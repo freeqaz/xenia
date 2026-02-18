@@ -55,3 +55,8 @@ DEFINE_bool(break_condition_truncate, true, "truncate value to 32-bits", "CPU");
 
 DEFINE_bool(break_on_debugbreak, true, "int3 on JITed __debugbreak requests.",
             "CPU");
+
+DEFINE_string(pe_override, "",
+              "Path to a PE file to override the loaded XEX image. The PE "
+              "sections will be copied over the original XEX's PE content.",
+              "CPU");

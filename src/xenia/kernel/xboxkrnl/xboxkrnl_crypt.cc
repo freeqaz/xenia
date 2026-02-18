@@ -686,6 +686,34 @@ dword_result_t XeKeysHmacShaUsingKey_entry(lpvoid_t obscured_key,
 }
 DECLARE_XBOXKRNL_EXPORT1(XeKeysHmacShaUsingKey, kNone, kImplemented);
 
+// XeKeys stubs for DC3
+dword_result_t XeKeysAesCbc_entry(lpvoid_t key, lpvoid_t iv, lpvoid_t input,
+                                   dword_t input_size, lpvoid_t output,
+                                   dword_t encrypt) {
+  // TODO: AES-CBC encrypt/decrypt using console-specific keys
+  return X_STATUS_UNSUCCESSFUL;
+}
+DECLARE_XBOXKRNL_EXPORT1(XeKeysAesCbc, kNone, kStub);
+
+dword_result_t XeKeysSetKey_entry(dword_t key_index, lpvoid_t key_data,
+                                   dword_t key_size) {
+  return 0;
+}
+DECLARE_XBOXKRNL_EXPORT1(XeKeysSetKey, kNone, kStub);
+
+dword_result_t XeKeysGetConsoleID_entry(lpvoid_t console_id_ptr,
+                                         lpdword_t id_size_ptr) {
+  // Return a dummy console ID
+  if (console_id_ptr) {
+    std::memset(console_id_ptr, 0x42, 5);  // 5-byte console ID
+  }
+  if (id_size_ptr) {
+    *id_size_ptr = 5;
+  }
+  return 0;
+}
+DECLARE_XBOXKRNL_EXPORT1(XeKeysGetConsoleID, kNone, kStub);
+
 }  // namespace xboxkrnl
 }  // namespace kernel
 }  // namespace xe

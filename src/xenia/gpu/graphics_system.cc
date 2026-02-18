@@ -1,11 +1,11 @@
 /**
- ******************************************************************************
- * Xenia : Xbox 360 Emulator Research Project                                 *
- ******************************************************************************
- * Copyright 2022 Ben Vanik. All rights reserved.                             *
- * Released under the BSD license - see LICENSE in the root for more details. *
- ******************************************************************************
- */
+******************************************************************************
+* Xenia : Xbox 360 Emulator Research Project                                 *
+******************************************************************************
+* Copyright 2022 Ben Vanik. All rights reserved.                             *
+* Released under the BSD license - see LICENSE in the root for more details. *
+******************************************************************************
+*/
 
 #include "xenia/gpu/graphics_system.h"
 
@@ -23,9 +23,12 @@
 #include "xenia/base/threading.h"
 #include "xenia/gpu/command_processor.h"
 #include "xenia/gpu/gpu_flags.h"
+
+#ifndef XE_HEADLESS_BUILD
 #include "xenia/ui/graphics_provider.h"
 #include "xenia/ui/window.h"
 #include "xenia/ui/windowed_app_context.h"
+#endif
 
 DEFINE_bool(
     store_shaders, true,
@@ -61,6 +64,7 @@ X_STATUS GraphicsSystem::Setup(cpu::Processor* processor,
   kernel_state_ = kernel_state;
   app_context_ = app_context;
 
+#ifndef XE_HEADLESS_BUILD
   if (with_presentation && provider_) {
     // Safe if either the UI thread call or the presenter creation fails.
     if (app_context_) {
@@ -79,6 +83,9 @@ X_STATUS GraphicsSystem::Setup(cpu::Processor* processor,
           });
     }
   }
+#else
+  (void)with_presentation;  // Suppress unused parameter warning
+#endif
 
   // Create command processor. This will spin up a thread to process all
   // incoming ringbuffer packets.
@@ -137,6 +144,7 @@ void GraphicsSystem::Shutdown() {
     vsync_worker_thread_.reset();
   }
 
+#ifndef XE_HEADLESS_BUILD
   if (presenter_) {
     if (app_context_) {
       app_context_->CallInUIThreadSynchronous([this]() { presenter_.reset(); });
@@ -148,6 +156,7 @@ void GraphicsSystem::Shutdown() {
   }
 
   provider_.reset();
+#endif
 }
 
 void GraphicsSystem::OnHostGpuLossFromAnyThread(
@@ -244,16 +253,15 @@ void GraphicsSystem::DispatchInterruptCallback(uint32_t source, uint32_t cpu) {
   }
 
   auto thread = kernel::XThread::GetCurrentThread();
-  assert_not_null(thread);
+  if (!thread) {
+    return;
+  }
 
   // Pick a CPU, if needed. We're going to guess 2. Because.
   if (cpu == 0xFFFFFFFF) {
     cpu = 2;
   }
   thread->SetActiveCpu(cpu);
-
-  // XELOGGPU("Dispatching GPU interrupt at {:08X} w/ mode {} on cpu {}",
-  //          interrupt_callback_, source, cpu);
 
   uint64_t args[] = {source, interrupt_callback_data_};
   processor_->ExecuteInterrupt(thread->thread_state(), interrupt_callback_,

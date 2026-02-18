@@ -1,13 +1,12 @@
 /**
- ******************************************************************************
- * Xenia : Xbox 360 Emulator Research Project                                 *
- ******************************************************************************
- * Copyright 2022 Ben Vanik. All rights reserved.                             *
- * Released under the BSD license - see LICENSE in the root for more details. *
- ******************************************************************************
- */
+******************************************************************************
+* Xenia : Xbox 360 Emulator Research Project                                 *
+******************************************************************************
+* Copyright 2022 Ben Vanik. All rights reserved.                             *
+* Released under the BSD license - see LICENSE in the root for more details. *
+******************************************************************************
+*/
 
-#include "third_party/imgui/imgui.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/string_util.h"
 #include "xenia/emulator.h"
@@ -15,11 +14,15 @@
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/util/shim_utils.h"
 #include "xenia/kernel/xam/xam_private.h"
+#include "xenia/xbox.h"
+
+#ifndef XE_HEADLESS_BUILD
+#include "third_party/imgui/imgui.h"
 #include "xenia/ui/imgui_dialog.h"
 #include "xenia/ui/imgui_drawer.h"
 #include "xenia/ui/window.h"
 #include "xenia/ui/windowed_app_context.h"
-#include "xenia/xbox.h"
+#endif
 
 namespace xe {
 namespace kernel {
@@ -44,6 +47,8 @@ namespace xam {
 // to create a listener (if they're insane enough do this).
 
 extern std::atomic<int> xam_dialogs_shown_;
+
+#ifndef XE_HEADLESS_BUILD
 
 class XamDialog : public xe::ui::ImGuiDialog {
  public:
@@ -154,6 +159,8 @@ X_RESULT xeXamDispatchDialogEx(
   }
 }
 
+#endif  // XE_HEADLESS_BUILD
+
 X_RESULT xeXamDispatchHeadless(std::function<X_RESULT()> run_callback,
                                uint32_t overlapped) {
   auto pre = []() {
@@ -205,6 +212,8 @@ X_RESULT xeXamDispatchHeadlessEx(
 
 dword_result_t XamIsUIActive_entry() { return xeXamIsUIActive(); }
 DECLARE_XAM_EXPORT2(XamIsUIActive, kUI, kImplemented, kHighFrequency);
+
+#ifndef XE_HEADLESS_BUILD
 
 class MessageBoxDialog : public XamDialog {
  public:
@@ -264,11 +273,21 @@ class MessageBoxDialog : public XamDialog {
   uint32_t chosen_button_ = 0;
 };
 
+#endif  // XE_HEADLESS_BUILD
+
 // https://www.se7ensins.com/forums/threads/working-xshowmessageboxui.844116/
 dword_result_t XamShowMessageBoxUI_entry(
     dword_t user_index, lpu16string_t title_ptr, lpu16string_t text_ptr,
     dword_t button_count, lpdword_t button_ptrs, dword_t active_button,
     dword_t flags, lpdword_t result_ptr, pointer_t<XAM_OVERLAPPED> overlapped) {
+#ifdef XE_HEADLESS_BUILD
+  // Auto-pick the focused button.
+  auto run = [result_ptr, active_button]() -> X_RESULT {
+    *result_ptr = static_cast<uint32_t>(active_button);
+    return X_ERROR_SUCCESS;
+  };
+  return xeXamDispatchHeadless(run, overlapped);
+#else
   std::string title;
   if (title_ptr) {
     title = xe::to_utf8(title_ptr.value());
@@ -320,8 +339,11 @@ dword_result_t XamShowMessageBoxUI_entry(
         close, overlapped);
   }
   return result;
+#endif  // XE_HEADLESS_BUILD
 }
 DECLARE_XAM_EXPORT1(XamShowMessageBoxUI, kUI, kImplemented);
+
+#ifndef XE_HEADLESS_BUILD
 
 class KeyboardInputDialog : public XamDialog {
  public:
@@ -404,6 +426,8 @@ class KeyboardInputDialog : public XamDialog {
   bool cancelled_ = true;
 };
 
+#endif  // XE_HEADLESS_BUILD
+
 // https://www.se7ensins.com/forums/threads/release-how-to-use-xshowkeyboardui-release.906568/
 dword_result_t XamShowKeyboardUI_entry(
     dword_t user_index, dword_t flags, lpu16string_t default_text,
@@ -417,6 +441,19 @@ dword_result_t XamShowKeyboardUI_entry(
 
   auto buffer_size = static_cast<size_t>(buffer_length) * 2;
 
+#ifdef XE_HEADLESS_BUILD
+  auto run = [default_text, buffer, buffer_length, buffer_size]() -> X_RESULT {
+    // Redirect default_text back into the buffer.
+    if (!default_text) {
+      std::memset(buffer, 0, buffer_size);
+    } else {
+      string_util::copy_and_swap_truncating(buffer, default_text.value(),
+                                            buffer_length);
+    }
+    return X_ERROR_SUCCESS;
+  };
+  return xeXamDispatchHeadless(run, overlapped);
+#else
   X_RESULT result;
   if (cvars::headless) {
     auto run = [default_text, buffer, buffer_length,
@@ -459,6 +496,7 @@ dword_result_t XamShowKeyboardUI_entry(
         close, overlapped);
   }
   return result;
+#endif  // XE_HEADLESS_BUILD
 }
 DECLARE_XAM_EXPORT1(XamShowKeyboardUI, kUI, kImplemented);
 
@@ -477,6 +515,11 @@ dword_result_t XamShowDeviceSelectorUI_entry(
 DECLARE_XAM_EXPORT1(XamShowDeviceSelectorUI, kUI, kImplemented);
 
 void XamShowDirtyDiscErrorUI_entry(dword_t user_index) {
+#ifdef XE_HEADLESS_BUILD
+  XELOGE("XamShowDirtyDiscErrorUI: Dirty disc error in headless mode");
+  assert_always();
+  exit(1);
+#else
   if (cvars::headless) {
     assert_always();
     exit(1);
@@ -494,6 +537,7 @@ void XamShowDirtyDiscErrorUI_entry(dword_t user_index) {
   // This is death, and should never return.
   // TODO(benvanik): cleaner exit.
   exit(1);
+#endif  // XE_HEADLESS_BUILD
 }
 DECLARE_XAM_EXPORT1(XamShowDirtyDiscErrorUI, kUI, kImplemented);
 
@@ -506,6 +550,89 @@ dword_result_t XamShowCommunitySessionsUI_entry(unknown_t r3, unknown_t r4) {
   return X_ERROR_FUNCTION_FAILED;
 }
 DECLARE_XAM_EXPORT1(XamShowCommunitySessionsUI, kNone, kStub);
+
+// NUI UI Dialog stubs
+dword_result_t XamShowNuiGuideUI_entry(unknown_t unk1, unknown_t unk2) {
+  return 0;
+}
+DECLARE_XAM_EXPORT1(XamShowNuiGuideUI, kUI, kStub);
+
+dword_result_t XamShowNuiSigninUI_entry(unknown_t unk1, unknown_t unk2) {
+  return 0;
+}
+DECLARE_XAM_EXPORT1(XamShowNuiSigninUI, kUI, kStub);
+
+dword_result_t XamShowNuiControllerRequiredUI_entry(unknown_t unk1,
+                                                     unknown_t unk2) {
+  return 0;
+}
+DECLARE_XAM_EXPORT1(XamShowNuiControllerRequiredUI, kUI, kStub);
+
+dword_result_t XamShowNuiFriendsUI_entry(unknown_t unk1, unknown_t unk2) {
+  return 0;
+}
+DECLARE_XAM_EXPORT1(XamShowNuiFriendsUI, kUI, kStub);
+
+dword_result_t XamShowNuiGamerCardUIForXUID_entry(unknown_t unk1,
+                                                   qword_t xuid) {
+  return 0;
+}
+DECLARE_XAM_EXPORT1(XamShowNuiGamerCardUIForXUID, kUI, kStub);
+
+dword_result_t XamShowNuiMarketplaceUI_entry(unknown_t unk1, unknown_t unk2) {
+  return 0;
+}
+DECLARE_XAM_EXPORT1(XamShowNuiMarketplaceUI, kUI, kStub);
+
+dword_result_t XamShowNuiPartyUI_entry(unknown_t unk1, unknown_t unk2) {
+  return 0;
+}
+DECLARE_XAM_EXPORT1(XamShowNuiPartyUI, kUI, kStub);
+
+dword_result_t XamShowNuiDeviceSelectorUI_entry(unknown_t unk1,
+                                                 unknown_t unk2) {
+  return 0;
+}
+DECLARE_XAM_EXPORT1(XamShowNuiDeviceSelectorUI, kUI, kStub);
+
+dword_result_t XamShowNuiDirtyDiscErrorUI_entry(unknown_t unk1,
+                                                 unknown_t unk2) {
+  return 0;
+}
+DECLARE_XAM_EXPORT1(XamShowNuiDirtyDiscErrorUI, kUI, kStub);
+
+// Standard UI Dialog stubs
+dword_result_t XamShowMessageBoxUIEx_entry(unknown_t unk1, unknown_t unk2,
+                                            unknown_t unk3, unknown_t unk4,
+                                            unknown_t unk5, unknown_t unk6,
+                                            unknown_t unk7, unknown_t unk8) {
+  return 0;
+}
+DECLARE_XAM_EXPORT1(XamShowMessageBoxUIEx, kUI, kStub);
+
+dword_result_t XamShowFriendsUI_entry(dword_t user_index) { return 0; }
+DECLARE_XAM_EXPORT1(XamShowFriendsUI, kUI, kStub);
+
+dword_result_t XamShowGamerCardUIForXUID_entry(unknown_t unk1, qword_t xuid) {
+  return 0;
+}
+DECLARE_XAM_EXPORT1(XamShowGamerCardUIForXUID, kUI, kStub);
+
+dword_result_t XamShowMarketplaceUI_entry(dword_t user_index,
+                                           unknown_t unk2,
+                                           unknown_t unk3,
+                                           unknown_t unk4) {
+  return 0;
+}
+DECLARE_XAM_EXPORT1(XamShowMarketplaceUI, kUI, kStub);
+
+dword_result_t XamShowMarketplaceDownloadItemsUI_entry(dword_t user_index,
+                                                        unknown_t unk2,
+                                                        unknown_t unk3,
+                                                        unknown_t unk4) {
+  return 0;
+}
+DECLARE_XAM_EXPORT1(XamShowMarketplaceDownloadItemsUI, kUI, kStub);
 
 }  // namespace xam
 }  // namespace kernel

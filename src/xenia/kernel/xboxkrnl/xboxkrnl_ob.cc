@@ -9,6 +9,7 @@
 
 #include "xenia/base/assert.h"
 #include "xenia/base/logging.h"
+#include "xenia/cpu/processor.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/util/shim_utils.h"
 #include "xenia/kernel/xboxkrnl/xboxkrnl_private.h"
@@ -84,24 +85,41 @@ DECLARE_XBOXKRNL_EXPORT1(ObLookupThreadByThreadId, kNone, kImplemented);
 dword_result_t ObReferenceObjectByHandle_entry(dword_t handle,
                                                dword_t object_type_ptr,
                                                lpdword_t out_object_ptr) {
-  // These values come from how Xenia handles uninitialized kernel data exports.
-  // D###BEEF where ### is the ordinal.
-  const static std::unordered_map<XObject::Type, uint32_t> object_types = {
-      {XObject::Type::Event, 0xD00EBEEF},
-      {XObject::Type::Semaphore, 0xD017BEEF},
-      {XObject::Type::Thread, 0xD01BBEEF}};
+  // Look up the guest addresses of the kernel object type variables.
+  // Games pass the address of the ExXxxObjectType export variable,
+  // NOT the sentinel value stored within it.
+  auto* resolver = kernel_state()->processor()->export_resolver();
+  const static std::unordered_map<XObject::Type,
+                                  std::pair<const char*, uint16_t>>
+      object_type_ordinals = {
+          {XObject::Type::Event, {"xboxkrnl.exe", 0x0E}},       // ExEventObjectType
+          {XObject::Type::Semaphore, {"xboxkrnl.exe", 0x17}},   // ExSemaphoreObjectType
+          {XObject::Type::Thread, {"xboxkrnl.exe", 0x1B}},      // ExThreadObjectType
+      };
   auto object = kernel_state()->object_table()->LookupObject<XObject>(handle);
   if (!object) {
     return X_STATUS_INVALID_HANDLE;
   }
 
   uint32_t native_ptr = object->guest_object();
-  auto object_type = object_types.find(object->type());
-  if (object_type != object_types.end()) {
-    if (object_type_ptr && object_type_ptr != object_type->second) {
-      return X_STATUS_OBJECT_TYPE_MISMATCH;
+  if (object_type_ptr) {
+    // Check type: look up the expected variable address for this object type.
+    auto ordinal_it = object_type_ordinals.find(object->type());
+    if (ordinal_it != object_type_ordinals.end()) {
+      auto export_entry = resolver->GetExportByOrdinal(
+          ordinal_it->second.first, ordinal_it->second.second);
+      uint32_t expected_var_addr =
+          export_entry ? export_entry->variable_ptr : 0;
+      if (expected_var_addr && object_type_ptr != expected_var_addr) {
+        return X_STATUS_OBJECT_TYPE_MISMATCH;
+      }
+    } else {
+      // Unknown object type — don't fail, just warn
+      assert_unhandled_case(object->type());
+      native_ptr = 0xDEADF00D;
     }
-  } else {
+  } else if (object_type_ordinals.find(object->type()) ==
+             object_type_ordinals.end()) {
     assert_unhandled_case(object->type());
     native_ptr = 0xDEADF00D;
   }
@@ -206,6 +224,21 @@ dword_result_t NtClose_entry(dword_t handle) {
   return kernel_state()->object_table()->ReleaseHandle(handle);
 }
 DECLARE_XBOXKRNL_EXPORT1(NtClose, kNone, kImplemented);
+
+// Object Manager stubs
+dword_result_t ObCreateObject_entry(lpvoid_t object_type, dword_t attributes,
+                                     dword_t object_size,
+                                     lpdword_t object_ptr) {
+  // TODO: real object creation
+  XELOGW("ObCreateObject stub - returning error");
+  return X_STATUS_UNSUCCESSFUL;
+}
+DECLARE_XBOXKRNL_EXPORT1(ObCreateObject, kNone, kStub);
+
+void ObReferenceObject_entry(lpvoid_t object_ptr) {
+  // TODO: real reference counting
+}
+DECLARE_XBOXKRNL_EXPORT1(ObReferenceObject, kNone, kStub);
 
 }  // namespace xboxkrnl
 }  // namespace kernel

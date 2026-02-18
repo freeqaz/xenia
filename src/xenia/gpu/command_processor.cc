@@ -12,10 +12,12 @@
 #include <algorithm>
 #include <cinttypes>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 
 #include "third_party/fmt/include/fmt/format.h"
 #include "xenia/base/byte_stream.h"
+#include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
 #include "xenia/base/memory.h"
@@ -28,6 +30,10 @@
 #include "xenia/gpu/xenos.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/user_module.h"
+
+DECLARE_string(dump_frames_path);
+
+DECLARE_string(dump_frames_path);
 
 namespace xe {
 namespace gpu {
@@ -563,6 +569,18 @@ uint32_t CommandProcessor::ExecutePrimaryBuffer(uint32_t read_index,
       assert_always();
       break;
     }
+    // Incremental read pointer writeback after each primary buffer packet.
+    // Real hardware continuously updates the read pointer as it processes;
+    // without this, the game thread may see a stale read pointer and think
+    // the ring buffer is full, causing a permanent stall when the CP is slow
+    // (e.g., Vulkan backend doing actual GPU work).
+    if (read_ptr_writeback_ptr_) {
+      uint32_t current_read_index =
+          static_cast<uint32_t>(reader.read_offset() / sizeof(uint32_t));
+      xe::store_and_swap<uint32_t>(
+          memory_->TranslatePhysical(read_ptr_writeback_ptr_),
+          current_read_index);
+    }
   } while (reader.read_count());
 
   OnPrimaryBufferEnd();
@@ -687,6 +705,19 @@ bool CommandProcessor::ExecutePacketType3(RingBuffer* reader, uint32_t packet) {
   uint32_t opcode = (packet >> 8) & 0x7F;
   uint32_t count = ((packet >> 16) & 0x3FFF) + 1;
   auto data_start_offset = reader->read_offset();
+
+  // Headless draw debug: log PM4 opcodes around draws
+  static bool pm4_log_after_draw = false;
+  static uint32_t pm4_log_count = 0;
+  if (pm4_log_after_draw && pm4_log_count < 50) {
+    XELOGI("PM4 POST-DRAW #{}: opcode=0x{:02X} count={}", pm4_log_count,
+           opcode, count);
+    pm4_log_count++;
+  }
+  if (opcode == PM4_DRAW_INDX || opcode == PM4_DRAW_INDX_2) {
+    pm4_log_after_draw = true;
+    pm4_log_count = 0;
+  }
 
   if (reader->read_count() < count * sizeof(uint32_t)) {
     XELOGE(
@@ -936,6 +967,48 @@ bool CommandProcessor::ExecutePacketType3_XE_SWAP(RingBuffer* reader,
 
   IssueSwap(frontbuffer_ptr, frontbuffer_width, frontbuffer_height);
 
+  // Raw frontbuffer dump for backends that don't handle their own frame capture
+  if (!cvars::dump_frames_path.empty() && !HandlesFrameDump() &&
+      frontbuffer_ptr && frontbuffer_width && frontbuffer_height) {
+    static uint32_t frame_number = 0;
+    uint32_t pixel_count = frontbuffer_width * frontbuffer_height;
+    uint8_t* fb_data = memory_->TranslatePhysical<uint8_t*>(frontbuffer_ptr);
+
+    char filename[256];
+    snprintf(filename, sizeof(filename), "%s/frame_%04u.ppm",
+             cvars::dump_frames_path.c_str(), frame_number);
+
+    FILE* f = fopen(filename, "wb");
+    if (f) {
+      fprintf(f, "P6\n%u %u\n255\n", frontbuffer_width, frontbuffer_height);
+      for (uint32_t i = 0; i < pixel_count; ++i) {
+        uint32_t offset = i * 4;
+        // Big-endian ARGB in guest memory
+        uint8_t r = fb_data[offset + 1];
+        uint8_t g = fb_data[offset + 2];
+        uint8_t b = fb_data[offset + 3];
+        fputc(r, f);
+        fputc(g, f);
+        fputc(b, f);
+      }
+      fclose(f);
+      if (frame_number == 0 || (frame_number % 100) == 0) {
+        XELOGI("Dumped frame {} to {} ({}x{}) phys=0x{:08X}",
+               frame_number, filename,
+               frontbuffer_width, frontbuffer_height,
+               frontbuffer_ptr & 0x1FFFFFFF);
+        // Scan first 256 bytes for non-zero content
+        uint32_t nz = 0;
+        for (uint32_t j = 0; j < 256 && j < pixel_count * 4; ++j) {
+          if (fb_data[j]) ++nz;
+        }
+        XELOGI("  first 256 bytes: {} non-zero, first4=[{:02X},{:02X},{:02X},{:02X}]",
+               nz, fb_data[0], fb_data[1], fb_data[2], fb_data[3]);
+      }
+    }
+    frame_number++;
+  }
+
   ++counter_;
   return true;
 }
@@ -973,9 +1046,11 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(RingBuffer* reader,
                       poll_reg_addr & ~uint32_t(0x3)))
                 : register_file_->values[poll_reg_addr];
 
+  uint32_t spin_count = 0;
   bool matched = false;
   do {
     uint32_t value = value_ref;
+    ++spin_count;
     if (is_memory) {
       trace_writer_.WriteMemoryRead(CpuToGpu(poll_reg_addr & ~uint32_t(0x3)),
                                     sizeof(uint32_t));
@@ -1014,6 +1089,17 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(RingBuffer* reader,
         break;
     }
     if (!matched) {
+      if (spin_count == 1000) {
+        XELOGI("WAIT_REG_MEM STALL: spinning on {} addr=0x{:08X} ref=0x{:X} "
+               "mask=0x{:X} cond={} value=0x{:X}",
+               is_memory ? "mem" : "reg", poll_reg_addr, ref, mask,
+               wait_info & 0x7, value_ref);
+      }
+      if (spin_count % 100000 == 0 && spin_count > 0) {
+        XELOGI("WAIT_REG_MEM still spinning: {} spins, addr=0x{:08X} "
+               "current=0x{:X}", spin_count, poll_reg_addr,
+               static_cast<uint32_t>(value_ref));
+      }
       // Wait.
       if (wait >= 0x100) {
         PrepareForWait();
@@ -1271,7 +1357,7 @@ bool CommandProcessor::ExecutePacketType3_EVENT_WRITE_ZPD(RingBuffer* reader,
     // Older versions of D3D also checks for ZFail (4D5307D5).
     bool is_end_via_z_fail = pSampleCounts->ZFail_A == kQueryFinished &&
                              pSampleCounts->ZFail_B == kQueryFinished;
-    std::memset(pSampleCounts, 0, sizeof(xe_gpu_depth_sample_counts));
+    std::memset(reinterpret_cast<void*>(pSampleCounts), 0, sizeof(xe_gpu_depth_sample_counts));
     if (is_end_via_z_pass || is_end_via_z_fail) {
       pSampleCounts->ZPass_A = fake_sample_count;
       pSampleCounts->Total_A = fake_sample_count;

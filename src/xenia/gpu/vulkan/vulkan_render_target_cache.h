@@ -447,17 +447,17 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
     // Including all the padding, for a stable hash.
     FramebufferKey() { Reset(); }
     FramebufferKey(const FramebufferKey& key) {
-      std::memcpy(this, &key, sizeof(*this));
+      std::memcpy(reinterpret_cast<void*>(this), &key, sizeof(*this));
     }
     FramebufferKey& operator=(const FramebufferKey& key) {
-      std::memcpy(this, &key, sizeof(*this));
+      std::memcpy(reinterpret_cast<void*>(this), &key, sizeof(*this));
       return *this;
     }
     bool operator==(const FramebufferKey& key) const {
       return std::memcmp(this, &key, sizeof(*this)) == 0;
     }
     using Hasher = xe::hash::XXHasher<FramebufferKey>;
-    void Reset() { std::memset(this, 0, sizeof(*this)); }
+    void Reset() { std::memset(reinterpret_cast<void*>(this), 0, sizeof(*this)); }
   };
 
   enum TransferUsedDescriptorSet : uint32_t {

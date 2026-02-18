@@ -162,7 +162,7 @@ X_RESULT SDLInputDriver::GetCapabilities(uint32_t user_index, uint32_t flags,
   // battery information) so this needs to be refreshed every time.
   UpdateXCapabilities(*controller);
 
-  std::memcpy(out_caps, &controller->caps, sizeof(*out_caps));
+  std::memcpy(reinterpret_cast<void*>(out_caps), &controller->caps, sizeof(*out_caps));
 
   return X_ERROR_SUCCESS;
 }
@@ -196,11 +196,11 @@ X_RESULT SDLInputDriver::GetState(uint32_t user_index,
     controller->is_active = is_active;
     controller->state_changed = false;
   }
-  std::memcpy(out_state, &controller->state, sizeof(*out_state));
+  std::memcpy(reinterpret_cast<void*>(out_state), &controller->state, sizeof(*out_state));
   if (!is_active) {
     // Simulate an "untouched" controller. When we become active again the
     // pressed buttons aren't lost and will be visible again.
-    std::memset(&out_state->gamepad, 0, sizeof(out_state->gamepad));
+    std::memset(reinterpret_cast<void*>(&out_state->gamepad), 0, sizeof(out_state->gamepad));
   }
   return X_ERROR_SUCCESS;
 }

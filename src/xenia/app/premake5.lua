@@ -127,3 +127,109 @@ project("xenia-app")
       debugargs({
       })
     end
+
+-- Headless console app - no UI dependencies
+project("xenia-headless")
+  uuid("d7e98620-d007-4ad8-9dbd-b47c8853a17e")
+  language("C++")
+  kind "ConsoleApp"
+
+  includedirs({
+    "src/",
+    "src/third_party/",
+  })
+
+  files({
+    "emulator_headless.cc",
+    "emulator_headless.h",
+    "xenia_headless_main.cc",
+  })
+
+  links({
+    -- Core emulation
+    "xenia-apu",
+    "xenia-apu-nop",
+    "xenia-base",
+    "xenia-core-headless",
+    "xenia-cpu",
+    "xenia-gpu",
+    "xenia-gpu-null",
+    "xenia-gpu-vulkan",
+    "xenia-hid",
+    "xenia-hid-nop",
+    "xenia-kernel-headless",
+    "xenia-ui",
+    "xenia-ui-vulkan",
+    "xenia-vfs",
+
+    -- Third-party libraries
+    "aes_128",
+    "capstone",
+    "dxbc",
+    "fmt",
+    "glslang-spirv",
+    "libavcodec",
+    "libavutil",
+    "mspack",
+    "snappy",
+    "xxhash",
+  })
+
+  includedirs({
+    project_root.."/third_party/Vulkan-Headers/include",
+  })
+
+  defines({
+    "XE_HEADLESS_BUILD",
+    "XBYAK_NO_OP_NAMES",
+    "XBYAK_ENABLE_OMITTED_OPERAND",
+  })
+
+  resincludedirs({
+    project_root,
+  })
+
+  -- Use the same main_init as windowed app
+  files({
+    "../base/main_init_"..platform_suffix..".cc",
+  })
+
+  filter("platforms:not Android-*")
+    targetname("xenia-headless")
+
+  filter("architecture:x86_64")
+    links({
+      "xenia-cpu-backend-x64",
+    })
+
+  filter({"architecture:x86_64", "files:../base/main_init_"..platform_suffix..".cc"})
+    vectorextensions("IA32")  -- Disable AVX for main_init
+
+  filter("platforms:Linux")
+    links({
+      "pthread",
+      "lz4",
+      "stdc++fs",
+      "dl",
+      "rt",
+    })
+    -- Remove GTK dependencies inherited from global Linux filter
+    removelinks({
+      "gtk-3",
+      "gdk-3",
+      "pangocairo-1.0",
+      "cairo-gobject",
+      "gdk_pixbuf-2.0",
+      "atk-1.0",
+      "pango-1.0",
+      "cairo",
+      "harfbuzz",
+      "gio-2.0",
+      "gobject-2.0",
+      "glib-2.0",
+    })
+
+  filter("platforms:Windows")
+    links({
+      "ws2_32",
+    })

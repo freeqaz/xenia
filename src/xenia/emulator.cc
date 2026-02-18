@@ -41,15 +41,18 @@
 #include "xenia/kernel/xbdm/xbdm_module.h"
 #include "xenia/kernel/xboxkrnl/xboxkrnl_module.h"
 #include "xenia/memory.h"
-#include "xenia/ui/imgui_dialog.h"
-#include "xenia/ui/imgui_drawer.h"
-#include "xenia/ui/window.h"
-#include "xenia/ui/windowed_app_context.h"
 #include "xenia/vfs/devices/disc_image_device.h"
 #include "xenia/vfs/devices/host_path_device.h"
 #include "xenia/vfs/devices/null_device.h"
 #include "xenia/vfs/devices/stfs_container_device.h"
 #include "xenia/vfs/virtual_file_system.h"
+
+#ifndef XE_HEADLESS_BUILD
+#include "xenia/ui/imgui_dialog.h"
+#include "xenia/ui/imgui_drawer.h"
+#include "xenia/ui/window.h"
+#include "xenia/ui/windowed_app_context.h"
+#endif
 
 #if XE_ARCH_AMD64
 #include "xenia/cpu/backend/x64/x64_backend.h"
@@ -601,6 +604,7 @@ bool Emulator::ExceptionCallback(Exception* ex) {
   }
 
   // Display a dialog telling the user the guest has crashed.
+#ifndef XE_HEADLESS_BUILD
   if (display_window_ && imgui_drawer_) {
     display_window_->app_context().CallInUIThreadSynchronous([this]() {
       xe::ui::ImGuiDialog::ShowMessageBox(
@@ -611,6 +615,10 @@ bool Emulator::ExceptionCallback(Exception* ex) {
           "A crash dump has been written into the log.");
     });
   }
+#else
+  XELOGE("Guest crashed! PC: 0x{:08X}",
+         guest_function->MapMachineCodeToGuestAddress(ex->pc()));
+#endif
 
   // Now suspend ourself (we should be a guest thread).
   current_thread->Suspend(nullptr);
@@ -728,9 +736,14 @@ static std::string format_version(xex2_version version) {
 
 X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
                                   const std::string_view module_path) {
+#ifndef XE_HEADLESS_BUILD
   // Making changes to the UI (setting the icon) and executing game config load
   // callbacks which expect to be called from the UI thread.
   assert_true(display_window_->app_context().IsInUIThread());
+#else
+  // Headless mode: no display window
+  assert_true(display_window_ == nullptr);
+#endif
 
   // Setup NullDevices for raw HDD partition accesses
   // Cache/STFC code baked into games tries reading/writing to these
@@ -755,7 +768,9 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
   title_id_ = std::nullopt;
   title_name_ = "";
   title_version_ = "";
+#ifndef XE_HEADLESS_BUILD
   display_window_->SetIcon(nullptr, 0);
+#endif
 
   // Allow xam to request module loads.
   auto xam = kernel_state()->GetKernelModule<kernel::xam::XamModule>("xam.xex");
@@ -818,7 +833,9 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
 
       auto icon_block = db.icon();
       if (icon_block) {
+#ifndef XE_HEADLESS_BUILD
         display_window_->SetIcon(icon_block.buffer, icon_block.size);
+#endif
       }
     }
   }
@@ -831,6 +848,12 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
   graphics_system_->InitializeShaderStorage(cache_root_, title_id_.value(),
                                             true);
   on_shader_storage_initialization(false);
+
+  // DC3 title-specific guest code patches.
+  // DC3 Title ID: 0x373307D9 (Dance Central 3)
+  if (title_id_.has_value() && title_id_.value() == 0x373307D9) {
+    XELOGI("DC3: Applying guest code patches for headless mode");
+  }
 
   auto main_thread = kernel_state_->LaunchModule(module);
   if (!main_thread) {

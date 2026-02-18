@@ -85,7 +85,7 @@ class ShaderInterpreter {
     int32_t address_register;
     bool predicate;
 
-    void Reset() { std::memset(this, 0, sizeof(*this)); }
+    void Reset() { std::memset(reinterpret_cast<void*>(this), 0, sizeof(*this)); }
 
     int32_t GetLoopAddress() const {
       assert_true(loop_stack_depth && loop_stack_depth < 4);

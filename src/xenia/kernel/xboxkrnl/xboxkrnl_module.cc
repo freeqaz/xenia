@@ -105,7 +105,7 @@ XboxkrnlModule::XboxkrnlModule(Emulator* emulator, KernelState* kernel_state)
     auto lpKeDebugMonitorData =
         memory_->TranslateVirtual<X_KEDEBUGMONITORDATA*>(pKeDebugMonitorData +
                                                          4);
-    std::memset(lpKeDebugMonitorData, 0, sizeof(X_KEDEBUGMONITORDATA));
+    std::memset(reinterpret_cast<void*>(lpKeDebugMonitorData), 0, sizeof(X_KEDEBUGMONITORDATA));
     lpKeDebugMonitorData->callback_fn =
         GenerateTrampoline("KeDebugMonitorCallback", KeDebugMonitorCallback);
   }
@@ -126,7 +126,7 @@ XboxkrnlModule::XboxkrnlModule(Emulator* emulator, KernelState* kernel_state)
                                  pKeCertMonitorData + 4);
     auto lpKeCertMonitorData =
         memory_->TranslateVirtual<X_KECERTMONITORDATA*>(pKeCertMonitorData + 4);
-    std::memset(lpKeCertMonitorData, 0, sizeof(X_KECERTMONITORDATA));
+    std::memset(reinterpret_cast<void*>(lpKeCertMonitorData), 0, sizeof(X_KECERTMONITORDATA));
     lpKeCertMonitorData->callback_fn =
         GenerateTrampoline("KeCertMonitorCallback", KeCertMonitorCallback);
   }
@@ -159,6 +159,28 @@ XboxkrnlModule::XboxkrnlModule(Emulator* emulator, KernelState* kernel_state)
   export_resolver_->SetVariableMapping(
       "xboxkrnl.exe", ordinals::ExConsoleGameRegion, pExConsoleGameRegion);
   xe::store<uint32_t>(lpExConsoleGameRegion, 0xFFFFFFFF);
+
+  // ExEventObjectType - pointer to object type structure
+  // Games pass this to ObOpenObjectByName/ObCreateObject for events.
+  uint32_t pExEventObjectType = memory_->SystemHeapAlloc(4);
+  export_resolver_->SetVariableMapping(
+      "xboxkrnl.exe", ordinals::ExEventObjectType, pExEventObjectType);
+  xe::store_and_swap<uint32_t>(memory_->TranslateVirtual(pExEventObjectType),
+                               0xD00BEEF0);
+
+  // ExThreadObjectType - pointer to object type structure
+  uint32_t pExThreadObjectType = memory_->SystemHeapAlloc(4);
+  export_resolver_->SetVariableMapping(
+      "xboxkrnl.exe", ordinals::ExThreadObjectType, pExThreadObjectType);
+  xe::store_and_swap<uint32_t>(memory_->TranslateVirtual(pExThreadObjectType),
+                               0xD00BEEF1);
+
+  // ExSemaphoreObjectType - pointer to object type structure
+  uint32_t pExSemaphoreObjectType = memory_->SystemHeapAlloc(4);
+  export_resolver_->SetVariableMapping(
+      "xboxkrnl.exe", ordinals::ExSemaphoreObjectType, pExSemaphoreObjectType);
+  xe::store_and_swap<uint32_t>(
+      memory_->TranslateVirtual(pExSemaphoreObjectType), 0xD00BEEF2);
 
   // XexExecutableModuleHandle (?**)
   // Games try to dereference this to get a pointer to some module struct.

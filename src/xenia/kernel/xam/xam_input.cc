@@ -194,6 +194,23 @@ X_HRESULT_result_t XamUserGetDeviceContext_entry(dword_t user_index,
 }
 DECLARE_XAM_EXPORT1(XamUserGetDeviceContext, kInput, kStub);
 
+dword_result_t XamInputSendStayAliveRequest_entry(unknown_t unk1,
+                                                   unknown_t unk2) {
+  return 0;
+}
+DECLARE_XAM_EXPORT1(XamInputSendStayAliveRequest, kInput, kStub);
+
+dword_result_t XamInputControl_entry(unknown_t unk1, unknown_t unk2,
+                                      unknown_t unk3) {
+  return 0;
+}
+DECLARE_XAM_EXPORT1(XamInputControl, kInput, kStub);
+
+dword_result_t XamInputRawState_entry(dword_t user_index, lpvoid_t state_ptr) {
+  return X_E_FAIL;
+}
+DECLARE_XAM_EXPORT1(XamInputRawState, kInput, kStub);
+
 }  // namespace xam
 }  // namespace kernel
 }  // namespace xe

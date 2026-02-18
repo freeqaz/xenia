@@ -156,15 +156,15 @@ class TextureCache {
 
     TextureKey() { MakeInvalid(); }
     TextureKey(const TextureKey& key) {
-      std::memcpy(this, &key, sizeof(*this));
+      std::memcpy(reinterpret_cast<void*>(this), &key, sizeof(*this));
     }
     TextureKey& operator=(const TextureKey& key) {
-      std::memcpy(this, &key, sizeof(*this));
+      std::memcpy(reinterpret_cast<void*>(this), &key, sizeof(*this));
       return *this;
     }
     void MakeInvalid() {
       // Zero everything, including the padding, for a stable hash.
-      std::memset(this, 0, sizeof(*this));
+      std::memset(reinterpret_cast<void*>(this), 0, sizeof(*this));
     }
 
     using Hasher = xe::hash::XXHasher<TextureKey>;
@@ -458,7 +458,7 @@ class TextureCache {
     TextureBinding() { Reset(); }
 
     void Reset() {
-      std::memset(this, 0, sizeof(*this));
+      std::memset(reinterpret_cast<void*>(this), 0, sizeof(*this));
       host_swizzle = xenos::XE_GPU_TEXTURE_SWIZZLE_0000;
       swizzled_signs = kSwizzledSignsUnsigned;
     }

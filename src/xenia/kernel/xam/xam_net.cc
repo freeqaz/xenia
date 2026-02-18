@@ -1033,6 +1033,56 @@ void NetDll_WSASetLastError_entry(dword_t error_code) {
 }
 DECLARE_XAM_EXPORT1(NetDll_WSASetLastError, kNetworking, kImplemented);
 
+// Network stubs for DC3
+dword_result_t NetDll_XnpGetConfigStatus_entry(unknown_t unk1) { return 0; }
+DECLARE_XAM_EXPORT1(NetDll_XnpGetConfigStatus, kNetworking, kStub);
+
+dword_result_t NetDll_getpeername_entry(dword_t caller,
+                                         dword_t socket_handle,
+                                         lpvoid_t addr_ptr,
+                                         lpdword_t addr_len_ptr) {
+  return -1;
+}
+DECLARE_XAM_EXPORT1(NetDll_getpeername, kNetworking, kStub);
+
+dword_result_t NetDll_getsockname_entry(dword_t caller,
+                                         dword_t socket_handle,
+                                         lpvoid_t addr_ptr,
+                                         lpdword_t addr_len_ptr) {
+  return -1;
+}
+DECLARE_XAM_EXPORT1(NetDll_getsockname, kNetworking, kStub);
+
+dword_result_t NetDll_getsockopt_entry(dword_t caller,
+                                        dword_t socket_handle,
+                                        dword_t level,
+                                        dword_t optname,
+                                        lpvoid_t optval_ptr,
+                                        lpdword_t optlen_ptr) {
+  return -1;
+}
+DECLARE_XAM_EXPORT1(NetDll_getsockopt, kNetworking, kStub);
+
+dword_result_t NetDll_XNetGetConnectStatus_entry(lpvoid_t xnaddr_ptr) {
+  return 0;  // XNET_CONNECT_STATUS_IDLE
+}
+DECLARE_XAM_EXPORT1(NetDll_XNetGetConnectStatus, kNetworking, kStub);
+
+dword_result_t NetDll_XNetConnect_entry(lpvoid_t xnaddr_ptr) { return 0; }
+DECLARE_XAM_EXPORT1(NetDll_XNetConnect, kNetworking, kStub);
+
+dword_result_t NetDll_XNetUnregisterInAddr_entry(lpvoid_t xnaddr_ptr) {
+  return 0;
+}
+DECLARE_XAM_EXPORT1(NetDll_XNetUnregisterInAddr, kNetworking, kStub);
+
+dword_result_t NetDll_XNetServerToInAddr_entry(lpvoid_t server_addr,
+                                                dword_t service_id,
+                                                lpvoid_t in_addr_ptr) {
+  return -1;
+}
+DECLARE_XAM_EXPORT1(NetDll_XNetServerToInAddr, kNetworking, kStub);
+
 }  // namespace xam
 }  // namespace kernel
 }  // namespace xe

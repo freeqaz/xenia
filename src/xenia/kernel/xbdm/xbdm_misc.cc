@@ -86,6 +86,18 @@ dword_result_t DmFindPdbSignature_entry(lpdword_t unk0_ptr,
 }
 DECLARE_XBDM_EXPORT1(DmFindPdbSignature, kDebug, kStub);
 
+// DM_SYSTEM_INFO struct — game just checks that it doesn't fail
+dword_result_t DmGetSystemInfo_entry(lpdword_t info_ptr) {
+  // TODO: fill struct with plausible values if any game actually reads them
+  if (info_ptr) {
+    // Zero out a reasonable struct size (0x24 bytes = 36 bytes)
+    auto* p = reinterpret_cast<uint8_t*>(info_ptr.host_address());
+    std::memset(p, 0, 0x24);
+  }
+  return 0;  // XBDM_NOERR
+}
+DECLARE_XBDM_EXPORT1(DmGetSystemInfo, kDebug, kStub);
+
 }  // namespace xbdm
 }  // namespace kernel
 }  // namespace xe

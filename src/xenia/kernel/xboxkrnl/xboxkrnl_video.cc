@@ -133,7 +133,7 @@ DECLARE_XBOXKRNL_EXPORT1(VdGetCurrentDisplayInformation, kVideo, kStub);
 
 void VdQueryVideoMode(X_VIDEO_MODE* video_mode) {
   // TODO(benvanik): get info from actual display.
-  std::memset(video_mode, 0, sizeof(X_VIDEO_MODE));
+  std::memset(reinterpret_cast<void*>(video_mode), 0, sizeof(X_VIDEO_MODE));
   video_mode->display_width = 1280;
   video_mode->display_height = 720;
   video_mode->is_interlaced = 0;
@@ -198,6 +198,7 @@ dword_result_t VdInitializeEngines_entry(unknown_t unk0, function_t callback,
   // r5 = function arg
   // r6 = PFP Microcode
   // r7 = ME Microcode
+  XELOGI("VdInitializeEngines called: unk0=0x{:08X}, callback=0x{:08X}", (uint32_t)unk0, (uint32_t)callback);
   return 1;
 }
 DECLARE_XBOXKRNL_EXPORT1(VdInitializeEngines, kVideo, kStub);
@@ -227,6 +228,7 @@ void VdSetGraphicsInterruptCallback_entry(function_t callback,
   // callback takes 2 params
   // r3 = bool 0/1 - 0 is normal interrupt, 1 is some acquire/lock mumble
   // r4 = user_data (r4 of VdSetGraphicsInterruptCallback)
+  XELOGI("VdSetGraphicsInterruptCallback: callback=0x{:08X}, user_data=0x{:08X}", (uint32_t)callback, user_data.guest_address());
   auto graphics_system = kernel_state()->emulator()->graphics_system();
   graphics_system->SetInterruptCallback(callback, user_data);
 }
@@ -236,6 +238,7 @@ void VdInitializeRingBuffer_entry(lpvoid_t ptr, int_t size_log2) {
   // r3 = result of MmGetPhysicalAddress
   // r4 = log2(size)
   // Buffer pointers are from MmAllocatePhysicalMemory with WRITE_COMBINE.
+  XELOGI("VdInitializeRingBuffer: ptr=0x{:08X}, size_log2={}", ptr.guest_address(), (int32_t)size_log2);
   auto graphics_system = kernel_state()->emulator()->graphics_system();
   graphics_system->InitializeRingBuffer(ptr, size_log2);
 }
@@ -358,6 +361,7 @@ void VdSwap_entry(
     lpdword_t frontbuffer_ptr,  // ptr to frontbuffer address
     lpdword_t texture_format_ptr, lpdword_t color_space_ptr, lpdword_t width,
     lpdword_t height) {
+  XELOGI("VdSwap called! buffer=0x{:08X}, frontbuffer=0x{:08X}, {}x{}", buffer_ptr.guest_address(), frontbuffer_ptr.guest_address(), width ? (uint32_t)*width : 0, height ? (uint32_t)*height : 0);
   // All of these parameters are REQUIRED.
   assert(buffer_ptr);
   assert(fetch_ptr);

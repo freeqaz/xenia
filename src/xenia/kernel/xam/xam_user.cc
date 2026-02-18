@@ -88,7 +88,7 @@ X_HRESULT_result_t XamUserGetSigninInfo_entry(
     return X_E_INVALIDARG;
   }
 
-  std::memset(info, 0, sizeof(X_USER_SIGNIN_INFO));
+  std::memset(reinterpret_cast<void*>(&*info), 0, sizeof(X_USER_SIGNIN_INFO));
   if (user_index) {
     return X_E_NO_SUCH_USER;
   }
@@ -273,7 +273,7 @@ uint32_t XamUserReadProfileSettingsEx(uint32_t title_id, uint32_t user_index,
     uint32_t setting_id = setting_ids[n];
     auto setting = user_profile->GetSetting(setting_id);
 
-    std::memset(out_setting, 0, sizeof(X_USER_PROFILE_SETTING));
+    std::memset(reinterpret_cast<void*>(&*out_setting), 0, sizeof(X_USER_PROFILE_SETTING));
     out_setting->from = !setting || !setting->is_set   ? 0
                         : setting->is_title_specific() ? 2
                                                        : 1;
@@ -516,6 +516,7 @@ dword_result_t XamUserAreUsersFriends_entry(dword_t user_index, dword_t unk1,
 DECLARE_XAM_EXPORT1(XamUserAreUsersFriends, kUserProfiles, kStub);
 
 dword_result_t XamShowSigninUI_entry(dword_t unk, dword_t unk_mask) {
+  XELOGI("XamShowSigninUI called! unk={}, unk_mask={}", uint32_t(unk), uint32_t(unk_mask));
   // Mask values vary. Probably matching user types? Local/remote?
 
   // To fix game modes that display a 4 profile signin UI (even if playing
@@ -762,6 +763,42 @@ dword_result_t XamSessionRefObjByHandle_entry(dword_t handle,
   return X_ERROR_SUCCESS;
 }
 DECLARE_XAM_EXPORT1(XamSessionRefObjByHandle, kUserProfiles, kStub);
+
+// User/Profile stubs for DC3
+dword_result_t XamUserGetIndexFromXUID_entry(qword_t xuid,
+                                              lpdword_t index_ptr) {
+  return X_E_FAIL;
+}
+DECLARE_XAM_EXPORT1(XamUserGetIndexFromXUID, kUserProfiles, kStub);
+
+dword_result_t XamUserGetOnlineCountryFromXUID_entry(qword_t xuid,
+                                                      lpdword_t country_ptr) {
+  return X_E_FAIL;
+}
+DECLARE_XAM_EXPORT1(XamUserGetOnlineCountryFromXUID, kUserProfiles, kStub);
+
+dword_result_t XamUserGetMembershipTierFromXUID_entry(qword_t xuid,
+                                                       lpdword_t tier_ptr) {
+  return X_E_FAIL;
+}
+DECLARE_XAM_EXPORT1(XamUserGetMembershipTierFromXUID, kUserProfiles, kStub);
+
+dword_result_t XamUserGetCachedUserFlags_entry(dword_t user_index) {
+  return 0;
+}
+DECLARE_XAM_EXPORT1(XamUserGetCachedUserFlags, kUserProfiles, kStub);
+
+dword_result_t XamProfileCreateEnumerator_entry(unknown_t unk1,
+                                                 lpdword_t handle_ptr) {
+  return X_E_FAIL;
+}
+DECLARE_XAM_EXPORT1(XamProfileCreateEnumerator, kUserProfiles, kStub);
+
+dword_result_t XamProfileEnumerate_entry(unknown_t handle, lpvoid_t buffer,
+                                          lpunknown_t overlapped_ptr) {
+  return X_E_FAIL;
+}
+DECLARE_XAM_EXPORT1(XamProfileEnumerate, kUserProfiles, kStub);
 
 }  // namespace xam
 }  // namespace kernel

@@ -103,6 +103,11 @@ class CommandProcessor {
   virtual void IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbuffer_width,
                          uint32_t frontbuffer_height) = 0;
 
+  // Whether IssueSwap handles its own frame dump (GPU readback). When true,
+  // the base class guest-memory PPM dump in ExecutePacketType3_XE_SWAP is
+  // skipped to avoid overwriting with incorrect data.
+  virtual bool HandlesFrameDump() const { return false; }
+
   // May be called not only from the command processor thread when the command
   // processor is paused, and the termination of this function may be explicitly
   // awaited.

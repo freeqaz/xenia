@@ -49,6 +49,16 @@ DEFINE_bool(
     "when MSAA is used with fullscreen passes.",
     "GPU");
 
+DEFINE_string(dump_frames_path, "",
+              "Path to dump headless frame captures (PPM format).", "GPU");
+DEFINE_int32(headless_capture_interval, 100,
+             "Capture frames every N swaps in headless mode (0 = every frame).",
+             "GPU");
+
+DEFINE_bool(force_all_draws, false,
+            "Force all draws to execute even in headless mode. "
+            "Use with trace replay to render captured GPU traces.", "GPU");
+
 DEFINE_int32(query_occlusion_fake_sample_count, 1000,
              "If set to -1 no sample counts are written, games may hang. Else, "
              "the sample count of every tile will be incremented on every "

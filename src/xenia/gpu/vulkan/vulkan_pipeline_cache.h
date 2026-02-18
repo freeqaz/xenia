@@ -10,10 +10,13 @@
 #ifndef XENIA_GPU_VULKAN_VULKAN_PIPELINE_STATE_CACHE_H_
 #define XENIA_GPU_VULKAN_VULKAN_PIPELINE_STATE_CACHE_H_
 
+#include <atomic>
 #include <cstddef>
 #include <cstring>
+#include <filesystem>
 #include <functional>
 #include <memory>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 
@@ -88,6 +91,16 @@ class VulkanPipelineCache {
       VulkanRenderTargetCache::RenderPassKey render_pass_key,
       VkPipeline& pipeline_out,
       const PipelineLayoutProvider*& pipeline_layout_out);
+
+  // Enable async pipeline compilation for headless mode. When enabled,
+  // pipelines that need creation are compiled on background threads instead of
+  // blocking the CP thread (which would cause EVENT_WRITE_SHD deadlocks).
+  void SetHeadlessMode(bool headless) { headless_mode_ = headless; }
+  bool IsHeadlessMode() const { return headless_mode_; }
+  // When warmup_wait is true, ConfigurePipeline will spin-wait for
+  // async pipeline compilation to finish instead of skipping the draw.
+  void SetWarmupWait(bool wait) { warmup_wait_ = wait; }
+  bool IsWarmupWait() const { return warmup_wait_; }
 
  private:
   enum class PipelineGeometryShader : uint32_t {
@@ -182,16 +195,16 @@ class VulkanPipelineCache {
     // Including all the padding, for a stable hash.
     PipelineDescription() { Reset(); }
     PipelineDescription(const PipelineDescription& description) {
-      std::memcpy(this, &description, sizeof(*this));
+      std::memcpy(reinterpret_cast<void*>(this), &description, sizeof(*this));
     }
     PipelineDescription& operator=(const PipelineDescription& description) {
-      std::memcpy(this, &description, sizeof(*this));
+      std::memcpy(reinterpret_cast<void*>(this), &description, sizeof(*this));
       return *this;
     }
     bool operator==(const PipelineDescription& description) const {
       return std::memcmp(this, &description, sizeof(*this)) == 0;
     }
-    void Reset() { std::memset(this, 0, sizeof(*this)); }
+    void Reset() { std::memset(reinterpret_cast<void*>(this), 0, sizeof(*this)); }
     uint64_t GetHash() const { return XXH3_64bits(this, sizeof(*this)); }
     struct Hasher {
       size_t operator()(const PipelineDescription& description) const {
@@ -278,6 +291,9 @@ class VulkanPipelineCache {
   bool EnsurePipelineCreated(
       const PipelineCreationArguments& creation_arguments);
 
+  // Save pipeline cache data to disk for cross-run persistence.
+  void SavePipelineCacheToDisk();
+
   VulkanCommandProcessor& command_processor_;
   const RegisterFile& register_file_;
   VulkanRenderTargetCache& render_target_cache_;
@@ -318,12 +334,30 @@ class VulkanPipelineCache {
   // shader interlock when no Xenos pixel shader provided.
   VkShaderModule depth_only_fragment_shader_ = VK_NULL_HANDLE;
 
+  // Vulkan pipeline cache for cross-run persistence of compiled pipelines.
+  VkPipelineCache vk_pipeline_cache_ = VK_NULL_HANDLE;
+  std::filesystem::path pipeline_cache_path_;
+
   std::unordered_map<PipelineDescription, Pipeline, PipelineDescription::Hasher>
       pipelines_;
 
   // Previously used pipeline, to avoid lookups if the state wasn't changed.
   const std::pair<const PipelineDescription, Pipeline>* last_pipeline_ =
       nullptr;
+
+  // Async pipeline compilation for headless mode. Pipelines are compiled on
+  // background threads to avoid blocking the CP thread during
+  // vkCreateGraphicsPipelines (which can take 10-100ms per new pipeline).
+  bool headless_mode_ = false;
+  bool warmup_wait_ = false;
+  struct PendingPipeline {
+    std::atomic<bool> done{false};
+    VkPipeline result = VK_NULL_HANDLE;
+    const PipelineLayoutProvider* pipeline_layout = nullptr;
+  };
+  std::unordered_map<PipelineDescription, std::shared_ptr<PendingPipeline>,
+                     PipelineDescription::Hasher>
+      pending_pipelines_;
 };
 
 }  // namespace vulkan
