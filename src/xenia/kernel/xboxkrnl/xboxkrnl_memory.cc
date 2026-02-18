@@ -649,6 +649,14 @@ dword_result_t MmDeleteKernelStack_entry(lpvoid_t stack_base,
 }
 DECLARE_XBOXKRNL_EXPORT1(MmDeleteKernelStack, kMemory, kImplemented);
 
+// Pool allocation stub
+pointer_result_t ExAllocatePoolWithTag_entry(dword_t size, dword_t tag) {
+  // TODO: real pool allocation - use system heap for now
+  uint32_t addr = kernel_state()->memory()->SystemHeapAlloc(size);
+  return addr;
+}
+DECLARE_XBOXKRNL_EXPORT1(ExAllocatePoolWithTag, kMemory, kStub);
+
 }  // namespace xboxkrnl
 }  // namespace kernel
 }  // namespace xe

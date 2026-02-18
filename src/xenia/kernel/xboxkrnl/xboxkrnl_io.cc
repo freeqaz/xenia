@@ -121,6 +121,8 @@ dword_result_t NtCreateFile_entry(lpdword_t handle_out, dword_t desired_access,
   // Compute path, possibly attrs relative.
   auto target_path = util::TranslateAnsiString(kernel_memory(), object_name);
 
+  XELOGI("NtCreateFile: {}", target_path);
+
   // Enforce that the path is ASCII.
   if (!IsValidPath(target_path, false)) {
     return X_STATUS_OBJECT_NAME_INVALID;
@@ -186,6 +188,19 @@ dword_result_t NtReadFile_entry(dword_t file_handle, dword_t event_handle,
                                 pointer_t<X_IO_STATUS_BLOCK> io_status_block,
                                 lpvoid_t buffer, dword_t buffer_length,
                                 lpqword_t byte_offset_ptr) {
+  // Track all reads on main thread
+  {
+    auto* thread = XThread::GetCurrentThread();
+    if (thread && thread->thread_id() == 6) {
+      static uint32_t main_read_count = 0;
+      main_read_count++;
+      if (main_read_count <= 20 || (main_read_count % 100) == 0) {
+        XELOGI("MainThread NtReadFile #{} handle=0x{:X} len={} offset={}",
+               main_read_count, (uint32_t)file_handle, (uint32_t)buffer_length,
+               byte_offset_ptr ? (int64_t)*byte_offset_ptr : -1);
+      }
+    }
+  }
   X_STATUS result = X_STATUS_SUCCESS;
 
   bool signal_event = false;
@@ -223,32 +238,16 @@ dword_result_t NtReadFile_entry(dword_t file_handle, dword_t event_handle,
         }
       }
 
-      if (!file->is_synchronous()) {
-        result = X_STATUS_PENDING;
-      }
+      // Note: We always complete synchronously (even for async files),
+      // so we should NOT return STATUS_PENDING. The XAPILIB ReadFile wrapper
+      // may set OVERLAPPED.Internal = STATUS_PENDING before calling us,
+      // and uses a separate stack IO_STATUS_BLOCK. If we return PENDING,
+      // GetOverlappedResult will see OVERLAPPED.Internal is still PENDING
+      // and spin forever. Since we completed the read, return SUCCESS.
 
       // Mark that we should signal the event now. We do this after
       // we have written the info out.
       signal_event = true;
-    } else {
-      // TODO(benvanik): async.
-
-      // X_STATUS_PENDING if not returning immediately.
-      // XFile is waitable and signalled after each async req completes.
-      // reset the input event (->Reset())
-      /*xeNtReadFileState* call_state = new xeNtReadFileState();
-      XAsyncRequest* request = new XAsyncRequest(
-      state, file,
-      (XAsyncRequest::CompletionCallback)xeNtReadFileCompleted,
-      call_state);*/
-      // result = file->Read(buffer.guest_address(), buffer_length, byte_offset,
-      //                     request);
-      if (io_status_block) {
-        io_status_block->status = X_STATUS_PENDING;
-        io_status_block->information = 0;
-      }
-
-      result = X_STATUS_PENDING;
     }
   }
 
@@ -306,35 +305,12 @@ dword_result_t NtReadFileScatter_entry(
         }
       }
 
-      if (!file->is_synchronous()) {
-        result = X_STATUS_PENDING;
-      }
+      // Note: We always complete synchronously (even for async files),
+      // so we should NOT return STATUS_PENDING. See NtReadFile for details.
 
       // Mark that we should signal the event now. We do this after
       // we have written the info out.
       signal_event = true;
-    } else {
-      // TODO(benvanik): async.
-
-      // TODO: On Windows it might be worth trying to use Win32 ReadFileScatter
-      // here instead of handling it ourselves
-
-      // X_STATUS_PENDING if not returning immediately.
-      // XFile is waitable and signalled after each async req completes.
-      // reset the input event (->Reset())
-      /*xeNtReadFileState* call_state = new xeNtReadFileState();
-      XAsyncRequest* request = new XAsyncRequest(
-      state, file,
-      (XAsyncRequest::CompletionCallback)xeNtReadFileCompleted,
-      call_state);*/
-      // result = file->Read(buffer.guest_address(), buffer_length, byte_offset,
-      //                     request);
-      if (io_status_block) {
-        io_status_block->status = X_STATUS_PENDING;
-        io_status_block->information = 0;
-      }
-
-      result = X_STATUS_PENDING;
     }
   }
 
@@ -398,21 +374,12 @@ dword_result_t NtWriteFile_entry(dword_t file_handle, dword_t event_handle,
         }
       }
 
-      if (!file->is_synchronous()) {
-        result = X_STATUS_PENDING;
-      }
+      // Note: We always complete synchronously (even for async files),
+      // so we should NOT return STATUS_PENDING. See NtReadFile for details.
 
       // Mark that we should signal the event now. We do this after
       // we have written the info out.
       signal_event = true;
-    } else {
-      // X_STATUS_PENDING if not returning immediately.
-      result = X_STATUS_PENDING;
-
-      if (io_status_block) {
-        io_status_block->status = X_STATUS_PENDING;
-        io_status_block->information = 0;
-      }
     }
   }
 

@@ -20,6 +20,40 @@ project("xenia-gpu")
   })
   local_platform_files()
 
+-- Headless variant (no UI dependencies)
+project("xenia-gpu-headless")
+  uuid("0e8d3370-e4b1-4b05-a2e8-39ebbcdf9b18")
+  kind("StaticLib")
+  language("C++")
+  links({
+    "fmt",
+    "snappy",
+    "xenia-base",
+    "xxhash",
+  })
+  defines({
+    "XE_HEADLESS_BUILD",
+  })
+  files({
+    "command_processor.cc",
+    "draw_extent_estimator.cc",
+    "draw_util.cc",
+    "gpu_flags.cc",
+    "graphics_system.cc",
+    "packet_disassembler.cc",
+    "primitive_processor.cc",
+    "register_file.cc",
+    "registers.cc",
+    "render_target_cache.cc",
+    "sampler_info.cc",
+    "shader.cc",
+    "shader_interpreter.cc",
+    "shader_translator.cc",
+    "shader_translator_disasm.cc",
+    "shared_memory.cc",
+    "trace_writer.cc",
+  })
+
 group("src")
 project("xenia-gpu-shader-compiler")
   uuid("ad76d3e4-4c62-439b-a0f6-f83fcf0e83c5")

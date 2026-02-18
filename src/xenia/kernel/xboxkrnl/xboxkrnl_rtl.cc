@@ -628,6 +628,50 @@ dword_result_t RtlComputeCrc32_entry(dword_t seed, lpvoid_t buffer,
 }
 DECLARE_XBOXKRNL_EXPORT1(RtlComputeCrc32, kNone, kImplemented);
 
+// Unicode char case conversion
+dword_result_t RtlUpcaseUnicodeChar_entry(dword_t source_char) {
+  uint32_t c = static_cast<uint32_t>(source_char);
+  if (c >= u'a' && c <= u'z') {
+    return c - 0x20;
+  }
+  return c;
+}
+DECLARE_XBOXKRNL_EXPORT1(RtlUpcaseUnicodeChar, kNone, kImplemented);
+
+dword_result_t RtlDowncaseUnicodeChar_entry(dword_t source_char) {
+  uint32_t c = static_cast<uint32_t>(source_char);
+  if (c >= u'A' && c <= u'Z') {
+    return c + 0x20;
+  }
+  return c;
+}
+DECLARE_XBOXKRNL_EXPORT1(RtlDowncaseUnicodeChar, kNone, kImplemented);
+
+// Exception handling stubs
+void RtlCaptureContext_entry(lpvoid_t context_ptr) {
+  // TODO: real context capture for SEH
+  XELOGW("RtlCaptureContext stub - zeroing context");
+  std::memset(context_ptr, 0, 0x200);
+}
+DECLARE_XBOXKRNL_EXPORT1(RtlCaptureContext, kNone, kStub);
+
+void RtlUnwind_entry(lpvoid_t target_frame, lpvoid_t target_ip,
+                      lpvoid_t exception_record, dword_t return_value) {
+  // TODO: real SEH unwind
+  XELOGW("RtlUnwind stub - not implemented");
+}
+DECLARE_XBOXKRNL_EXPORT1(RtlUnwind, kNone, kStub);
+
+dword_result_t __C_specific_handler_entry(lpvoid_t exception_record,
+                                           lpvoid_t establisher_frame,
+                                           lpvoid_t context_record,
+                                           lpvoid_t dispatcher_context) {
+  // TODO: real C exception handler
+  XELOGW("__C_specific_handler stub - not implemented");
+  return 1;  // ExceptionContinueSearch
+}
+DECLARE_XBOXKRNL_EXPORT1(__C_specific_handler, kNone, kStub);
+
 }  // namespace xboxkrnl
 }  // namespace kernel
 }  // namespace xe

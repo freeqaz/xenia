@@ -121,6 +121,9 @@ class VulkanTextureCache final : public TextureCache {
                                  uint32_t& height_scaled_out,
                                  xenos::TextureFormat& format_out);
 
+  // Returns the VkImage of the last texture returned by RequestSwapTexture.
+  VkImage GetLastSwapImage() const { return last_swap_image_; }
+
  protected:
   bool IsSignedVersionSeparateForFormat(TextureKey key) const override;
   uint32_t GetHostFormatSwizzle(TextureKey key) const override;
@@ -315,6 +318,8 @@ class VulkanTextureCache final : public TextureCache {
 
   VulkanCommandProcessor& command_processor_;
   VkPipelineStageFlags guest_shader_pipeline_stages_;
+
+  VkImage last_swap_image_ = VK_NULL_HANDLE;
 
   // Using the Vulkan Memory Allocator because texture count in games is
   // naturally pretty much unbounded, while Vulkan implementations, especially

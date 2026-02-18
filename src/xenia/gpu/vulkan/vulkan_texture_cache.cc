@@ -922,6 +922,7 @@ VkImageView VulkanTextureCache::RequestSwapTexture(
   height_scaled_out =
       key.GetHeight() * (key.scaled_resolve ? draw_resolution_scale_y() : 1);
   format_out = key.format;
+  last_swap_image_ = texture->image();
   return texture_view;
 }
 

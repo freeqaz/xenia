@@ -13,6 +13,7 @@
 #include <array>
 #include <climits>
 #include <cstdint>
+#include <chrono>
 #include <deque>
 #include <functional>
 #include <memory>
@@ -260,6 +261,8 @@ class VulkanCommandProcessor : public CommandProcessor {
 
   void OnGammaRamp256EntryTableValueWritten() override;
   void OnGammaRampPWLValueWritten() override;
+
+  bool HandlesFrameDump() const override { return headless_frame_dump_; }
 
   void IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbuffer_width,
                  uint32_t frontbuffer_height) override;
@@ -731,6 +734,49 @@ class VulkanCommandProcessor : public CommandProcessor {
 
   // Temporary storage for memexport stream constants used in the draw.
   std::vector<draw_util::MemExportRange> memexport_ranges_;
+
+  // Headless frame capture state.
+  bool headless_frame_dump_ = false;
+  uint32_t headless_frame_count_ = 0;
+  // Frame-selective rendering: skip draws except when rendering a frame to
+  // capture. This allows the game to run at ~30fps (null-GPU speed) with
+  // periodic fully-rendered snapshots.
+  bool headless_render_frame_ = false;
+  uint32_t headless_capture_interval_ = 0;
+
+  // Per-frame timing counters for draw profiling
+  std::chrono::steady_clock::time_point headless_frame_start_;
+  uint32_t headless_draw_count_ = 0;
+  int64_t headless_shader_ms_ = 0;
+  int64_t headless_submit_ms_ = 0;
+  int64_t headless_pipeline_ms_ = 0;
+  int64_t headless_rt_ms_ = 0;
+  int64_t headless_texture_ms_ = 0;
+
+  // Time-budgeted draw state: allow draws for N ms per frame, skip rest.
+  bool headless_draw_budget_exceeded_ = false;
+  bool headless_draw_timer_started_ = false;
+  std::chrono::steady_clock::time_point headless_draw_start_;
+
+  // Deferred draw system: in headless mode, non-copy draws are deferred
+  // (register state saved, draw skipped) so sync events process immediately.
+  // At XE_SWAP time, all deferred draws execute sequentially.
+  struct DeferredDrawState {
+    std::vector<uint32_t> register_values;  // RegisterFile::kRegisterCount
+    Shader* vertex_shader;
+    Shader* pixel_shader;
+    // Draw parameters (saved to avoid re-deriving from registers).
+    xenos::PrimitiveType prim_type;
+    uint32_t index_count;
+    bool is_indexed;
+    bool major_mode_explicit;
+    IndexBufferInfo index_buffer_info;
+  };
+  bool deferred_draws_enabled_ = false;
+  std::vector<DeferredDrawState> deferred_draws_;
+
+  // Execute all deferred draws (called from IssueSwap).
+  void FlushDeferredDraws();
 };
 
 }  // namespace vulkan

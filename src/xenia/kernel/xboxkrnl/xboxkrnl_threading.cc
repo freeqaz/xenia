@@ -320,6 +320,17 @@ dword_result_t KeDelayExecutionThread_entry(dword_t processor_mode,
                                             dword_t alertable,
                                             lpqword_t interval_ptr) {
   XThread* thread = XThread::GetCurrentThread();
+
+  // Log when main thread calls Sleep
+  if (thread && thread->thread_id() == 6) {
+    static uint32_t main_delay_count = 0;
+    main_delay_count++;
+    if (main_delay_count <= 10 || (main_delay_count % 1000) == 0) {
+      XELOGI("MainThread KeDelay #{} interval={}", main_delay_count,
+             (int64_t)*interval_ptr);
+    }
+  }
+
   X_STATUS result = thread->Delay(processor_mode, alertable, *interval_ptr);
 
   return result;
@@ -472,6 +483,7 @@ dword_result_t NtCreateEvent_entry(
   if (handle_ptr) {
     *handle_ptr = ev->handle();
   }
+
   return X_STATUS_SUCCESS;
 }
 DECLARE_XBOXKRNL_EXPORT1(NtCreateEvent, kThreading, kImplemented);
@@ -815,6 +827,7 @@ dword_result_t NtWaitForSingleObjectEx_entry(dword_t object_handle,
       kernel_state()->object_table()->LookupObject<XObject>(object_handle);
   if (object) {
     uint64_t timeout = timeout_ptr ? static_cast<uint64_t>(*timeout_ptr) : 0u;
+
     result =
         object->Wait(3, wait_mode, alertable, timeout_ptr ? &timeout : nullptr);
   } else {
@@ -1390,6 +1403,49 @@ pointer_result_t InterlockedFlushSList_entry(
   return first;
 }
 DECLARE_XBOXKRNL_EXPORT1(InterlockedFlushSList, kThreading, kImplemented);
+
+// Ke* Timer stubs (Nt* variants already implemented above)
+void KeInitializeTimerEx_entry(lpvoid_t timer_ptr, dword_t type) {
+  XELOGI("KeInitializeTimerEx(ptr={:08X}, type={})", timer_ptr.guest_address(),
+         (uint32_t)type);
+  // TODO: real timer init - for now just zero the structure
+  std::memset(timer_ptr, 0, 0x28);
+}
+DECLARE_XBOXKRNL_EXPORT1(KeInitializeTimerEx, kThreading, kStub);
+
+dword_result_t KeCancelTimer_entry(lpvoid_t timer_ptr) {
+  XELOGI("KeCancelTimer(ptr={:08X})", timer_ptr.guest_address());
+  // TODO: real cancel
+  return 0;  // FALSE = timer was not in queue
+}
+DECLARE_XBOXKRNL_EXPORT1(KeCancelTimer, kThreading, kStub);
+
+dword_result_t KeSetTimer_entry(lpvoid_t timer_ptr, qword_t due_time,
+                                 lpvoid_t dpc_ptr) {
+  XELOGI("KeSetTimer(ptr={:08X}, due={}, dpc={:08X})",
+         timer_ptr.guest_address(), (uint64_t)due_time,
+         dpc_ptr.guest_address());
+  // TODO: real set timer
+  return 0;  // FALSE = timer was not already in queue
+}
+DECLARE_XBOXKRNL_EXPORT1(KeSetTimer, kThreading, kStub);
+
+// Ke* Mutant stubs (Nt* variants already implemented above)
+void KeInitializeMutant_entry(lpvoid_t mutant_ptr, dword_t initial_owner) {
+  XELOGI("KeInitializeMutant(ptr={:08X}, owner={})",
+         mutant_ptr.guest_address(), (uint32_t)initial_owner);
+  // TODO: real mutex init
+  std::memset(mutant_ptr, 0, 0x20);
+}
+DECLARE_XBOXKRNL_EXPORT1(KeInitializeMutant, kThreading, kStub);
+
+dword_result_t KeReleaseMutant_entry(lpvoid_t mutant_ptr, dword_t increment,
+                                      dword_t abandoned, dword_t wait) {
+  XELOGI("KeReleaseMutant(ptr={:08X})", mutant_ptr.guest_address());
+  // TODO: real release
+  return 0;
+}
+DECLARE_XBOXKRNL_EXPORT1(KeReleaseMutant, kThreading, kStub);
 
 }  // namespace xboxkrnl
 }  // namespace kernel

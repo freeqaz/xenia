@@ -38,6 +38,31 @@ DECLARE_XAM_EXPORT1(XamVoiceClose, kNone, kStub);
 dword_result_t XamVoiceHeadsetPresent_entry(lpunknown_t voice_ptr) { return 0; }
 DECLARE_XAM_EXPORT1(XamVoiceHeadsetPresent, kNone, kStub);
 
+dword_result_t XamVoiceSubmitPacket_entry(unknown_t unk1, unknown_t unk2,
+                                          lpvoid_t buffer) {
+  return 0;
+}
+DECLARE_XAM_EXPORT1(XamVoiceSubmitPacket, kNone, kStub);
+
+dword_result_t XamVoiceGetMicArrayAudioEx_entry(unknown_t unk1,
+                                                 lpvoid_t buffer,
+                                                 lpdword_t size_ptr) {
+  return X_E_FAIL;
+}
+DECLARE_XAM_EXPORT1(XamVoiceGetMicArrayAudioEx, kNone, kStub);
+
+dword_result_t XamVoiceGetMicArrayUnderrunStatus_entry(unknown_t unk1) {
+  return 0;
+}
+DECLARE_XAM_EXPORT1(XamVoiceGetMicArrayUnderrunStatus, kNone, kStub);
+
+dword_result_t XamVoiceGetMicArrayStatus_entry(unknown_t unk1,
+                                                lpdword_t status_ptr) {
+  *status_ptr = 0;
+  return 0;
+}
+DECLARE_XAM_EXPORT1(XamVoiceGetMicArrayStatus, kNone, kStub);
+
 }  // namespace xam
 }  // namespace kernel
 }  // namespace xe

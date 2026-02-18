@@ -41,7 +41,7 @@ void TextureDump(const TextureInfo& src, void* buffer, size_t length) {
     uint32_t reserved2;
   } dds_header;
 
-  std::memset(&dds_header, 0, sizeof(dds_header));
+  std::memset(reinterpret_cast<void*>(&dds_header), 0, sizeof(dds_header));
   dds_header.size = sizeof(dds_header);
   dds_header.flags = 1u | 2u | 4u | 0x1000u | 0x20000u;
   if (src.is_compressed()) {
@@ -83,7 +83,7 @@ void TextureDump(const TextureInfo& src, void* buffer, size_t length) {
     }
     default: {
       assert_unhandled_case(src.format);
-      std::memset(&dds_header.pixel_format, 0xCD,
+      std::memset(reinterpret_cast<void*>(&dds_header.pixel_format), 0xCD,
                   sizeof(dds_header.pixel_format));
       XELOGW("Skipping {} for texture dump.", src.format_info()->name);
       return;

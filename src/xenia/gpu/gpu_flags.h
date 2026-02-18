@@ -24,6 +24,11 @@ DECLARE_bool(non_seamless_cube_map);
 
 DECLARE_bool(half_pixel_offset);
 
+DECLARE_string(dump_frames_path);
+DECLARE_int32(headless_capture_interval);
+
+DECLARE_bool(force_all_draws);
+
 DECLARE_int32(query_occlusion_fake_sample_count);
 
 #define XE_GPU_FINE_GRAINED_DRAW_SCOPES 1

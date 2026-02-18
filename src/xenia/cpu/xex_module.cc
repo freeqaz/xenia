@@ -10,6 +10,9 @@
 #include "xenia/cpu/xex_module.h"
 
 #include <algorithm>
+#include <cstdio>
+#include <cstring>
+#include <vector>
 
 #include "third_party/fmt/include/fmt/format.h"
 
@@ -1045,6 +1048,113 @@ bool XexModule::LoadContinue() {
       auto library_name = std::string(string_table[library_name_index]);
       SetupLibraryImports(library_name, library);
       library_offset += library->size;
+    }
+  }
+
+  // PE Override: replace the entire PE image with a decomp binary.
+  // Runs AFTER SetupLibraryImports so import descriptors are read from
+  // the original XEX. Copies ALL sections (code + data) so that code↔data
+  // references remain consistent. Then re-patches all import thunks and
+  // variable import values that were overwritten by the copy.
+  //
+  // IMPORTANT: The override PE must have matching function addresses (same
+  // section layout and link order as the original). If addresses differ,
+  // the XEX entry point will jump to the wrong code and crash.
+  if (!cvars::pe_override.empty()) {
+    XELOGI("PE Override: loading {}", cvars::pe_override);
+    FILE* pe_file = fopen(cvars::pe_override.c_str(), "rb");
+    if (pe_file) {
+      fseek(pe_file, 0, SEEK_END);
+      size_t pe_size = ftell(pe_file);
+      fseek(pe_file, 0, SEEK_SET);
+      std::vector<uint8_t> pe_data(pe_size);
+      fread(pe_data.data(), 1, pe_size, pe_file);
+      fclose(pe_file);
+
+      auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(pe_data.data());
+      if (dos->e_magic == IMAGE_DOS_SIGNATURE) {
+        auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS32*>(
+            pe_data.data() + dos->e_lfanew);
+        if (nt->Signature == IMAGE_NT_SIGNATURE) {
+          uint8_t* dest = memory()->TranslateVirtual(base_address_);
+          auto* sec = reinterpret_cast<const IMAGE_SECTION_HEADER*>(
+              reinterpret_cast<const uint8_t*>(&nt->OptionalHeader) +
+              nt->FileHeader.SizeOfOptionalHeader);
+          uint32_t copied = 0;
+          for (int i = 0; i < nt->FileHeader.NumberOfSections; i++, sec++) {
+            if (sec->SizeOfRawData > 0 && sec->PointerToRawData < pe_size) {
+              size_t copy_size = std::min(
+                  static_cast<size_t>(sec->SizeOfRawData),
+                  pe_size - sec->PointerToRawData);
+              std::memcpy(dest + sec->VirtualAddress,
+                          pe_data.data() + sec->PointerToRawData, copy_size);
+              XELOGI("PE Override: section {} -> VA 0x{:08X} ({} bytes)",
+                     reinterpret_cast<const char*>(sec->Name),
+                     base_address_ + sec->VirtualAddress, copy_size);
+              ++copied;
+            }
+          }
+          XELOGI("PE Override: {} sections copied ({} bytes total PE)",
+                 copied, pe_size);
+
+          // Re-patch import thunks and variable values overwritten by copy.
+          uint32_t repatched_thunks = 0, repatched_vars = 0;
+          for (const auto& lib : import_libs_) {
+            ExportResolver* resolver = nullptr;
+            if (kernel_state_->IsKernelModule(lib.name)) {
+              resolver = processor_->export_resolver();
+            }
+            auto user_mod = kernel_state_->GetModule(lib.name);
+
+            for (const auto& import : lib.imports) {
+              if (import.thunk_address) {
+                uint8_t* p = memory()->TranslateVirtual(import.thunk_address);
+                xe::store_and_swap<uint32_t>(p + 0x0, 0x44000042);  // sc 2
+                xe::store_and_swap<uint32_t>(p + 0x4, 0x4E800020);  // blr
+                xe::store_and_swap<uint32_t>(p + 0x8, 0x60000000);  // nop
+                xe::store_and_swap<uint32_t>(p + 0xC, 0x60000000);  // nop
+                ++repatched_thunks;
+              }
+              if (import.value_address) {
+                auto* slot = memory()->TranslateVirtual<xe::be<uint32_t>*>(
+                    import.value_address);
+                Export* ke = nullptr;
+                uint32_t user_addr = 0;
+                if (resolver) {
+                  ke = resolver->GetExportByOrdinal(lib.name, import.ordinal);
+                }
+                if (!ke && user_mod) {
+                  user_addr = user_mod->GetProcAddressByOrdinal(import.ordinal);
+                }
+                if (ke) {
+                  if (ke->type == Export::Type::kFunction) {
+                    *slot = 0xDEADC0DE;
+                  } else if (ke->type == Export::Type::kVariable) {
+                    if (ke->is_implemented()) {
+                      *slot = ke->variable_ptr;
+                    } else {
+                      *slot = 0xD000BEEF | (ke->ordinal & 0xFFF) << 16;
+                    }
+                  }
+                } else if (user_addr) {
+                  *slot = user_addr;
+                } else {
+                  *slot = 0xF00DF00D;
+                }
+                ++repatched_vars;
+              }
+            }
+          }
+          XELOGI("PE Override: re-patched {} thunks, {} variables",
+                 repatched_thunks, repatched_vars);
+        } else {
+          XELOGE("PE Override: invalid NT signature");
+        }
+      } else {
+        XELOGE("PE Override: invalid DOS signature");
+      }
+    } else {
+      XELOGE("PE Override: failed to open {}", cvars::pe_override);
     }
   }
 

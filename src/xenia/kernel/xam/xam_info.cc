@@ -7,6 +7,10 @@
  ******************************************************************************
  */
 
+#include <chrono>
+#include <ctime>
+
+#include "xenia/base/clock.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/string_util.h"
 #include "xenia/kernel/kernel_state.h"
@@ -346,6 +350,69 @@ dword_result_t XamQueryLiveHiveW_entry(lpu16string_t name, lpvoid_t out_buf,
   return X_STATUS_INVALID_PARAMETER_1;
 }
 DECLARE_XAM_EXPORT1(XamQueryLiveHiveW, kNone, kStub);
+
+// Xbox 360 SYSTEMTIME: 8 big-endian WORD fields (16 bytes total)
+// wYear, wMonth, wDayOfWeek, wDay, wHour, wMinute, wSecond, wMilliseconds
+static void FillSystemTime(lpvoid_t out_ptr, const struct tm* t, int millis) {
+  auto* p = reinterpret_cast<uint8_t*>(out_ptr.host_address());
+  xe::store_and_swap<uint16_t>(p + 0, static_cast<uint16_t>(t->tm_year + 1900));
+  xe::store_and_swap<uint16_t>(p + 2, static_cast<uint16_t>(t->tm_mon + 1));
+  xe::store_and_swap<uint16_t>(p + 4, static_cast<uint16_t>(t->tm_wday));
+  xe::store_and_swap<uint16_t>(p + 6, static_cast<uint16_t>(t->tm_mday));
+  xe::store_and_swap<uint16_t>(p + 8, static_cast<uint16_t>(t->tm_hour));
+  xe::store_and_swap<uint16_t>(p + 10, static_cast<uint16_t>(t->tm_min));
+  xe::store_and_swap<uint16_t>(p + 12, static_cast<uint16_t>(t->tm_sec));
+  xe::store_and_swap<uint16_t>(p + 14, static_cast<uint16_t>(millis));
+}
+
+void GetLocalTime_entry(lpvoid_t out_ptr) {
+  auto now = std::chrono::system_clock::now();
+  auto time_t_now = std::chrono::system_clock::to_time_t(now);
+  auto millis = std::chrono::duration_cast<std::chrono::milliseconds>(
+      now.time_since_epoch()).count() % 1000;
+  struct tm local_tm;
+  localtime_r(&time_t_now, &local_tm);
+  FillSystemTime(out_ptr, &local_tm, static_cast<int>(millis));
+}
+DECLARE_XAM_EXPORT1(GetLocalTime, kNone, kImplemented);
+
+void GetSystemTime_entry(lpvoid_t out_ptr) {
+  auto now = std::chrono::system_clock::now();
+  auto time_t_now = std::chrono::system_clock::to_time_t(now);
+  auto millis = std::chrono::duration_cast<std::chrono::milliseconds>(
+      now.time_since_epoch()).count() % 1000;
+  struct tm utc_tm;
+  gmtime_r(&time_t_now, &utc_tm);
+  FillSystemTime(out_ptr, &utc_tm, static_cast<int>(millis));
+}
+DECLARE_XAM_EXPORT1(GetSystemTime, kNone, kImplemented);
+
+dword_result_t GetTickCount_entry() {
+  return static_cast<uint32_t>(Clock::QueryHostUptimeMillis());
+}
+DECLARE_XAM_EXPORT2(GetTickCount, kNone, kImplemented, kHighFrequency);
+
+void OutputDebugStringA_entry(lpstring_t debug_string) {
+  if (debug_string) {
+    XELOGI("OutputDebugStringA: {}", debug_string.value());
+  }
+}
+DECLARE_XAM_EXPORT1(OutputDebugStringA, kNone, kImplemented);
+
+void OutputDebugStringW_entry(lpu16string_t debug_string) {
+  if (debug_string) {
+    auto str = xe::to_utf8(debug_string.value());
+    XELOGI("OutputDebugStringW: {}", str);
+  }
+}
+DECLARE_XAM_EXPORT1(OutputDebugStringW, kNone, kImplemented);
+
+void RtlOutputDebugString_entry(lpstring_t debug_string) {
+  if (debug_string) {
+    XELOGI("RtlOutputDebugString: {}", debug_string.value());
+  }
+}
+DECLARE_XAM_EXPORT1(RtlOutputDebugString, kNone, kImplemented);
 
 }  // namespace xam
 }  // namespace kernel

@@ -83,15 +83,20 @@ bool IsWritableExecutableMemorySupported() { return true; }
 
 void* AllocFixed(void* base_address, size_t length,
                  AllocationType allocation_type, PageAccess access) {
-  // mmap does not support reserve / commit, so ignore allocation_type.
+  // Use mprotect to change permissions on already-mapped memory.
+  // This preserves MAP_SHARED file-backed mappings (needed for
+  // virtual/physical address aliasing).
   uint32_t prot = ToPosixProtectFlags(access);
+  if (mprotect(base_address, length, prot) == 0) {
+    return base_address;
+  }
+  // Fallback: if mprotect fails (e.g., no mapping exists), create one.
   void* result = mmap(base_address, length, prot,
-                      MAP_PRIVATE | MAP_FIXED | MAP_ANONYMOUS, -1, 0);
+                      MAP_SHARED | MAP_FIXED | MAP_ANONYMOUS, -1, 0);
   if (result == MAP_FAILED) {
     return nullptr;
-  } else {
-    return result;
   }
+  return result;
 }
 
 bool DeallocFixed(void* base_address, size_t length,
@@ -178,8 +183,12 @@ void CloseFileMappingHandle(FileMappingHandle handle,
 void* MapFileView(FileMappingHandle handle, void* base_address, size_t length,
                   PageAccess access, size_t file_offset) {
   uint32_t prot = ToPosixProtectFlags(access);
-  return mmap64(base_address, length, prot, MAP_PRIVATE | MAP_ANONYMOUS, handle,
-                file_offset);
+  void* result = mmap64(base_address, length, prot, MAP_SHARED | MAP_FIXED,
+                        handle, file_offset);
+  if (result == MAP_FAILED) {
+    return nullptr;
+  }
+  return result;
 }
 
 bool UnmapFileView(FileMappingHandle handle, void* base_address,
