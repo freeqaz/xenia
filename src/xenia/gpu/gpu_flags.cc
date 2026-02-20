@@ -59,6 +59,10 @@ DEFINE_bool(force_all_draws, false,
             "Force all draws to execute even in headless mode. "
             "Use with trace replay to render captured GPU traces.", "GPU");
 
+DEFINE_bool(headless_verbose_diagnostics, false,
+            "Enable verbose per-draw and capture diagnostics in headless mode.",
+            "GPU");
+
 DEFINE_int32(query_occlusion_fake_sample_count, 1000,
              "If set to -1 no sample counts are written, games may hang. Else, "
              "the sample count of every tile will be incremented on every "

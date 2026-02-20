@@ -399,28 +399,18 @@ inline void AppendParam(StringBuffer* string_buffer, lpvoid_t param) {
   string_buffer->AppendFormat("{:08X}", uint32_t(param));
 }
 inline void AppendParam(StringBuffer* string_buffer, lpdword_t param) {
+  // Only print guest address, not value - dereferencing can trigger SIGSEGV
+  // on write-watched pages, deadlocking in the MMIO handler.
   string_buffer->AppendFormat("{:08X}", param.guest_address());
-  if (param) {
-    string_buffer->AppendFormat("({:08X})", param.value());
-  }
 }
 inline void AppendParam(StringBuffer* string_buffer, lpqword_t param) {
   string_buffer->AppendFormat("{:08X}", param.guest_address());
-  if (param) {
-    string_buffer->AppendFormat("({:016X})", param.value());
-  }
 }
 inline void AppendParam(StringBuffer* string_buffer, lpfloat_t param) {
   string_buffer->AppendFormat("{:08X}", param.guest_address());
-  if (param) {
-    string_buffer->AppendFormat("({:G})", param.value());
-  }
 }
 inline void AppendParam(StringBuffer* string_buffer, lpdouble_t param) {
   string_buffer->AppendFormat("{:08X}", param.guest_address());
-  if (param) {
-    string_buffer->AppendFormat("({:G})", param.value());
-  }
 }
 inline void AppendParam(StringBuffer* string_buffer, lpstring_t param) {
   string_buffer->AppendFormat("{:08X}", param.guest_address());

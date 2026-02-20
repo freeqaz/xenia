@@ -16,6 +16,7 @@
 #include "xenia/base/logging.h"
 #include "xenia/hid/hid_flags.h"
 #include "xenia/hid/input.h"
+#include "xenia/ui/virtual_key.h"
 
 namespace xe {
 namespace hid {
@@ -146,18 +147,12 @@ X_RESULT NopInputDriver::GetCapabilities(uint32_t user_index, uint32_t flags,
   return X_ERROR_SUCCESS;
 }
 
-X_RESULT NopInputDriver::GetState(uint32_t user_index,
-                                  X_INPUT_STATE* out_state) {
-  if (!scripted_mode_ || user_index != 0) {
-    return X_ERROR_DEVICE_NOT_CONNECTED;
-  }
-
+uint16_t NopInputDriver::GetCurrentButtons() const {
   auto now = std::chrono::steady_clock::now();
   auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                         now - start_time_)
                         .count();
 
-  // Compute combined button state from all active events
   uint16_t active_buttons = 0;
   for (const auto& event : scripted_events_) {
     if (elapsed_ms >= (int64_t)event.time_ms &&
@@ -165,6 +160,80 @@ X_RESULT NopInputDriver::GetState(uint32_t user_index,
       active_buttons |= event.buttons;
     }
   }
+  return active_buttons;
+}
+
+uint16_t NopInputDriver::ButtonToVK(uint16_t button) const {
+  switch (button) {
+    case X_INPUT_GAMEPAD_A:
+      return uint16_t(ui::VirtualKey::kXInputPadA);
+    case X_INPUT_GAMEPAD_B:
+      return uint16_t(ui::VirtualKey::kXInputPadB);
+    case X_INPUT_GAMEPAD_X:
+      return uint16_t(ui::VirtualKey::kXInputPadX);
+    case X_INPUT_GAMEPAD_Y:
+      return uint16_t(ui::VirtualKey::kXInputPadY);
+    case X_INPUT_GAMEPAD_START:
+      return uint16_t(ui::VirtualKey::kXInputPadStart);
+    case X_INPUT_GAMEPAD_BACK:
+      return uint16_t(ui::VirtualKey::kXInputPadBack);
+    case X_INPUT_GAMEPAD_DPAD_UP:
+      return uint16_t(ui::VirtualKey::kXInputPadDpadUp);
+    case X_INPUT_GAMEPAD_DPAD_DOWN:
+      return uint16_t(ui::VirtualKey::kXInputPadDpadDown);
+    case X_INPUT_GAMEPAD_DPAD_LEFT:
+      return uint16_t(ui::VirtualKey::kXInputPadDpadLeft);
+    case X_INPUT_GAMEPAD_DPAD_RIGHT:
+      return uint16_t(ui::VirtualKey::kXInputPadDpadRight);
+    case X_INPUT_GAMEPAD_LEFT_SHOULDER:
+      return uint16_t(ui::VirtualKey::kXInputPadLShoulder);
+    case X_INPUT_GAMEPAD_RIGHT_SHOULDER:
+      return uint16_t(ui::VirtualKey::kXInputPadRShoulder);
+    case X_INPUT_GAMEPAD_LEFT_THUMB:
+      return uint16_t(ui::VirtualKey::kXInputPadLThumbPress);
+    case X_INPUT_GAMEPAD_RIGHT_THUMB:
+      return uint16_t(ui::VirtualKey::kXInputPadRThumbPress);
+    default:
+      return 0;
+  }
+}
+
+X_RESULT NopInputDriver::GetState(uint32_t user_index,
+                                  X_INPUT_STATE* out_state) {
+  if (!scripted_mode_ || user_index != 0) {
+    return X_ERROR_DEVICE_NOT_CONNECTED;
+  }
+
+  uint16_t active_buttons = GetCurrentButtons();
+
+  // Generate keystroke events for button transitions
+  uint16_t pressed = active_buttons & ~prev_buttons_;
+  uint16_t released = prev_buttons_ & ~active_buttons;
+
+  // Check each button bit for transitions
+  for (uint16_t bit = 1; bit != 0; bit <<= 1) {
+    if (pressed & bit) {
+      X_INPUT_KEYSTROKE ks = {};
+      ks.virtual_key = ButtonToVK(bit);
+      ks.flags = X_INPUT_KEYSTROKE_KEYDOWN;
+      ks.user_index = 0;
+      if (ks.virtual_key) {
+        keystroke_queue_.push_back(ks);
+        XELOGI("Keystroke KEYDOWN: VK=0x{:04X} button=0x{:04X}",
+               (uint16_t)ks.virtual_key, bit);
+      }
+    }
+    if (released & bit) {
+      X_INPUT_KEYSTROKE ks = {};
+      ks.virtual_key = ButtonToVK(bit);
+      ks.flags = X_INPUT_KEYSTROKE_KEYUP;
+      ks.user_index = 0;
+      if (ks.virtual_key) {
+        keystroke_queue_.push_back(ks);
+      }
+    }
+  }
+  prev_buttons_ = active_buttons;
 
   std::memset(reinterpret_cast<void*>(out_state), 0, sizeof(*out_state));
   out_state->packet_number = packet_number_++;
@@ -187,7 +256,39 @@ X_RESULT NopInputDriver::GetKeystroke(uint32_t user_index, uint32_t flags,
     return X_ERROR_DEVICE_NOT_CONNECTED;
   }
 
-  // Return empty keystroke (no key events). Games primarily use GetState.
+  // Poll current state to generate any pending keystroke events
+  // (in case GetKeystroke is called without GetState)
+  uint16_t active_buttons = GetCurrentButtons();
+  uint16_t pressed = active_buttons & ~prev_buttons_;
+  uint16_t released = prev_buttons_ & ~active_buttons;
+  for (uint16_t bit = 1; bit != 0; bit <<= 1) {
+    if (pressed & bit) {
+      X_INPUT_KEYSTROKE ks = {};
+      ks.virtual_key = ButtonToVK(bit);
+      ks.flags = X_INPUT_KEYSTROKE_KEYDOWN;
+      ks.user_index = 0;
+      if (ks.virtual_key) {
+        keystroke_queue_.push_back(ks);
+        XELOGI("Keystroke KEYDOWN: VK=0x{:04X} button=0x{:04X}",
+               (uint16_t)ks.virtual_key, bit);
+      }
+    }
+    if (released & bit) {
+      X_INPUT_KEYSTROKE ks = {};
+      ks.virtual_key = ButtonToVK(bit);
+      ks.flags = X_INPUT_KEYSTROKE_KEYUP;
+      ks.user_index = 0;
+      if (ks.virtual_key) keystroke_queue_.push_back(ks);
+    }
+  }
+  prev_buttons_ = active_buttons;
+
+  if (!keystroke_queue_.empty()) {
+    *out_keystroke = keystroke_queue_.front();
+    keystroke_queue_.pop_front();
+    return X_ERROR_SUCCESS;
+  }
+
   std::memset(reinterpret_cast<void*>(out_keystroke), 0, sizeof(*out_keystroke));
   return X_ERROR_EMPTY;
 }

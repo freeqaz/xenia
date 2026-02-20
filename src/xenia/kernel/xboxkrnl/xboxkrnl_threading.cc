@@ -11,10 +11,15 @@
 #include <vector>
 
 #include "xenia/base/atomic.h"
+#include "xenia/base/cvar.h"
 #include "xenia/base/clock.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/mutex.h"
 #include "xenia/cpu/processor.h"
+#include "xenia/cpu/thread_state.h"
+#include "xenia/cpu/ppc/ppc_context.h"
+#include "xenia/cpu/backend/backend.h"
+#include "xenia/cpu/backend/code_cache.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/user_module.h"
 #include "xenia/kernel/util/shim_utils.h"
@@ -26,6 +31,10 @@
 #include "xenia/kernel/xthread.h"
 #include "xenia/kernel/xtimer.h"
 #include "xenia/xbox.h"
+
+DEFINE_bool(headless_thread_diagnostics, false,
+            "Enable verbose main-thread wait/delay diagnostics in headless mode.",
+            "Kernel");
 
 namespace xe {
 namespace kernel {
@@ -135,6 +144,11 @@ dword_result_t ExCreateThread_entry(lpdword_t handle_ptr, dword_t stack_size,
     XELOGE("Thread creation failed: {:08X}", result);
     return result;
   }
+
+  XELOGI("ExCreateThread: start=0x{:08X} ctx=0x{:08X} flags=0x{:X} stack={} -> tid={}",
+         start_address.guest_address(), start_context.guest_address(),
+         uint32_t(creation_flags), uint32_t(actual_stack_size),
+         thread->thread_id());
 
   if (XSUCCEEDED(result)) {
     if (handle_ptr) {
@@ -322,7 +336,8 @@ dword_result_t KeDelayExecutionThread_entry(dword_t processor_mode,
   XThread* thread = XThread::GetCurrentThread();
 
   // Log when main thread calls Sleep
-  if (thread && thread->thread_id() == 6) {
+  if (cvars::headless_thread_diagnostics &&
+      thread && thread->thread_id() == 6) {
     static uint32_t main_delay_count = 0;
     main_delay_count++;
     if (main_delay_count <= 10 || (main_delay_count % 1000) == 0) {
@@ -492,6 +507,18 @@ uint32_t xeNtSetEvent(uint32_t handle, xe::be<uint32_t>* previous_state_ptr) {
   X_STATUS result = X_STATUS_SUCCESS;
 
   auto ev = kernel_state()->object_table()->LookupObject<XEvent>(handle);
+
+  // Trace SetEvent for handle 0xF80000EC (the splash event the main thread waits on)
+  {
+    static uint32_t set_event_count = 0;
+    set_event_count++;
+    if (handle == 0xF80000EC || set_event_count <= 30) {
+      auto* thread = XThread::GetCurrentThread();
+      uint32_t tid = thread ? thread->thread_id() : 0;
+      XELOGI("NtSetEvent #{} tid={} handle=0x{:X} obj={}",
+             set_event_count, tid, handle, (void*)ev.get());
+    }
+  }
   if (ev) {
     int32_t was_signalled = ev->Set(0, false);
     if (previous_state_ptr) {
@@ -810,9 +837,35 @@ dword_result_t KeWaitForSingleObject_entry(lpvoid_t object_ptr,
                                            dword_t processor_mode,
                                            dword_t alertable,
                                            lpqword_t timeout_ptr) {
+  // Trace main thread waits
+  if (cvars::headless_thread_diagnostics) {
+    auto* thread = XThread::GetCurrentThread();
+    if (thread && thread->thread_id() == 6) {
+      static uint32_t ke_wait_count = 0;
+      ke_wait_count++;
+      int64_t timeout_val = timeout_ptr ? (int64_t)*timeout_ptr : -999;
+      if (ke_wait_count <= 30 || (ke_wait_count % 500) == 0) {
+        XELOGI("MainThread KeWait #{} obj_ptr=0x{:08X} timeout={}",
+               ke_wait_count, object_ptr.guest_address(), timeout_val);
+      }
+    }
+  }
   uint64_t timeout = timeout_ptr ? static_cast<uint64_t>(*timeout_ptr) : 0u;
-  return xeKeWaitForSingleObject(object_ptr, wait_reason, processor_mode,
+  auto result = xeKeWaitForSingleObject(object_ptr, wait_reason, processor_mode,
                                  alertable, timeout_ptr ? &timeout : nullptr);
+  // Trace main thread wait returns
+  if (cvars::headless_thread_diagnostics) {
+    auto* thread = XThread::GetCurrentThread();
+    if (thread && thread->thread_id() == 6) {
+      static uint32_t ke_ret_count = 0;
+      ke_ret_count++;
+      if (ke_ret_count <= 30 || (ke_ret_count % 500) == 0) {
+        XELOGI("MainThread KeWait RETURNED obj_ptr=0x{:08X} result=0x{:X}",
+               object_ptr.guest_address(), (uint32_t)result);
+      }
+    }
+  }
+  return result;
 }
 DECLARE_XBOXKRNL_EXPORT3(KeWaitForSingleObject, kThreading, kImplemented,
                          kBlocking, kHighFrequency);
@@ -825,6 +878,22 @@ dword_result_t NtWaitForSingleObjectEx_entry(dword_t object_handle,
 
   auto object =
       kernel_state()->object_table()->LookupObject<XObject>(object_handle);
+
+  // Trace main thread waits
+  if (cvars::headless_thread_diagnostics) {
+    auto* thread = XThread::GetCurrentThread();
+    if (thread && thread->thread_id() == 6) {
+      static uint32_t main_wait_count = 0;
+      main_wait_count++;
+      int64_t timeout_val = timeout_ptr ? (int64_t)*timeout_ptr : -999;
+      if (main_wait_count <= 20 || (main_wait_count % 500) == 0) {
+        XELOGI("MainThread NtWait #{} handle=0x{:X} timeout={} obj={} type={}",
+               main_wait_count, (uint32_t)object_handle, timeout_val,
+               (void*)object.get(),
+               object ? (int)object->type() : -1);
+      }
+    }
+  }
   if (object) {
     uint64_t timeout = timeout_ptr ? static_cast<uint64_t>(*timeout_ptr) : 0u;
 
@@ -832,6 +901,15 @@ dword_result_t NtWaitForSingleObjectEx_entry(dword_t object_handle,
         object->Wait(3, wait_mode, alertable, timeout_ptr ? &timeout : nullptr);
   } else {
     result = X_STATUS_INVALID_HANDLE;
+  }
+
+  // Trace main thread wait returns
+  if (cvars::headless_thread_diagnostics) {
+    auto* thread = XThread::GetCurrentThread();
+    if (thread && thread->thread_id() == 6) {
+      XELOGI("MainThread NtWait RETURNED handle=0x{:X} result=0x{:X}",
+             (uint32_t)object_handle, result);
+    }
   }
 
   return result;

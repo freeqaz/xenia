@@ -96,6 +96,9 @@ class TextureCache {
     texture_bindings_in_sync_ &= ~(UINT32_C(1) << index);
   }
 
+  // Invalidate all texture bindings (e.g. after bulk register file restore).
+  void ResetTextureBindingsInSync() { texture_bindings_in_sync_ = 0; }
+
   virtual void RequestTextures(uint32_t used_texture_mask);
 
   // "ActiveTexture" means as of the latest RequestTextures call.

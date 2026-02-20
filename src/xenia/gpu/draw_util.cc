@@ -933,9 +933,8 @@ bool GetResolveInfo(const RegisterFile& regs, const Memory& memory,
     y1 = y0 + int32_t(xenos::kMaxResolveSize);
   }
 
-  assert_true(x0 < x1 && y0 < y1);
   if (x0 >= x1 || y0 >= y1) {
-    XELOGE("Resolve region is empty");
+    XELOGE("Resolve region is empty (x {}..{}, y {}..{})", x0, x1, y0, y1);
     return false;
   }
 

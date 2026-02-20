@@ -40,9 +40,11 @@
 
 DECLARE_string(dump_frames_path);
 DECLARE_int32(headless_capture_interval);
+DECLARE_bool(headless_verbose_diagnostics);
 
 namespace xe {
 namespace gpu {
+
 namespace vulkan {
 
 // Generated with `xb buildshaders`.
@@ -353,10 +355,12 @@ bool VulkanCommandProcessor::SetupContext() {
   // pipeline cache is warm and draws produce full content.
   if (!graphics_system_->presenter()) {
     if (cvars::force_all_draws) {
-      // force_all_draws with deferred draws: non-copy draws are deferred until
-      // XE_SWAP so sync events process immediately (avoiding CP deadlock).
+      // force_all_draws with deferred draws: draws are queued during PM4
+      // processing (keeping CP responsive for sync events) and replayed
+      // at VdSwap time. Without deferral, inline draws block the CP thread
+      // at frame 12 causing deadlock with the game's sync mechanism.
       deferred_draws_enabled_ = true;
-      XELOGI("Force all draws enabled — deferred draw mode (sync events first)");
+      XELOGI("Force all draws enabled — deferred draw mode");
     } else {
       pipeline_cache_->SetHeadlessMode(true);
     }
@@ -367,6 +371,43 @@ bool VulkanCommandProcessor::SetupContext() {
       XELOGI("Headless frame dump enabled: {} (capture interval: {})",
              cvars::dump_frames_path,
              headless_capture_interval_ ? headless_capture_interval_ : 0);
+
+      // Pre-allocate readback resources for frame capture.
+      const ui::vulkan::VulkanDevice* vk_dev = GetVulkanDevice();
+      if (ui::vulkan::util::CreateDedicatedAllocationBuffer(
+              vk_dev, kReadbackBufferSize,
+              VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+              ui::vulkan::util::MemoryPurpose::kReadback,
+              readback_staging_buffer_, readback_staging_memory_)) {
+        const auto& dfn2 = vk_dev->functions();
+        VkDevice dev = vk_dev->device();
+
+        // Persistently map the staging buffer.
+        dfn2.vkMapMemory(dev, readback_staging_memory_, 0, kReadbackBufferSize,
+                         0, &readback_staging_mapping_);
+
+        // Create resettable command pool + one persistent command buffer.
+        VkCommandPoolCreateInfo pool_ci{};
+        pool_ci.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+        pool_ci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+        pool_ci.queueFamilyIndex =
+            vk_dev->queue_family_graphics_compute();
+        dfn2.vkCreateCommandPool(dev, &pool_ci, nullptr,
+                                 &readback_command_pool_);
+
+        VkCommandBufferAllocateInfo cb_alloc{};
+        cb_alloc.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        cb_alloc.commandPool = readback_command_pool_;
+        cb_alloc.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        cb_alloc.commandBufferCount = 1;
+        dfn2.vkAllocateCommandBuffers(dev, &cb_alloc,
+                                      &readback_command_buffer_);
+
+        XELOGI("Readback resources pre-allocated: {}x{} staging buffer",
+               kReadbackMaxWidth, kReadbackMaxHeight);
+      } else {
+        XELOGE("Failed to pre-allocate readback staging buffer");
+      }
     }
   }
 
@@ -1064,6 +1105,29 @@ void VulkanCommandProcessor::ShutdownContext() {
 
   DestroyScratchBuffer();
 
+  // Clean up pre-allocated readback resources.
+  if (readback_fence_ != VK_NULL_HANDLE) {
+    dfn.vkDestroyFence(device, readback_fence_, nullptr);
+    readback_fence_ = VK_NULL_HANDLE;
+  }
+  if (readback_command_pool_ != VK_NULL_HANDLE) {
+    dfn.vkDestroyCommandPool(device, readback_command_pool_, nullptr);
+    readback_command_pool_ = VK_NULL_HANDLE;
+    readback_command_buffer_ = VK_NULL_HANDLE;
+  }
+  if (readback_staging_memory_ != VK_NULL_HANDLE) {
+    if (readback_staging_mapping_) {
+      dfn.vkUnmapMemory(device, readback_staging_memory_);
+      readback_staging_mapping_ = nullptr;
+    }
+    dfn.vkFreeMemory(device, readback_staging_memory_, nullptr);
+    readback_staging_memory_ = VK_NULL_HANDLE;
+  }
+  if (readback_staging_buffer_ != VK_NULL_HANDLE) {
+    dfn.vkDestroyBuffer(device, readback_staging_buffer_, nullptr);
+    readback_staging_buffer_ = VK_NULL_HANDLE;
+  }
+
   for (SwapFramebuffer& swap_framebuffer : swap_framebuffers_) {
     ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyFramebuffer, device,
                                            swap_framebuffer.framebuffer);
@@ -1268,9 +1332,11 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
 
   ui::Presenter* presenter = graphics_system_->presenter();
   if (!presenter) {
-    // Execute deferred draws BEFORE processing the swap. This ensures all
-    // sync events from the current frame's PM4 batch have been processed
-    // (preventing CP deadlock), while still rendering before capture.
+    // ================================================================
+    // Execute deferred draws from the render frame. All sync events
+    // (EVENT_WRITE_SHD, WAIT_REG_MEM) were processed during the frame;
+    // the flush happens here at swap time after sync is satisfied.
+    // ================================================================
     if (!deferred_draws_.empty()) {
       FlushDeferredDraws();
     }
@@ -1280,106 +1346,164 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
       EndSubmission(true);
     }
 
-    if (headless_frame_dump_) {
-      headless_frame_count_++;
-      // Report timing from previous frame
-      if (headless_draw_count_ > 0) {
-        auto frame_end = std::chrono::steady_clock::now();
-        auto frame_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-            frame_end - headless_frame_start_).count();
-        if (headless_frame_count_ <= 20 || headless_frame_count_ % 50 == 0) {
-          XELOGI("Frame {} timing: {}ms total, {} draws ({}ms shader, {}ms submit, {}ms pipeline, {}ms render_target, {}ms texture, {}ms other)",
-              headless_frame_count_ - 1, frame_ms,
-              headless_draw_count_,
-              headless_shader_ms_, headless_submit_ms_, headless_pipeline_ms_,
-              headless_rt_ms_, headless_texture_ms_,
-              frame_ms - headless_shader_ms_ - headless_submit_ms_ - headless_pipeline_ms_ - headless_rt_ms_ - headless_texture_ms_);
-        }
-      }
-      headless_draw_count_ = 0;
-      headless_shader_ms_ = 0;
-      headless_submit_ms_ = 0;
-      headless_pipeline_ms_ = 0;
-      headless_rt_ms_ = 0;
-      headless_texture_ms_ = 0;
-      headless_frame_start_ = std::chrono::steady_clock::now();
-      bool should_capture =
-          headless_capture_interval_ == 0 ||
-          (headless_frame_count_ % headless_capture_interval_) == 0;
+    // Reset render/deferred state after flush (before deciding next frame).
+    if (headless_render_frame_ && !cvars::force_all_draws) {
+      headless_render_frame_ = false;
+      deferred_draws_enabled_ = false;
+      pipeline_cache_->SetWarmupWait(false);
+    }
 
-      if (cvars::force_all_draws) {
-        // force_all_draws mode (e.g. trace replay): all draws execute, no
-        // warmup needed. Just capture at the configured interval.
-        headless_render_frame_ = true;
-        if (headless_frame_count_ <= 5 ||
-            headless_frame_count_ % 100 == 0 || should_capture) {
-          XELOGI("VdSwap #{}: ptr=0x{:08X} {}x{}{}", headless_frame_count_,
-                 frontbuffer_ptr, frontbuffer_width, frontbuffer_height,
-                 should_capture ? " [CAPTURE]" : "");
-        }
-      } else {
-        // Normal headless mode: enable draws for the frame BEFORE capture.
-        // Draws happen between VdSwap #(N-1) and VdSwap #N. The capture
-        // happens at VdSwap #N. So we enable draws at VdSwap #(N-1) to
-        // render content that gets captured at VdSwap #N.
-        bool next_is_capture = false;
-        if (headless_capture_interval_ > 0) {
-          next_is_capture =
-              ((headless_frame_count_ + 1) % headless_capture_interval_) == 0;
-        }
-        headless_render_frame_ = should_capture || next_is_capture;
-        pipeline_cache_->SetWarmupWait(should_capture || next_is_capture);
-
-        if (headless_frame_count_ <= 5 ||
-            headless_frame_count_ % 100 == 0 ||
-            should_capture || next_is_capture) {
-          XELOGI("VdSwap #{}: ptr=0x{:08X} {}x{}{}{}",
-                 headless_frame_count_, frontbuffer_ptr, frontbuffer_width,
-                 frontbuffer_height,
-                 next_is_capture ? " [RENDER]" : "",
-                 should_capture ? " [CAPTURE]" : "");
-        }
-      }
-
-      if (!should_capture) {
-        return;
-      }
-    } else {
+    if (!headless_frame_dump_) {
       return;
     }
 
-    // GPU readback for captured frames.
-    if (frontbuffer_ptr && frontbuffer_width && frontbuffer_height) {
+    headless_frame_count_++;
 
-      // Flush pending GPU submissions and wait for completion.
+    // Report timing from previous frame
+    if (headless_draw_count_ > 0) {
+      auto frame_end = std::chrono::steady_clock::now();
+      auto frame_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                          frame_end - headless_frame_start_)
+                          .count();
+      if (headless_frame_count_ <= 20 || headless_frame_count_ % 50 == 0) {
+        XELOGI(
+            "Frame {} timing: {}ms total, {} draws ({}ms shader, {}ms submit, "
+            "{}ms pipeline, {}ms render_target, {}ms texture, {}ms other)",
+            headless_frame_count_ - 1, frame_ms, headless_draw_count_,
+            headless_shader_ms_, headless_submit_ms_, headless_pipeline_ms_,
+            headless_rt_ms_, headless_texture_ms_,
+            frame_ms - headless_shader_ms_ - headless_submit_ms_ -
+                headless_pipeline_ms_ - headless_rt_ms_ -
+                headless_texture_ms_);
+      }
+    }
+    headless_draw_count_ = 0;
+    headless_shader_ms_ = 0;
+    headless_submit_ms_ = 0;
+    headless_pipeline_ms_ = 0;
+    headless_rt_ms_ = 0;
+    headless_texture_ms_ = 0;
+    headless_frame_start_ = std::chrono::steady_clock::now();
+    bool should_capture =
+        headless_capture_interval_ == 0 ||
+        (headless_frame_count_ % headless_capture_interval_) == 0;
+
+    if (cvars::force_all_draws) {
+      // force_all_draws mode (e.g. trace replay): all draws execute, no
+      // warmup needed. Just capture at the configured interval.
+      headless_render_frame_ = true;
+      if (headless_frame_count_ <= 5 || headless_frame_count_ % 100 == 0 ||
+          should_capture) {
+        XELOGI("VdSwap #{}: ptr=0x{:08X} {}x{}{}", headless_frame_count_,
+               frontbuffer_ptr, frontbuffer_width, frontbuffer_height,
+               should_capture ? " [CAPTURE]" : "");
+      }
+    } else {
+      // Normal headless: enable render + deferred draws for the frame
+      // BEFORE capture. Draws and copies are deferred so sync events
+      // process immediately, keeping the game alive.
+      bool next_is_capture = false;
+      if (headless_capture_interval_ > 0) {
+        next_is_capture =
+            ((headless_frame_count_ + 1) % headless_capture_interval_) == 0;
+      }
+
+      if (next_is_capture) {
+        headless_render_frame_ = true;
+        deferred_draws_enabled_ = true;
+        pipeline_cache_->SetWarmupWait(true);
+        XELOGI("Enabled deferred draws for render frame (next is capture)");
+      }
+      // Note: render_frame already reset above for non-next-is-capture frames.
+
+      if (headless_frame_count_ <= 5 || headless_frame_count_ % 100 == 0 ||
+          should_capture || next_is_capture) {
+        XELOGI("VdSwap #{}: ptr=0x{:08X} {}x{}{}{}", headless_frame_count_,
+               frontbuffer_ptr, frontbuffer_width, frontbuffer_height,
+               next_is_capture ? " [RENDER+DEFER]" : "",
+               should_capture ? " [CAPTURE]" : "");
+      }
+    }
+
+    if (!should_capture) {
+      return;
+    }
+
+    // ================================================================
+    // PHASE 1: Submit readback work for this capture frame.
+    // Deferred draws were flushed above. Submit GPU work for texture
+    // load + image copy, then defer pixel read to Phase 2 (next swap).
+    // ================================================================
+    if (frontbuffer_ptr && frontbuffer_width && frontbuffer_height &&
+        readback_staging_buffer_ != VK_NULL_HANDLE) {
+      auto p1_start = std::chrono::steady_clock::now();
+
+      // Wait for GPU to finish deferred draws + copies.
       if (submission_open_) {
         EndSubmission(true);
       }
       AwaitAllQueueOperationsCompletion();
 
-      // Diagnostic: check texture fetch constant 0 for the swap texture
-      {
-        auto& regs = *register_file_;
-        auto fetch = regs.GetTextureFetch(0);
-        uint32_t base_page = fetch.base_address;
-        uint32_t base_addr = base_page << 12;
-        XELOGI("CAPTURE DIAG: tex_fetch_0 base_page=0x{:X} base_addr=0x{:08X} "
-               "dim={} fmt={} size={}x{}",
-               base_page, base_addr,
-               static_cast<int>(fetch.dimension),
-               static_cast<int>(fetch.format),
-               fetch.size_2d.width + 1, fetch.size_2d.height + 1);
-        // Check guest memory at base_addr for non-zero data
-        uint8_t* host = memory_->TranslatePhysical(base_addr);
-        uint32_t nz = 0;
-        for (uint32_t i = 0; i < 4096 && host; i++) {
-          if (host[i]) nz++;
+      // Dump raw GPU buffer bytes at frontbuffer address for debugging.
+      // Gated: submits Vulkan work every capture frame just to print hex.
+      if (cvars::headless_verbose_diagnostics) {
+        auto* vsm = static_cast<VulkanSharedMemory*>(shared_memory_.get());
+        const ui::vulkan::VulkanDevice* vd = GetVulkanDevice();
+        const auto& dfn2 = vd->functions();
+        dfn2.vkResetCommandPool(vd->device(), readback_command_pool_, 0);
+        VkCommandBufferBeginInfo bi{};
+        bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        dfn2.vkBeginCommandBuffer(readback_command_buffer_, &bi);
+        VkBufferCopy bc{};
+        bc.srcOffset = frontbuffer_ptr;
+        bc.dstOffset = 0;
+        bc.size = 256;
+        dfn2.vkCmdCopyBuffer(readback_command_buffer_,
+                             vsm->buffer(), readback_staging_buffer_, 1, &bc);
+        dfn2.vkEndCommandBuffer(readback_command_buffer_);
+        if (readback_fence_ == VK_NULL_HANDLE) {
+          VkFenceCreateInfo fci{};
+          fci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+          dfn2.vkCreateFence(vd->device(), &fci, nullptr, &readback_fence_);
+        } else {
+          dfn2.vkResetFences(vd->device(), 1, &readback_fence_);
         }
-        XELOGI("CAPTURE DIAG: guest memory at 0x{:08X}: {}/4096 non-zero bytes",
-               base_addr, nz);
+        VkSubmitInfo si{};
+        si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        si.commandBufferCount = 1;
+        si.pCommandBuffers = &readback_command_buffer_;
+        {
+          auto qa = vd->AcquireQueue(vd->queue_family_graphics_compute(), 0);
+          dfn2.vkQueueSubmit(qa.queue(), 1, &si, readback_fence_);
+        }
+        dfn2.vkWaitForFences(vd->device(), 1, &readback_fence_, VK_TRUE,
+                             UINT64_MAX);
+        uint8_t* bytes = static_cast<uint8_t*>(readback_staging_mapping_);
+        XELOGI("GPU buffer raw @ 0x{:08X}: {:02X} {:02X} {:02X} {:02X}  "
+               "{:02X} {:02X} {:02X} {:02X}  {:02X} {:02X} {:02X} {:02X}  "
+               "{:02X} {:02X} {:02X} {:02X}",
+               frontbuffer_ptr,
+               bytes[0], bytes[1], bytes[2], bytes[3],
+               bytes[4], bytes[5], bytes[6], bytes[7],
+               bytes[8], bytes[9], bytes[10], bytes[11],
+               bytes[12], bytes[13], bytes[14], bytes[15]);
+        XELOGI("GPU buffer raw @ 0x{:08X}+16: {:02X} {:02X} {:02X} {:02X}  "
+               "{:02X} {:02X} {:02X} {:02X}  {:02X} {:02X} {:02X} {:02X}  "
+               "{:02X} {:02X} {:02X} {:02X}",
+               frontbuffer_ptr,
+               bytes[16], bytes[17], bytes[18], bytes[19],
+               bytes[20], bytes[21], bytes[22], bytes[23],
+               bytes[24], bytes[25], bytes[26], bytes[27],
+               bytes[28], bytes[29], bytes[30], bytes[31]);
       }
 
-      // Load the swap texture.
+      // Load the swap texture from resolved EDRAM content.
+      // NOTE: Do NOT call MemoryInvalidationCallback here -- the resolve
+      // compute shader writes to the GPU buffer (shared_memory.buffer()),
+      // and MarkRangeAsResolved marks those pages valid+gpu_written.
+      // Invalidating would force re-upload from guest physical memory
+      // (which is zeros), destroying the resolve data.
       if (!BeginSubmission(true)) {
         return;
       }
@@ -1390,6 +1514,10 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
       EndSubmission(true);
       AwaitAllQueueOperationsCompletion();
 
+      XELOGI("RequestSwapTexture: view={} {}x{} fmt={}",
+             swap_view != VK_NULL_HANDLE ? "valid" : "NULL",
+             width_scaled, height_scaled,
+             static_cast<uint32_t>(format));
       if (swap_view != VK_NULL_HANDLE) {
         VkImage swap_image = texture_cache_->GetLastSwapImage();
         if (swap_image != VK_NULL_HANDLE) {
@@ -1400,144 +1528,94 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
           VkDeviceSize buffer_size =
               static_cast<VkDeviceSize>(width_scaled) * height_scaled * 4;
 
-          // Create host-visible staging buffer.
-          VkBufferCreateInfo buffer_ci{};
-          buffer_ci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-          buffer_ci.size = buffer_size;
-          buffer_ci.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-          buffer_ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+          if (buffer_size <= kReadbackBufferSize) {
+            // Reset and record pre-allocated command buffer.
+            dfn.vkResetCommandPool(device, readback_command_pool_, 0);
 
-          VkBuffer staging_buffer = VK_NULL_HANDLE;
-          if (dfn.vkCreateBuffer(device, &buffer_ci, nullptr,
-                                 &staging_buffer) != VK_SUCCESS) {
-            return;
-          }
+            VkCommandBufferBeginInfo begin_info{};
+            begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+            begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+            dfn.vkBeginCommandBuffer(readback_command_buffer_, &begin_info);
 
-          VkMemoryRequirements mem_reqs;
-          dfn.vkGetBufferMemoryRequirements(device, staging_buffer, &mem_reqs);
+            VkImageMemoryBarrier barrier{};
+            barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            barrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            barrier.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+            barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barrier.image = swap_image;
+            barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            barrier.subresourceRange.levelCount = 1;
+            barrier.subresourceRange.layerCount = 1;
+            dfn.vkCmdPipelineBarrier(
+                readback_command_buffer_,
+                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1,
+                &barrier);
 
-          // Find host-visible, host-coherent memory type.
-          VkPhysicalDeviceMemoryProperties mem_props;
-          vulkan_device->vulkan_instance()->functions()
-              .vkGetPhysicalDeviceMemoryProperties(
-                  vulkan_device->physical_device(), &mem_props);
+            VkBufferImageCopy region{};
+            region.bufferRowLength = width_scaled;
+            region.bufferImageHeight = height_scaled;
+            region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            region.imageSubresource.layerCount = 1;
+            region.imageExtent = {width_scaled, height_scaled, 1};
+            dfn.vkCmdCopyImageToBuffer(
+                readback_command_buffer_, swap_image,
+                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                readback_staging_buffer_, 1, &region);
 
-          uint32_t mem_type_index = UINT32_MAX;
-          for (uint32_t i = 0; i < mem_props.memoryTypeCount; i++) {
-            if ((mem_reqs.memoryTypeBits & (1u << i)) &&
-                (mem_props.memoryTypes[i].propertyFlags &
-                 (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                  VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) ==
-                    (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                     VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) {
-              mem_type_index = i;
-              break;
+            barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+            barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            dfn.vkCmdPipelineBarrier(
+                readback_command_buffer_, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0,
+                nullptr, 1, &barrier);
+
+            dfn.vkEndCommandBuffer(readback_command_buffer_);
+
+            // Submit readback with fence and wait synchronously.
+            if (readback_fence_ == VK_NULL_HANDLE) {
+              VkFenceCreateInfo fence_ci{};
+              fence_ci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+              dfn.vkCreateFence(device, &fence_ci, nullptr, &readback_fence_);
+            } else {
+              dfn.vkResetFences(device, 1, &readback_fence_);
             }
-          }
 
-          if (mem_type_index == UINT32_MAX) {
-            XELOGE("No host-visible memory type for frame readback");
-            dfn.vkDestroyBuffer(device, staging_buffer, nullptr);
-            return;
-          }
+            VkSubmitInfo submit{};
+            submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+            submit.commandBufferCount = 1;
+            submit.pCommandBuffers = &readback_command_buffer_;
+            {
+              auto queue_acq = vulkan_device->AcquireQueue(
+                  vulkan_device->queue_family_graphics_compute(), 0);
+              dfn.vkQueueSubmit(queue_acq.queue(), 1, &submit,
+                                readback_fence_);
+            }
 
-          VkDeviceMemory staging_memory = VK_NULL_HANDLE;
-          VkMemoryAllocateInfo mem_alloc{};
-          mem_alloc.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-          mem_alloc.allocationSize = mem_reqs.size;
-          mem_alloc.memoryTypeIndex = mem_type_index;
-          if (dfn.vkAllocateMemory(device, &mem_alloc, nullptr,
-                                   &staging_memory) != VK_SUCCESS) {
-            dfn.vkDestroyBuffer(device, staging_buffer, nullptr);
-            return;
-          }
-          dfn.vkBindBufferMemory(device, staging_buffer, staging_memory, 0);
+            // Wait for GPU copy to complete and write PPM immediately.
+            dfn.vkWaitForFences(device, 1, &readback_fence_, VK_TRUE,
+                                UINT64_MAX);
 
-          // One-shot command buffer for image-to-buffer copy.
-          VkCommandPoolCreateInfo pool_ci{};
-          pool_ci.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
-          pool_ci.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
-          pool_ci.queueFamilyIndex =
-              vulkan_device->queue_family_graphics_compute();
-          VkCommandPool cmd_pool = VK_NULL_HANDLE;
-          dfn.vkCreateCommandPool(device, &pool_ci, nullptr, &cmd_pool);
+            // Read from persistent mapping and write PPM.
+            const uint8_t* pixels =
+                static_cast<const uint8_t*>(readback_staging_mapping_);
+            uint32_t total_pixels = width_scaled * height_scaled;
+            uint32_t nonzero = 0;
+            for (uint32_t i = 0; i < total_pixels * 4; i += 4) {
+              if (pixels[i] || pixels[i + 1] || pixels[i + 2]) {
+                nonzero++;
+              }
+            }
+            XELOGI("Frame {}: {}x{} fmt={} {}/{} non-zero pixels ({}%)",
+                   headless_frame_count_, width_scaled, height_scaled,
+                   static_cast<int>(format), nonzero, total_pixels,
+                   total_pixels ? nonzero * 100 / total_pixels : 0);
 
-          VkCommandBufferAllocateInfo cb_alloc{};
-          cb_alloc.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-          cb_alloc.commandPool = cmd_pool;
-          cb_alloc.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-          cb_alloc.commandBufferCount = 1;
-          VkCommandBuffer cb = VK_NULL_HANDLE;
-          dfn.vkAllocateCommandBuffers(device, &cb_alloc, &cb);
-
-          VkCommandBufferBeginInfo begin_info{};
-          begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-          begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-          dfn.vkBeginCommandBuffer(cb, &begin_info);
-
-          // Transition swap image to transfer source.
-          VkImageMemoryBarrier barrier{};
-          barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-          barrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
-          barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-          barrier.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-          barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-          barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-          barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-          barrier.image = swap_image;
-          barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-          barrier.subresourceRange.levelCount = 1;
-          barrier.subresourceRange.layerCount = 1;
-          dfn.vkCmdPipelineBarrier(
-              cb, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-              VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1,
-              &barrier);
-
-          // Copy image to staging buffer.
-          VkBufferImageCopy region{};
-          region.bufferRowLength = width_scaled;
-          region.bufferImageHeight = height_scaled;
-          region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-          region.imageSubresource.layerCount = 1;
-          region.imageExtent = {width_scaled, height_scaled, 1};
-          dfn.vkCmdCopyImageToBuffer(
-              cb, swap_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-              staging_buffer, 1, &region);
-
-          // Transition back to shader read.
-          barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-          barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-          barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-          barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-          dfn.vkCmdPipelineBarrier(
-              cb, VK_PIPELINE_STAGE_TRANSFER_BIT,
-              VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0,
-              nullptr, 1, &barrier);
-
-          dfn.vkEndCommandBuffer(cb);
-
-          // Submit and wait.
-          VkFenceCreateInfo fence_ci{};
-          fence_ci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-          VkFence fence = VK_NULL_HANDLE;
-          dfn.vkCreateFence(device, &fence_ci, nullptr, &fence);
-
-          VkSubmitInfo submit{};
-          submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-          submit.commandBufferCount = 1;
-          submit.pCommandBuffers = &cb;
-          {
-            auto queue_acq = vulkan_device->AcquireQueue(
-                vulkan_device->queue_family_graphics_compute(), 0);
-            dfn.vkQueueSubmit(queue_acq.queue(), 1, &submit, fence);
-          }
-          dfn.vkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX);
-
-          // Map and write PPM.
-          void* mapped = nullptr;
-          if (dfn.vkMapMemory(device, staging_memory, 0, buffer_size, 0,
-                              &mapped) == VK_SUCCESS &&
-              mapped) {
             char ppm_path[512];
             std::snprintf(ppm_path, sizeof(ppm_path), "%s/frame_%04u.ppm",
                           cvars::dump_frames_path.c_str(),
@@ -1546,39 +1624,38 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
             if (f) {
               std::fprintf(f, "P6\n%u %u\n255\n", width_scaled,
                            height_scaled);
-              const uint8_t* pixels = static_cast<const uint8_t*>(mapped);
-              uint32_t nonzero = 0;
-              for (uint32_t i = 0; i < width_scaled * height_scaled * 4;
-                   i += 4) {
-                if (pixels[i] || pixels[i + 1] || pixels[i + 2]) {
-                  nonzero++;
-                }
-              }
-              XELOGI("Frame {}: {}x{} fmt={} {}/{} non-zero pixels ({}%)",
-                     headless_frame_count_, width_scaled, height_scaled,
-                     static_cast<int>(format), nonzero,
-                     width_scaled * height_scaled,
-                     width_scaled * height_scaled
-                         ? nonzero * 100 / (width_scaled * height_scaled)
-                         : 0);
-              // Write RGB (skip alpha channel).
-              for (uint32_t i = 0; i < width_scaled * height_scaled * 4;
-                   i += 4) {
-                std::fwrite(pixels + i, 1, 3, f);
+              for (uint32_t pi = 0; pi < total_pixels * 4; pi += 4) {
+                std::fwrite(pixels + pi, 1, 3, f);
               }
               std::fclose(f);
+              XELOGI("Saved {}", ppm_path);
             }
-            dfn.vkUnmapMemory(device, staging_memory);
-          }
 
-          // Cleanup.
-          dfn.vkDestroyFence(device, fence, nullptr);
-          dfn.vkDestroyCommandPool(device, cmd_pool, nullptr);
-          dfn.vkFreeMemory(device, staging_memory, nullptr);
-          dfn.vkDestroyBuffer(device, staging_buffer, nullptr);
+            auto p1_end = std::chrono::steady_clock::now();
+            auto p1_ms =
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    p1_end - p1_start)
+                    .count();
+            XELOGI("Readback completed in {}ms (frame {})", p1_ms,
+                   headless_frame_count_);
+          }
         }
       }
-    }  // frontbuffer valid
+    }
+
+    // Schedule the NEXT render frame after capture completes.
+    // Without this, only the first capture triggers RENDER+DEFER.
+    if (headless_capture_interval_ > 0) {
+      bool next_is_capture =
+          ((headless_frame_count_ + 1) % headless_capture_interval_) == 0;
+      if (next_is_capture) {
+        headless_render_frame_ = true;
+        deferred_draws_enabled_ = true;
+        pipeline_cache_->SetWarmupWait(true);
+        XELOGI("Scheduled next RENDER+DEFER for frame {}",
+               headless_frame_count_ + 1);
+      }
+    }
     return;
   }
 
@@ -2486,7 +2563,8 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   static uint32_t total_draw_count = 0;
   static uint32_t total_swap_at_last_draw = 0;
   total_draw_count++;
-  if (headless_frame_count_ != total_swap_at_last_draw) {
+  if (cvars::headless_verbose_diagnostics &&
+      headless_frame_count_ != total_swap_at_last_draw) {
     if (total_draw_count <= 200 || total_draw_count % 500 == 0) {
       XELOGI("IssueDraw #{} at swap_count={} prim={} idx_count={} render_frame={}",
              total_draw_count, headless_frame_count_,
@@ -2501,7 +2579,8 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   xenos::EdramMode edram_mode = regs.Get<reg::RB_MODECONTROL>().edram_mode;
 
   // Diagnostic: log ALL draws during warmup (both copy and non-copy)
-  if (!graphics_system_->presenter() && headless_render_frame_) {
+  if (cvars::headless_verbose_diagnostics &&
+      !graphics_system_->presenter() && headless_render_frame_) {
     static uint32_t all_draw_log_count = 0;
     all_draw_log_count++;
     if (all_draw_log_count <= 20 || all_draw_log_count % 200 == 0) {
@@ -2511,26 +2590,56 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   }
 
   if (edram_mode == xenos::EdramMode::kCopy) {
-    // Flush deferred draws before copy: copies read EDRAM written by draws.
+    // HEADLESS: Skip copies when not rendering — no EDRAM content to resolve.
+    if (!graphics_system_->presenter() && !headless_render_frame_ &&
+        !cvars::force_all_draws) {
+      return true;
+    }
+    // Defer copies along with draws during deferred rendering. Flushing
+    // draws at copy time would execute Vulkan draws mid-frame, permanently
+    // killing VdSwap before the capture frame arrives.
+    if (deferred_draws_enabled_) {
+      DeferredDrawState state;
+      state.register_values.assign(
+          register_file_->values,
+          register_file_->values + RegisterFile::kRegisterCount);
+      state.vertex_shader = active_vertex_shader();
+      state.pixel_shader = active_pixel_shader();
+      state.prim_type = prim_type;
+      state.index_count = index_count;
+      state.is_indexed = (index_buffer_info != nullptr);
+      state.is_copy = true;
+      state.major_mode_explicit = major_mode_explicit;
+      if (index_buffer_info) {
+        state.index_buffer_info = *index_buffer_info;
+      }
+      // Save resolve vertex data from guest memory — it may be overwritten
+      // by subsequent frames before we replay.
+      xenos::xe_gpu_vertex_fetch_t vfetch =
+          register_file_->GetVertexFetch(0);
+      state.resolve_vertex_addr = 0;
+      std::memset(state.resolve_vertex_data, 0,
+                  sizeof(state.resolve_vertex_data));
+      if (vfetch.type == xenos::FetchConstantType::kVertex &&
+          vfetch.size == 3 * 2 && vfetch.address) {
+        state.resolve_vertex_addr = vfetch.address;
+        const void* guest_ptr = memory_->TranslatePhysical(
+            vfetch.address * sizeof(uint32_t));
+        std::memcpy(state.resolve_vertex_data, guest_ptr,
+                    sizeof(state.resolve_vertex_data));
+      }
+      deferred_draws_.push_back(std::move(state));
+      return true;
+    }
+    // Non-deferred: flush pending draws then execute copy inline.
     if (!deferred_draws_.empty()) {
       FlushDeferredDraws();
     }
-    // Special copy handling — always execute copies (EDRAM resolve).
-    auto copy_t0 = std::chrono::steady_clock::now();
-    bool copy_result = IssueCopy();
-    auto copy_t1 = std::chrono::steady_clock::now();
-    auto copy_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-        copy_t1 - copy_t0).count();
-    if (headless_render_frame_ && copy_ms > 0) {
-      XELOGI("IssueCopy took {}ms", copy_ms);
-    }
-    return copy_result;
+    return IssueCopy();
   }
 
   // HEADLESS: Skip non-copy draws unless this is a capture frame or
-  // force_all_draws is enabled (e.g. trace replay mode).
-  // headless_render_frame_ is set one frame before capture, using synchronous
-  // pipeline compilation so all pipelines are ready for the capture frame.
+  // force_all_draws is enabled.
   if (!graphics_system_->presenter() && !headless_render_frame_ &&
       !cvars::force_all_draws) {
     return true;
@@ -2554,28 +2663,33 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       state.index_buffer_info = *index_buffer_info;
     }
     deferred_draws_.push_back(std::move(state));
-    static uint32_t defer_log_count = 0;
-    defer_log_count++;
-    if (defer_log_count <= 10 || defer_log_count % 100 == 0) {
-      XELOGI("Deferred draw #{} (prim={} idx_count={})", defer_log_count,
-             static_cast<int>(prim_type), index_count);
+    if (cvars::headless_verbose_diagnostics) {
+      static uint32_t defer_log_count = 0;
+      defer_log_count++;
+      if (defer_log_count <= 10 || defer_log_count % 100 == 0) {
+        XELOGI("Deferred draw #{} (prim={} idx_count={})", defer_log_count,
+               static_cast<int>(prim_type), index_count);
+      }
     }
     return true;
   }
 
   // Diagnostic: log when warmup draws start (only first few per frame)
-  static uint32_t warmup_draw_log_count = 0;
-  if (!graphics_system_->presenter() && headless_render_frame_) {
-    warmup_draw_log_count++;
-    if (warmup_draw_log_count <= 10 || warmup_draw_log_count % 100 == 0) {
-      XELOGI("WARMUP DRAW #{}: edram_mode={} headless_render_frame_={}",
-             warmup_draw_log_count, static_cast<int>(edram_mode),
-             headless_render_frame_);
+  if (cvars::headless_verbose_diagnostics) {
+    static uint32_t warmup_draw_log_count = 0;
+    if (!graphics_system_->presenter() && headless_render_frame_) {
+      warmup_draw_log_count++;
+      if (warmup_draw_log_count <= 10 || warmup_draw_log_count % 100 == 0) {
+        XELOGI("WARMUP DRAW #{}: edram_mode={} headless_render_frame_={}",
+               warmup_draw_log_count, static_cast<int>(edram_mode),
+               headless_render_frame_);
+      }
     }
   }
 
   auto draw_t0 = std::chrono::steady_clock::now();
-  if (headless_render_frame_ && headless_draw_count_ == 0) {
+  if (cvars::headless_verbose_diagnostics &&
+      headless_render_frame_ && headless_draw_count_ == 0) {
     auto since_frame_start = std::chrono::duration_cast<std::chrono::milliseconds>(
         draw_t0 - headless_frame_start_).count();
     XELOGI("First draw: {}ms after frame start", since_frame_start);
@@ -2800,6 +2914,8 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   auto rt_t1 = std::chrono::steady_clock::now();
   headless_rt_ms_ += std::chrono::duration_cast<std::chrono::milliseconds>(rt_t1 - rt_t0).count();
 
+
+
   // Create the pipeline (for this, need the render pass from the render target
   // cache), translating the shaders - doing this now to obtain the used
   // textures.
@@ -2830,6 +2946,8 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   auto pipe_t1 = std::chrono::steady_clock::now();
   headless_pipeline_ms_ += std::chrono::duration_cast<std::chrono::milliseconds>(pipe_t1 - pipe_t0).count();
 
+
+
   // Update the textures before most other work in the submission because
   // samplers depend on this (and in case of sampler overflow in a submission,
   // submissions must be split) - may perform dispatches and copying.
@@ -2842,6 +2960,8 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   texture_cache_->RequestTextures(used_texture_mask);
   auto tex_t1 = std::chrono::steady_clock::now();
   headless_texture_ms_ += std::chrono::duration_cast<std::chrono::milliseconds>(tex_t1 - tex_t0).count();
+
+
 
   // Update the graphics pipeline, and if the new graphics pipeline has a
   // different layout, invalidate incompatible descriptor sets before updating
@@ -2984,6 +3104,8 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                                                   << (vfetch_index & 63);
   }
 
+
+
   // Synchronize the memory pages backing memory scatter export streams, and
   // calculate the range that includes the streams for the buffer barrier.
   uint32_t memexport_extent_start = UINT32_MAX, memexport_extent_end = 0;
@@ -3018,12 +3140,16 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     shared_memory_->Use(VulkanSharedMemory::Usage::kRead);
   }
 
+
+
   // After all commands that may dispatch, copy or insert barriers, submit the
   // barriers (may end the render pass), and (re)enter the render pass before
   // drawing.
   SubmitBarriersAndEnterRenderTargetCacheRenderPass(
       render_target_cache_->last_update_render_pass(),
       render_target_cache_->last_update_framebuffer());
+
+
 
   // Draw.
   if (primitive_processing_result.index_buffer_type ==
@@ -3067,7 +3193,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                                       memexport_range.size_bytes);
   }
 
-  if (headless_render_frame_) {
+  if (cvars::headless_verbose_diagnostics && headless_render_frame_) {
     auto draw_t1 = std::chrono::steady_clock::now();
     auto draw_us = std::chrono::duration_cast<std::chrono::microseconds>(
         draw_t1 - draw_t0).count();
@@ -3235,14 +3361,11 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
       is_opening_frame
           ? closed_frame_submissions_[frame_current_ % kMaxFramesInFlight]
           : 0;
-  // HEADLESS: In headless mode (no presenter), don't block waiting for frame
-  // fences. The CP thread must stay responsive to process EVENT_WRITE_SHD and
-  // PM4_INTERRUPT commands the game thread depends on. Blocking here causes
-  // deadlock: CP waits for Vulkan fence -> can't process PM4 -> game waits
-  // for sync value -> stall.
+  // HEADLESS: Non-blocking completion check. The CP thread must stay
+  // responsive to process EVENT_WRITE_SHD and WAIT_REG_MEM commands the
+  // game thread depends on. Blocking here causes deadlock at ~frame 12.
   bool headless = !graphics_system_->presenter();
   if (headless && await_submission > 0) {
-    // Non-blocking completion check only.
     CheckSubmissionCompletionAndDeviceLoss(0);
   } else {
     CheckSubmissionCompletionAndDeviceLoss(await_submission);
@@ -4876,30 +4999,110 @@ void VulkanCommandProcessor::FlushDeferredDraws() {
   // Temporarily disable deferred mode so the draws actually execute.
   deferred_draws_enabled_ = false;
 
+  // Suppress mprotect-based page watches during deferred draw execution.
+  // Without this, RequestTextures → MakeRangeValid sets up page watches that
+  // persist after the flush. Game threads then trigger SIGSEGVs on every write
+  // to watched pages, and the signal handler's global lock contention kills
+  // the game thread's timing (VdSwap stops being called 2 frames later).
+  shared_memory_->set_suppress_memory_watches(true);
+
+  // Execute all deferred draws normally (no debug limits).
+
   uint32_t success_count = 0;
+  uint32_t copy_count = 0;
   for (uint32_t i = 0; i < draw_count; ++i) {
     auto& state = deferred_draws_[i];
 
     // Restore register file to the state at the time this draw was deferred.
     std::memcpy(register_file_->values, state.register_values.data(),
                 RegisterFile::kRegisterCount * sizeof(uint32_t));
-    active_vertex_shader_ = state.vertex_shader;
-    active_pixel_shader_ = state.pixel_shader;
 
-    // Execute the draw with the restored state.
-    bool ok = IssueDraw(
-        state.prim_type, state.index_count,
-        state.is_indexed ? &state.index_buffer_info : nullptr,
-        state.major_mode_explicit);
+    // Invalidate Vulkan-side caches that track register state.
+    // The raw memcpy bypasses WriteRegister(), which normally marks constant
+    // buffers dirty and notifies the texture cache of fetch constant changes.
+    // Without this, draws may render with stale constant data or textures.
+    current_constant_buffers_up_to_date_ = 0;
+    if (texture_cache_) {
+      texture_cache_->ResetTextureBindingsInSync();
+    }
+
+    bool ok;
+    if (state.is_copy) {
+      // Ensure draws before this copy are fully completed on GPU.
+      // The resolve reads from EDRAM (render targets) written by draws;
+      // without a flush, the EDRAM content may not be visible yet.
+      if (submission_open_) {
+        EndSubmission(true);
+      }
+      AwaitAllQueueOperationsCompletion();
+      // Restore saved resolve vertex data to guest memory before the copy.
+      // Guest memory may have been overwritten since deferral.
+      if (state.resolve_vertex_addr) {
+        void* guest_ptr = memory_->TranslatePhysical(
+            state.resolve_vertex_addr * sizeof(uint32_t));
+        std::memcpy(guest_ptr, state.resolve_vertex_data,
+                    sizeof(state.resolve_vertex_data));
+      }
+      // Validate copy state before executing — skip operations that would
+      // assert in GetResolveInfo due to invalid register state.
+      auto rb_copy_ctl =
+          register_file_->Get<reg::RB_COPY_CONTROL>();
+      auto copy_cmd = rb_copy_ctl.copy_command;
+      xenos::xe_gpu_vertex_fetch_t vfetch =
+          register_file_->GetVertexFetch(0);
+      bool copy_valid =
+          (copy_cmd == xenos::CopyCommand::kRaw ||
+           copy_cmd == xenos::CopyCommand::kConvert) &&
+          vfetch.type == xenos::FetchConstantType::kVertex &&
+          vfetch.size == 3 * 2;
+      if (!copy_valid) {
+        if (cvars::headless_verbose_diagnostics && (i < 10 || copy_count == 0)) {
+          XELOGI("  deferred copy {}/{}: SKIPPED (cmd={} fetch_type={} "
+                 "fetch_size={})",
+                 i + 1, draw_count, static_cast<uint32_t>(copy_cmd),
+                 static_cast<uint32_t>(vfetch.type), vfetch.size);
+        }
+        continue;
+      }
+      // Log resolve details
+      if (cvars::headless_verbose_diagnostics) {
+        auto rb_copy_dest = register_file_->Get<reg::RB_COPY_DEST_INFO>();
+        auto rb_copy_addr = register_file_->values[XE_GPU_REG_RB_COPY_DEST_BASE];
+        auto rb_surface_info = register_file_->Get<reg::RB_SURFACE_INFO>();
+        auto rb_color_info = register_file_->values[XE_GPU_REG_RB_COLOR_INFO];
+        auto rb_color1_info = register_file_->values[XE_GPU_REG_RB_COLOR1_INFO];
+        auto rb_depth_info = register_file_->values[XE_GPU_REG_RB_DEPTH_INFO];
+        auto rb_copy_ctl_full = register_file_->values[XE_GPU_REG_RB_COPY_CONTROL];
+        XELOGI("  RESOLVE {}/{}: cmd={} dest_addr=0x{:08X} dest_endian={} "
+               "dest_format={} surface_pitch={} color_info=0x{:08X} "
+               "color1_info=0x{:08X} depth_info=0x{:08X} copy_ctl=0x{:08X}",
+               i + 1, draw_count, static_cast<uint32_t>(copy_cmd),
+               rb_copy_addr,
+               static_cast<uint32_t>(rb_copy_dest.copy_dest_endian),
+               static_cast<uint32_t>(rb_copy_dest.copy_dest_format),
+               rb_surface_info.surface_pitch,
+               rb_color_info, rb_color1_info, rb_depth_info, rb_copy_ctl_full);
+      }
+      ok = IssueCopy();
+      copy_count++;
+    } else {
+      active_vertex_shader_ = state.vertex_shader;
+      active_pixel_shader_ = state.pixel_shader;
+      // Execute the draw with the restored state.
+      ok = IssueDraw(
+          state.prim_type, state.index_count,
+          state.is_indexed ? &state.index_buffer_info : nullptr,
+          state.major_mode_explicit);
+    }
     if (ok) success_count++;
 
-    if (i < 5 || i % 50 == 0) {
+    if (cvars::headless_verbose_diagnostics && (i < 5 || i % 50 == 0)) {
       auto now = std::chrono::steady_clock::now();
       auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
           now - flush_start).count();
-      XELOGI("  deferred draw {}/{}: prim={} idx={} ok={} ({}ms elapsed)",
-             i + 1, draw_count, static_cast<int>(state.prim_type),
-             state.index_count, ok, elapsed_ms);
+      XELOGI("  deferred {}{}/{}: ok={} ({}ms elapsed)",
+             state.is_copy ? "copy " : "draw ", i + 1, draw_count,
+             ok, elapsed_ms);
     }
   }
 
@@ -4909,14 +5112,15 @@ void VulkanCommandProcessor::FlushDeferredDraws() {
   active_vertex_shader_ = saved_vs;
   active_pixel_shader_ = saved_ps;
 
-  // Re-enable deferred mode.
+  // Re-enable deferred mode and restore memory watches.
+  shared_memory_->set_suppress_memory_watches(false);
   deferred_draws_enabled_ = true;
 
   auto flush_end = std::chrono::steady_clock::now();
   auto flush_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
       flush_end - flush_start).count();
-  XELOGI("FlushDeferredDraws: {} succeeded/{} total in {}ms",
-         success_count, draw_count, flush_ms);
+  XELOGI("FlushDeferredDraws: {} succeeded/{} total ({} copies) in {}ms",
+         success_count, draw_count, copy_count, flush_ms);
 
   deferred_draws_.clear();
 }

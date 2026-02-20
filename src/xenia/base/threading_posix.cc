@@ -22,6 +22,7 @@
 #include <sys/time.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include <ucontext.h>
 #include <array>
 #include <cstddef>
 #include <ctime>
@@ -127,6 +128,13 @@ void install_signal_handler(SignalType type) {
   sigemptyset(&action.sa_mask);
   if (sigaction(GetSystemSignal(type), &action, nullptr) == -1)
     signal_handler_installed[static_cast<size_t>(type)] = true;
+}
+
+// Captured RIP from last thread suspension (for guest PC diagnosis).
+static std::atomic<uint64_t> last_suspend_host_rip_{0};
+
+uint64_t GetLastSuspendHostRip() {
+  return last_suspend_host_rip_.load(std::memory_order_relaxed);
 }
 
 // TODO(dougvj)
@@ -1165,9 +1173,16 @@ void set_name(const std::string_view name) {
 #endif
 }
 
-static void signal_handler(int signal, siginfo_t* info, void* /*context*/) {
+static void signal_handler(int signal, siginfo_t* info, void* context) {
   switch (GetSystemSignalType(signal)) {
     case SignalType::kThreadSuspend: {
+      // Capture x64 RIP from signal context for guest PC diagnosis.
+      if (context) {
+        auto* uc = static_cast<ucontext_t*>(context);
+        last_suspend_host_rip_.store(
+            static_cast<uint64_t>(uc->uc_mcontext.gregs[REG_RIP]),
+            std::memory_order_relaxed);
+      }
       assert_not_null(current_thread_);
       current_thread_->WaitSuspended();
     } break;

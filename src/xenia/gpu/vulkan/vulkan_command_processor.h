@@ -11,6 +11,7 @@
 #define XENIA_GPU_VULKAN_VULKAN_COMMAND_PROCESSOR_H_
 
 #include <array>
+#include <atomic>
 #include <climits>
 #include <cstdint>
 #include <chrono>
@@ -18,6 +19,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -744,6 +746,21 @@ class VulkanCommandProcessor : public CommandProcessor {
   bool headless_render_frame_ = false;
   uint32_t headless_capture_interval_ = 0;
 
+  // Pre-allocated readback resources (created in SetupContext, reused per
+  // capture).
+  static constexpr uint32_t kReadbackMaxWidth = 1920;
+  static constexpr uint32_t kReadbackMaxHeight = 1080;
+  static constexpr VkDeviceSize kReadbackBufferSize =
+      kReadbackMaxWidth * kReadbackMaxHeight * 4;
+  VkBuffer readback_staging_buffer_ = VK_NULL_HANDLE;
+  VkDeviceMemory readback_staging_memory_ = VK_NULL_HANDLE;
+  void* readback_staging_mapping_ = nullptr;  // Persistently mapped
+  VkCommandPool readback_command_pool_ = VK_NULL_HANDLE;
+  VkCommandBuffer readback_command_buffer_ = VK_NULL_HANDLE;
+
+  // Readback fence for synchronous capture.
+  VkFence readback_fence_ = VK_NULL_HANDLE;
+
   // Per-frame timing counters for draw profiling
   std::chrono::steady_clock::time_point headless_frame_start_;
   uint32_t headless_draw_count_ = 0;
@@ -769,8 +786,13 @@ class VulkanCommandProcessor : public CommandProcessor {
     xenos::PrimitiveType prim_type;
     uint32_t index_count;
     bool is_indexed;
+    bool is_copy = false;  // EDRAM resolve (copy mode) — calls IssueCopy() instead
     bool major_mode_explicit;
     IndexBufferInfo index_buffer_info;
+    // For copies: saved resolve vertex data (6 floats, 24 bytes) from guest
+    // memory. Guest memory may be overwritten by the time we replay.
+    uint32_t resolve_vertex_addr;  // Guest physical address (in dwords)
+    uint32_t resolve_vertex_data[6];  // Saved float data
   };
   bool deferred_draws_enabled_ = false;
   std::vector<DeferredDrawState> deferred_draws_;
