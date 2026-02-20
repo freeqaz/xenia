@@ -124,29 +124,15 @@ void EmulatorHeadless::RunWithTimeout(int32_t timeout_ms) {
     }
 
     // Periodic thread state report every 3 seconds
-    if (elapsed - last_report_ms >= 500) {
+    if (elapsed - last_report_ms >= 3000) {
       last_report_ms = elapsed;
       auto* kernel_state = emulator_->kernel_state();
+      auto* processor = emulator_->processor();
       if (kernel_state) {
         auto threads = kernel_state->object_table()->GetObjectsByType<kernel::XThread>(
             kernel::XObject::Type::Thread);
-        // Also enumerate via threads_by_id
-        auto all_objects = kernel_state->object_table()->GetAllObjects();
-        size_t thread_count = 0;
-        for (auto& obj : all_objects) {
-          if (obj->type() == kernel::XObject::Type::Thread) thread_count++;
-        }
-        fprintf(stderr, "=== Thread Status Report (%ldms) === %zu threads (object_table total=%zu, thread_objs=%zu)\n",
-                elapsed, threads.size(), all_objects.size(), thread_count);
-        // Look up threads by ID (game threads 5, 6 are missing from object table)
-        for (uint32_t tid = 5; tid <= 8; tid++) {
-          auto t = kernel_state->GetThreadByID(tid);
-          if (t) {
-            auto* ctx = t->thread_state() ? t->thread_state()->context() : nullptr;
-            fprintf(stderr, "  [by_id] Thread %d: SP=0x%08X LR=0x%08X\n",
-                    tid, ctx ? (uint32_t)ctx->r[1] : 0, ctx ? (uint32_t)ctx->lr : 0);
-          }
-        }
+        fprintf(stderr, "=== Thread Status Report (%ldms) === %zu threads\n",
+                elapsed, threads.size());
         fflush(stderr);
         for (auto& thread : threads) {
           auto* ppc_ctx = thread->thread_state() ? thread->thread_state()->context() : nullptr;
@@ -157,22 +143,34 @@ void EmulatorHeadless::RunWithTimeout(int32_t timeout_ms) {
           }
           uint32_t sp = (uint32_t)ppc_ctx->r[1];
           uint32_t lr = (uint32_t)ppc_ctx->lr;
-          fprintf(stderr, "  Thread %d: LR=0x%08X SP=0x%08X\n", thread->thread_id(), lr, sp);
+          // Resolve LR to function name
+          std::string lr_name = "?";
+          if (processor && lr >= 0x82000000) {
+            auto* fn = processor->QueryFunction(lr);
+            if (fn) lr_name = fn->name();
+          }
+          fprintf(stderr, "  Thread %d: LR=0x%08X [%s] SP=0x%08X\n",
+                  thread->thread_id(), lr, lr_name.c_str(), sp);
           fflush(stderr);
-          // Walk PPC stack frames
+          // Walk PPC stack frames - wide range for all guest stacks
           auto* mem = emulator_->memory();
-          // Skip stack walk for threads at stack top (idle) or outside valid range
-          // Stack tops are at 0x10000-aligned boundaries; skip if SP is exactly at one
-          if (sp >= 0x70000010 && sp < 0x701F0000 && (sp & 3) == 0 && (sp & 0xFFFF) != 0) {
-            for (int frame = 0; frame < 10; frame++) {
-              if (sp < 0x70000010 || sp >= 0x701F0000 || (sp & 3) != 0) break;
+          if (sp >= 0x70000010 && sp < 0x78000000 && (sp & 3) == 0 && (sp & 0xFFFF) != 0) {
+            for (int frame = 0; frame < 15; frame++) {
+              if (sp < 0x70000010 || sp >= 0x78000000 || (sp & 3) != 0) break;
               auto* host_ptr = mem->TranslateVirtual(sp);
               if (!host_ptr) break;
               uint32_t back_chain = xe::load_and_swap<uint32_t>(host_ptr);
               uint32_t saved_lr = xe::load_and_swap<uint32_t>(host_ptr + 4);
-              fprintf(stderr, "    [%d] sp=0x%08X back=0x%08X lr=0x%08X\n", frame, sp, back_chain, saved_lr);
+              // Resolve saved LR to function name
+              std::string fn_name = "";
+              if (processor && saved_lr >= 0x82000000) {
+                auto* fn = processor->QueryFunction(saved_lr);
+                if (fn) fn_name = " [" + fn->name() + "]";
+              }
+              fprintf(stderr, "    [%d] sp=0x%08X back=0x%08X lr=0x%08X%s\n",
+                      frame, sp, back_chain, saved_lr, fn_name.c_str());
               fflush(stderr);
-              if (back_chain == 0 || back_chain == sp || back_chain < 0x70000000 || back_chain >= 0x70200000) break;
+              if (back_chain == 0 || back_chain == sp || back_chain < 0x70000000 || back_chain >= 0x78000000) break;
               sp = back_chain;
             }
           }

@@ -94,6 +94,10 @@ uint32_t logical_processor_count();
 // Must be called at startup before attempting to set thread affinity.
 void EnableAffinityConfiguration();
 
+// Gets the host (x64) RIP captured from the last thread suspension signal.
+// Used for diagnosing guest code execution when PPCContext is stale.
+uint64_t GetLastSuspendHostRip();
+
 // Gets a stable thread-specific ID, but may not be. Use for informative
 // purposes only.
 uint32_t current_thread_system_id();

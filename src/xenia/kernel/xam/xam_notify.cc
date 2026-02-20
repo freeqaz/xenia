@@ -20,6 +20,8 @@ namespace xam {
 
 uint32_t xeXamNotifyCreateListener(uint64_t mask, uint32_t is_system,
                                    uint32_t max_version) {
+  XELOGI("XamNotifyCreateListener: mask=0x{:016X} is_system={} max_version={}",
+         mask, is_system, max_version);
   assert_true(max_version < 11);
 
   if (max_version > 10) {
@@ -33,6 +35,7 @@ uint32_t xeXamNotifyCreateListener(uint64_t mask, uint32_t is_system,
   // Handle ref is incremented, so return that.
   uint32_t handle = listener->handle();
 
+  XELOGI("XamNotifyCreateListener: -> handle=0x{:08X}", handle);
   return handle;
 }
 
@@ -50,8 +53,14 @@ dword_result_t XamNotifyCreateListenerInternal_entry(qword_t mask,
 DECLARE_XAM_EXPORT1(XamNotifyCreateListenerInternal, kNone, kImplemented);
 
 // https://github.com/CodeAsm/ffplay360/blob/master/Common/AtgSignIn.cpp
+static int xnotify_call_count_ = 0;
 dword_result_t XNotifyGetNext_entry(dword_t handle, dword_t match_id,
                                     lpdword_t id_ptr, lpdword_t param_ptr) {
+  if (xnotify_call_count_ < 5) {
+    XELOGI("XNotifyGetNext: handle=0x{:08X} match_id=0x{:08X} (call #{})",
+           uint32_t(handle), uint32_t(match_id), xnotify_call_count_);
+  }
+  ++xnotify_call_count_;
   if (param_ptr) {
     *param_ptr = 0;
   }
@@ -86,6 +95,10 @@ dword_result_t XNotifyGetNext_entry(dword_t handle, dword_t match_id,
   // https://github.com/xenia-project/xenia/pull/1577
   if (param_ptr) {
     *param_ptr = dequeued ? param : 0;
+  }
+  if (dequeued) {
+    XELOGI("XNotifyGetNext: dequeued notification id=0x{:08X} param=0x{:08X}",
+           id, param);
   }
   return dequeued ? 1 : 0;
 }

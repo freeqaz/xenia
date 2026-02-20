@@ -108,7 +108,9 @@ dword_result_t XamContentCreateEnumerator_entry(
     // TODO(gibbed): disc drive content
   }
 
-  XELOGD("XamContentCreateEnumerator: added {} items to enumerator",
+  XELOGI("XamContentCreateEnumerator: user={} device=0x{:08X} type={} flags={} items={} added={}",
+         uint32_t(user_index), uint32_t(device_id), uint32_t(content_type),
+         uint32_t(content_flags), uint32_t(items_per_enumerate),
          e->item_count());
 
   *handle_out = e->handle();
@@ -125,6 +127,9 @@ dword_result_t xeXamContentCreate(dword_t user_index, lpstring_t root_name,
                                   lpdword_t license_mask_ptr,
                                   dword_t cache_size, qword_t content_size,
                                   lpvoid_t overlapped_ptr) {
+  XELOGI("xeXamContentCreate: user={} root='{}' flags=0x{:X} cache_size={} content_size={}",
+         uint32_t(user_index), root_name.value(), uint32_t(flags),
+         uint32_t(cache_size), uint64_t(content_size));
   XCONTENT_AGGREGATE_DATA content_data;
   if (content_data_size == sizeof(XCONTENT_DATA)) {
     content_data = *content_data_ptr.as<XCONTENT_DATA*>();

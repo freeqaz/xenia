@@ -11,6 +11,7 @@
 #define XENIA_HID_NOP_NOP_INPUT_DRIVER_H_
 
 #include <chrono>
+#include <deque>
 #include <string>
 #include <vector>
 
@@ -45,10 +46,15 @@ class NopInputDriver final : public InputDriver {
     uint64_t duration_ms;  // How long to hold (default 200ms)
   };
 
+  uint16_t GetCurrentButtons() const;
+  uint16_t ButtonToVK(uint16_t button) const;
+
   bool scripted_mode_ = false;
   std::vector<ScriptedEvent> scripted_events_;
   std::chrono::steady_clock::time_point start_time_;
   uint32_t packet_number_ = 0;
+  uint16_t prev_buttons_ = 0;  // For keystroke edge detection
+  std::deque<X_INPUT_KEYSTROKE> keystroke_queue_;
 };
 
 }  // namespace nop

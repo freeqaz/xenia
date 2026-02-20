@@ -281,6 +281,11 @@ dword_result_t XamShowMessageBoxUI_entry(
     dword_t button_count, lpdword_t button_ptrs, dword_t active_button,
     dword_t flags, lpdword_t result_ptr, pointer_t<XAM_OVERLAPPED> overlapped) {
 #ifdef XE_HEADLESS_BUILD
+  XELOGI("XamShowMessageBoxUI: user={} title='{}' text='{}' buttons={} active={}",
+         uint32_t(user_index),
+         title_ptr ? xe::to_utf8(title_ptr.value()) : "(null)",
+         text_ptr ? xe::to_utf8(text_ptr.value()) : "(null)",
+         uint32_t(button_count), uint32_t(active_button));
   // Auto-pick the focused button.
   auto run = [result_ptr, active_button]() -> X_RESULT {
     *result_ptr = static_cast<uint32_t>(active_button);
@@ -558,6 +563,12 @@ dword_result_t XamShowNuiGuideUI_entry(unknown_t unk1, unknown_t unk2) {
 DECLARE_XAM_EXPORT1(XamShowNuiGuideUI, kUI, kStub);
 
 dword_result_t XamShowNuiSigninUI_entry(unknown_t unk1, unknown_t unk2) {
+  XELOGI("XamShowNuiSigninUI(unk1={}, unk2={})", uint32_t(unk1),
+         uint32_t(unk2));
+  // Simulate sign-in completing — broadcast the same notifications as
+  // XamShowSigninUI so the game's PlatformMgr picks up the signed-in user.
+  kernel_state()->BroadcastNotification(0x0000000A, 1);  // XN_SYS_SIGNINCHANGED
+  kernel_state()->BroadcastNotification(0x00000009, 0);  // XN_SYS_UI (off)
   return 0;
 }
 DECLARE_XAM_EXPORT1(XamShowNuiSigninUI, kUI, kStub);
@@ -589,11 +600,23 @@ dword_result_t XamShowNuiPartyUI_entry(unknown_t unk1, unknown_t unk2) {
 }
 DECLARE_XAM_EXPORT1(XamShowNuiPartyUI, kUI, kStub);
 
-dword_result_t XamShowNuiDeviceSelectorUI_entry(unknown_t unk1,
-                                                 unknown_t unk2) {
-  return 0;
+dword_result_t XamShowNuiDeviceSelectorUI_entry(
+    dword_t tracking_id, dword_t user_index, dword_t content_type,
+    dword_t content_flags, qword_t total_requested,
+    lpdword_t device_id_ptr, pointer_t<XAM_OVERLAPPED> overlapped) {
+  XELOGI("XamShowNuiDeviceSelectorUI(tracking={}, user={}, type={}, flags={})",
+         uint32_t(tracking_id), uint32_t(user_index), uint32_t(content_type),
+         uint32_t(content_flags));
+  // Same behavior as XamShowDeviceSelectorUI — return dummy device ID.
+  return xeXamDispatchHeadless(
+      [device_id_ptr]() -> X_RESULT {
+        // NOTE: 0x00000001 is our dummy device ID from xam_content.cc
+        *device_id_ptr = 0x00000001;
+        return X_ERROR_SUCCESS;
+      },
+      overlapped);
 }
-DECLARE_XAM_EXPORT1(XamShowNuiDeviceSelectorUI, kUI, kStub);
+DECLARE_XAM_EXPORT1(XamShowNuiDeviceSelectorUI, kUI, kImplemented);
 
 dword_result_t XamShowNuiDirtyDiscErrorUI_entry(unknown_t unk1,
                                                  unknown_t unk2) {
@@ -606,6 +629,7 @@ dword_result_t XamShowMessageBoxUIEx_entry(unknown_t unk1, unknown_t unk2,
                                             unknown_t unk3, unknown_t unk4,
                                             unknown_t unk5, unknown_t unk6,
                                             unknown_t unk7, unknown_t unk8) {
+  XELOGI("XamShowMessageBoxUIEx called!");
   return 0;
 }
 DECLARE_XAM_EXPORT1(XamShowMessageBoxUIEx, kUI, kStub);

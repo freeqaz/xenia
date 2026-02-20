@@ -18,6 +18,7 @@
 #include "xenia/kernel/util/shim_utils.h"
 #include "xenia/kernel/xboxkrnl/xboxkrnl_private.h"
 #include "xenia/kernel/xboxkrnl/xboxkrnl_rtl.h"
+#include "xenia/kernel/xthread.h"
 #include "xenia/xbox.h"
 
 // BT.709 on modern monitors and TVs looks the closest to the Xbox 360 connected
@@ -361,7 +362,16 @@ void VdSwap_entry(
     lpdword_t frontbuffer_ptr,  // ptr to frontbuffer address
     lpdword_t texture_format_ptr, lpdword_t color_space_ptr, lpdword_t width,
     lpdword_t height) {
-  XELOGI("VdSwap called! buffer=0x{:08X}, frontbuffer=0x{:08X}, {}x{}", buffer_ptr.guest_address(), frontbuffer_ptr.guest_address(), width ? (uint32_t)*width : 0, height ? (uint32_t)*height : 0);
+  {
+    static uint32_t swap_count = 0;
+    swap_count++;
+    auto* thread = XThread::GetCurrentThread();
+    uint32_t tid = thread ? thread->thread_id() : 0;
+    if (swap_count <= 20 || (swap_count % 200) == 0) {
+      XELOGI("VdSwap #{} tid={} {}x{}", swap_count, tid,
+             width ? (uint32_t)*width : 0, height ? (uint32_t)*height : 0);
+    }
+  }
   // All of these parameters are REQUIRED.
   assert(buffer_ptr);
   assert(fetch_ptr);

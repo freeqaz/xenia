@@ -166,6 +166,7 @@ class KernelState {
   void RegisterNotifyListener(XNotifyListener* listener);
   void UnregisterNotifyListener(XNotifyListener* listener);
   void BroadcastNotification(XNotificationID id, uint32_t data);
+  size_t notify_listener_count() const { return notify_listeners_.size(); }
 
   util::NativeList* dpc_list() { return &dpc_list_; }
 

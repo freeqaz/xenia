@@ -121,7 +121,8 @@ dword_result_t NtCreateFile_entry(lpdword_t handle_out, dword_t desired_access,
   // Compute path, possibly attrs relative.
   auto target_path = util::TranslateAnsiString(kernel_memory(), object_name);
 
-  XELOGI("NtCreateFile: {}", target_path);
+  XELOGI("NtCreateFile: {} disp={}", target_path,
+         uint32_t(creation_disposition));
 
   // Enforce that the path is ASCII.
   if (!IsValidPath(target_path, false)) {
@@ -168,6 +169,10 @@ dword_result_t NtCreateFile_entry(lpdword_t handle_out, dword_t desired_access,
 
   *handle_out = handle;
 
+  if (!XSUCCEEDED(result)) {
+    XELOGI("NtCreateFile FAILED: {} -> 0x{:08X}", target_path, result);
+  }
+
   return result;
 }
 DECLARE_XBOXKRNL_EXPORT1(NtCreateFile, kFileSystem, kImplemented);
@@ -188,17 +193,16 @@ dword_result_t NtReadFile_entry(dword_t file_handle, dword_t event_handle,
                                 pointer_t<X_IO_STATUS_BLOCK> io_status_block,
                                 lpvoid_t buffer, dword_t buffer_length,
                                 lpqword_t byte_offset_ptr) {
-  // Track all reads on main thread
+  // Track all reads
   {
+    static uint32_t read_count = 0;
+    read_count++;
     auto* thread = XThread::GetCurrentThread();
-    if (thread && thread->thread_id() == 6) {
-      static uint32_t main_read_count = 0;
-      main_read_count++;
-      if (main_read_count <= 20 || (main_read_count % 100) == 0) {
-        XELOGI("MainThread NtReadFile #{} handle=0x{:X} len={} offset={}",
-               main_read_count, (uint32_t)file_handle, (uint32_t)buffer_length,
-               byte_offset_ptr ? (int64_t)*byte_offset_ptr : -1);
-      }
+    uint32_t tid = thread ? thread->thread_id() : 0;
+    if (read_count <= 100 || (read_count % 500) == 0) {
+      XELOGI("NtReadFile #{} tid={} handle=0x{:X} len={} offset={}",
+             read_count, tid, (uint32_t)file_handle, (uint32_t)buffer_length,
+             byte_offset_ptr ? (int64_t)*byte_offset_ptr : -1);
     }
   }
   X_STATUS result = X_STATUS_SUCCESS;
@@ -507,6 +511,7 @@ dword_result_t NtQueryFullAttributesFile_entry(
     return X_STATUS_SUCCESS;
   }
 
+  XELOGI("NtQueryFullAttributesFile NOT FOUND: {}", target_path);
   return X_STATUS_NO_SUCH_FILE;
 }
 DECLARE_XBOXKRNL_EXPORT1(NtQueryFullAttributesFile, kFileSystem, kImplemented);
@@ -599,6 +604,7 @@ dword_result_t NtOpenSymbolicLinkObject_entry(
   std::string link_path;
   if (!kernel_state()->file_system()->FindSymbolicLink(target_path,
                                                        link_path)) {
+    XELOGI("NtOpenSymbolicLinkObject NOT FOUND: {}", target_path);
     return X_STATUS_NO_SUCH_FILE;
   }
 

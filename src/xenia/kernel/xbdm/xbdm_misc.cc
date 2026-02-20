@@ -42,7 +42,16 @@ DECLARE_XBDM_EXPORT1(DmGetXbeInfo, kDebug, kStub);
 
 MAKE_DUMMY_STUB_STATUS(DmGetXboxName);
 
-dword_result_t DmIsDebuggerPresent_entry() { return 0; }
+dword_result_t DmIsDebuggerPresent_entry() {
+  static uint32_t call_count = 0;
+  call_count++;
+  if (call_count <= 5 || (call_count % 100) == 0) {
+    auto* thread = XThread::GetCurrentThread();
+    uint32_t tid = thread ? thread->thread_id() : 0;
+    XELOGI("DmIsDebuggerPresent #{} tid={}", call_count, tid);
+  }
+  return 0;
+}
 DECLARE_XBDM_EXPORT1(DmIsDebuggerPresent, kDebug, kStub);
 
 MAKE_DUMMY_STUB_STATUS(DmRegisterCommandProcessor);
@@ -63,6 +72,7 @@ MAKE_DUMMY_STUB_STATUS(DmStopProfiling);
 
 dword_result_t DmCaptureStackBackTrace_entry(lpdword_t unk0_ptr,
                                              lpdword_t unk1_ptr) {
+  XELOGI("DmCaptureStackBackTrace called (stubbed)");
   return X_STATUS_INVALID_PARAMETER;
 }
 DECLARE_XBDM_EXPORT1(DmCaptureStackBackTrace, kDebug, kStub);

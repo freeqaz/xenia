@@ -305,7 +305,7 @@ void SharedMemory::MakeRangeValid(uint32_t start, uint32_t length,
     }
   }
 
-  if (memory_invalidation_callback_handle_) {
+  if (memory_invalidation_callback_handle_ && !suppress_memory_watches_) {
     memory().EnablePhysicalMemoryAccessCallbacks(
         valid_page_first << page_size_log2_,
         (valid_page_last - valid_page_first + 1) << page_size_log2_, true,

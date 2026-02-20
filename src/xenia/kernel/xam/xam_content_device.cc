@@ -112,8 +112,10 @@ static_assert_size(X_CONTENT_DEVICE_DATA, 0x50);
 
 dword_result_t XamContentGetDeviceData_entry(
     dword_t device_id, pointer_t<X_CONTENT_DEVICE_DATA> device_data) {
+  XELOGI("XamContentGetDeviceData: device_id=0x{:08X}", uint32_t(device_id));
   auto device_info = GetDummyDeviceInfo(device_id);
   if (device_info == nullptr) {
+    XELOGI("XamContentGetDeviceData: device not found!");
     return X_ERROR_DEVICE_NOT_CONNECTED;
   }
   device_data.Zero();
@@ -133,6 +135,8 @@ dword_result_t XamContentCreateDeviceEnumerator_entry(dword_t content_type,
                                                       dword_t max_count,
                                                       lpdword_t buffer_size_ptr,
                                                       lpdword_t handle_out) {
+  XELOGI("XamContentCreateDeviceEnumerator: type={} flags={} max={}",
+         uint32_t(content_type), uint32_t(content_flags), uint32_t(max_count));
   assert_not_null(handle_out);
 
   if (buffer_size_ptr) {

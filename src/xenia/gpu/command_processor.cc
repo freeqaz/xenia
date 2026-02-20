@@ -33,8 +33,6 @@
 
 DECLARE_string(dump_frames_path);
 
-DECLARE_string(dump_frames_path);
-
 namespace xe {
 namespace gpu {
 
@@ -705,19 +703,6 @@ bool CommandProcessor::ExecutePacketType3(RingBuffer* reader, uint32_t packet) {
   uint32_t opcode = (packet >> 8) & 0x7F;
   uint32_t count = ((packet >> 16) & 0x3FFF) + 1;
   auto data_start_offset = reader->read_offset();
-
-  // Headless draw debug: log PM4 opcodes around draws
-  static bool pm4_log_after_draw = false;
-  static uint32_t pm4_log_count = 0;
-  if (pm4_log_after_draw && pm4_log_count < 50) {
-    XELOGI("PM4 POST-DRAW #{}: opcode=0x{:02X} count={}", pm4_log_count,
-           opcode, count);
-    pm4_log_count++;
-  }
-  if (opcode == PM4_DRAW_INDX || opcode == PM4_DRAW_INDX_2) {
-    pm4_log_after_draw = true;
-    pm4_log_count = 0;
-  }
 
   if (reader->read_count() < count * sizeof(uint32_t)) {
     XELOGE(

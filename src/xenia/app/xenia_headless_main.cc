@@ -20,6 +20,7 @@
 #include "xenia/base/threading.h"
 #include "xenia/config.h"
 #include "xenia/emulator.h"
+#include "xenia/kernel/kernel_state.h"
 #include "xenia/vfs/devices/host_path_device.h"
 
 // Headless backends
@@ -69,10 +70,6 @@ DEFINE_bool(headless_report_boot, true,
 DEFINE_int32(headless_timeout_ms, 0,
             "Timeout in milliseconds before terminating (0 = run indefinitely)",
             "Headless");
-DEFINE_bool(headless_async_draws, false,
-            "Queue draws for async execution in headless Vulkan mode, "
-            "preventing CP thread stalls from shader compilation.",
-            "GPU");
 DEFINE_string(scripted_input, "",
               "Scripted controller input. Format: '5s:A,7s:START,10s:A'. "
               "Simulates a connected controller with timed button presses.",
@@ -255,9 +252,9 @@ int main(int argc, char** argv) {
   // Initialize logging (needs parsed cvars)
   xe::InitializeLogging("xenia-headless");
 
-  xe::app::HeadlessMain({});
+  int result = xe::app::HeadlessMain({});
 
   xe::ShutdownLogging();
 
-  return EXIT_SUCCESS;
+  return result;
 }
