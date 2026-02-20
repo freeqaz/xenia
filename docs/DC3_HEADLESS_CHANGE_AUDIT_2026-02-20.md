@@ -100,33 +100,43 @@ Use this when the question is "what does XEX/Xenia actually do?" versus "what di
 
 ## Executive Summary
 
-- Boot/runtime progress is real: game runs for long durations and scripted input fires.
-- Primary blocker is still rendering correctness in deferred mode.
-- Branch state is split into:
-  - One large committed branch delta vs upstream (`6394d2a7f`)
-  - A large uncommitted investigation layer on top (render/deadlock diagnostics + shim tweaks)
-- Current approach is directionally sound, but risk is high because functional fixes and heavy diagnostics are mixed in hot paths.
+- Boot/runtime progress is real: game runs for long durations, 16+ threads, ~33 FPS.
+- **Deferred draw rendering partially fixed** (2026-02-20 session): cache invalidation fix produces 151K bright pixels with real rendered content (R=255 warm tones), up from flat B=0x3F.
+- All diagnostic logging gated behind cvars (`headless_verbose_diagnostics`, `headless_thread_diagnostics`), defaulting to off.
+- Dead code and signal safety issues cleaned up.
+- Branch state: all work committed as `e024ff31a` on `headless-vulkan-linux` (2 commits ahead of upstream).
 
-## Runtime Snapshot (Latest Session Context)
+## Runtime Snapshot (2026-02-20 Session)
 
-From the most recent 120-second extended boot test:
+### Experiment Results
 
-- Frames remained black at sampled frames 500/1000/1500/2000 (0% non-zero pixels).
-- Runtime remained stable: 2000+ swaps over 120s (~33 FPS).
-- Scripted input fired (`A` and `START` keystroke events observed).
-- Only 3 draws executed (around swaps 11-13) with `render_frame=false`.
-- Frontbuffer pointer stayed fixed at `0x1EBC8000`.
+| ID | Mode | Duration | Threads | Captures | Pixel Quality |
+|---|---|---|---|---|---|
+| E00 | Null GPU | 30s | 4 (system) | N/A | N/A — baseline stability confirmed |
+| E10 | Vulkan force_all_draws | 60s | 16+ | 3 (frames 100/200/300) | Flat R=2,G=1,B=2 — nearly black |
+| E20 | Vulkan deferred draws | 60s | 16+ | 3 (frames 100/200/300) | **151K bright pixels, 525 unique RGB, max R=255** |
 
-Interpretation:
+### E20 Frame Analysis (frame_0100.ppm)
 
-- This behavior is consistent with non-`force_all_draws` mode not scheduling RENDER+DEFER correctly for capture windows in that run.
-- Existing evidence still indicates deferred draw content quality is wrong even when scheduling works (B channel dominated by `0x3F`), while inline draws have better color but deadlock around frame 12.
+- 283K non-background pixels across full 1280x720 frame
+- Brightest pixels: R=255 G=232 B=127 (warm gold/yellow tones)
+- Content concentrated at x=[500-720], y=[260-490] — likely boot animation character/logo
+- Row variation peaks at rows 240-480 with 500+ unique colors per row
+- Overall frame still dark — possible gamma/format issue in readback path
 
-Primary runtime references for this snapshot (full map above):
+### Key Fix: Deferred Draw Cache Invalidation
 
-- [`../../dc3-decomp/docs/runtime/XENIA_HEADLESS_STATUS.md`](../../dc3-decomp/docs/runtime/XENIA_HEADLESS_STATUS.md): current rendering investigation and status decisions.
-- [`../../dc3-decomp/docs/runtime/BOOT_ANALYSIS.md`](../../dc3-decomp/docs/runtime/BOOT_ANALYSIS.md): boot-stage timeline and run evidence.
-- [`../../dc3-decomp/docs/runtime/SCRIPTED_INPUT_TESTING.md`](../../dc3-decomp/docs/runtime/SCRIPTED_INPUT_TESTING.md): scripted input behavior and tested sequences.
+Root cause of B=0x3F: `FlushDeferredDraws()` used raw `memcpy` to restore register state, bypassing `VulkanCommandProcessor::WriteRegister()`. This left `current_constant_buffers_up_to_date_` and `texture_bindings_in_sync_` stale, causing draws to render with wrong constant data and textures.
+
+Fix: After memcpy, explicitly invalidate both caches:
+- `current_constant_buffers_up_to_date_ = 0`
+- `texture_cache_->ResetTextureBindingsInSync()`
+
+### Remaining Issues
+
+1. **E10 flat color**: force_all_draws + deferred mode produces flat R=2,G=1,B=2. Different failure mode from E20 — possibly all draws are identically wrong, or capture timing misses the rendered frame.
+2. **E20 dark overall**: While content is visible with 151K bright pixels, most of the frame is very dark. Could be gamma ramp, format conversion, or readback endianness issue.
+3. **Inline draw deadlock**: Still present at frame 12 (not tested this session).
 
 ## Architecture Notes (Current Code)
 
@@ -219,53 +229,36 @@ Related external context:
 
 Branch state:
 
-- `HEAD`: `6394d2a7f` (`headless-vulkan-linux`)
-- `upstream/master...HEAD`: `0 behind / 1 ahead`
+- `HEAD`: `e024ff31a` (`headless-vulkan-linux`)
+- `upstream/master...HEAD`: `0 behind / 2 ahead`
 
-Net size:
+Commit history:
 
-- `61 files changed, 3328 insertions, 177 deletions`
+1. `6394d2a7f` — Initial headless emulator mode with Vulkan support for Linux
+2. `e024ff31a` — Stabilization: gate diagnostics, fix deferred draw rendering, cleanup
 
-Largest subsystem impact (approx):
+Net size (total branch):
 
-- `gpu`: 19 files, +1159/-55
-- `kernel`: 20 files, +925/-94
-- `app`: 4 files, +727/-0
-- `hid`: 3 files, +176/-9
-- `cpu`: 6 files, +165/-5
+- `89 files changed, ~4900 insertions, ~570 deletions` (approx)
 
 High-impact committed areas:
 
 - New headless app binary and main loop
 - Vulkan headless capture and deferred replay scaffolding
+- **Deferred draw cache invalidation fix** (constant buffer + texture binding)
 - Async pipeline cache behavior for headless
 - Scripted nop input
 - NUI/XAM/Xboxkrnl shims for DC3 boot
 - Linux/JIT thunk ABI fixes
 - Filesystem and memory mapping platform fixes
 - PE override support
+- Diagnostic cvars (`headless_verbose_diagnostics`, `headless_thread_diagnostics`)
+- Dead code removal (MonitorMainThreadPC, unsafe backtrace)
+- Quality fixes (EXIT_SUCCESS bug, duplicate declarations, unused cvars)
 
 ### B. Uncommitted working tree delta
 
-Net size:
-
-- `28 files changed, 961 insertions, 366 deletions`
-
-Largest in-progress files:
-
-- `src/xenia/gpu/vulkan/vulkan_command_processor.cc` (+471/-284)
-- `src/xenia/kernel/xboxkrnl/xboxkrnl_threading.cc` (+171/-1)
-- `src/xenia/hid/nop/nop_input_driver.cc` (+109/-8)
-- `src/xenia/base/threading_posix.cc` (+33/-1)
-
-Uncommitted focus areas:
-
-- Render scheduling/replay refinement
-- Readback resource pre-allocation + debug dumps
-- Shared memory watch suppression integration
-- Additional deadlock diagnostics (threading/wait logging/backtrace capture)
-- Input keystroke edge behavior
-- Extra logging in XAM/xboxkrnl paths
+No uncommitted source changes. All work committed as of `e024ff31a`.
 
 ### C. Dirty submodules (not yet integrated)
 
@@ -285,32 +278,32 @@ These include local compatibility tweaks and heavy header edits. They increase i
 
 - Baseline architecture direction (headless + selective rendering + replay + capture) is coherent.
 - DC3-specific boot unblockers (NUI/audio/object type handling) are plausible and evidence-backed.
-- The project has moved from zero-render visibility to meaningful boot/render instrumentation.
+- **Deferred draw rendering now produces real content** — cache invalidation fix confirmed working.
+- Diagnostic logging properly gated behind cvars, defaulting to off.
+- Signal handler safety fixed (backtrace removed, RIP capture preserved).
+- Quality issues resolved (EXIT_SUCCESS bug, unused cvars, duplicate declarations).
 
-### Where this is still fragile ("swiss cheese" risk)
+### Where this is still fragile
 
-1. Rendering correctness is unresolved in the mode we need most.
-- Symptom: deferred path gives wrong color content.
-- Impact: blocks meaningful boot/menu validation.
+1. **Rendering quality still incomplete** — E20 captures show real content but overall frame is dark.
+   - Possible gamma ramp, format conversion, or readback path issue.
+   - Need comparison with inline draw output to isolate.
 
-2. Deadlock diagnosis code is currently mixed into production threading/signal paths.
-- `src/xenia/base/threading_posix.cc:1190` captures backtraces in a signal handler.
-- `backtrace()` is not async-signal-safe; this can perturb behavior.
+2. **E10 (force_all_draws) produces flat color** — different failure mode from deferred.
+   - All draws may be rendering identically wrong, or capture timing issue.
 
-3. Hot-path logging is very heavy in timing-sensitive systems.
-- `src/xenia/gpu/vulkan/vulkan_command_processor.cc`
-- `src/xenia/kernel/xboxkrnl/xboxkrnl_threading.cc`
-- `src/xenia/kernel/xboxkrnl/xboxkrnl_io.cc`
-- Risk: instrumentation changes scheduler behavior and masks/reorders races.
+3. **Inline draw deadlock** — still untested this session.
+   - Frame-12 deadlock may still block reference comparisons.
 
-4. Functional and diagnostic edits are not cleanly separated.
-- Hard to bisect regressions.
-- Hard to know what is required vs temporary.
+4. **Dirty submodules** — 5 submodules with local modifications.
+   - Low-risk compiler/build fixes but increase integration complexity.
 
-5. A few quality issues should be cleaned as part of stabilization.
-- `src/xenia/app/xenia_headless_main.cc:265` always returns `EXIT_SUCCESS` from `main`.
-- `src/xenia/app/xenia_headless_main.cc:73` defines `headless_async_draws` but it is currently unused.
-- `src/xenia/gpu/command_processor.cc:34` has duplicated `DECLARE_string(dump_frames_path)`.
+### Resolved risks (from previous audit)
+
+- ~~Deadlock diagnosis code mixed into signal handler~~ — FIXED: `backtrace()` removed
+- ~~Hot-path logging in timing-sensitive paths~~ — FIXED: gated behind cvars
+- ~~Quality issues (EXIT_SUCCESS, duplicate declarations)~~ — FIXED
+- ~~Deferred draws produce B=0x3F everywhere~~ — FIXED: cache invalidation
 
 ## Roadmap (Priority Order)
 
@@ -408,7 +401,7 @@ Suggested run command template:
 ```bash
 mkdir -p /tmp/dc3-exp/<ID>
 /home/free/code/milohax/xenia/build/bin/Linux/Checked/xenia-headless \
-  --target=/home/free/code/milohax/dc3-decomp/orig/373307D9/default.xex \
+  --target=/home/free/code/milohax/dc3-decomp/orig-assets/default.xex \
   --dump_frames_path=/tmp/dc3-exp/<ID>/ \
   --headless_capture_interval=100 \
   --headless_timeout_ms=120000 \
@@ -438,11 +431,11 @@ Artifacts to collect per experiment:
 4. Mark each current uncommitted change as `keep`, `gate`, or `drop`.
 5. Start splitting diagnostics from functional changes before adding new behavior.
 
-## Appendix: Current Git Snapshot Used For This Audit
+## Appendix: Current Git Snapshot
 
 - Branch: `headless-vulkan-linux`
-- Branch commit vs upstream: `6394d2a7f`
-- Committed delta: `61 files, +3328/-177`
-- Uncommitted delta: `28 files, +961/-366`
-- Untracked: `docs/DC3_NUI_ROADMAP.md`
+- HEAD: `e024ff31a`
+- Commits ahead of upstream: 2
+- Uncommitted source changes: none
 - Dirty submodules: `cxxopts`, `date`, `fmt`, `imgui`, `premake-core`
+- Game assets: `/home/free/code/milohax/dc3-decomp/orig-assets/default.xex`
