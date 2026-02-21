@@ -36,6 +36,7 @@
 #include "xenia/ui/vulkan/vulkan_util.h"
 
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 
 DECLARE_string(dump_frames_path);
@@ -1514,10 +1515,18 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
       EndSubmission(true);
       AwaitAllQueueOperationsCompletion();
 
-      XELOGI("RequestSwapTexture: view={} {}x{} fmt={}",
-             swap_view != VK_NULL_HANDLE ? "valid" : "NULL",
-             width_scaled, height_scaled,
-             static_cast<uint32_t>(format));
+      // Log fetch constant details for debugging channel order issues.
+      {
+        const auto& regs = *register_file_;
+        auto fetch = regs.GetTextureFetch(0);
+        XELOGI(
+            "RequestSwapTexture: view={} {}x{} fmt={} "
+            "endian={} guest_swizzle=0x{:03X} host_swizzle=0x{:03X}",
+            swap_view != VK_NULL_HANDLE ? "valid" : "NULL", width_scaled,
+            height_scaled, static_cast<uint32_t>(format),
+            static_cast<uint32_t>(fetch.endianness), fetch.swizzle,
+            texture_cache_->GetLastSwapHostSwizzle());
+      }
       if (swap_view != VK_NULL_HANDLE) {
         VkImage swap_image = texture_cache_->GetLastSwapImage();
         if (swap_image != VK_NULL_HANDLE) {
@@ -1605,17 +1614,73 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
             const uint8_t* pixels =
                 static_cast<const uint8_t*>(readback_staging_mapping_);
             uint32_t total_pixels = width_scaled * height_scaled;
+
+            // Determine channel byte mapping from the VkImageView's host
+            // swizzle. The VkImage stores raw endian-swapped guest data in
+            // R8G8B8A8 layout. The VkImageView swizzle remaps channels for
+            // correct shader sampling, but vkCmdCopyImageToBuffer bypasses
+            // the view. We apply the same swizzle on the CPU side.
+            //
+            // Host swizzle is 4x 3-bit indices packed into 12 bits:
+            //   bits [2:0]  = output R reads from source component N
+            //   bits [5:3]  = output G reads from source component N
+            //   bits [8:6]  = output B reads from source component N
+            //   bits [11:9] = output A reads from source component N
+            // where source component 0=R(byte0), 1=G(byte1), 2=B(byte2),
+            // 3=A(byte3), 4=0, 5=1
+            uint32_t host_swizzle =
+                texture_cache_->GetLastSwapHostSwizzle();
+            uint32_t r_src = (host_swizzle >> 0) & 7;
+            uint32_t g_src = (host_swizzle >> 3) & 7;
+            uint32_t b_src = (host_swizzle >> 6) & 7;
+
+            // Log the swizzle for debugging.
+            XELOGI(
+                "Frame {} readback: host_swizzle=0x{:03X} "
+                "R<-{} G<-{} B<-{} A<-{}",
+                headless_frame_count_, host_swizzle,
+                r_src, g_src, b_src, (host_swizzle >> 9) & 7);
+
+            // Build sRGB gamma correction lookup table.
+            // Converts linear-space values to sRGB for human-viewable output.
+            static uint8_t srgb_lut[256] = {};
+            static bool srgb_lut_built = false;
+            if (!srgb_lut_built) {
+              for (int i = 0; i < 256; i++) {
+                float linear = i / 255.0f;
+                float srgb;
+                if (linear <= 0.0031308f)
+                  srgb = linear * 12.92f;
+                else
+                  srgb = 1.055f * std::pow(linear, 1.0f / 2.4f) - 0.055f;
+                srgb_lut[i] = static_cast<uint8_t>(
+                    std::min(255.0f, srgb * 255.0f + 0.5f));
+              }
+              srgb_lut_built = true;
+            }
+
+            // Helper to read a channel value from the pixel, handling swizzle
+            // constants (4=0, 5=1).
+            auto read_channel = [&pixels](uint32_t pi,
+                                          uint32_t src) -> uint8_t {
+              if (src <= 3) return pixels[pi + src];
+              if (src == 4) return 0;    // constant 0
+              return 255;                // constant 1
+            };
+
             uint32_t nonzero = 0;
             for (uint32_t i = 0; i < total_pixels * 4; i += 4) {
-              if (pixels[i] || pixels[i + 1] || pixels[i + 2]) {
-                nonzero++;
-              }
+              uint8_t r = read_channel(i, r_src);
+              uint8_t g = read_channel(i, g_src);
+              uint8_t b = read_channel(i, b_src);
+              if (r || g || b) nonzero++;
             }
             XELOGI("Frame {}: {}x{} fmt={} {}/{} non-zero pixels ({}%)",
                    headless_frame_count_, width_scaled, height_scaled,
                    static_cast<int>(format), nonzero, total_pixels,
                    total_pixels ? nonzero * 100 / total_pixels : 0);
 
+            // Write gamma-corrected PPM with swizzle-corrected channels.
             char ppm_path[512];
             std::snprintf(ppm_path, sizeof(ppm_path), "%s/frame_%04u.ppm",
                           cvars::dump_frames_path.c_str(),
@@ -1625,10 +1690,30 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
               std::fprintf(f, "P6\n%u %u\n255\n", width_scaled,
                            height_scaled);
               for (uint32_t pi = 0; pi < total_pixels * 4; pi += 4) {
-                std::fwrite(pixels + pi, 1, 3, f);
+                uint8_t rgb[3] = {
+                    srgb_lut[read_channel(pi, r_src)],
+                    srgb_lut[read_channel(pi, g_src)],
+                    srgb_lut[read_channel(pi, b_src)],
+                };
+                std::fwrite(rgb, 1, 3, f);
               }
               std::fclose(f);
               XELOGI("Saved {}", ppm_path);
+            }
+
+            // Also save raw (no gamma, no swizzle) PPM for comparison.
+            std::snprintf(ppm_path, sizeof(ppm_path),
+                          "%s/frame_%04u_raw.ppm",
+                          cvars::dump_frames_path.c_str(),
+                          headless_frame_count_);
+            f = std::fopen(ppm_path, "wb");
+            if (f) {
+              std::fprintf(f, "P6\n%u %u\n255\n", width_scaled,
+                           height_scaled);
+              for (uint32_t pi = 0; pi < total_pixels * 4; pi += 4) {
+                std::fwrite(pixels + pi, 1, 3, f);
+              }
+              std::fclose(f);
             }
 
             auto p1_end = std::chrono::steady_clock::now();
@@ -5111,6 +5196,14 @@ void VulkanCommandProcessor::FlushDeferredDraws() {
               RegisterFile::kRegisterCount * sizeof(uint32_t));
   active_vertex_shader_ = saved_vs;
   active_pixel_shader_ = saved_ps;
+
+  // Invalidate caches after the final register restore — the memcpy bypasses
+  // WriteRegister() side effects. Without this, RequestSwapTexture() may use
+  // stale texture bindings from the last deferred draw's register state.
+  current_constant_buffers_up_to_date_ = 0;
+  if (texture_cache_) {
+    texture_cache_->ResetTextureBindingsInSync();
+  }
 
   // Re-enable deferred mode and restore memory watches.
   shared_memory_->set_suppress_memory_watches(false);

@@ -47,6 +47,15 @@ uint32_t xeXamEnumerate(uint32_t handle, uint32_t flags, lpvoid_t buffer_ptr,
       result = e->WriteItems(buffer_ptr.guest_address(),
                              buffer_ptr.as<uint8_t*>(), &item_count);
     }
+    if (result == X_ERROR_NO_MORE_FILES) {
+      // Enumeration complete with no more items. On real Xbox 360, the
+      // overlapped completes with SUCCESS and count=0 rather than
+      // propagating ERROR_NO_MORE_FILES (0x12) through XGetOverlappedResult.
+      // Games like Dance Central 3 only handle result codes 0 and 0x65B.
+      extended_error = 0;
+      length = 0;
+      return X_ERROR_SUCCESS;
+    }
     extended_error = X_HRESULT_FROM_WIN32(result);
     length = item_count;
     return result;

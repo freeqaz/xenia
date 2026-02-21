@@ -63,6 +63,18 @@ DEFINE_bool(headless_verbose_diagnostics, false,
             "Enable verbose per-draw and capture diagnostics in headless mode.",
             "GPU");
 
+DEFINE_bool(stub_nui_functions, false,
+            "Stub NUI (Kinect SDK) functions in guest memory for DC3 debug "
+            "builds. Writes PPC return-S_OK stubs at known NUI function "
+            "addresses so the game boots without Kinect hardware.",
+            "Headless");
+
+DEFINE_bool(fake_kinect_data, false,
+            "Provide synthetic Kinect skeleton data (T-pose) for DC3. "
+            "Requires --stub_nui_functions. Enables game to detect a "
+            "player and progress past the Kinect player detection screen.",
+            "Headless");
+
 DEFINE_int32(query_occlusion_fake_sample_count, 1000,
              "If set to -1 no sample counts are written, games may hang. Else, "
              "the sample count of every tile will be incremented on every "
