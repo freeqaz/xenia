@@ -31,6 +31,9 @@ DECLARE_bool(force_all_draws);
 
 DECLARE_bool(headless_verbose_diagnostics);
 
+DECLARE_bool(stub_nui_functions);
+DECLARE_bool(fake_kinect_data);
+
 DECLARE_int32(query_occlusion_fake_sample_count);
 
 #define XE_GPU_FINE_GRAINED_DRAW_SCOPES 1

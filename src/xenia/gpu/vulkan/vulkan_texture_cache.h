@@ -124,6 +124,10 @@ class VulkanTextureCache final : public TextureCache {
   // Returns the VkImage of the last texture returned by RequestSwapTexture.
   VkImage GetLastSwapImage() const { return last_swap_image_; }
 
+  // Returns the host swizzle applied by the VkImageView returned by the last
+  // RequestSwapTexture call. Used by headless readback to reorder channels.
+  uint32_t GetLastSwapHostSwizzle() const { return last_swap_host_swizzle_; }
+
  protected:
   bool IsSignedVersionSeparateForFormat(TextureKey key) const override;
   uint32_t GetHostFormatSwizzle(TextureKey key) const override;
@@ -320,6 +324,7 @@ class VulkanTextureCache final : public TextureCache {
   VkPipelineStageFlags guest_shader_pipeline_stages_;
 
   VkImage last_swap_image_ = VK_NULL_HANDLE;
+  uint32_t last_swap_host_swizzle_ = 0;
 
   // Using the Vulkan Memory Allocator because texture count in games is
   // naturally pretty much unbounded, while Vulkan implementations, especially

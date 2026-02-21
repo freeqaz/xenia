@@ -11,6 +11,7 @@
 #include <dlfcn.h>
 #include <stdlib.h>
 
+#include <cstdio>
 #include <cstring>
 
 #include "xenia/base/assert.h"
@@ -32,6 +33,33 @@ void LaunchWebBrowser(const std::string_view url) {
 void LaunchFileExplorer(const std::filesystem::path& path) { assert_always(); }
 
 void ShowSimpleMessageBox(SimpleMessageBoxType type, std::string_view message) {
+  // Check if a display server is available. Without X11 or Wayland, SDL2
+  // message boxes will fail (e.g. headless mode, SSH, no GUI).
+  const char* x11_display = std::getenv("DISPLAY");
+  const char* wayland_display = std::getenv("WAYLAND_DISPLAY");
+  bool has_display = (x11_display && x11_display[0] != '\0') ||
+                     (wayland_display && wayland_display[0] != '\0');
+
+  if (!has_display) {
+    // Fall back to stderr when no display is available.
+    const char* prefix;
+    switch (type) {
+      default:
+      case SimpleMessageBoxType::Help:
+        prefix = "[Xenia Help] ";
+        break;
+      case SimpleMessageBoxType::Warning:
+        prefix = "[Xenia Warning] ";
+        break;
+      case SimpleMessageBoxType::Error:
+        prefix = "[Xenia Error] ";
+        break;
+    }
+    std::fprintf(stderr, "%s%.*s\n", prefix, static_cast<int>(message.size()),
+                 message.data());
+    return;
+  }
+
   void* libsdl2 = dlopen("libSDL2.so", RTLD_LAZY | RTLD_LOCAL);
   assert_not_null(libsdl2);
   if (libsdl2) {

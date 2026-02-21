@@ -889,9 +889,9 @@ VkImageView VulkanTextureCache::RequestSwapTexture(
   if (!texture) {
     return VK_NULL_HANDLE;
   }
-  VkImageView texture_view = texture->GetView(
-      false, GuestToHostSwizzle(fetch.swizzle, GetHostFormatSwizzle(key)),
-      false);
+  uint32_t host_swizzle =
+      GuestToHostSwizzle(fetch.swizzle, GetHostFormatSwizzle(key));
+  VkImageView texture_view = texture->GetView(false, host_swizzle, false);
   if (texture_view == VK_NULL_HANDLE) {
     return VK_NULL_HANDLE;
   }
@@ -923,6 +923,7 @@ VkImageView VulkanTextureCache::RequestSwapTexture(
       key.GetHeight() * (key.scaled_resolve ? draw_resolution_scale_y() : 1);
   format_out = key.format;
   last_swap_image_ = texture->image();
+  last_swap_host_swizzle_ = host_swizzle;
   return texture_view;
 }
 

@@ -431,6 +431,46 @@ Artifacts to collect per experiment:
 4. Mark each current uncommitted change as `keep`, `gate`, or `drop`.
 5. Start splitting diagnostics from functional changes before adding new behavior.
 
+## debug.xex Findings and NuiInitialize Blocker (2026-02-20 Late Session)
+
+### Summary
+
+The debug.xex (DC3 debug build) halts early on `NuiInitialize` failure, while the retail default.xex continues past it. This means debug.xex cannot be used for runtime comparison without a NUI initialization shim or bypass.
+
+### Observations
+
+- **NuiInitialize returns error `0x8301000b`**: The Kinect/NUI subsystem fails to initialize (expected in emulation).
+- **Debug build treats this as fatal**: Shows a blue Milo debug console screen with "Program ended". The retail build logs the error but continues.
+- **52 captures collected**: All 52 frame captures from the debug.xex run show the identical crash/halt screen (blue Milo debug console).
+- **Build info visible on debug screen**: Build 120916, Plat: xbox, SystemConfig: config/ham_preinit_keep.dta
+
+### CLI Corrections Discovered
+
+The initial crash was not a packaging issue. The real problem was incorrect CLI flag names:
+- `--headless_timeout` does not exist; correct flag is `--headless_timeout_ms`
+- `--capture_start_frame` does not exist
+- XEX path must use `--target=` prefix, not positional argument
+
+Correct minimal invocation:
+```bash
+./xenia-headless --gpu=vulkan --headless_timeout_ms=90000 \
+    --dump_frames_path=/tmp/frames/ --headless_capture_interval=100 \
+    --target=/path/to/default.xex
+```
+
+### SDL2-compat Crash Path
+
+On Arch Linux, `sdl2` has been replaced by `sdl2-compat` (an SDL3 shim). When Xenia attempts to display error dialogs, the path SDL2-compat -> SDL3 -> zenity crashes if zenity is not installed. Installing `zenity` prevents this crash. Not required for normal headless operation where no error dialogs are triggered.
+
+### Impact on Headless Testing
+
+- **default.xex (retail)**: Remains the primary test target. DC logo boot animation renders correctly with deferred draw cache fix.
+- **debug.xex**: Blocked until NuiInitialize is shimmed to return success, or the debug build's error handling is bypassed. The current `XamShowNuiSigninUI` stub is not sufficient because `NuiInitialize` itself fails before sign-in is attempted.
+
+### Potential Fix
+
+The `NuiInitialize` import (from `xam.xex`) needs to return success (`0x00000000`) instead of the current failure. This is in the XAM NUI shim layer (`src/xenia/kernel/xam/xam_nui.cc`). The existing `NuiInitialize` stub may be returning an error status or not handling the debug build's specific initialization sequence.
+
 ## Appendix: Current Git Snapshot
 
 - Branch: `headless-vulkan-linux`
