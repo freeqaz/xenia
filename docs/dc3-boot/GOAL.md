@@ -117,8 +117,10 @@ rm -f /dev/shm/xenia_* 2>/dev/null
 Current status:
 - Implemented `tools/dc3_runtime_parity_gate.sh`
 - Validated on 2026-02-23 in both `hybrid` and `strict`
+- Supports explicit per-run manifest/symbol overrides (`DC3_{ORIG,DECOMP}_{MANIFEST_PATH,SYMBOL_MAP_PATH}`)
 - Hard checks currently enforce NUI/XBC override counts + strict signature coverage
 - Higher-level parity diffs (hot loops / unresolved patterns / milestones) are warn-only for now
+ - `tools/dc3_runtime_telemetry_diff.py` provides ranked JSONL diffs (override hits, unresolved stubs, hot-loop PCs)
 
 ### 3. Promote manifest as the canonical Xenia input from `dc3-decomp`
 

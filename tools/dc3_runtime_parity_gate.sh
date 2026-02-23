@@ -11,6 +11,14 @@ TMPDIR_GATE="${DC3_PARITY_TMPDIR:-/tmp/xenia_dc3_parity_gate}"
 PARITY_MODE="${DC3_PARITY_MODE:-hybrid}"
 REQUIRE_EQUAL_MILESTONES="${DC3_PARITY_REQUIRE_EQUAL_MILESTONES:-0}"
 FAIL_ON_NEW_HOT_LOOP="${DC3_PARITY_FAIL_ON_NEW_HOT_LOOP:-0}"
+COMMON_MANIFEST_PATH="${DC3_PARITY_MANIFEST_PATH:-}"
+COMMON_SYMBOL_MAP_PATH="${DC3_PARITY_SYMBOL_MAP_PATH:-}"
+ORIG_MANIFEST_PATH="${DC3_ORIG_MANIFEST_PATH:-$COMMON_MANIFEST_PATH}"
+DECOMP_MANIFEST_PATH="${DC3_DECOMP_MANIFEST_PATH:-$COMMON_MANIFEST_PATH}"
+ORIG_SYMBOL_MAP_PATH="${DC3_ORIG_SYMBOL_MAP_PATH:-$COMMON_SYMBOL_MAP_PATH}"
+DECOMP_SYMBOL_MAP_PATH="${DC3_DECOMP_SYMBOL_MAP_PATH:-$COMMON_SYMBOL_MAP_PATH}"
+TELEMETRY_DIFF_TOOL="${DC3_PARITY_TELEMETRY_DIFF_TOOL:-$XENIA_DIR/tools/dc3_runtime_telemetry_diff.py}"
+TELEMETRY_DIFF_TOP="${DC3_PARITY_TELEMETRY_DIFF_TOP:-15}"
 
 mkdir -p "$TMPDIR_GATE"
 
@@ -24,7 +32,7 @@ if [[ "$PARITY_MODE" != "hybrid" && "$PARITY_MODE" != "strict" ]]; then
 fi
 
 run_case() {
-  local case_name="$1" xex="$2" expected_total="$3" expected_layout="$4"
+  local case_name="$1" xex="$2" expected_total="$3" expected_layout="$4" manifest_path="$5" symbol_map_path="$6"
   local logfile="$TMPDIR_GATE/${case_name}.log"
   local telefile="$TMPDIR_GATE/${case_name}.jsonl"
   rm -f "$logfile" "$telefile"
@@ -44,6 +52,13 @@ run_case() {
       --dc3_nui_patch_manifest_path=/tmp/does_not_exist_manifest.json
       --dc3_nui_symbol_map_path=/tmp/does_not_exist_symbols.txt
     )
+  else
+    if [[ -n "$manifest_path" ]]; then
+      args+=(--dc3_nui_patch_manifest_path="$manifest_path")
+    fi
+    if [[ -n "$symbol_map_path" ]]; then
+      args+=(--dc3_nui_symbol_map_path="$symbol_map_path")
+    fi
   fi
 
   echo "== $case_name ($PARITY_MODE) =="
@@ -158,8 +173,8 @@ print(f"PASS {case_name}: mode={expected_mode} layout={layout} total={patch_tota
 PY
 }
 
-run_case orig "$ORIG_XEX" 59 original
-run_case decomp "$DECOMP_XEX" 85 decomp
+run_case orig "$ORIG_XEX" 59 original "$ORIG_MANIFEST_PATH" "$ORIG_SYMBOL_MAP_PATH"
+run_case decomp "$DECOMP_XEX" 85 decomp "$DECOMP_MANIFEST_PATH" "$DECOMP_SYMBOL_MAP_PATH"
 
 python3 - "$TMPDIR_GATE/orig.jsonl" "$TMPDIR_GATE/decomp.jsonl" "$REQUIRE_EQUAL_MILESTONES" "$FAIL_ON_NEW_HOT_LOOP" <<'PY'
 import json, sys
@@ -214,5 +229,15 @@ print("  decomp milestones:", dec_m)
 print("  orig unresolved unique:", len(orig_un))
 print("  decomp unresolved unique:", len(dec_un))
 PY
+
+if [[ -f "$TMPDIR_GATE/orig.jsonl" && -f "$TMPDIR_GATE/decomp.jsonl" ]]; then
+  if [[ -x "$TELEMETRY_DIFF_TOOL" || "$TELEMETRY_DIFF_TOOL" == *.py ]]; then
+    echo "Telemetry diff (top=$TELEMETRY_DIFF_TOP):"
+    python3 "$TELEMETRY_DIFF_TOOL" \
+      --orig "$TMPDIR_GATE/orig.jsonl" \
+      --decomp "$TMPDIR_GATE/decomp.jsonl" \
+      --top "$TELEMETRY_DIFF_TOP" || true
+  fi
+fi
 
 echo "DC3 runtime parity gate passed for mode=$PARITY_MODE. Artifacts: $TMPDIR_GATE"

@@ -57,6 +57,7 @@ Items are ordered by priority. Check off as completed. Add new items each iterat
   - Scripted milestone/log comparison beyond NUI cutover gate
   - Track boot progression, recurring loop PCs, unresolved/no-op call patterns, and override hit counts
   - Implemented `tools/dc3_runtime_parity_gate.sh` (`hybrid` + `strict`)
+  - Added explicit per-run manifest/symbol override env vars for clean-worktree parity validation
   - Goal: a stable regression signal for `dc3-decomp` / `jeff` changes
 
 - [x] **Emit structured runtime telemetry (JSONL) for DC3 bring-up** [xenia] ✓ Session 13
@@ -65,6 +66,11 @@ Items are ordered by priority. Check off as completed. Add new items each iterat
   - hot loop PCs / repeated callsites
   - Implemented cvar-gated JSONL telemetry (`dc3_runtime_telemetry_*`)
   - Use for original vs decomp diffing and prioritization
+
+- [x] **Add telemetry diff ranking tool (JSONL -> blockers)** [xenia] ✓ Session 15
+  - Implemented `tools/dc3_runtime_telemetry_diff.py`
+  - Ranks decomp-vs-original deltas for override hits, unresolved stubs, and hot-loop PCs
+  - Tolerates partial/crashed runs (missing `dc3_summary`) and still emits useful diffs
 
 ### Tier 2: Reduce unresolved symbols (high leverage)
 
@@ -198,6 +204,7 @@ Items are ordered by priority. Check off as completed. Add new items each iterat
 | 2026-02-23 | 2 | Pushed merged Xenia branch `headless-vulkan-linux` to `origin` |
 | 2026-02-23 | 2 | Added `tools/dc3_runtime_parity_gate.sh` (hybrid + strict original/decomp parity checks) |
 | 2026-02-23 | 2 | Added DC3 JSONL runtime telemetry (override/unresolved/hot-loop/milestone/summary events) |
+| 2026-02-23 | 2 | Added `tools/dc3_runtime_telemetry_diff.py` and parity-gate per-run manifest/symbol overrides |
 | 2026-02-23 | 2 | Added initial `HACK_RETIREMENT_MATRIX.md` with active workaround inventory + triggers |
 | 2026-02-23 | 2 | Extracted stable non-NUI DC3 hack-pack module (`dc3_hack_pack`) for CRT/imports/debug/decomp stopgaps |
 | 2026-02-23 | 2 | Caught and reverted two extraction semantic drifts (full-image writable + `.text` zero-word `blr` patching) via cutover/parity validation |
