@@ -226,6 +226,11 @@ class ExceptionHandler {
 
   // Uninstalls a previously-installed exception handler.
   static void Uninstall(Handler fn, void* data);
+
+  // Diagnostic counters for tracking fault loops.
+  static uint64_t GetSigsegvCount();
+  static uint64_t GetLastFaultAddress();
+  static uint64_t GetLastFaultRip();
 };
 
 }  // namespace xe

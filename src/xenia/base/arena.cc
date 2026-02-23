@@ -63,9 +63,9 @@ void* Arena::Alloc(size_t size, size_t align) {
         size + get_padding() + 4_KiB) {
       Chunk* next = active_chunk_->next;
       if (!next) {
-        assert_true(size + get_padding() < chunk_size_,
-                    "need to support larger chunks");
-        next = new Chunk(chunk_size_);
+        size_t needed = size + get_padding();
+        size_t alloc_size = (needed < chunk_size_) ? chunk_size_ : needed + 4_KiB;
+        next = new Chunk(alloc_size);
         active_chunk_->next = next;
       }
       next->offset = 0;

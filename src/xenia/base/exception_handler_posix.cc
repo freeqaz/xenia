@@ -13,6 +13,8 @@
 #include <ucontext.h>
 #include <cstdint>
 
+#include <atomic>
+
 #include "xenia/base/assert.h"
 #include "xenia/base/host_thread_context.h"
 #include "xenia/base/logging.h"
@@ -20,6 +22,11 @@
 #include "xenia/base/platform.h"
 
 namespace xe {
+
+// Diagnostic counters for fault loop detection.
+static std::atomic<uint64_t> sigsegv_count_{0};
+static std::atomic<uint64_t> last_fault_address_{0};
+static std::atomic<uint64_t> last_fault_rip_{0};
 
 bool signal_handlers_installed_ = false;
 struct sigaction original_sigill_handler_;
@@ -152,6 +159,13 @@ static void ExceptionHandlerCallback(int signal_number, siginfo_t* signal_info,
       access_violation_operation =
           Exception::AccessViolationOperation::kUnknown;
 #endif  // XE_ARCH
+      sigsegv_count_.fetch_add(1, std::memory_order_relaxed);
+      last_fault_address_.store(reinterpret_cast<uint64_t>(signal_info->si_addr),
+                                std::memory_order_relaxed);
+#if XE_ARCH_AMD64
+      last_fault_rip_.store(uint64_t(mcontext.gregs[REG_RIP]),
+                            std::memory_order_relaxed);
+#endif
       ex.InitializeAccessViolation(
           &thread_context, reinterpret_cast<uint64_t>(signal_info->si_addr),
           access_violation_operation);
@@ -160,8 +174,10 @@ static void ExceptionHandlerCallback(int signal_number, siginfo_t* signal_info,
       assert_unhandled_case(signal_number);
   }
 
+  bool handled = false;
   for (size_t i = 0; i < xe::countof(handlers_) && handlers_[i].first; ++i) {
     if (handlers_[i].first(&ex, handlers_[i].second)) {
+      handled = true;
       // Exception handled.
 #if XE_ARCH_AMD64
       mcontext.gregs[REG_RIP] = greg_t(thread_context.rip);
@@ -220,6 +236,17 @@ static void ExceptionHandlerCallback(int signal_number, siginfo_t* signal_info,
       }
 #endif  // XE_ARCH
       return;
+    }
+  }
+
+  if (!handled) {
+    // No handler handled this exception. Restore the original signal handler
+    // and return — the faulting instruction will re-execute, and the original
+    // handler (or SIG_DFL) will produce a proper crash/core dump.
+    if (signal_number == SIGSEGV) {
+      sigaction(SIGSEGV, &original_sigsegv_handler_, nullptr);
+    } else if (signal_number == SIGILL) {
+      sigaction(SIGILL, &original_sigill_handler_, nullptr);
     }
   }
 }
@@ -281,6 +308,18 @@ void ExceptionHandler::Uninstall(Handler fn, void* data) {
       signal_handlers_installed_ = false;
     }
   }
+}
+
+uint64_t ExceptionHandler::GetSigsegvCount() {
+  return sigsegv_count_.load(std::memory_order_relaxed);
+}
+
+uint64_t ExceptionHandler::GetLastFaultAddress() {
+  return last_fault_address_.load(std::memory_order_relaxed);
+}
+
+uint64_t ExceptionHandler::GetLastFaultRip() {
+  return last_fault_rip_.load(std::memory_order_relaxed);
 }
 
 }  // namespace xe

@@ -340,9 +340,37 @@ dword_result_t KeDelayExecutionThread_entry(dword_t processor_mode,
       thread && thread->thread_id() == 6) {
     static uint32_t main_delay_count = 0;
     main_delay_count++;
-    if (main_delay_count <= 10 || (main_delay_count % 1000) == 0) {
-      XELOGI("MainThread KeDelay #{} interval={}", main_delay_count,
-             (int64_t)*interval_ptr);
+    if (main_delay_count <= 3) {
+      uint32_t guest_lr = 0;
+      uint32_t guest_sp = 0;
+      auto* ctx = thread->thread_state()->context();
+      if (ctx) {
+        guest_lr = static_cast<uint32_t>(ctx->lr);
+        guest_sp = static_cast<uint32_t>(ctx->r[1]);
+      }
+      XELOGI("MainThread KeDelay #{} interval={} guest_lr={:08X} guest_sp={:08X}",
+             main_delay_count, (int64_t)*interval_ptr, guest_lr, guest_sp);
+      // Walk guest stack frames to find the actual caller chain
+      // Xbox 360 ABI: __savegprlr saves LR at (caller_sp - 8)
+      // After stwu, back_chain = caller_sp, so saved LR = back_chain - 8
+      auto* memory = kernel_state()->memory();
+      if (memory && guest_sp) {
+        uint32_t sp = guest_sp;
+        for (int frame = 0; frame < 12 && sp != 0 && sp > 0x70000000; frame++) {
+          uint32_t back_chain = xe::load_and_swap<uint32_t>(
+              memory->TranslateVirtual<uint32_t*>(sp));
+          uint32_t lr_at_bc_minus8 = 0;
+          if (back_chain > 0x70000000 && back_chain < 0x80000000) {
+            lr_at_bc_minus8 = xe::load_and_swap<uint32_t>(
+                memory->TranslateVirtual<uint32_t*>(back_chain - 8));
+          }
+          XELOGI("  frame[{}] sp={:08X} back={:08X} saved_lr={:08X}",
+                 frame, sp, back_chain, lr_at_bc_minus8);
+          if (back_chain == 0 || back_chain == 0xBEBEBEBE ||
+              back_chain <= sp) break;
+          sp = back_chain;
+        }
+      }
     }
   }
 
@@ -887,10 +915,13 @@ dword_result_t NtWaitForSingleObjectEx_entry(dword_t object_handle,
       main_wait_count++;
       int64_t timeout_val = timeout_ptr ? (int64_t)*timeout_ptr : -999;
       if (main_wait_count <= 20 || (main_wait_count % 500) == 0) {
-        XELOGI("MainThread NtWait #{} handle=0x{:X} timeout={} obj={} type={}",
+        uint32_t guest_lr = 0;
+        auto* ctx = thread->thread_state()->context();
+        if (ctx) guest_lr = static_cast<uint32_t>(ctx->lr);
+        XELOGI("MainThread NtWait #{} handle=0x{:X} timeout={} obj={} type={} guest_lr={:08X}",
                main_wait_count, (uint32_t)object_handle, timeout_val,
                (void*)object.get(),
-               object ? (int)object->type() : -1);
+               object ? (int)object->type() : -1, guest_lr);
       }
     }
   }

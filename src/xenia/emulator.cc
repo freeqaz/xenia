@@ -98,20 +98,16 @@ DEFINE_string(dc3_crt_skip_indices, "",
               "DC3");
 DEFINE_bool(dc3_crt_skip_nui, true,
             "DC3: auto-nullify NUI/Kinect SDK CRT constructors (indices "
-            "69,75,98-340). These call unresolved internal NUI functions that "
-            "corrupt the heap. Set false to disable.",
+            "69,75,98-101,210-328). These call unresolved internal NUI "
+            "functions that corrupt the heap. Set false to disable.",
             "DC3");
 DEFINE_bool(dc3_guest_overrides, true,
             "DC3: use guest extern overrides for eligible simple NUI/XBC "
             "stub-return functions (default cutover path; skips byte patching "
             "for registered entries; preserves fake_kinect_data "
-            "NuiSkeletonGetNextFrame path). Disable to force byte-patch "
-            "fallback/legacy validation.",
-            "DC3");
-DEFINE_bool(dc3_guest_override_poc, false,
-            "DC3: deprecated alias for --dc3_guest_overrides=true. Kept for "
-            "compatibility while the guest-override path is promoted from "
-            "POC to default.",
+            "NuiSkeletonGetNextFrame path). The legacy NUI/XBC byte-patch "
+            "fallback path has been removed; false logs a warning and is "
+            "ignored for this path.",
             "DC3");
 DEFINE_string(dc3_nui_patch_layout, "auto",
               "DC3: NUI/XBC patch address layout selector "
@@ -139,7 +135,7 @@ DEFINE_string(
     "DC3");
 DEFINE_string(dc3_nui_patch_resolver_mode, "hybrid",
               "DC3: NUI/XBC patch target resolver mode "
-              "(legacy|hybrid|strict). hybrid uses manifest/symbol/signature "
+              "(hybrid|strict). hybrid uses manifest/symbol/signature "
               "resolution before catalog fallback; strict disables raw "
               "catalog fallback.",
               "DC3");
@@ -748,6 +744,60 @@ bool Emulator::ExceptionCallback(Exception* ex) {
                addr == guest_pc ? "  <-- CRASH PC" : "");
       }
     }
+  }
+
+  // Walk the PPC stack to identify call chain (helps diagnose recursion).
+  {
+    uint32_t sp = static_cast<uint32_t>(context->r[1]);
+    XELOGE("==== STACK WALK (SP=0x{:08X}) ====", sp);
+    int frame = 0;
+    uint32_t last_lr = 0;
+    int repeat_count = 0;
+    for (; frame < 20000 && sp >= 0x70000000 && sp < 0x78000000; frame++) {
+      auto* host_ptr = memory_->TranslateVirtual<uint8_t*>(sp);
+      if (!host_ptr) break;
+      uint32_t back_chain = xe::load_and_swap<uint32_t>(host_ptr);
+      // Try multiple LR save locations:
+      uint32_t lr_sp4 = xe::load_and_swap<uint32_t>(host_ptr + 4);
+      uint32_t lr_sp8 = xe::load_and_swap<uint32_t>(host_ptr + 8);
+      // Also try __savegprlr convention: LR at back_chain - 8
+      uint32_t lr_bc8 = 0;
+      if (back_chain >= 0x70000000 && back_chain < 0x78000000) {
+        auto* bc_ptr = memory_->TranslateVirtual<uint8_t*>(back_chain - 8);
+        if (bc_ptr) lr_bc8 = xe::load_and_swap<uint32_t>(bc_ptr);
+      }
+      // Pick the most likely LR (first non-BEBEBEBE, non-zero, in code range)
+      uint32_t best_lr = 0;
+      if (lr_bc8 >= 0x82000000 && lr_bc8 < 0x8A000000) best_lr = lr_bc8;
+      else if (lr_sp4 >= 0x82000000 && lr_sp4 < 0x8A000000) best_lr = lr_sp4;
+      else if (lr_sp8 >= 0x82000000 && lr_sp8 < 0x8A000000) best_lr = lr_sp8;
+      else best_lr = lr_sp4;  // fallback
+      uint32_t frame_size = (back_chain > sp) ? (back_chain - sp) : 0;
+      // Log with sampling: first 30 frames, then every 100th, last 10
+      bool should_log = (frame < 30) || (frame % 100 == 0) ||
+                         (best_lr != last_lr && best_lr != 0xBEBEBEBE);
+      if (should_log) {
+        if (repeat_count > 0) {
+          XELOGE("  ... ({} identical frames skipped, lr=0x{:08X})",
+                 repeat_count, last_lr);
+          repeat_count = 0;
+        }
+        XELOGE("  [{}] sp=0x{:08X} sz={} lr_sp4=0x{:08X} lr_bc8=0x{:08X}",
+               frame, sp, frame_size, lr_sp4, lr_bc8);
+      } else {
+        repeat_count++;
+      }
+      last_lr = best_lr;
+      if (back_chain == 0 || back_chain == sp || back_chain < 0x70000000 ||
+          back_chain >= 0x78000000)
+        break;
+      sp = back_chain;
+    }
+    if (repeat_count > 0) {
+      XELOGE("  ... ({} identical frames skipped, lr=0x{:08X})",
+             repeat_count, last_lr);
+    }
+    XELOGE("==== END STACK WALK ({} frames) ====", frame);
   }
 
   // Display a dialog telling the user the guest has crashed.
@@ -1564,6 +1614,17 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
       }
     }
 
+    std::string resolver_mode = cvars::dc3_nui_patch_resolver_mode;
+    if (resolver_mode == "legacy") {
+      XELOGW("DC3: --dc3_nui_patch_resolver_mode=legacy has been removed; "
+             "using hybrid");
+      resolver_mode = "hybrid";
+    } else if (resolver_mode != "hybrid" && resolver_mode != "strict") {
+      XELOGW("DC3: Unknown --dc3_nui_patch_resolver_mode='{}'; using hybrid",
+             resolver_mode);
+      resolver_mode = "hybrid";
+    }
+
     std::vector<Dc3ResolvedNuiPatch> resolved_patches;
     resolved_patches.reserve(active_count);
     int resolved_by_manifest = 0;
@@ -1577,7 +1638,7 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
                                                               : nullptr,
                                                symbol_manifest ? &*symbol_manifest
                                                                : nullptr,
-                                               cvars::dc3_nui_patch_resolver_mode,
+                                               resolver_mode,
                                                memory_.get(),
                                                cvars::dc3_nui_enable_signature_resolver);
       if (!resolved.resolved && resolved.strict_rejected) {
@@ -1600,7 +1661,7 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
     XELOGI(
         "DC3: NUI resolver summary mode={} manifest_hits={} symbol_hits={} "
         "signature_hits={} catalog_hits={} strict_rejects={} total={}",
-        cvars::dc3_nui_patch_resolver_mode, resolved_by_manifest,
+        resolver_mode, resolved_by_manifest,
         resolved_by_symbol, resolved_by_signature,
         resolved_by_catalog, resolver_strict_rejects, active_count);
     if (cvars::dc3_nui_signature_trace) {
@@ -1647,13 +1708,8 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
       }
     }
 
-    const bool requested_guest_overrides =
-        cvars::dc3_guest_overrides || cvars::dc3_guest_override_poc;
+    const bool requested_guest_overrides = cvars::dc3_guest_overrides;
     const bool enable_guest_overrides = true;
-    if (cvars::dc3_guest_override_poc && !cvars::dc3_guest_overrides) {
-      XELOGW("DC3: --dc3_guest_override_poc is deprecated; use "
-             "--dc3_guest_overrides=true");
-    }
     if (!requested_guest_overrides) {
       XELOGW(
           "DC3: DC3 NUI/XBC legacy byte-patch path has been removed; "
@@ -1661,7 +1717,7 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
     }
     XELOGI("DC3: NUI/XBC apply path guest_overrides={} resolver_mode={} "
            "signature_resolver={}",
-           enable_guest_overrides ? 1 : 0, cvars::dc3_nui_patch_resolver_mode,
+           enable_guest_overrides ? 1 : 0, resolver_mode,
            cvars::dc3_nui_enable_signature_resolver ? 1 : 0);
 
     processor_->ClearGuestFunctionOverrides();
@@ -1701,7 +1757,7 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
         XELOGW(
             "DC3: Guest override registration skipped {:08X}: {} "
             "(unresolved target; resolver mode={})",
-            patch.address, patch.name, cvars::dc3_nui_patch_resolver_mode);
+            patch.address, patch.name, resolver_mode);
         override_register_unresolved++;
         override_register_failed++;
         continue;
@@ -2029,12 +2085,13 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
       }
     }
 
-    // The decomp XEX specifies a 256KB stack which overflows during CRT
-    // startup (_cinit runs many static initializers).  Increase to 1MB.
-    if (module->stack_size() < 1024 * 1024) {
-      XELOGI("DC3: Increasing main thread stack from {}KB to 1024KB",
+    // The decomp XEX specifies a 256KB stack which overflows during init.
+    // CRT constructors + App::App() + SystemPreInit + GetSystemLanguage
+    // chain consumes >1MB.  Use 4MB to be safe.
+    if (module->stack_size() < 4 * 1024 * 1024) {
+      XELOGI("DC3: Increasing main thread stack from {}KB to 4096KB",
              module->stack_size() / 1024);
-      module->set_stack_size(1024 * 1024);
+      module->set_stack_size(4 * 1024 * 1024);
     }
 
     // DC3 decomp workaround: make header pages writable.
@@ -2044,13 +2101,17 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
     // all original symbols.  With /FORCE, unresolved symbols resolve to
     // address 0 = 0x82000000 (image base / RODATA).  Making this region
     // writable prevents SIGSEGV when game code writes to these globals.
+    // Make RODATA pages writable for unresolved BSS globals.
+    // Unresolved symbols resolve to 0x82000000 (image base) via /FORCE.
+    // Only make the actual RODATA section writable (before .text start
+    // at 0x822E0000) to limit damage from String overflow corruption.
     {
       auto* heap = memory_->LookupHeap(0x82000000);
       if (heap) {
-        heap->Protect(0x82000000, 0x410000,
+        heap->Protect(0x82000000, 0x2E0000,
                       kMemoryProtectRead | kMemoryProtectWrite);
-        XELOGI("DC3: Made pages 0x82000000-0x82410000 writable "
-               "(workaround for unresolved BSS globals at image base)");
+        XELOGI("DC3: Made pages 0x82000000-0x822E0000 writable "
+               "(RODATA only — workaround for unresolved BSS globals)");
       }
     }
 
@@ -2092,6 +2153,131 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
         xe::store_and_swap<uint32_t>(mem + 4, 0x4E800020);  // blr
         XELOGI("DC3: Stubbed {} at {:08X} (li r3,0; blr)", func.name,
                func.address);
+      }
+    }
+
+    // DC3 decomp workaround: stub Debug::Fail to prevent infinite loop.
+    //
+    // The game's Debug::Fail assertion handler (Debug.obj) iterates a
+    // linked list of notification callbacks at offset 0x20 of a global
+    // object.  In the decomp build, this callback list has garbage
+    // function pointers (0x38600000 = PPC `li r3,0`, 0x00000000 = null).
+    // Our JIT no-op stubs handle these without crashing, but the loop
+    // never terminates because the list sentinel comparison fails.
+    //
+    // Fix: Stub Debug::Fail to return immediately.  The game will
+    // continue past assertions instead of getting stuck in the handler.
+    {
+      struct DebugFunc {
+        uint32_t address;
+        const char* name;
+        uint32_t return_value;  // r3 return value (default 0)
+      };
+      // Addresses from MAP public symbols
+      DebugFunc debug_funcs[] = {
+          {0x834B1DFC, "Debug::Fail", 0},
+          // --- XDK CRT runtime functions that recurse or crash ---
+          {0x838DEE34, "XGetLocale", 0},         // infinite recursion
+          {0x838DF03C, "XTLGetLanguage", 1},     // stack overflow (English=1)
+          {0x838DF0DC, "DebugBreak", 0},         // debug break trap
+          // --- System_Xbox.obj: locale functions with self-recursion ---
+          {0x8333D160, "GetSystemLanguage", 0},  // recurses ~16K times
+          {0x8333D620, "GetSystemLocale", 0},    // may also recurse
+          // --- DataNode.obj: Print loops infinitely on zero-page data ---
+          {0x830EDFF4, "DataNode::Print", 0},    // void; logging only
+          // --- HolmesClient.obj: comprehensive stub of all Holmes functions ---
+          // Network/server communication
+          {0x8310CD88, "HolmesClientInit", 0},
+          {0x8310D058, "HolmesClientReInit", 0},
+          {0x8310D0D8, "HolmesClientPoll", 0},
+          {0x8310C958, "HolmesClientPollInternal", 0},
+          {0x8310CA70, "HolmesClientInitOpcode", 0},
+          {0x8310BF14, "HolmesClientTerminate", 0},
+          // Query/state functions
+          {0x8310B284, "CanUseHolmes", 0},
+          {0x8310B2F8, "UsingHolmes", 0},
+          {0x8310B154, "ProtocolDebugString", 0},
+          {0x8310B314, "HolmesSetFileShare", 0},
+          {0x8310B36C, "HolmesFileHostName", 0},
+          {0x8310B378, "HolmesFileShare", 0},
+          {0x8310B384, "HolmesResolveIP", 0},
+          // Command/response (poll loops that block)
+          {0x8310B7E0, "BeginCmd", 0},
+          {0x8310B830, "CheckForResponse", 0},
+          {0x8310BA34, "WaitForAnyResponse", 0},
+          {0x8310C664, "EndCmd", 0},
+          {0x8310C76C, "CheckReads", 0},
+          {0x8310C850, "CheckInput", 0},
+          {0x8310C8F0, "WaitForResponse", 0},
+          {0x8310E13C, "WaitForReads", 0},
+          // Input polling
+          {0x8310C9B8, "HolmesClientPollKeyboard", 0},
+          {0x8310CA10, "HolmesClientPollJoypad", 0},
+          // File I/O through Holmes
+          {0x8310D53C, "HolmesClientOpen", 0},
+          {0x8310DA24, "HolmesClientRead", 0},
+          {0x8310DB5C, "HolmesClientReadDone", 0},
+          {0x8310D778, "HolmesClientWrite", 0},
+          {0x8310D8E8, "HolmesClientTruncate", 0},
+          {0x8310E1D8, "HolmesClientClose", 0},
+          {0x8310D244, "HolmesClientGetStat", 0},
+          {0x8310D150, "HolmesClientSysExec", 0},
+          {0x8310D35C, "HolmesClientMkDir", 0},
+          {0x8310D44C, "HolmesClientDelete", 0},
+          {0x8310E360, "HolmesClientEnumerate", 0},
+          // Cache/resource
+          {0x8310DC14, "HolmesClientCacheFile", 0},
+          {0x8310DDE4, "HolmesClientCacheResource", 0},
+          // Misc
+          {0x8310BBC0, "HolmesToLocal", 0},
+          {0x8310BCB0, "HolmesFlushStreamBuffer", 0},
+          {0x8310BD44, "DumpHolmesLog", 0},
+          {0x8310DF18, "HolmesClientStackTrace", 0},
+          {0x8310E048, "HolmesClientSendMessage", 0},
+      };
+      for (const auto& func : debug_funcs) {
+        auto* heap = memory_->LookupHeap(func.address);
+        if (!heap) continue;
+        auto* mem = memory_->TranslateVirtual<uint8_t*>(func.address);
+        if (!mem) continue;
+        uint32_t w0 = xe::load_and_swap<uint32_t>(mem);
+        if (w0 == 0x00000000) continue;  // skip if already zero-filled
+        heap->Protect(func.address, 8,
+                      kMemoryProtectRead | kMemoryProtectWrite);
+        // li r3, <return_value>: opcode = 0x38600000 | (value & 0xFFFF)
+        uint32_t li_instr = 0x38600000 | (func.return_value & 0xFFFF);
+        xe::store_and_swap<uint32_t>(mem + 0, li_instr);
+        xe::store_and_swap<uint32_t>(mem + 4, 0x4E800020);  // blr
+        XELOGI("DC3: Stubbed {} at {:08X} (li r3,{}; blr)", func.name,
+               func.address, func.return_value);
+      }
+    }
+
+    // DC3 decomp workaround: stub String::operator+=(const char*).
+    //
+    // String::operator+= (Str.obj @ 0x834BE118) does an unbounded byte
+    // copy: strlen(this->data) to find the end, then memcpy from source.
+    // When a String object is in uninitialized RODATA (from an unresolved
+    // BSS global at image base), this->data points into the PE image
+    // with no null terminator for megabytes.  The copy overwrites the
+    // entire XEX image with '.' characters, destroying all code+data.
+    //
+    // Fix: Stub with blr.  Returns *this (r3) unchanged = no-op append.
+    // This disables ALL string concatenation, but the game's init logic
+    // (kernel calls, KeDelay, NtWait) doesn't depend on String::operator+=.
+    {
+      const uint32_t kStringOpPlusEq = 0x834BE118;
+      auto* heap = memory_->LookupHeap(kStringOpPlusEq);
+      if (heap) {
+        auto* mem = memory_->TranslateVirtual<uint8_t*>(kStringOpPlusEq);
+        if (mem && xe::load_and_swap<uint32_t>(mem) != 0x00000000) {
+          heap->Protect(kStringOpPlusEq, 4,
+                        kMemoryProtectRead | kMemoryProtectWrite);
+          xe::store_and_swap<uint32_t>(mem, 0x4E800020);  // blr
+          XELOGI("DC3: Stubbed String::operator+=(const char*) at {:08X} "
+                 "(blr — prevents unbounded PE image corruption)",
+                 kStringOpPlusEq);
+        }
       }
     }
 
@@ -2187,35 +2373,31 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
           pe_thunks_stubbed + xex_markers_stubbed);
     }
 
-    // DC3 decomp: zero page with vtable stubs.
+    // DC3 decomp: zero page (all zeros).
     //
-    // The 26 unresolved CRT constructors leave critical globals with
-    // vtable pointers == NULL.  Game code loads vtable[N] from address
-    // 0+N, which faults if unmapped.  Rather than crash immediately,
-    // we map guest 0x0-0x10000 RW and populate it with pointers to a
-    // PPC stub (li r3, 0; blr) at offset 0x100.  This lets virtual
-    // calls through null vtables return 0 instead of crashing, so we
-    // can observe how far boot progresses.
+    // Unresolved CRT constructors leave critical globals with vtable
+    // pointers == NULL.  Game code loads vtable[N] from address 0+N,
+    // which faults if unmapped.  We map guest 0x0-0x10000 as readable
+    // zeros so that:
+    //   1. Reads from null object fields return 0
+    //   2. Null-checks in game code (cmplwi rX, 0) correctly detect null
+    //   3. Virtual dispatch through null vtable loads CTR=0, which
+    //      hits the CallIndirect bounds check → resolve thunk → no-op stub
     //
-    // TODO: Remove once dc3-decomp exports the 26 missing ??__E symbols.
+    // Previously used PPC stubs (li r3,0; blr) but those returned non-zero
+    // for field reads, defeating null-object checks and causing infinite
+    // loops in BinStream::Write and other functions.
     {
       auto* heap = memory_->LookupHeap(0x00000000);
       if (heap) {
         heap->Protect(0x00000000, 0x10000,
                       kMemoryProtectRead | kMemoryProtectWrite);
         auto* base = memory_->TranslateVirtual<uint8_t*>(0x00000000);
-        // Fill entire first page with "li r3, 0; blr" stub pairs.
-        // This serves dual purpose:
-        //   1. Direct calls to address 0 execute the stub (return 0)
-        //   2. Vtable reads at [0+N] get instruction words as "pointers"
-        //      which, when called, land in the same stub-filled page
-        // Every 8 bytes: li r3, 0 (0x38600000); blr (0x4E800020)
-        for (uint32_t off = 0; off < 0x1000; off += 8) {
-          xe::store_and_swap<uint32_t>(base + off + 0, 0x38600000);
-          xe::store_and_swap<uint32_t>(base + off + 4, 0x4E800020);
-        }
-        XELOGI("DC3: Mapped zero page 0x0-0x10000 with PPC stubs "
-               "(li r3,0; blr every 8 bytes — null vtable + null fptr safety)");
+        // Fill with zeros — MAP_ANONYMOUS should already be zero but
+        // be explicit since this might be over existing allocations.
+        std::memset(base, 0, 0x10000);
+        XELOGI("DC3: Mapped zero page 0x0-0x10000 (all zeros — null "
+               "object reads return 0, null checks work correctly)");
       }
 
       // Also map a guard region below virtual_membase to catch null pointer
@@ -2297,10 +2479,11 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
       };
       if (cvars::dc3_crt_skip_nui &&
           cvars::dc3_crt_skip_indices.empty()) {
-        // Default NUI skip: constructor #69 (heap corruption) + #75
-        // (NUI classifier) + NUI SDK range 98-340.
-        parse_skip_list("69,75,98-340");
-        XELOGI("DC3: Auto-NUI skip enabled (69,75,98-340)");
+        // NUI-only skip: only skip constructors from NUI/Kinect .obj files.
+        // Indices 102-209 and 329-340 are game engine globals that MUST run.
+        // See /tmp/dc3_crt_classification.txt for full analysis.
+        parse_skip_list("69,75,98-101,210-328");
+        XELOGI("DC3: Auto-NUI skip enabled (69,75,98-101,210-328)");
       }
       if (!cvars::dc3_crt_skip_indices.empty()) {
         parse_skip_list(cvars::dc3_crt_skip_indices);
