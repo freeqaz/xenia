@@ -1,6 +1,6 @@
 # TODO: DC3 Boot Progression
 
-*Last updated: 2026-02-23 (Iteration 2, post-NUI/XBC cutover + validation)*
+*Last updated: 2026-02-23 (Iteration 3, Thread 6 alive, tracing VdSwap blocker)*
 
 Items are ordered by priority. Check off as completed. Add new items each iteration.
 
@@ -21,35 +21,57 @@ Items are ordered by priority. Check off as completed. Add new items each iterat
 - [x] **Fix ResolveFunction null target assertion** ✓ Sessions 12-13
 - [x] **Fix Linux SysV ABI register ordering in CallIndirect** ✓ Sessions 12-13
 
-## Iteration 2: Break NUI Callback Loop + Advance Past Init
-
-### Tier 0: CRITICAL PATH — NUI Callback Dispatch Loop
+## Iteration 2: Break NUI Callback Loop + Advance Past Init — COMPLETE ✓
 
 - [x] **Cut over DC3 NUI/XBC stubs to resolver + guest overrides** [xenia] ✓ Session 11
-  - Default path now uses semantic resolution + guest extern overrides
-  - Legacy DC3 NUI/XBC byte-patch fallback removed after validation
-  - Strict signatures-only portability gate now covers original `59/59` and decomp `85/85`
+- [x] **Break NUI callback loop** ✓ Sessions 14-16 (JIT crash cascade + dcbf no-op + soft faults)
+- [x] **Investigate Thunk[0x83A00964] all zeros** — resolved, not a runtime blocker
+- [x] **Rebuild dc3-decomp for consistent MAP+XEX** ✓ Session 16
+- [x] **SIGBUS handler** ✓ Session 15 (exception_handler_posix.cc)
+- [x] **Soft fault handler for unmapped guest memory** ✓ Session 15 (mmio_handler.cc)
+- [x] **Guard page pre-mapping** ✓ Session 15 (dc3_hack_pack.cc — GPU writeback + top-of-address)
+- [x] **dcbf/dcbst → no-op in JIT** ✓ Session 16 (x64_seq_memory.cc — eliminated 1.4M faults)
+- [x] **clflush/prefetch fault handler** ✓ Session 16 (mmio_handler.cc — safety net)
 
-- [ ] **Break NUI callback dispatch loop at 0x834B1F40** [xenia]
-  - Game stuck calling garbage function pointers (0x38600000, 0x00000000) in linked list
-  - Callback list at object 0x83C16B40, offset 0x20
-  - Options: stub dispatch function, empty the list, or limit no-op stub call count
-  - Need to identify the dispatch function from MAP and decide best approach
+## Iteration 3: First Frame — Get VdSwap Called
 
-- [ ] **Investigate Thunk[0x83A00964] all zeros** [xenia]
-  - Import thunk at this address is all zeros instead of expected `sc 2; blr`
-  - May indicate import resolution failure for this specific thunk
+### Tier 0: CRITICAL PATH — Trace the Present/Swap failure
 
-### Tier 1: After Loop Is Broken
+- [ ] **Find D3DDevice_Present/Swap in MAP and check if called** [analysis]
+  - VdSwap is imported but never called during 40s run
+  - Need to find the D3D present path: D3DDevice_Present → ... → VdSwap
+  - Identify which function in the chain is missing or failing
 
-- [ ] **Run boot test and observe next crash/hang** [test]
-  - Once callback loop exits, what's the next blocker?
-  - Iterative: fix, run, observe, fix
+- [ ] **Investigate frequent `guest 0x00000000` execution** [analysis]
+  - Thread 6 JIT IP samples show frequent execution at address 0
+  - These are null function pointer calls (stubs)
+  - If a critical D3D function resolves to null, that breaks the present pipeline
 
-- [ ] **Rebuild dc3-decomp for consistent MAP+XEX** [dc3-decomp]
-  - Current MAP may not match XEX — need consistent pair for address lookups
-  - Update manifest (`xenia_dc3_patch_manifest.json`) from the rebuilt outputs
-  - Use `tools/dc3_extract_addresses.py` for non-NUI address diagnostics only
+- [ ] **Check D3D device initialization return values** [analysis]
+  - D3DDevice_Create and setup functions may return stub values (0/-1)
+  - Game may silently fail to create device, render targets, or swap chain
+  - Look for D3DDevice_Create* in MAP and check their implementations
+
+### Tier 1: Fix the Present path
+
+- [ ] **Implement or stub missing D3D present functions** [xenia/dc3-decomp]
+  - Once specific blocker identified, fix in the appropriate layer
+  - Stub to return success in Xenia, or add to dc3-decomp if game-side
+
+- [ ] **Verify first VdSwap call** [test]
+  - Run with NullGPU IssueSwap logging
+  - Confirm frame dimensions and frontbuffer pointer
+
+### Tier 2: Activate idle threads + game progression
+
+- [ ] **Investigate why Threads 1-5 never start** [analysis]
+  - All 5 created with LR=0, SP at initial stack top
+  - Likely worker threads waiting for signal from main thread
+  - May activate once rendering pipeline completes
+
+- [ ] **Check game state progression after first frame** [test]
+  - Does game advance to loading screen?
+  - Monitor for new function calls / thread activations
 
 ### Tier 1.5: Runtime Parity / Validation Infrastructure (high leverage)
 
@@ -171,11 +193,11 @@ Items are ordered by priority. Check off as completed. Add new items each iterat
 - ~~Fix JIT indirect call crashes~~ ✓ Sessions 12-13
 - **Game runs stably** ✓ Exit code 124 (timeout), zero crashes
 
-### Current Focus: NUI Callback Loop
-- Identify dispatch function at 0x834B1F40 from MAP
-- Stub or patch the callback list to break the loop
-- Re-test and observe next blocker
-- Keep NUI/XBC resolver `strict` mode green as a portability regression target while iterating
+### Current Focus: Trace VdSwap / Present Pipeline
+- Find D3DDevice_Present and D3DDevice_Swap in MAP
+- Check if they're in XDK .obj files or need decomp implementation
+- Trace call chain: Game::PostUpdate → ? → Present → VdSwap
+- Identify why the chain breaks (stub return, null function, missing state)
 
 ---
 
@@ -210,3 +232,10 @@ Items are ordered by priority. Check off as completed. Add new items each iterat
 | 2026-02-23 | 2 | Added parity-gate manifest/XEX preflight integrity checks and extracted `fake_kinect_data` skeleton injection into `ApplyDc3SkeletonHackPack` |
 | 2026-02-23 | 2 | Caught and reverted two extraction semantic drifts (full-image writable + `.text` zero-word `blr` patching) via cutover/parity validation |
 | 2026-02-23 | 2 | Hardened DC3 patch manifest contract: schema/version validation + manifest-fingerprint target gating in Xenia |
+| 2026-02-23 | 2 | **SIGBUS handler**: Added SIGBUS to exception_handler_posix.cc |
+| 2026-02-23 | 2 | **Soft fault handler**: Zero dest register + advance past faulting load (mmio_handler.cc) |
+| 2026-02-23 | 2 | **Guard page pre-mapping**: GPU writeback 0x7F000000 + top-of-address guard (dc3_hack_pack.cc) |
+| 2026-02-23 | 2 | **JIT crash cascade**: CALL null guard, CALL_INDIRECT constants, null machine_code, null indirection, PPC scanner bounds, HIR builder 1MB cap |
+| 2026-02-23 | 2 | **dcbf/dcbst → no-op in JIT**: Eliminated 1.4M clflush faults/run (x64_seq_memory.cc) |
+| 2026-02-23 | 2 | **clflush/prefetch fault handler**: Cache hint instruction detection in mmio_handler.cc |
+| 2026-02-23 | 2 | **THREAD 6 ALIVE**: Game executes Game::PostUpdate → D3D rendering, CS counts growing steadily |

@@ -1,6 +1,5 @@
 #include "xenia/dc3_hack_pack.h"
 
-#include <atomic>
 #include <cstring>
 #include <set>
 #include <string>
@@ -32,14 +31,13 @@ namespace {
 
 constexpr uint32_t kPpcLiR3_0 = 0x38600000;
 constexpr uint32_t kPpcBlr = 0x4E800020;
-static std::atomic<uint32_t> g_dc3_errno_guest_ptr{0};
+static uint32_t g_dc3_errno_guest_ptr = 0;
 
 void Dc3ErrnoExtern(cpu::ppc::PPCContext* ppc_context,
                     kernel::KernelState* kernel_state) {
   (void)kernel_state;
   if (!ppc_context) return;
-  uint32_t p = g_dc3_errno_guest_ptr.load(std::memory_order_relaxed);
-  ppc_context->r[3] = p;
+  ppc_context->r[3] = g_dc3_errno_guest_ptr;
 }
 
 Dc3HackApplyResult& GetResult(Dc3HackPackSummary& summary, Dc3HackCategory category) {
@@ -273,58 +271,17 @@ void ApplyDc3ImportAndRuntimeStopgaps(const Dc3HackContext& ctx,
     }
   }
 
-  // Decomp-only crash stopgap: invalid-SP entry into String::~String causes a
-  // write to 0xFFFFFFF8 at the function prologue (observed crash_guest=0x834BE09C).
-  // Stub the destructor so corrupted control flow doesn't take down Thread 6
-  // before we can advance further toward present/swap.
-  if (ctx.is_decomp_layout) {
-    if (PatchStub8(memory, 0x834BE094, 0, "String::~String (invalid SP stopgap)")) {
-      stopgap_result.applied++;
-    } else {
-      stopgap_result.skipped++;
-    }
-  }
-
-  // Decomp-only speech COM stopgap: first reproducible data-as-code / invalid-SP
-  // crash is reached from NUISPEECH CSpCfgInst::AddWordWithCustomProns
-  // (0x82B324A0, crash at +0x30 after D3D::UnlockResource calls into speech).
-  // Returning failure avoids dereferencing a corrupted callback/vtable-like
-  // object (`r3=0x83A89C78`, slots contain 0x4000xxxx import-ish pointers)
-  // while we continue tracing the underlying corruption source.
-  if (ctx.is_decomp_layout) {
-    if (PatchStub8(memory, 0x82B324A0, 0xFFFFFFFFu,
-                   "NUISPEECH::CSpCfgInst::AddWordWithCustomProns (stopgap)")) {
-      stopgap_result.applied++;
-    } else {
-      stopgap_result.skipped++;
-    }
-  }
-
-  // Decomp-only recursive error-reporting/assert loop stopgap. After stubbing
-  // CSpCfgInst::AddWordWithCustomProns, the next blocker becomes a repeating
-  // error formatting path (format string at r30 = "File: %s Line: %d Error: %s\\n")
-  // with stack-frame recursion through 0x83346A2C/0x83347624/0x8337CF00.
-  if (ctx.is_decomp_layout) {
-    if (PatchStub8(memory, 0x83346A2C, 0,
-                   "recursive error-report helper 0x83346A2C (stopgap)")) {
-      stopgap_result.applied++;
-    } else {
-      stopgap_result.skipped++;
-    }
-  }
-
-  // Decomp-only follow-on debug/assert helper crash after the recursive
-  // formatter stopgap: function at 0x834B1240 re-enters a local debug pipeline
-  // and dereferences a zeroed object (r3=0x83C16B20, all zeros) at +0x14.
-  // Stub to avoid the null-object assert path while continuing bring-up.
-  if (ctx.is_decomp_layout) {
-    if (PatchStub8(memory, 0x834B1240, 0,
-                   "debug/assert helper 0x834B1240 (null object stopgap)")) {
-      stopgap_result.applied++;
-    } else {
-      stopgap_result.skipped++;
-    }
-  }
+  // NOTE: The following decomp stopgaps (String::~String, NUISPEECH::CSpCfgInst,
+  // recursive error-report helper, debug/assert helper) had hardcoded addresses
+  // from a previous XEX build. After relinking (more units set to matching), these
+  // addresses now point to unrelated code. Disabled until addresses are refreshed
+  // from a new MAP file.
+  //
+  // Stale addresses (do NOT re-enable without verifying against current MAP):
+  //   0x834BE094 - was String::~String, now mid-function bl
+  //   0x82B324A0 - was NUISPEECH::CSpCfgInst, now zeroed out
+  //   0x83346A2C - was recursive error-report, now function epilogue
+  //   0x834B1240 - was debug/assert helper, now mid-function bctrl
 
   // Decomp-only CRT/TLS stopgap: guest `_errno` currently returns a bogus
   // handle-like pointer (observed `0x400006A8`) on the decomp build, which
@@ -334,14 +291,14 @@ void ApplyDc3ImportAndRuntimeStopgaps(const Dc3HackContext& ctx,
     const uint32_t kErrnoAddr = 0x835B2D68;
     auto* p_errno_fn = memory->TranslateVirtual<uint8_t*>(kErrnoAddr);
     if (p_errno_fn && xe::load_and_swap<uint32_t>(p_errno_fn) != 0x00000000) {
-      uint32_t errno_ptr = g_dc3_errno_guest_ptr.load(std::memory_order_relaxed);
+      uint32_t errno_ptr = g_dc3_errno_guest_ptr;
       if (!errno_ptr) {
         errno_ptr = memory->SystemHeapAlloc(4, 4);
         if (errno_ptr) {
           if (auto* p_errno = memory->TranslateVirtual<uint8_t*>(errno_ptr)) {
             xe::store_and_swap<uint32_t>(p_errno, 0);
           }
-          g_dc3_errno_guest_ptr.store(errno_ptr, std::memory_order_relaxed);
+          g_dc3_errno_guest_ptr = errno_ptr;
         }
       }
       if (errno_ptr) {
@@ -353,6 +310,49 @@ void ApplyDc3ImportAndRuntimeStopgaps(const Dc3HackContext& ctx,
       } else {
         XELOGW("DC3: Failed to allocate guest errno backing storage for decomp _errno override");
         stopgap_result.failed++;
+      }
+    } else {
+      stopgap_result.skipped++;
+    }
+  }
+
+  // Decomp-only CRT stopgap: _invalid_parameter_noinfo (invarg.obj) checks
+  // __pInvalidArgHandler function pointer (at 0x83C75734 in this build).
+  // When it's NULL (CRT not fully initialized), it traps with tw 0x16
+  // (EINVAL) which crashes the JIT host. Stub it to just return.
+  if (ctx.is_decomp_layout) {
+    if (PatchStub8(memory, 0x835D428C, 0,
+                   "_invalid_parameter_noinfo (CRT trap stopgap)")) {
+      stopgap_result.applied++;
+    } else {
+      stopgap_result.skipped++;
+    }
+  }
+
+  // Decomp-only formatting guard: in the current decomp build, TaskMgr ctor
+  // -> FormatString::operator<< -> Hx_snprintf enters _vsnprintf_l invalid-
+  // parameter recursion. Patch the _vsnprintf_l call inside Hx_snprintf so
+  // Hx_snprintf's own error path still runs (it null-terminates and returns
+  // -1) instead of bypassing local cleanup at the higher-level callsite.
+  if (ctx.is_decomp_layout) {
+    const uint32_t kHxSnprintfVsnprintfCall = 0x83477FBC;
+    auto* heap = memory->LookupHeap(kHxSnprintfVsnprintfCall);
+    auto* p = memory->TranslateVirtual<uint8_t*>(kHxSnprintfVsnprintfCall);
+    if (heap && p) {
+      uint32_t w = xe::load_and_swap<uint32_t>(p);
+      if (w == 0x4813BE35) {
+        heap->Protect(kHxSnprintfVsnprintfCall, 4,
+                      kMemoryProtectRead | kMemoryProtectWrite);
+        xe::store_and_swap<uint32_t>(p, 0x3860FFFF);  // li r3,-1
+        XELOGI("DC3: Patched Hx_snprintf _vsnprintf_l call {:08X} -> li r3,-1",
+               kHxSnprintfVsnprintfCall);
+        stopgap_result.applied++;
+      } else if (w == 0x3860FFFF) {
+        stopgap_result.applied++;
+      } else {
+        XELOGW("DC3: Unexpected Hx_snprintf _vsnprintf_l callsite word {:08X} at {:08X}",
+               w, kHxSnprintfVsnprintfCall);
+        stopgap_result.skipped++;
       }
     } else {
       stopgap_result.skipped++;
