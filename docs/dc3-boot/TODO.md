@@ -127,10 +127,11 @@ Items are ordered by priority. Check off as completed. Add new items each iterat
   - Initial matrix: `docs/dc3-boot/HACK_RETIREMENT_MATRIX.md`
   - Use this to prioritize decomp fixes that delete emulator hacks
 
-- [ ] **Promote patch manifest as canonical machine-readable contract** [dc3-decomp + xenia]
+- [~] **Promote patch manifest as canonical machine-readable contract** [dc3-decomp + xenia] (in progress)
+  - Done: schema/version fields + `build_identity` block in emitter; parser schema/version validation + safe fallback on invalid manifests
+  - Done: Xenia disables manifest target addresses on manifest/runtime fingerprint mismatch
+  - Remaining: detect stale `.map` vs `.xex` pair mismatch (manifest may be schema-valid but semantically wrong)
   - `.map` remains for human investigation
-  - Manifest should carry semantic targets + CRT sentinels + build identity + hash metadata
-  - Add runtime `.text` hash field in decomp build workflow when available
 
 ### Tier 4: Post-boot progression (after CRT init works)
 
@@ -200,3 +201,4 @@ Items are ordered by priority. Check off as completed. Add new items each iterat
 | 2026-02-23 | 2 | Added initial `HACK_RETIREMENT_MATRIX.md` with active workaround inventory + triggers |
 | 2026-02-23 | 2 | Extracted stable non-NUI DC3 hack-pack module (`dc3_hack_pack`) for CRT/imports/debug/decomp stopgaps |
 | 2026-02-23 | 2 | Caught and reverted two extraction semantic drifts (full-image writable + `.text` zero-word `blr` patching) via cutover/parity validation |
+| 2026-02-23 | 2 | Hardened DC3 patch manifest contract: schema/version validation + manifest-fingerprint target gating in Xenia |

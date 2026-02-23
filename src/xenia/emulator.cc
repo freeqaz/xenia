@@ -1612,6 +1612,24 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
       }
     }
 
+    bool use_patch_manifest_targets = patch_manifest.has_value();
+    if (patch_manifest && text_info.have_fingerprint) {
+      const std::optional<uint64_t> manifest_runtime_fp =
+          patch_manifest->runtime_text_fingerprint;
+      const std::optional<uint64_t> manifest_compare_fp =
+          manifest_runtime_fp.has_value() ? manifest_runtime_fp
+                                          : patch_manifest->text_fingerprint;
+      if (manifest_compare_fp.has_value() &&
+          *manifest_compare_fp != text_info.fingerprint) {
+        XELOGW(
+            "DC3: Disabling patch manifest target resolution due fingerprint "
+            "mismatch (manifest {:016X} != runtime {:016X}); "
+            "falling back to symbol/signature/catalog",
+            *manifest_compare_fp, text_info.fingerprint);
+        use_patch_manifest_targets = false;
+      }
+    }
+
     std::string resolver_mode = cvars::dc3_nui_patch_resolver_mode;
     if (resolver_mode == "legacy") {
       XELOGW("DC3: --dc3_nui_patch_resolver_mode=legacy has been removed; "
@@ -1640,8 +1658,9 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
     int resolver_strict_rejects = 0;
     for (int i = 0; i < active_count; ++i) {
       auto resolved = Dc3ResolveNuiPatchTarget(active_patches[i], text_info,
-                                               patch_manifest ? &*patch_manifest
-                                                              : nullptr,
+                                               use_patch_manifest_targets
+                                                   ? &*patch_manifest
+                                                   : nullptr,
                                                symbol_manifest ? &*symbol_manifest
                                                                : nullptr,
                                                resolver_mode,

@@ -106,6 +106,8 @@ TEST_CASE("DC3 resolver manifest parser reads runtime fingerprint and targets",
   {
     std::ofstream out(file.path);
     out << R"JSON({
+  "schema": "xenia.dc3.nui_patch_manifest",
+  "schema_version": 1,
   "build_label": "decomp",
   "pe": {
     "text": {
