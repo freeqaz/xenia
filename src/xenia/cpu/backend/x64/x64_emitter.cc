@@ -526,6 +526,21 @@ uint64_t ResolveFunction(void* raw_context, uint64_t target_address) {
 
 void X64Emitter::Call(const hir::Instr* instr, GuestFunction* function) {
   assert_not_null(function);
+  if (auto* reason =
+          ClassifyNonTextExecutableTarget(processor_, function->address())) {
+    uint32_t caller_fn = trace_data_ ? trace_data_->start_address() : 0;
+    std::string telemetry_reason = "direct_call_non_text_";
+    telemetry_reason += reason;
+    xe::Dc3RuntimeTelemetryRecordUnresolvedCallStubHit(telemetry_reason,
+                                                       function->address(),
+                                                       caller_fn);
+    static std::atomic<int> direct_non_text_count{0};
+    int n = direct_non_text_count.fetch_add(1, std::memory_order_relaxed);
+    if (n < 20 || (n < 200 && (n % 10) == 0) || (n % 1000) == 0) {
+      XELOGW("JIT direct call to executable non-.text target {:08X} from fn {:08X} ({})",
+             function->address(), caller_fn, reason);
+    }
+  }
   if (function->behavior() == Function::Behavior::kExtern) {
     CallExtern(instr, function);
     if (instr->flags & hir::CALL_TAIL) {
