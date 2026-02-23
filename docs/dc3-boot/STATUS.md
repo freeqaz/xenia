@@ -46,6 +46,31 @@ During extraction validation, two accidental behavior changes caused real regres
 - `tools/dc3_runtime_parity_gate.sh` ✅ (`hybrid`)
 - `DC3_PARITY_MODE=strict tools/dc3_runtime_parity_gate.sh` ✅ (`strict`)
 
+## 2026-02-23 Update (Phase 4 Manifest Contract Hardening): Schema + Safe Fallbacks
+
+- `dc3-decomp` manifest emitter (`generate_xenia_dc3_patch_manifest.py`) now writes:
+  - `schema_version`
+  - `build_identity` block (`title_id`, `build_label`)
+  - existing fields retained for compatibility (`format_version`, top-level `title_id`, `build_label`)
+- Xenia manifest parser (`Dc3LoadNuiPatchManifest`) now:
+  - requires `schema == "xenia.dc3.nui_patch_manifest"`
+  - requires supported schema/version (`schema_version` or `format_version`, currently `1`)
+  - rejects manifests with no `targets` table
+  - logs actionable warnings and safely falls back to symbol/signature/catalog inputs
+- Resolver unit tests updated for the stricter manifest parser requirements (`schema` + `schema_version`)
+
+### Additional safety hardening (important workflow fix)
+
+- Xenia now disables **manifest target address resolution** (but not the whole resolver pipeline) when the loaded XEX `.text` fingerprint does not match the manifest fingerprint.
+  - This prevents stale/wrong manifests from overriding function addresses and crashing hybrid runs.
+  - Resolver falls back to symbol/signature/catalog sources automatically.
+
+### Known remaining manifest hazard (tracked)
+
+- A manifest can still be internally inconsistent if it is regenerated from a mismatched artifact pair (for example: stale `.map` with a different `.xex`) but the `.xex` fingerprint matches.
+  - This is a build-provenance problem, not a parser crash problem.
+  - Follow-up work: add stronger manifest/source pairing checks or avoid prioritizing `.map` addresses when pair integrity is unknown.
+
 ## 2026-02-23 Update (Phase 1 Consolidation): Runtime Parity Gate + JSONL Telemetry
 
 - Implemented DC3 structured runtime telemetry (cvar-gated JSONL):

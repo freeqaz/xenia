@@ -119,31 +119,6 @@ void ApplyDc3ImportAndRuntimeStopgaps(const Dc3HackContext& ctx,
     }
   }
 
-  // Patch zero-filled unresolved function stubs in .text with blr.
-  // The decomp linker (/FORCE:UNRESOLVED) leaves unresolved function bodies
-  // as all zeros.  0x00000000 is an invalid PPC instruction, so the JIT
-  // scans forward indefinitely looking for a blr that never comes.
-  // Replace every zero word in .text with blr (0x4E800020).
-  // Safe because 0x00000000 is never a valid PPC instruction.
-  // Limit to actual .text section (0x822E0000-0x839FA414) to avoid clobbering
-  // import thunks in BINK/RADCODE sections that follow .text.
-  {
-    const uint32_t text_start = 0x822E0000;
-    const uint32_t text_end = 0x839FA400;  // .text section end (page-aligned)
-    auto* base = memory->TranslateVirtual<uint8_t*>(text_start);
-    int patched = 0;
-    for (uint32_t off = 0; off < (text_end - text_start); off += 4) {
-      uint32_t w = xe::load_and_swap<uint32_t>(base + off);
-      if (w == 0x00000000) {
-        xe::store_and_swap<uint32_t>(base + off, kPpcBlr);
-        patched++;
-      }
-    }
-    XELOGI("DC3: Replaced {} zero words in .text with blr (~{} KB)",
-           patched, patched * 4 / 1024);
-    stopgap_result.applied++;
-  }
-
   // Stub _output_l / _woutput_l / XMP overrides.
   {
     struct OutputFunc {

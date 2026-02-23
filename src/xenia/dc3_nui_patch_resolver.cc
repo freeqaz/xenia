@@ -2523,6 +2523,47 @@ std::optional<Dc3NuiPatchManifest> Dc3LoadNuiPatchManifest(
     return std::nullopt;
   }
 
+  constexpr const char* kExpectedSchema = "xenia.dc3.nui_patch_manifest";
+  if (auto schema_it = doc.FindMember("schema");
+      schema_it != doc.MemberEnd() && schema_it->value.IsString()) {
+    if (std::string_view(schema_it->value.GetString()) != kExpectedSchema) {
+      XELOGW("DC3: Patch manifest '{}' has unsupported schema '{}' "
+             "(expected '{}'); ignoring manifest",
+             xe::path_to_utf8(path), schema_it->value.GetString(),
+             kExpectedSchema);
+      return std::nullopt;
+    }
+  } else {
+    XELOGW("DC3: Patch manifest '{}' missing string field 'schema'; "
+           "ignoring manifest",
+           xe::path_to_utf8(path));
+    return std::nullopt;
+  }
+
+  uint32_t schema_version = 0;
+  bool have_schema_version = false;
+  if (auto v_it = doc.FindMember("schema_version");
+      v_it != doc.MemberEnd() && v_it->value.IsUint()) {
+    schema_version = v_it->value.GetUint();
+    have_schema_version = true;
+  } else if (auto v_it = doc.FindMember("format_version");
+             v_it != doc.MemberEnd() && v_it->value.IsUint()) {
+    schema_version = v_it->value.GetUint();
+    have_schema_version = true;
+  }
+  if (!have_schema_version) {
+    XELOGW("DC3: Patch manifest '{}' missing schema/format version; "
+           "ignoring manifest",
+           xe::path_to_utf8(path));
+    return std::nullopt;
+  }
+  if (schema_version != 1) {
+    XELOGW("DC3: Patch manifest '{}' has unsupported schema_version={} "
+           "(supported: 1); ignoring manifest",
+           xe::path_to_utf8(path), schema_version);
+    return std::nullopt;
+  }
+
   Dc3NuiPatchManifest manifest;
   if (auto it = doc.FindMember("build_label");
       it != doc.MemberEnd() && it->value.IsString()) {
@@ -2595,6 +2636,11 @@ std::optional<Dc3NuiPatchManifest> Dc3LoadNuiPatchManifest(
   if (auto crt_it = doc.FindMember("crt_sentinels");
       crt_it != doc.MemberEnd()) {
     parse_target_table(crt_it->value, &manifest.crt_sentinels);
+  }
+  if (manifest.targets.empty()) {
+    XELOGW("DC3: Patch manifest '{}' contains no targets; ignoring manifest",
+           xe::path_to_utf8(path));
+    return std::nullopt;
   }
   return manifest;
 }
