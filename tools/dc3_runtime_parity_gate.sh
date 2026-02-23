@@ -19,6 +19,8 @@ ORIG_SYMBOL_MAP_PATH="${DC3_ORIG_SYMBOL_MAP_PATH:-$COMMON_SYMBOL_MAP_PATH}"
 DECOMP_SYMBOL_MAP_PATH="${DC3_DECOMP_SYMBOL_MAP_PATH:-$COMMON_SYMBOL_MAP_PATH}"
 TELEMETRY_DIFF_TOOL="${DC3_PARITY_TELEMETRY_DIFF_TOOL:-$XENIA_DIR/tools/dc3_runtime_telemetry_diff.py}"
 TELEMETRY_DIFF_TOP="${DC3_PARITY_TELEMETRY_DIFF_TOP:-15}"
+FAIL_ON_STALE_MANIFEST="${DC3_PARITY_FAIL_ON_STALE_MANIFEST:-0}"
+FAIL_ON_MANIFEST_FP_MISMATCH="${DC3_PARITY_FAIL_ON_MANIFEST_FP_MISMATCH:-0}"
 
 mkdir -p "$TMPDIR_GATE"
 
@@ -30,6 +32,83 @@ if [[ "$PARITY_MODE" != "hybrid" && "$PARITY_MODE" != "strict" ]]; then
   echo "error: DC3_PARITY_MODE must be hybrid or strict (got '$PARITY_MODE')" >&2
   exit 1
 fi
+
+preflight_case_inputs() {
+  local case_name="$1" xex="$2" expected_layout="$3" manifest_path="$4" symbol_map_path="$5"
+  if [[ ! -f "$xex" ]]; then
+    echo "FAIL: $case_name missing XEX: $xex" >&2
+    return 1
+  fi
+  if [[ "$PARITY_MODE" == "strict" ]]; then
+    return 0
+  fi
+  if [[ -n "$manifest_path" && ! -f "$manifest_path" ]]; then
+    echo "FAIL: $case_name missing manifest: $manifest_path" >&2
+    return 1
+  fi
+  if [[ -n "$symbol_map_path" && ! -f "$symbol_map_path" ]]; then
+    echo "FAIL: $case_name missing symbol map: $symbol_map_path" >&2
+    return 1
+  fi
+  if [[ -z "$manifest_path" ]]; then
+    return 0
+  fi
+
+  python3 - "$case_name" "$xex" "$expected_layout" "$manifest_path" "$symbol_map_path" "$FAIL_ON_STALE_MANIFEST" <<'PY'
+import json, os, sys
+from pathlib import Path
+
+case_name, xex, expected_layout, manifest, symbols, fail_stale = sys.argv[1:]
+fail_stale = fail_stale == "1"
+xex_p = Path(xex)
+man_p = Path(manifest)
+sym_p = Path(symbols) if symbols else None
+
+errs = []
+warns = []
+try:
+    obj = json.loads(man_p.read_text(encoding="utf-8"))
+except Exception as e:
+    errs.append(f"{case_name}: manifest parse failed: {e}")
+    obj = None
+
+if obj is not None:
+    if obj.get("schema") != "xenia.dc3.nui_patch_manifest":
+        errs.append(f"{case_name}: manifest schema={obj.get('schema')!r} unexpected")
+    ver = obj.get("schema_version", obj.get("format_version"))
+    if not isinstance(ver, int) or ver < 1:
+        errs.append(f"{case_name}: manifest schema_version/format_version invalid: {ver!r}")
+    targets = obj.get("targets")
+    if not isinstance(targets, dict) or not targets:
+        errs.append(f"{case_name}: manifest targets missing/empty")
+    build_label = obj.get("build_label")
+    if build_label and str(build_label) != expected_layout:
+        warns.append(f"{case_name}: manifest build_label={build_label!r} expected {expected_layout!r}")
+    text = (((obj.get("pe") or {}).get("text")) or {})
+    if "xenia_runtime_fnv1a64" not in text:
+        warns.append(f"{case_name}: manifest missing pe.text.xenia_runtime_fnv1a64 (runtime mismatch detection will rely on log)")
+
+try:
+    xex_m = xex_p.stat().st_mtime
+    man_m = man_p.stat().st_mtime
+    if xex_m - man_m > 1.0:
+        msg = f"{case_name}: manifest older than XEX by {xex_m-man_m:.1f}s (possible stale manifest)"
+        (errs if fail_stale else warns).append(msg)
+    if sym_p and sym_p.exists():
+        sym_m = sym_p.stat().st_mtime
+        if sym_m - man_m > 1.0:
+            warns.append(f"{case_name}: symbols newer than manifest by {sym_m-man_m:.1f}s (manifest may be stale)")
+except OSError as e:
+    warns.append(f"{case_name}: mtime preflight skipped ({e})")
+
+for w in warns:
+    print("WARN:", w)
+if errs:
+    for e in errs:
+        print("FAIL:", e, file=sys.stderr)
+    sys.exit(1)
+PY
+}
 
 run_case() {
   local case_name="$1" xex="$2" expected_total="$3" expected_layout="$4" manifest_path="$5" symbol_map_path="$6"
@@ -72,7 +151,7 @@ run_case() {
     return 1
   fi
 
-  python3 - "$logfile" "$telefile" "$case_name" "$expected_total" "$expected_layout" "$PARITY_MODE" <<'PY'
+  python3 - "$logfile" "$telefile" "$case_name" "$expected_total" "$expected_layout" "$PARITY_MODE" "$manifest_path" "$FAIL_ON_MANIFEST_FP_MISMATCH" <<'PY'
 import json, re, sys
 from pathlib import Path
 
@@ -82,12 +161,15 @@ case_name = sys.argv[3]
 expected_total = int(sys.argv[4])
 expected_layout = sys.argv[5]
 expected_mode = sys.argv[6]
+manifest_path = sys.argv[7]
+fail_on_fp_mismatch = sys.argv[8] == "1"
 log = log_path.read_text(errors="ignore")
 
 summary_re = re.compile(r"DC3: NUI resolver summary mode=(\w+) .* signature_hits=(\d+) .* strict_rejects=(\d+) total=(\d+)")
 apply_re = re.compile(r"DC3: NUI/XBC apply path guest_overrides=(\d+) resolver_mode=(\w+) signature_resolver=(\d+)")
 patch_re = re.compile(r"DC3: NUI patch/override summary: patched=(\d+) overridden=(\d+) skipped=(\d+) total=(\d+) layout=(\w+).*")
 reg_re = re.compile(r"DC3: Registered (\d+) guest extern overrides from NUI patch table")
+manifest_fp_disable_re = re.compile(r"Disabling patch manifest target resolution due fingerprint mismatch")
 
 m_apply = apply_re.search(log)
 m_summary = summary_re.search(log)
@@ -128,6 +210,14 @@ if expected_mode == "strict":
     if sig_flag != 1: errs.append(f"signature_resolver={sig_flag} expected 1")
     if sig_hits != expected_total or strict_rejects != 0:
         errs.append(f"strict signature coverage not full: hits={sig_hits} rejects={strict_rejects}")
+
+if expected_mode != "strict" and manifest_path:
+    if manifest_fp_disable_re.search(log):
+        msg = "manifest target resolution disabled due runtime fingerprint mismatch"
+        if fail_on_fp_mismatch:
+            errs.append(msg)
+        else:
+            print(f"WARN {case_name}: {msg}")
 
 events = []
 if not tele_path.exists():
@@ -172,6 +262,9 @@ unresolved = [e for e in events if e.get("event") == "dc3_unresolved_call_stub_h
 print(f"PASS {case_name}: mode={expected_mode} layout={layout} total={patch_total} overridden={overridden} sig_hits={sig_hits} strict_rejects={strict_rejects} telemetry={{milestones:{len(milestones)} hot_loops:{len(hot_loops)} unresolved:{len(unresolved)}}}")
 PY
 }
+
+preflight_case_inputs orig "$ORIG_XEX" original "$ORIG_MANIFEST_PATH" "$ORIG_SYMBOL_MAP_PATH"
+preflight_case_inputs decomp "$DECOMP_XEX" decomp "$DECOMP_MANIFEST_PATH" "$DECOMP_SYMBOL_MAP_PATH"
 
 run_case orig "$ORIG_XEX" 59 original "$ORIG_MANIFEST_PATH" "$ORIG_SYMBOL_MAP_PATH"
 run_case decomp "$DECOMP_XEX" 85 decomp "$DECOMP_MANIFEST_PATH" "$DECOMP_SYMBOL_MAP_PATH"

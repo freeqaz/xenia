@@ -118,6 +118,7 @@ Current status:
 - Implemented `tools/dc3_runtime_parity_gate.sh`
 - Validated on 2026-02-23 in both `hybrid` and `strict`
 - Supports explicit per-run manifest/symbol overrides (`DC3_{ORIG,DECOMP}_{MANIFEST_PATH,SYMBOL_MAP_PATH}`)
+- Adds manifest/XEX preflight integrity checks (schema/targets/build-label + stale manifest warnings)
 - Hard checks currently enforce NUI/XBC override counts + strict signature coverage
 - Higher-level parity diffs (hot loops / unresolved patterns / milestones) are warn-only for now
  - `tools/dc3_runtime_telemetry_diff.py` provides ranked JSONL diffs (override hits, unresolved stubs, hot-loop PCs)
