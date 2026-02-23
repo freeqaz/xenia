@@ -216,6 +216,7 @@ void EmulatorHeadless::RunWithTimeout(int32_t timeout_ms) {
             uint32_t r10 = (uint32_t)ppc_ctx->r[10];
             uint32_t r11 = (uint32_t)ppc_ctx->r[11];
             uint32_t r12 = (uint32_t)ppc_ctx->r[12];
+            uint32_t r29 = (uint32_t)ppc_ctx->r[29];
             uint32_t r30 = (uint32_t)ppc_ctx->r[30];
             uint32_t r31 = (uint32_t)ppc_ctx->r[31];
             uint32_t r4 = (uint32_t)ppc_ctx->r[4];
@@ -224,6 +225,28 @@ void EmulatorHeadless::RunWithTimeout(int32_t timeout_ms) {
                     r3, r4, r5, r8, r9, r10);
             fprintf(stderr, "          r11=0x%08X r12=0x%08X r30=0x%08X r31=0x%08X CTR=0x%08X\n",
                     r11, r12, r30, r31, ctr);
+            // Crash forensics: inspect object-ish pointers that frequently
+            // participate in decomp data-as-code crashes.
+            if (auto* mem_words = emulator_->memory()) {
+              auto dump_words = [&](const char* tag, uint32_t addr) {
+                if (addr < 0x82000000 || addr >= 0xA0000000) return;
+                auto* p = mem_words->TranslateVirtual(addr);
+                if (!p) {
+                  fprintf(stderr, "    %s @0x%08X unmapped\n", tag, addr);
+                  return;
+                }
+                fprintf(stderr, "    %s @0x%08X:", tag, addr);
+                for (int wi = 0; wi < 8; ++wi) {
+                  fprintf(stderr, " %08X",
+                          xe::load_and_swap<uint32_t>(p + wi * 4));
+                }
+                fprintf(stderr, "\n");
+              };
+              dump_words("r3", r3);
+              dump_words("r30", r30);
+              dump_words("r29", r29);
+              dump_words("r12", r12);
+            }
             fflush(stderr);
             // Read strings from registers that might be pointers to guest memory
             auto* mem_str = emulator_->memory();

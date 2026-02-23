@@ -42,11 +42,14 @@ ACT      →  Implement the fix, rebuild, test again
 ### Current boot blocker (post NUI/XBC cutover)
 
 - NUI/XBC resolver + guest overrides are no longer the limiting factor for decomp boot.
-- The current decomp-only blocker is control-flow corruption leading to **data-as-code execution** and **invalid-SP (`r1=0`)** prologue faults before the game reaches `DxRnd::Present` / `D3DDevice_Swap`.
+- The current decomp-only blocker has progressed beyond the first data-as-code crash:
+  - the harmful `except_data_82910450` (`0x82910448`) stopgap was removed after proving it created a `NavListSortMgr` loop
+  - the stable blocker is now a repeated debugbreak trap loop anchored at `LR=0x835B3D5C` with payload `r3=0x400006A8`
+  - `0x400006A8` currently looks like a status/error payload, not a normal XAM import ordinal on the DC3 import list
 - Active work should prioritize:
-  1. tracing first jumps into non-text targets,
+  1. identifying the helper/function around `0x835B3D0C..0x835B3D98`,
   2. parity/telemetry comparison on matched decomp artifacts,
-  3. narrow decomp-only stopgaps only when they clearly move the blocker.
+  3. narrow decomp-only stopgaps only when they clearly move the blocker and remain stable.
 
 ### DC3 NUI/XBC path is now cut over
 
