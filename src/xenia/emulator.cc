@@ -710,6 +710,12 @@ bool Emulator::ExceptionCallback(Exception* ex) {
     XELOGE("PC: <unknown guest function, host PC=0x{:016X}>", ex->pc());
   }
   XELOGE("Guest lr: 0x{:08X}", static_cast<uint32_t>(context->lr));
+  XELOGE("Guest ctr: 0x{:08X}  CR=0x{:08X}  XER[CA/OV/SO]={}/{}/{}",
+         static_cast<uint32_t>(context->ctr),
+         static_cast<uint32_t>(context->cr()),
+         static_cast<uint32_t>(context->xer_ca),
+         static_cast<uint32_t>(context->xer_ov),
+         static_cast<uint32_t>(context->xer_so));
   XELOGE("Registers:");
   for (int i = 0; i < 32; i++) {
     XELOGE(" r{:<3} = {:016X}", i, context->r[i]);
