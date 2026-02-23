@@ -246,6 +246,49 @@ void EmulatorHeadless::RunWithTimeout(int32_t timeout_ms) {
               dump_words("r30", r30);
               dump_words("r29", r29);
               dump_words("r12", r12);
+
+              if (lr == 0x835B3D5C) {
+                static bool dumped_invarg_region = false;
+                static bool dumped_vsnprintf_region = false;
+                static bool dumped_vsnprintf_stack = false;
+                if (!dumped_invarg_region) {
+                  dumped_invarg_region = true;
+                  constexpr uint32_t kInvargStart = 0x835B9B08;  // _initp_misc_invarg
+                  constexpr uint32_t kInvargEnd = 0x835B9C20;    // past _invoke_watson
+                  fprintf(stderr,
+                          "    [dc3-debug] invarg.obj code dump near trap loop (LR=0x835B3D5C):\n");
+                  for (uint32_t a = kInvargStart; a < kInvargEnd; a += 4) {
+                    auto* p = mem_words->TranslateVirtual(a);
+                    uint32_t w = p ? xe::load_and_swap<uint32_t>(p) : 0;
+                    fprintf(stderr, "      0x%08X: %08X\n", a, w);
+                  }
+                }
+                if (!dumped_vsnprintf_region) {
+                  dumped_vsnprintf_region = true;
+                  constexpr uint32_t kVsnprintfStart = 0x835B3CE0;
+                  constexpr uint32_t kVsnprintfEnd = 0x835B3E10;
+                  fprintf(stderr,
+                          "    [dc3-debug] _vsnprintf_l code dump near trap caller (LR=0x835B3D5C):\n");
+                  for (uint32_t a = kVsnprintfStart; a < kVsnprintfEnd; a += 4) {
+                    auto* p = mem_words->TranslateVirtual(a);
+                    uint32_t w = p ? xe::load_and_swap<uint32_t>(p) : 0;
+                    const char* mark = (a == 0x835B3D58) ? "  <callsite>" : "";
+                    fprintf(stderr, "      0x%08X: %08X%s\n", a, w, mark);
+                  }
+                }
+                if (!dumped_vsnprintf_stack) {
+                  dumped_vsnprintf_stack = true;
+                  fprintf(stderr,
+                          "    [dc3-debug] stack dump near trap loop SP=0x%08X (Thread 6):\n",
+                          sp);
+                  for (int i = -8; i < 32; ++i) {
+                    uint32_t a = sp + static_cast<uint32_t>(i * 4);
+                    auto* p = mem_words->TranslateVirtual(a);
+                    uint32_t w = p ? xe::load_and_swap<uint32_t>(p) : 0;
+                    fprintf(stderr, "      [sp%+04d] 0x%08X: %08X\n", i * 4, a, w);
+                  }
+                }
+              }
             }
             fflush(stderr);
             // Read strings from registers that might be pointers to guest memory

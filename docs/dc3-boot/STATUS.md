@@ -1,6 +1,46 @@
 # Status: OODA Loop Iteration 4
 
-*Last updated: 2026-02-23 (Session 17 — NUI cutover validated; decomp boot blocker is data-as-code / invalid-SP corruption)*
+*Last updated: 2026-02-23 (Session 19 — `_errno` decomp stopgap added; `_vsnprintf_l` invalid-parameter loop narrowed)*
+
+## 2026-02-23 Update (Session 19): `_errno` root-cause fix (partial) + `_vsnprintf_l` loop narrowing
+
+- Re-read `STATUS.md` / `GOAL.md` and continued direct decomp boot bring-up work (no pause / no NUI detour).
+- Added headless one-shot trap-loop forensics tied to `LR=0x835B3D5C`:
+  - `invarg.obj` code dump (`_invalid_parameter_noinfo`, `_call_reportfault`, `_invoke_watson`)
+  - `_vsnprintf_l` code dump around `0x835B3D0C` and callsite `0x835B3D58`
+  - stack dump near the trap-loop frame (`SP=0x7054D8D0`)
+- Confirmed `_vsnprintf_l` control-flow details:
+  - `0x835B3D58` calls `_invalid_parameter_noinfo`
+  - `0x835B3DF8` is a recursive/self call back to `_vsnprintf_l`
+  - the trap loop is part of a recursive invalid-parameter formatting path, not a one-off trap
+- Identified the helper at `0x835B2D68` as `_errno` (`dosmap.obj`) from the decomp map.
+- Added a **decomp-only guest extern override** for `_errno` in `dc3_hack_pack`:
+  - allocates a guest-backed `int` on `SystemHeap`
+  - returns a stable guest pointer via `_errno`
+  - observed registration: `_errno` -> `0x00036000`
+- Validation result with `_errno` override (stable baseline):
+  - decomp headless smoke returns timeout cleanly (`RC=0`)
+  - NUI/XBC path still clean (`85/85` overrides, `patched=0`)
+  - trap loop still occurs at `LR=0x835B3D5C`, but payload changed from bogus `0x400006A8` to valid guest errno pointer `0x00036000`
+  - this proves `_errno` was one real bug in the path, but not the only cause of the loop
+
+### Experiments attempted (not kept in stable branch state)
+
+- Broad decomp guest override for `_invalid_parameter_noinfo` (`0x835B9B14`)
+  - removed trap spam but crashed early (`RC=139`) before `dc3_hack_pack_apply_complete`
+  - reverted
+- Narrow `_vsnprintf_l` callsite patch (`0x835B3D58` `bl _invalid_parameter_noinfo` -> `nop`)
+  - removed trap spam but also crashed early (`RC=139`)
+  - reverted
+- Trap-handler redirect attempts in `TrapDebugBreak`
+  - useful for understanding `_vsnprintf_l` recursion/epilogue path
+  - not stable, reverted
+
+### Current actionable focus (Session 19)
+
+1. Keep the `_errno` override (correctness + stable).
+2. Find a **safe** way to break the `_vsnprintf_l` invalid-parameter recursion path without startup regressions.
+3. Prefer a semantic fix near the actual invalid-parameter cause (upstream args/state) over broad CRT report suppression.
 
 ## 2026-02-23 Update (Session 18): NavList loop fix + stable trap-loop signature
 

@@ -44,12 +44,15 @@ ACT      →  Implement the fix, rebuild, test again
 - NUI/XBC resolver + guest overrides are no longer the limiting factor for decomp boot.
 - The current decomp-only blocker has progressed beyond the first data-as-code crash:
   - the harmful `except_data_82910450` (`0x82910448`) stopgap was removed after proving it created a `NavListSortMgr` loop
-  - the stable blocker is now a repeated debugbreak trap loop anchored at `LR=0x835B3D5C` with payload `r3=0x400006A8`
-  - `0x400006A8` currently looks like a status/error payload, not a normal XAM import ordinal on the DC3 import list
+  - the stable blocker is now a repeated debugbreak trap loop anchored at `LR=0x835B3D5C` inside `_vsnprintf_l` invalid-parameter handling
+  - `0x835B2D68` was identified as `_errno` (`dosmap.obj`) and was returning a bogus handle-like pointer (`0x400006A8`) on the decomp build
+  - a decomp-only `_errno` guest override now returns a valid guest-backed errno pointer (`0x00036000`), and the trap payload changed accordingly
+  - the trap loop still persists after fixing `_errno`, which narrows the remaining problem to `_vsnprintf_l` invalid-parameter recursion / upstream invalid state
 - Active work should prioritize:
-  1. identifying the helper/function around `0x835B3D0C..0x835B3D98`,
-  2. parity/telemetry comparison on matched decomp artifacts,
-  3. narrow decomp-only stopgaps only when they clearly move the blocker and remain stable.
+  1. stabilizing a fix for the `_vsnprintf_l` invalid-parameter recursion path (without early startup crashes),
+  2. identifying the upstream invalid arguments/state feeding that path,
+  3. parity/telemetry comparison on matched decomp artifacts while iterating,
+  4. narrow decomp-only stopgaps only when they clearly move the blocker and remain stable.
 
 ### DC3 NUI/XBC path is now cut over
 
