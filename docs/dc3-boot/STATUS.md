@@ -265,9 +265,16 @@ Hash normalization in xex.rs to resolve 533 unresolved `??_C@` string literals.
   - Runs original+decomp across:
     - default (`hybrid` + guest overrides)
     - strict signatures-only (manifest/symbol disabled)
-    - explicit legacy byte-patch fallback
+    - optional legacy byte-patch fallback (`DC3_GATE_INCLUDE_LEGACY=1`) for pre-removal commits
   - Asserts resolver/apply summaries and `TIMEOUT` completion.
   - Current result: passed twice consecutively (deterministic) on local runs.
+- Legacy DC3 NUI/XBC byte-patch application path removed after cutover validation:
+  - NUI/XBC now uses a single apply path: resolver -> guest extern override registration
+  - `dc3_guest_overrides=false` now warns and is forced on (legacy byte patching removed)
+  - Post-removal validation:
+    - `tools/dc3_nui_cutover_gate.sh` (default+strict) passed on original + decomp
+    - `xenia-core-tests \"[dc3_nui_patch_resolver]\"` passed (`648 assertions / 10 test cases`)
+  - Rollback path for legacy byte patching: revert commit `411064457` (checkpoint before removal) or the legacy-removal commit itself.
 
 ---
 

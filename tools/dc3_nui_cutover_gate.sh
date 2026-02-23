@@ -9,6 +9,7 @@ TIMEOUT_SECS="${DC3_GATE_TIMEOUT_SECS:-20}"
 HEADLESS_TIMEOUT_MS="${DC3_GATE_HEADLESS_TIMEOUT_MS:-15000}"
 TMPDIR_GATE="${DC3_GATE_TMPDIR:-/tmp/xenia_cutover_gate}"
 mkdir -p "$TMPDIR_GATE"
+INCLUDE_LEGACY="${DC3_GATE_INCLUDE_LEGACY:-0}"
 
 if [[ ! -x "$BIN" ]]; then
   echo "error: xenia-headless not found at $BIN" >&2
@@ -110,10 +111,16 @@ run_case strict_decomp "$DECOMP_XEX" 85 decomp strict 1 1 0 85 \
   --dc3_nui_patch_resolver_mode=strict --dc3_nui_enable_signature_resolver=true \
   --dc3_nui_patch_manifest_path=/tmp/does_not_exist_manifest.json \
   --dc3_nui_symbol_map_path=/tmp/does_not_exist_symbols.txt
+if [[ "$INCLUDE_LEGACY" == "1" ]]; then
 # explicit legacy fallback (until legacy byte patch path is removed)
 run_case legacy_orig "$ORIG_XEX" 59 original legacy 0 0 59 0 \
   --dc3_guest_overrides=false --dc3_nui_patch_resolver_mode=legacy --dc3_nui_enable_signature_resolver=false
 run_case legacy_decomp "$DECOMP_XEX" 85 decomp legacy 0 0 85 0 \
   --dc3_guest_overrides=false --dc3_nui_patch_resolver_mode=legacy --dc3_nui_enable_signature_resolver=false
+fi
 
-echo "All DC3 NUI/XBC cutover gate cases passed. Logs: $TMPDIR_GATE"
+if [[ "$INCLUDE_LEGACY" == "1" ]]; then
+  echo "All DC3 NUI/XBC cutover gate cases (default+strict+legacy) passed. Logs: $TMPDIR_GATE"
+else
+  echo "All DC3 NUI/XBC cutover gate cases (default+strict) passed. Logs: $TMPDIR_GATE"
+fi
