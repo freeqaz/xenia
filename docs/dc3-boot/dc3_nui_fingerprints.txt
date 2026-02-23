@@ -1,0 +1,17 @@
+# DC3 NUI/XBC patch layout fingerprints (.text FNV-1a 64-bit)
+#
+# Populate these from runtime logs emitted by Xenia (or from a decompressed final
+# XEX PE image, not the pre-pack default.exe for decomp builds):
+#   "DC3: .text fingerprint ... fnv1a64=XXXXXXXXXXXXXXX"
+#
+# Then leave dc3_nui_patch_layout=auto and the runtime will use fingerprint
+# matching before falling back to the zero-padding heuristic.
+#
+# Example:
+# original=0x0123456789ABCDEF
+# decomp=0xFEDCBA9876543210
+
+# Runtime-validated on 2026-02-23 via xenia-headless + dc3-decomp build.
+# Note: these are Xenia runtime .text fingerprints, not static PE .text hashes.
+original=0x5E827ACDEE70CB4F
+decomp=0x28F813763596C6C6
