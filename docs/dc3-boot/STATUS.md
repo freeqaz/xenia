@@ -2,6 +2,50 @@
 
 *Last updated: 2026-02-23 (Sessions 12-13 — Game runs stably, NUI callback loop blocker)*
 
+## 2026-02-23 Update (Phase 2 Consolidation): Non-NUI DC3 Hack-Pack Extraction (Stable, Partial)
+
+- Added `src/xenia/dc3_hack_pack.h` / `src/xenia/dc3_hack_pack.cc`
+- Extracted non-NUI DC3 workarounds from `src/xenia/emulator.cc` into the hack-pack module:
+  - Xapi thread notify stub
+  - decomp runtime stopgaps (stack bump, RODATA writable range, zero-page + Linux null-guard page)
+  - debug/runtime stubs (`_output_l`, Holmes, `Debug::Fail`, locale/debug helpers, `String::operator+=`, etc.)
+  - unresolved import thunk / XEX marker cleanup
+  - CRT table sanitizer + `InitMakeString` injection
+  - import-indirection diagnostics
+- `emulator.cc` now calls `ApplyDc3HackPack(...)` for this non-NUI block and logs per-category summary counts.
+
+### Important Phase 2 Validation Notes (semantic-drift bugs caught/fixed)
+
+During extraction validation, two accidental behavior changes caused real regressions and were removed:
+
+1. **Unsafe writable-range widening** (reverted)
+   - A drifted hack-pack version widened the decomp writable-image workaround from:
+     - `0x82000000-0x822E0000` (RODATA only)
+     to
+     - full image range (`0x82000000-0x83ED0000`)
+   - This caused original-build crashes and `BaseHeap::Protect` region-span failures.
+   - Final behavior is restored to **RODATA-only**, matching the original inline logic.
+
+2. **Extra `.text` zero-word mass patching** (removed)
+   - A drifted hack-pack version included a decomp-only experiment that replaced zero words in `.text` with `blr`.
+   - This was **not part of the original inline path** and caused original-build SIGSEGV during hack-pack apply.
+   - The block was removed to preserve no-behavior-change extraction semantics.
+
+### Deferred (explicit)
+
+- `fake_kinect_data` / skeleton injection remains inline in `src/xenia/emulator.cc`
+  - An extraction attempt was started but deferred to keep Phase 2 stable.
+  - The failure was traced to unrelated semantic drifts in the extracted hack-pack path, not the skeleton logic itself.
+  - Reattempt with exact-semantic extraction (or host-side hook replacement) is tracked in the retirement matrix.
+
+### Validation (2026-02-23)
+
+- `./xb build --config=debug --target=xenia-headless --target=xenia-core-tests --no_premake -j 8` ✅
+- `xenia-core-tests "[dc3_nui_patch_resolver]"` ✅ (`648 assertions / 10 test cases`)
+- `tools/dc3_nui_cutover_gate.sh` ✅ (`default` + `strict`, original + decomp)
+- `tools/dc3_runtime_parity_gate.sh` ✅ (`hybrid`)
+- `DC3_PARITY_MODE=strict tools/dc3_runtime_parity_gate.sh` ✅ (`strict`)
+
 ## 2026-02-23 Update (Phase 1 Consolidation): Runtime Parity Gate + JSONL Telemetry
 
 - Implemented DC3 structured runtime telemetry (cvar-gated JSONL):
