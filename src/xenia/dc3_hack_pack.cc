@@ -273,19 +273,53 @@ void ApplyDc3ImportAndRuntimeStopgaps(const Dc3HackContext& ctx,
     }
   }
 
-  // Decomp-only exception-data blob accidentally executed as code.
-  // Telemetry hot-loop / unresolved-call tracing showed repeated execution at
-  // `except_data_82910450+0x4` (0x8291044C), which is an 8-byte exception data
-  // object between NavListSortMgr methods in .text. Patch the blob to a small
-  // stub so accidental control-flow into it returns safely instead of looping
-  // on unresolved/null calls.
+  // Decomp-only speech COM stopgap: first reproducible data-as-code / invalid-SP
+  // crash is reached from NUISPEECH CSpCfgInst::AddWordWithCustomProns
+  // (0x82B324A0, crash at +0x30 after D3D::UnlockResource calls into speech).
+  // Returning failure avoids dereferencing a corrupted callback/vtable-like
+  // object (`r3=0x83A89C78`, slots contain 0x4000xxxx import-ish pointers)
+  // while we continue tracing the underlying corruption source.
   if (ctx.is_decomp_layout) {
-    if (PatchStub8(memory, 0x82910448, 0, "except_data_82910450")) {
+    if (PatchStub8(memory, 0x82B324A0, 0xFFFFFFFFu,
+                   "NUISPEECH::CSpCfgInst::AddWordWithCustomProns (stopgap)")) {
       stopgap_result.applied++;
     } else {
       stopgap_result.skipped++;
     }
   }
+
+  // Decomp-only recursive error-reporting/assert loop stopgap. After stubbing
+  // CSpCfgInst::AddWordWithCustomProns, the next blocker becomes a repeating
+  // error formatting path (format string at r30 = "File: %s Line: %d Error: %s\\n")
+  // with stack-frame recursion through 0x83346A2C/0x83347624/0x8337CF00.
+  if (ctx.is_decomp_layout) {
+    if (PatchStub8(memory, 0x83346A2C, 0,
+                   "recursive error-report helper 0x83346A2C (stopgap)")) {
+      stopgap_result.applied++;
+    } else {
+      stopgap_result.skipped++;
+    }
+  }
+
+  // Decomp-only follow-on debug/assert helper crash after the recursive
+  // formatter stopgap: function at 0x834B1240 re-enters a local debug pipeline
+  // and dereferences a zeroed object (r3=0x83C16B20, all zeros) at +0x14.
+  // Stub to avoid the null-object assert path while continuing bring-up.
+  if (ctx.is_decomp_layout) {
+    if (PatchStub8(memory, 0x834B1240, 0,
+                   "debug/assert helper 0x834B1240 (null object stopgap)")) {
+      stopgap_result.applied++;
+    } else {
+      stopgap_result.skipped++;
+    }
+  }
+
+  // NOTE: We previously stubbed `except_data_82910450` at `0x82910448`, but
+  // thread-6 telemetry later showed the `0x82910438..0x82910450` range on a
+  // live NavListSortMgr path. Stubbing this 8-byte region to `li r3,0; blr`
+  // can create a stable loop (returns without the surrounding epilogue). Keep
+  // the original bytes until we root-cause the control-flow corruption that
+  // reaches this region.
 
   // Stub unresolved import entries (PE thunks + XEX markers).
   {

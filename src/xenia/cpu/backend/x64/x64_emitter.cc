@@ -395,10 +395,19 @@ uint64_t TrapDebugPrint(void* raw_context, uint64_t address) {
 uint64_t TrapDebugBreak(void* raw_context, uint64_t address) {
   auto thread_state = *reinterpret_cast<ThreadState**>(raw_context);
   auto* ctx = thread_state->context();
-  XELOGE("tw/td forced trap hit! LR={:08X} CTR={:08X} r3={:08X} r4={:08X}",
-         static_cast<uint32_t>(ctx->lr),
+  uint32_t lr = static_cast<uint32_t>(ctx->lr);
+  uint32_t r3 = static_cast<uint32_t>(ctx->r[3]);
+  uint32_t trap_pc = static_cast<uint32_t>(address);
+  uint32_t trap_word = 0;
+  if (auto* p = thread_state->memory()->TranslateVirtual<uint8_t*>(trap_pc)) {
+    trap_word = xe::load_and_swap<uint32_t>(p);
+  }
+  XELOGE("tw/td forced trap hit! PC={:08X} WORD={:08X} LR={:08X} CTR={:08X} "
+         "r3={:08X} r4={:08X}",
+         trap_pc, trap_word,
+         lr,
          static_cast<uint32_t>(ctx->ctr),
-         static_cast<uint32_t>(ctx->r[3]),
+         r3,
          static_cast<uint32_t>(ctx->r[4]));
   if (cvars::break_on_debugbreak) {
     xe::debugging::Break();

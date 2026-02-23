@@ -2,6 +2,36 @@
 
 *Last updated: 2026-02-23 (Session 17 — NUI cutover validated; decomp boot blocker is data-as-code / invalid-SP corruption)*
 
+## 2026-02-23 Update (Session 18): NavList loop fix + stable trap-loop signature
+
+- Re-read `GOAL.md` / `STATUS.md` and resumed direct decomp-boot bring-up work (not NUI work).
+- Verified the prior decomp-only `except_data_82910450` stopgap at `0x82910448` was harmful:
+  - it sits on a live `NavListSortMgr::ClearHeaders` tail path (`0x82910438..0x82910450`)
+  - replacing it with `li r3,0; blr` created a stable loop (returns without surrounding epilogue)
+  - the stopgap was removed (original bytes preserved)
+- After removing the `0x82910448` stub, decomp advances to a new stable blocker:
+  - repeated `tw/td` trap loop with `LR=0x835B3D5C`
+  - trap log payload: `r3=0x400006A8`, `CTR=0`
+- Improved trap diagnostics in `x64_emitter`:
+  - trap logs now include `PC=` and `WORD=`
+  - current trap path reports `PC=0` (no caller PC propagated into the helper), so `LR` remains the useful anchor
+- Added/kept headless forensics useful for decomp boot triage:
+  - thread-6 object/register memory dumps (`r3/r29/r30/r12`)
+  - runtime one-shot patch experiments remain in headless diagnostics only
+- Verified a false lead and closed it:
+  - `0x400006A8` is not a DC3 XAM import ordinal on the current import list
+  - it is more consistent with a status/error code payload (not `XamShowPaymentOptionsUI`)
+- Stable decomp baseline after backing out unstable trap mutations:
+  - `xenia-headless` exits on timeout (`RC=0`)
+  - NUI/XBC path still clean (`85/85` overrides, `patched=0`)
+  - thread eventually enters stable trap loop at `LR=0x835B3D5C`
+
+### Current actionable focus (Session 18)
+
+1. Identify the function at/around `0x835B3D0C..0x835B3D98` and why it loops on the trap path.
+2. Prefer a semantic fix (status handling / helper stub) over caller-site byte patching unless the latter is proven safe.
+3. Keep decomp boot tests on the stable baseline (no unstable trap-mutation stopgaps) while iterating.
+
 ## 2026-02-23 Update (Session 17): Post-NUI Cutover Boot Bring-Up (decomp-only blocker)
 
 - Revalidated DC3 NUI/XBC resolver + guest-override path (`hybrid` default, `strict` coverage preserved).
