@@ -44,6 +44,7 @@
 #include "xenia/cpu/backend/null_backend.h"
 #include "xenia/cpu/cpu_flags.h"
 #include "xenia/cpu/thread_state.h"
+#include "xenia/dc3_hack_pack.h"
 #include "xenia/dc3_nui_patch_resolver.h"
 #include "xenia/dc3_runtime_telemetry.h"
 #include "xenia/gpu/gpu_flags.h"
@@ -1064,21 +1065,7 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
   // DC3 title-specific guest code patches.
   // DC3 Title ID: 0x373307D9 (Dance Central 3)
   if (title_id_.has_value() && title_id_.value() == 0x373307D9) {
-    // Clean stale content cache from previous runs.
-    // DC3's SaveLoadManager reads cached song/global options data on boot.
-    // If a previous xenia run wrote partial/corrupt data, the game will try
-    // to deserialize it and crash with a garbage allocation size.
-    // Deleting the content directory forces a fresh start.
-    auto dc3_content = content_root_ / "373307D9";
-    if (std::filesystem::exists(dc3_content)) {
-      XELOGI("DC3: Cleaning stale content cache at {}",
-             xe::path_to_utf8(dc3_content));
-      std::error_code ec;
-      std::filesystem::remove_all(dc3_content, ec);
-      if (ec) {
-        XELOGI("DC3: Failed to clean content cache: {}", ec.message());
-      }
-    }
+    Dc3MaybeCleanStaleContentCache(content_root_);
   }
 
   //
@@ -1877,8 +1864,7 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
       // NuipAccumulateSkeletonFrameStats at 0x829C2C50) adjacent to
       // NuiSkeletonGetNextFrame that would be overwritten.
       const uint32_t kDataSize = kSkeletonFrameSize + 4;  // +4 for counter
-      uint32_t data_guest_addr =
-          memory_->SystemHeapAlloc(kDataSize, 0x10);
+      uint32_t data_guest_addr = memory_->SystemHeapAlloc(kDataSize, 0x10);
       if (!data_guest_addr) {
         XELOGW("DC3: Failed to allocate guest memory for fake skeleton data");
       }
@@ -1916,25 +1902,25 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
         //   li r3, 0                        ; return S_OK
         //   blr
         uint32_t ppc_stub[] = {
-            0x7C882378,                                       // mr r8, r4
-            0x3CA00000 | (kSkeletonDataAddr >> 16),           // lis r5, hi16(data)
-            0x60A50000 | (kSkeletonDataAddr & 0xFFFF),        // ori r5, r5, lo16(data)
-            0x38C00000 | (kSkeletonFrameSize / 4),            // li r6, word_count
-            0x7CC903A6,                                       // mtctr r6
-            0x80E50000,                                       // lwz r7, 0(r5)
-            0x90E40000,                                       // stw r7, 0(r4)
-            0x38A50004,                                       // addi r5, r5, 4
-            0x38840004,                                       // addi r4, r4, 4
-            0x4200FFF0,                                       // bdnz -16 (to lwz)
-            0x3CA00000 | (kCounterAddr >> 16),                // lis r5, hi16(counter)
-            0x60A50000 | (kCounterAddr & 0xFFFF),             // ori r5, r5, lo16(counter)
-            0x80C50000,                                       // lwz r6, 0(r5)
-            0x38C60001,                                       // addi r6, r6, 1
-            0x90C50000,                                       // stw r6, 0(r5)
-            0x90C80004,                                       // stw r6, 4(r8) (timestamp)
-            0x90C80008,                                       // stw r6, 8(r8) (frame num)
-            0x38600000,                                       // li r3, 0 (S_OK)
-            0x4E800020,                                       // blr
+            0x7C882378,                                // mr r8, r4
+            0x3CA00000 | (kSkeletonDataAddr >> 16),    // lis r5, hi16(data)
+            0x60A50000 | (kSkeletonDataAddr & 0xFFFF), // ori r5, r5, lo16(data)
+            0x38C00000 | (kSkeletonFrameSize / 4),     // li r6, word_count
+            0x7CC903A6,                                // mtctr r6
+            0x80E50000,                                // lwz r7, 0(r5)
+            0x90E40000,                                // stw r7, 0(r4)
+            0x38A50004,                                // addi r5, r5, 4
+            0x38840004,                                // addi r4, r4, 4
+            0x4200FFF0,                                // bdnz -16 (to lwz)
+            0x3CA00000 | (kCounterAddr >> 16),         // lis r5, hi16(counter)
+            0x60A50000 | (kCounterAddr & 0xFFFF),      // ori r5, r5, lo16(counter)
+            0x80C50000,                                // lwz r6, 0(r5)
+            0x38C60001,                                // addi r6, r6, 1
+            0x90C50000,                                // stw r6, 0(r5)
+            0x90C80004,                                // stw r6, 4(r8) (timestamp)
+            0x90C80008,                                // stw r6, 8(r8) (frame num)
+            0x38600000,                                // li r3, 0 (S_OK)
+            0x4E800020,                                // blr
         };
         for (size_t i = 0; i < sizeof(ppc_stub) / sizeof(ppc_stub[0]); i++) {
           xe::store_and_swap<uint32_t>(stub_mem + i * 4, ppc_stub[i]);
@@ -1982,40 +1968,42 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
         //   0x1B0: dwQualityFlags
         const uint32_t skel0 = 0x30;  // offset of SkeletonData[0]
 
-        write_u32(skel0 + 0x00, 2);   // eTrackingState = NUI_SKELETON_TRACKED
-        write_u32(skel0 + 0x04, 1);   // dwTrackingID = 1
-        write_u32(skel0 + 0x0C, 0);   // dwUserIndex = 0
+        write_u32(skel0 + 0x00, 2);  // eTrackingState = NUI_SKELETON_TRACKED
+        write_u32(skel0 + 0x04, 1);  // dwTrackingID = 1
+        write_u32(skel0 + 0x0C, 0);  // dwUserIndex = 0
 
         // Center of mass position
-        write_float(skel0 + 0x10, 0.0f);   // Position.x
-        write_float(skel0 + 0x14, 0.9f);   // Position.y
-        write_float(skel0 + 0x18, 2.0f);   // Position.z
-        write_float(skel0 + 0x1C, 1.0f);   // Position.w
+        write_float(skel0 + 0x10, 0.0f);  // Position.x
+        write_float(skel0 + 0x14, 0.9f);  // Position.y
+        write_float(skel0 + 0x18, 2.0f);  // Position.z
+        write_float(skel0 + 0x1C, 1.0f);  // Position.w
 
         // T-pose joint positions (20 joints × XMVECTOR)
         // Positions in meters, Kinect camera coordinates (X=left/right, Y=up, Z=depth)
-        struct JointPos { float x, y, z; };
+        struct JointPos {
+          float x, y, z;
+        };
         JointPos joints[20] = {
-            { 0.00f, 0.90f, 2.0f},  //  0: Hip Center
-            { 0.00f, 1.10f, 2.0f},  //  1: Spine
-            { 0.00f, 1.35f, 2.0f},  //  2: Shoulder Center
-            { 0.00f, 1.60f, 2.0f},  //  3: Head
+            {0.00f, 0.90f, 2.0f},   //  0: Hip Center
+            {0.00f, 1.10f, 2.0f},   //  1: Spine
+            {0.00f, 1.35f, 2.0f},   //  2: Shoulder Center
+            {0.00f, 1.60f, 2.0f},   //  3: Head
             {-0.20f, 1.35f, 2.0f},  //  4: Shoulder Left
             {-0.50f, 1.35f, 2.0f},  //  5: Elbow Left
             {-0.75f, 1.35f, 2.0f},  //  6: Wrist Left
             {-0.85f, 1.35f, 2.0f},  //  7: Hand Left
-            { 0.20f, 1.35f, 2.0f},  //  8: Shoulder Right
-            { 0.50f, 1.35f, 2.0f},  //  9: Elbow Right
-            { 0.75f, 1.35f, 2.0f},  // 10: Wrist Right
-            { 0.85f, 1.35f, 2.0f},  // 11: Hand Right
+            {0.20f, 1.35f, 2.0f},   //  8: Shoulder Right
+            {0.50f, 1.35f, 2.0f},   //  9: Elbow Right
+            {0.75f, 1.35f, 2.0f},   // 10: Wrist Right
+            {0.85f, 1.35f, 2.0f},   // 11: Hand Right
             {-0.15f, 0.90f, 2.0f},  // 12: Hip Left
             {-0.15f, 0.50f, 2.0f},  // 13: Knee Left
             {-0.15f, 0.05f, 2.0f},  // 14: Ankle Left
-            { 0.15f, 0.90f, 2.0f},  // 15: Hip Right
-            { 0.15f, 0.50f, 2.0f},  // 16: Knee Right
-            { 0.15f, 0.05f, 2.0f},  // 17: Ankle Right
+            {0.15f, 0.90f, 2.0f},   // 15: Hip Right
+            {0.15f, 0.50f, 2.0f},   // 16: Knee Right
+            {0.15f, 0.05f, 2.0f},   // 17: Ankle Right
             {-0.15f, 0.00f, 2.0f},  // 18: Foot Left
-            { 0.15f, 0.00f, 2.0f},  // 19: Foot Right
+            {0.15f, 0.00f, 2.0f},   // 19: Foot Right
         };
 
         const uint32_t joints_offset = skel0 + 0x20;  // SkeletonPositions[0]
@@ -2087,587 +2075,27 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
   // XapiCallThreadNotifyRoutines (0x82F51108) to iterate a corrupt list
   // and spin forever trying to call null callback pointers.
   //
-  // Fix: Stub both XapiCallThreadNotifyRoutines and
-  // XRegisterThreadNotifyRoutine to return immediately.
-  //
+  // Non-NUI DC3 workarounds (CRT/imports/debug/decomp runtime stopgaps) are
+  // extracted into the DC3 hack pack module to keep emulator.cc orchestration-
+  // only and make retirement tracking manageable.
   if (title_id_.has_value() && title_id_.value() == 0x373307D9) {
-    // Stub XapiCallThreadNotifyRoutines and XRegisterThreadNotifyRoutine.
-    //
-    // The decomp's CRT calls XapiCallThreadNotifyRoutines from
-    // mainCRTStartup to notify registered DLL callbacks.  The list head
-    // (XapiThreadNotifyRoutineList at 0x83B14C3C) may contain garbage or
-    // be corrupted by Xenia's StashHandle writing kXObjSignature there,
-    // causing an infinite loop when iterating.  Both functions share the
-    // same critical section (XapiProcessLock at 0x83B14C34) and list head.
-    // The decomp has no DLL notification callbacks, so it's safe to NOP
-    // both.
-    // Address from MAP public symbols
-    const uint32_t kNotifyFuncs[] = {0x8302CEE0};
-    for (uint32_t addr : kNotifyFuncs) {
-      auto* heap = memory_->LookupHeap(addr);
-      if (heap) {
-        heap->Protect(addr, 8, kMemoryProtectRead | kMemoryProtectWrite);
-        auto* p = memory_->TranslateVirtual<uint8_t*>(addr);
-        xe::store_and_swap<uint32_t>(p + 0, 0x38600000);  // li r3, 0
-        xe::store_and_swap<uint32_t>(p + 4, 0x4E800020);  // blr
-        XELOGI("DC3: Stubbed XapiCallThreadNotifyRoutines at {:08X} "
-               "(li r3,0; blr)", addr);
-      }
+    Dc3HackContext dc3_hack_ctx;
+    dc3_hack_ctx.memory = memory_.get();
+    dc3_hack_ctx.processor = processor_.get();
+    dc3_hack_ctx.module = module.get();
+#ifdef XE_HEADLESS_BUILD
+    dc3_hack_ctx.is_headless = true;
+#else
+    dc3_hack_ctx.is_headless = false;
+#endif
+    auto dc3_hack_summary = ApplyDc3HackPack(dc3_hack_ctx);
+    for (const auto& result : dc3_hack_summary.results) {
+      XELOGD("DC3: hack-pack category={} applied={} skipped={} failed={}",
+             Dc3HackCategoryName(result.category), result.applied,
+             result.skipped, result.failed);
     }
-
-    // The decomp XEX specifies a 256KB stack which overflows during init.
-    // CRT constructors + App::App() + SystemPreInit + GetSystemLanguage
-    // chain consumes >1MB.  Use 4MB to be safe.
-    if (module->stack_size() < 4 * 1024 * 1024) {
-      XELOGI("DC3: Increasing main thread stack from {}KB to 4096KB",
-             module->stack_size() / 1024);
-      module->set_stack_size(4 * 1024 * 1024);
-    }
-
-    // DC3 decomp workaround: make header pages writable.
-    //
-    // Some BSS globals are LNK2019 unresolved externals because
-    // source-compiled .obj files replace split .obj files without defining
-    // all original symbols.  With /FORCE, unresolved symbols resolve to
-    // address 0 = 0x82000000 (image base / RODATA).  Making this region
-    // writable prevents SIGSEGV when game code writes to these globals.
-    // Make RODATA pages writable for unresolved BSS globals.
-    // Unresolved symbols resolve to 0x82000000 (image base) via /FORCE.
-    // Only make the actual RODATA section writable (before .text start
-    // at 0x822E0000) to limit damage from String overflow corruption.
-    {
-      auto* heap = memory_->LookupHeap(0x82000000);
-      if (heap) {
-        heap->Protect(0x82000000, 0x2E0000,
-                      kMemoryProtectRead | kMemoryProtectWrite);
-        XELOGI("DC3: Made pages 0x82000000-0x822E0000 writable "
-               "(RODATA only — workaround for unresolved BSS globals)");
-      }
-    }
-
-    // DC3 decomp workaround: stub _output_l and _woutput_l.
-    //
-    // The CRT printf formatters (_output_l in output.obj, _woutput_l in
-    // woutput.obj) contain multiple loops that spin infinitely when
-    // locale data is uninitialized (common in decomp builds where
-    // __initlcid / __init_numeric didn't run). Rather than patching
-    // individual backward branches (there are many), we stub the entire
-    // functions to return 0 immediately. This makes printf/sprintf
-    // produce no formatted output, but the game doesn't need printf
-    // results during boot.
-    {
-      struct OutputFunc {
-        uint32_t address;
-        const char* name;
-      };
-      // Addresses from MAP public symbols
-      OutputFunc output_funcs[] = {
-          {0x835BAC88, "_output_l"},
-          {0x835C0994, "_woutput_l"},
-          // XMP music override functions call RtlEnterCriticalSection on
-          // g_csOverrideRestore (0x83A3C424) whose CRT constructor was skipped,
-          // leaving the CS uninitialized → deadlock.  Not needed for boot.
-          {0x835FAA8C, "XMPOverrideBackgroundMusic"},
-          {0x835FAB64, "XMPRestoreBackgroundMusic"},
-      };
-      for (const auto& func : output_funcs) {
-        auto* heap = memory_->LookupHeap(func.address);
-        if (!heap) continue;
-        auto* mem = memory_->TranslateVirtual<uint8_t*>(func.address);
-        if (!mem) continue;
-        uint32_t w0 = xe::load_and_swap<uint32_t>(mem);
-        if (w0 == 0x00000000) continue;  // skip if already zero-filled
-        heap->Protect(func.address, 8,
-                      kMemoryProtectRead | kMemoryProtectWrite);
-        xe::store_and_swap<uint32_t>(mem + 0, 0x38600000);  // li r3, 0
-        xe::store_and_swap<uint32_t>(mem + 4, 0x4E800020);  // blr
-        XELOGI("DC3: Stubbed {} at {:08X} (li r3,0; blr)", func.name,
-               func.address);
-      }
-    }
-
-    // DC3 decomp workaround: stub Debug::Fail to prevent infinite loop.
-    //
-    // The game's Debug::Fail assertion handler (Debug.obj) iterates a
-    // linked list of notification callbacks at offset 0x20 of a global
-    // object.  In the decomp build, this callback list has garbage
-    // function pointers (0x38600000 = PPC `li r3,0`, 0x00000000 = null).
-    // Our JIT no-op stubs handle these without crashing, but the loop
-    // never terminates because the list sentinel comparison fails.
-    //
-    // Fix: Stub Debug::Fail to return immediately.  The game will
-    // continue past assertions instead of getting stuck in the handler.
-    {
-      struct DebugFunc {
-        uint32_t address;
-        const char* name;
-        uint32_t return_value;  // r3 return value (default 0)
-      };
-      // Addresses from MAP public symbols
-      DebugFunc debug_funcs[] = {
-          {0x834B1DFC, "Debug::Fail", 0},
-          // --- XDK CRT runtime functions that recurse or crash ---
-          {0x838DEE34, "XGetLocale", 0},         // infinite recursion
-          {0x838DF03C, "XTLGetLanguage", 1},     // stack overflow (English=1)
-          {0x838DF0DC, "DebugBreak", 0},         // debug break trap
-          // --- System_Xbox.obj: locale functions with self-recursion ---
-          {0x8333D160, "GetSystemLanguage", 0},  // recurses ~16K times
-          {0x8333D620, "GetSystemLocale", 0},    // may also recurse
-          // --- DataNode.obj: Print loops infinitely on zero-page data ---
-          {0x830EDFF4, "DataNode::Print", 0},    // void; logging only
-          // --- DataArray.obj: AddRef/Release write to bad pointers ---
-          // DataNodes have corrupt "DataArray*" pointing into the code/data
-          // section instead of heap. AddRef/Release try sth at this+0xA
-          // → WRITE fault on read-only image pages.
-          // Stubbing disables refcounting; acceptable for boot progression.
-          {0x832DD638, "DataArray::AddRef", 0},    // void; refcount++
-          {0x82F1A8D4, "DataArray::Release", 0},   // void; refcount-- & free
-          // --- Mat.obj: CreateMetaMaterial loops in NextName("{anon}") ---
-          {0x83140608, "RndMat::CreateMetaMaterial", 0},  // returns NULL
-          // --- rtlheap.obj: UCR linked list infinite loop ---
-          // The XDK heap calls NtAllocateVirtualMemory to commit/decommit
-          // pages within the heap region. In Xenia, all guest memory is
-          // already committed, so these operations are no-ops. The UCR list
-          // gets corrupt because NtAllocateVirtualMemory doesn't actually
-          // decommit anything, leaving stale entries. Fix: stub the wrapper
-          // to always succeed (return 0), and prevent UCR list corruption
-          // by stubbing InsertUnCommittedPages.
-          {0x8302D2EC, "NtAllocateVirtualMemoryWrapper", 0},
-          {0x8302D524, "RtlpInsertUnCommittedPages", 0},
-          // --- HolmesClient.obj: comprehensive stub of all Holmes functions ---
-          // Network/server communication
-          {0x8310CD88, "HolmesClientInit", 0},
-          {0x8310D058, "HolmesClientReInit", 0},
-          {0x8310D0D8, "HolmesClientPoll", 0},
-          {0x8310C958, "HolmesClientPollInternal", 0},
-          {0x8310CA70, "HolmesClientInitOpcode", 0},
-          {0x8310BF14, "HolmesClientTerminate", 0},
-          // Query/state functions
-          {0x8310B284, "CanUseHolmes", 0},
-          {0x8310B2F8, "UsingHolmes", 0},
-          {0x8310B154, "ProtocolDebugString", 0},
-          {0x8310B314, "HolmesSetFileShare", 0},
-          {0x8310B36C, "HolmesFileHostName", 0},
-          {0x8310B378, "HolmesFileShare", 0},
-          {0x8310B384, "HolmesResolveIP", 0},
-          // Command/response (poll loops that block)
-          {0x8310B7E0, "BeginCmd", 0},
-          {0x8310B830, "CheckForResponse", 0},
-          {0x8310BA34, "WaitForAnyResponse", 0},
-          {0x8310C664, "EndCmd", 0},
-          {0x8310C76C, "CheckReads", 0},
-          {0x8310C850, "CheckInput", 0},
-          {0x8310C8F0, "WaitForResponse", 0},
-          {0x8310E13C, "WaitForReads", 0},
-          // Input polling
-          {0x8310C9B8, "HolmesClientPollKeyboard", 0},
-          {0x8310CA10, "HolmesClientPollJoypad", 0},
-          // File I/O through Holmes
-          {0x8310D53C, "HolmesClientOpen", 0},
-          {0x8310DA24, "HolmesClientRead", 0},
-          {0x8310DB5C, "HolmesClientReadDone", 0},
-          {0x8310D778, "HolmesClientWrite", 0},
-          {0x8310D8E8, "HolmesClientTruncate", 0},
-          {0x8310E1D8, "HolmesClientClose", 0},
-          {0x8310D244, "HolmesClientGetStat", 0},
-          {0x8310D150, "HolmesClientSysExec", 0},
-          {0x8310D35C, "HolmesClientMkDir", 0},
-          {0x8310D44C, "HolmesClientDelete", 0},
-          {0x8310E360, "HolmesClientEnumerate", 0},
-          // Cache/resource
-          {0x8310DC14, "HolmesClientCacheFile", 0},
-          {0x8310DDE4, "HolmesClientCacheResource", 0},
-          // Misc
-          {0x8310BBC0, "HolmesToLocal", 0},
-          {0x8310BCB0, "HolmesFlushStreamBuffer", 0},
-          {0x8310BD44, "DumpHolmesLog", 0},
-          {0x8310DF18, "HolmesClientStackTrace", 0},
-          {0x8310E048, "HolmesClientSendMessage", 0},
-      };
-      for (const auto& func : debug_funcs) {
-        auto* heap = memory_->LookupHeap(func.address);
-        if (!heap) continue;
-        auto* mem = memory_->TranslateVirtual<uint8_t*>(func.address);
-        if (!mem) continue;
-        uint32_t w0 = xe::load_and_swap<uint32_t>(mem);
-        if (w0 == 0x00000000) continue;  // skip if already zero-filled
-        heap->Protect(func.address, 8,
-                      kMemoryProtectRead | kMemoryProtectWrite);
-        // li r3, <return_value>: opcode = 0x38600000 | (value & 0xFFFF)
-        uint32_t li_instr = 0x38600000 | (func.return_value & 0xFFFF);
-        xe::store_and_swap<uint32_t>(mem + 0, li_instr);
-        xe::store_and_swap<uint32_t>(mem + 4, 0x4E800020);  // blr
-        XELOGI("DC3: Stubbed {} at {:08X} (li r3,{}; blr)", func.name,
-               func.address, func.return_value);
-      }
-    }
-
-    // DC3 decomp workaround: stub String::operator+=(const char*).
-    //
-    // String::operator+= (Str.obj @ 0x834BE118) does an unbounded byte
-    // copy: strlen(this->data) to find the end, then memcpy from source.
-    // When a String object is in uninitialized RODATA (from an unresolved
-    // BSS global at image base), this->data points into the PE image
-    // with no null terminator for megabytes.  The copy overwrites the
-    // entire XEX image with '.' characters, destroying all code+data.
-    //
-    // Fix: Stub with blr.  Returns *this (r3) unchanged = no-op append.
-    // This disables ALL string concatenation, but the game's init logic
-    // (kernel calls, KeDelay, NtWait) doesn't depend on String::operator+=.
-    {
-      const uint32_t kStringOpPlusEq = 0x834BE118;
-      auto* heap = memory_->LookupHeap(kStringOpPlusEq);
-      if (heap) {
-        auto* mem = memory_->TranslateVirtual<uint8_t*>(kStringOpPlusEq);
-        if (mem && xe::load_and_swap<uint32_t>(mem) != 0x00000000) {
-          heap->Protect(kStringOpPlusEq, 4,
-                        kMemoryProtectRead | kMemoryProtectWrite);
-          xe::store_and_swap<uint32_t>(mem, 0x4E800020);  // blr
-          XELOGI("DC3: Stubbed String::operator+=(const char*) at {:08X} "
-                 "(blr — prevents unbounded PE image corruption)",
-                 kStringOpPlusEq);
-        }
-      }
-    }
-
-    // DC3 decomp workaround: stub unresolved import entries.
-    //
-    // Two types of unresolved imports exist after xenia's import resolver:
-    //
-    // 1. PE-style thunks: build_xex.py couldn't convert some thunks because
-    //    their .idata entries had non-standard values (addresses instead of
-    //    0x80XXXXXX ordinal markers).  These still have the PE pattern:
-    //    lis r11,hi; lwz r11,lo(r11); mtctr r11; bctr.
-    //
-    // 2. XEX marker thunks: build_xex.py converted the thunk to a
-    //    0x01XXXXXX XEX marker, but xenia's import resolver didn't process
-    //    it (e.g., the import_table VA array was too short, or the entry
-    //    was in an unmapped region).  These have the raw marker followed
-    //    by zeros.
-    //
-    // Both cause SIGSEGV when called (jump to garbage/null address).
-    // Fix: scan the import thunk area for both patterns and stub them
-    // with li r3, 0; blr; nop; nop.
-    {
-      const uint32_t kTextStart = 0x822E0000;
-      const uint32_t kTextSize = 0x171A414;
-      const uint32_t kIdataStart = 0x822D8400;
-      const uint32_t kIdataEnd = 0x822D8A34;
-      // Import thunks are clustered at the end of .text, roughly
-      // 0x8395BB00-0x8395CC00.  Scan a wider range to be safe.
-      const uint32_t kThunkAreaStart = 0x8395B000;
-      const uint32_t kThunkAreaEnd = 0x8395D000;
-
-      int pe_thunks_stubbed = 0;
-      int xex_markers_stubbed = 0;
-
-      for (uint32_t off = 0; off + 16 <= kTextSize; off += 4) {
-        uint32_t addr = kTextStart + off;
-        auto* p = memory_->TranslateVirtual<uint8_t*>(addr);
-        if (!p) continue;
-
-        uint32_t w0 = xe::load_and_swap<uint32_t>(p);
-        uint32_t w1 = xe::load_and_swap<uint32_t>(p + 4);
-        uint32_t w2 = xe::load_and_swap<uint32_t>(p + 8);
-        uint32_t w3 = xe::load_and_swap<uint32_t>(p + 12);
-
-        bool need_stub = false;
-
-        // Pattern 1: PE-style import thunk targeting .idata
-        if ((w0 >> 16) == 0x3D60 && (w1 >> 16) == 0x816B &&
-            w2 == 0x7D6903A6 && w3 == 0x4E800420) {
-          uint32_t hi = w0 & 0xFFFF;
-          int16_t lo = static_cast<int16_t>(w1 & 0xFFFF);
-          uint32_t iat_addr = (hi << 16) + lo;
-          if (iat_addr >= kIdataStart && iat_addr < kIdataEnd) {
-            need_stub = true;
-            pe_thunks_stubbed++;
-            XELOGI(
-                "DC3: Stubbed unrewritten PE import thunk at {:08X} "
-                "(IAT {:08X})",
-                addr, iat_addr);
-          }
-        }
-
-        // Pattern 2: unresolved XEX thunk marker (0x01XXXXXX, 0, 0, 0)
-        // in the import thunk area.  Resolved thunks would have been
-        // overwritten with sc 2 / blr / nop / nop by xenia's resolver.
-        if (!need_stub && addr >= kThunkAreaStart &&
-            addr < kThunkAreaEnd && (w0 >> 24) == 0x01 &&
-            w1 == 0 && w2 == 0 && w3 == 0) {
-          need_stub = true;
-          xex_markers_stubbed++;
-          uint16_t ordinal = w0 & 0xFFFF;
-          XELOGI(
-              "DC3: Stubbed unresolved XEX import marker at {:08X} "
-              "(ordinal 0x{:04X})",
-              addr, ordinal);
-        }
-
-        if (!need_stub) continue;
-
-        auto* heap = memory_->LookupHeap(addr);
-        if (!heap) continue;
-        heap->Protect(addr, 16,
-                      kMemoryProtectRead | kMemoryProtectWrite);
-        xe::store_and_swap<uint32_t>(p + 0, 0x38600000);   // li r3, 0
-        xe::store_and_swap<uint32_t>(p + 4, 0x4E800020);   // blr
-        xe::store_and_swap<uint32_t>(p + 8, 0x60000000);   // nop
-        xe::store_and_swap<uint32_t>(p + 12, 0x60000000);  // nop
-      }
-      XELOGI(
-          "DC3: Import thunk cleanup: {} PE thunks + {} XEX markers = {} "
-          "total stubbed",
-          pe_thunks_stubbed, xex_markers_stubbed,
-          pe_thunks_stubbed + xex_markers_stubbed);
-    }
-
-    // DC3 decomp: zero page (all zeros).
-    //
-    // Unresolved CRT constructors leave critical globals with vtable
-    // pointers == NULL.  Game code loads vtable[N] from address 0+N,
-    // which faults if unmapped.  We map guest 0x0-0x10000 as readable
-    // zeros so that:
-    //   1. Reads from null object fields return 0
-    //   2. Null-checks in game code (cmplwi rX, 0) correctly detect null
-    //   3. Virtual dispatch through null vtable loads CTR=0, which
-    //      hits the CallIndirect bounds check → resolve thunk → no-op stub
-    //
-    // Previously used PPC stubs (li r3,0; blr) but those returned non-zero
-    // for field reads, defeating null-object checks and causing infinite
-    // loops in BinStream::Write and other functions.
-    {
-      auto* heap = memory_->LookupHeap(0x00000000);
-      if (heap) {
-        heap->Protect(0x00000000, 0x10000,
-                      kMemoryProtectRead | kMemoryProtectWrite);
-        auto* base = memory_->TranslateVirtual<uint8_t*>(0x00000000);
-        // Fill with zeros — MAP_ANONYMOUS should already be zero but
-        // be explicit since this might be over existing allocations.
-        std::memset(base, 0, 0x10000);
-        XELOGI("DC3: Mapped zero page 0x0-0x10000 (all zeros — null "
-               "object reads return 0, null checks work correctly)");
-      }
-
-      // Also map a guard region below virtual_membase to catch null pointer
-      // dereferences with negative offsets (e.g., lwz r31, -4(r11) where
-      // r11=0 → host EA = virtual_membase + 0 + (-4) = virtual_membase - 4).
-      // PPC SIMM offsets are 16-bit signed (range -32768 to +32767), so map
-      // 64KB below virtual_membase as readable zeros.
-      {
-        auto* vmbase = memory_->virtual_membase();
-        void* guard_base = vmbase - 0x10000;
-        void* result = mmap(guard_base, 0x10000,
-                           PROT_READ,
-                           MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE,
-                           -1, 0);
-        if (result != MAP_FAILED) {
-          XELOGI("DC3: Mapped null-deref guard page at {:p} "
-                 "(64KB below virtual_membase {:p})",
-                 result, (void*)vmbase);
-        } else {
-          XELOGI("DC3: Could not map null-deref guard page below "
-                 "virtual_membase (errno={})", errno);
-        }
-      }
-    }
-
-    // DC3 decomp workaround: sanitize CRT static initializer tables.
-    //
-    // The CRT's _cinit() iterates function pointer tables (__xc_a to
-    // __xc_z for C++ constructors, __xi_a to __xi_z for C initializers)
-    // calling each non-null entry.  With /FORCE linking, unresolved
-    // function references resolve to RVA 0, which becomes guest address
-    // 0x82000000 (image base / RODATA).  Since _cinit only skips null (0)
-    // entries, it tries to execute the PE header as PPC code → SIGSEGV.
-    //
-    // Fix: scan both tables and null out any entry that doesn't point
-    // into the code section (0x822C0000+).  This catches entries pointing
-    // to 0x82000000, but also any other non-code address.
-    {
-      const uint32_t kCodeStart = 0x822C0000;
-      struct CrtTable {
-        uint32_t start;
-        uint32_t end;
-        const char* name;
-      };
-      // Addresses from MAP: 2026-02-22 build (390 __xc + 3 __xi entries)
-      CrtTable tables[] = {
-          {0x83A7B2E0, 0x83A7B8F8, "__xc_a..__xc_z (C++ constructors)"},
-          {0x83A7B8FC, 0x83A7B908, "__xi_a..__xi_z (C initializers)"},
-      };
-      const int32_t bisect_max = cvars::dc3_crt_bisect_max;
-      if (bisect_max >= 0) {
-        XELOGI(
-            "DC3: CRT bisect mode ACTIVE - only allowing constructor "
-            "indices 0..{} (inclusive)",
-            bisect_max);
-      }
-
-      // Build skip set from --dc3_crt_skip_indices and --dc3_crt_skip_nui.
-      // Supports comma-separated values and ranges: "69,98-330"
-      std::set<int> skip_set;
-      auto parse_skip_list = [&](const std::string& str) {
-        size_t pos = 0;
-        while (pos < str.size()) {
-          size_t comma = str.find(',', pos);
-          if (comma == std::string::npos) comma = str.size();
-          std::string token = str.substr(pos, comma - pos);
-          if (!token.empty()) {
-            size_t dash = token.find('-');
-            if (dash != std::string::npos && dash > 0) {
-              int lo = std::stoi(token.substr(0, dash));
-              int hi = std::stoi(token.substr(dash + 1));
-              for (int i = lo; i <= hi; i++) skip_set.insert(i);
-            } else {
-              skip_set.insert(std::stoi(token));
-            }
-          }
-          pos = comma + 1;
-        }
-      };
-      if (cvars::dc3_crt_skip_nui &&
-          cvars::dc3_crt_skip_indices.empty()) {
-        // NUI-only skip: only skip constructors from NUI/Kinect .obj files.
-        // Indices 102-209 and 329-340 are game engine globals that MUST run.
-        // See /tmp/dc3_crt_classification.txt for full analysis.
-        parse_skip_list("69,75,98-101,210-328");
-        XELOGI("DC3: Auto-NUI skip enabled (69,75,98-101,210-328)");
-      }
-      if (!cvars::dc3_crt_skip_indices.empty()) {
-        parse_skip_list(cvars::dc3_crt_skip_indices);
-      }
-      if (!skip_set.empty()) {
-        XELOGI("DC3: CRT skip list has {} entries", skip_set.size());
-      }
-
-      for (const auto& table : tables) {
-        // Make the CRT table pages writable so we can nullify bad entries.
-        // The CRT section may be in read-only pages of the loaded image.
-        auto* crt_heap = memory_->LookupHeap(table.start);
-        if (crt_heap) {
-          uint32_t page_start = table.start & ~0xFFFu;
-          uint32_t page_end = (table.end + 0xFFF) & ~0xFFFu;
-          crt_heap->Protect(page_start, page_end - page_start,
-                            kMemoryProtectRead | kMemoryProtectWrite);
-        }
-        int nullified_oob = 0;
-        int nullified_bisect = 0;
-        int nullified_skip = 0;
-        int valid_count = 0;
-        int already_null = 0;
-        int total = (table.end - table.start) / 4;
-        int index = 0;
-        for (uint32_t addr = table.start; addr < table.end;
-             addr += 4, index++) {
-          auto* p = memory_->TranslateVirtual<uint8_t*>(addr);
-          uint32_t entry = xe::load_and_swap<uint32_t>(p);
-          if (entry == 0) {
-            already_null++;
-            continue;
-          }
-          if (entry < kCodeStart) {
-            // Entry points outside code section (e.g. 0x82000000 from
-            // unresolved /FORCE link references).
-            XELOGI("DC3: CRT[{:3d}] = {:08X} (nullified-oob, not in code "
-                    "section)",
-                    index, entry);
-            xe::store_and_swap<uint32_t>(p, 0);
-            nullified_oob++;
-          } else if (bisect_max >= 0 && index > bisect_max) {
-            // Bisect mode: nullify entries beyond the bisect limit.
-            XELOGI("DC3: CRT[{:3d}] = {:08X} (nullified-bisect, index > {})",
-                    index, entry, bisect_max);
-            xe::store_and_swap<uint32_t>(p, 0);
-            nullified_bisect++;
-          } else if (!skip_set.empty() && skip_set.count(index)) {
-            // Skip list: nullify specific indices identified by bisect.
-            // Dump the first 8 PPC instructions at this address for analysis.
-            XELOGI("DC3: CRT[{:3d}] = {:08X} (nullified-skip, in skip list)",
-                    index, entry);
-            auto* fn = memory_->TranslateVirtual<uint8_t*>(entry);
-            if (fn) {
-              XELOGI("DC3:   PPC instructions at {:08X}:", entry);
-              for (int i = 0; i < 8; i++) {
-                uint32_t insn = xe::load_and_swap<uint32_t>(fn + i * 4);
-                XELOGI("DC3:     {:08X}: {:08X}", entry + i * 4, insn);
-              }
-            }
-            xe::store_and_swap<uint32_t>(p, 0);
-            nullified_skip++;
-          } else {
-            XELOGI("DC3: CRT[{:3d}] = {:08X} (valid)", index, entry);
-            valid_count++;
-          }
-        }
-        XELOGI(
-            "DC3: CRT table {}: {} total entries, {} already null, "
-            "{} valid, {} nullified-oob, {} nullified-bisect, "
-            "{} nullified-skip",
-            table.name, total, already_null, valid_count, nullified_oob,
-            nullified_bisect, nullified_skip);
-      }
-
-      // DC3: Inject required init functions into nullified CRT slots.
-      //
-      // Some game-engine init functions (like InitMakeString) are NOT in the
-      // CRT constructor table — they're called explicitly during game init
-      // from call chains that may be broken in the decomp.  Without them,
-      // global CriticalSections and buffer pools are never initialized,
-      // causing deadlocks.
-      //
-      // We inject these into nullified NUI slots so _cinit() calls them
-      // at the right time (after heap init, before main).
-      struct CrtInject {
-        int slot;           // CRT index (must be in skip_set / already nulled)
-        uint32_t func_addr; // guest address to inject
-        const char* name;
-      };
-      CrtInject injections[] = {
-          // InitMakeString (MakeString.obj) initializes the FormatString
-          // buffer pool and its CriticalSection.  Without it, NextBuf()
-          // deadlocks on an uninitialized CS at 0x400007E8.
-          {69, 0x833468CC, "InitMakeString"},
-      };
-      const uint32_t xc_start = 0x83A7B2E0;
-      for (const auto& inj : injections) {
-        uint32_t slot_addr = xc_start + inj.slot * 4;
-        auto* p = memory_->TranslateVirtual<uint8_t*>(slot_addr);
-        uint32_t current = xe::load_and_swap<uint32_t>(p);
-        if (current == 0) {
-          xe::store_and_swap<uint32_t>(p, inj.func_addr);
-          XELOGI("DC3: CRT[{:3d}] injected {:08X} ({})", inj.slot,
-                  inj.func_addr, inj.name);
-        } else {
-          XELOGI(
-              "DC3: CRT[{:3d}] injection SKIPPED - slot not empty "
-              "(contains {:08X}), wanted to inject {:08X} ({})",
-              inj.slot, current, inj.func_addr, inj.name);
-        }
-      }
-    }
+    Dc3RuntimeTelemetryRecordBootMilestone("dc3_hack_pack_apply_complete");
   }
-
-  // DC3 decomp: diagnostics — check JIT indirection table state for the
-  // import thunk area before launch.  The indirection table (host 0x80000000)
-  // should have been filled with the resolve_function_thunk address by
-  // CommitExecutableRange.  If any slots are 0, the JIT will crash at RIP=0
-  // when it tries to call unresolved functions.
-  if (title_id_.has_value() && title_id_.value() == 0x373307D9) {
-    auto* code_cache = reinterpret_cast<uint8_t*>(0x80000000);
-    uint32_t check_addrs[] = {
-        0x8395C668,  // crash address from previous debug session
-        0x8395C000,  // nearby thunk area
-        0x8395B000,  // start of thunk area
-        0x822E0000,  // start of .text
-    };
-    for (auto addr : check_addrs) {
-      uint32_t* slot = reinterpret_cast<uint32_t*>(
-          code_cache + (addr - 0x80000000));
-      XELOGI("DC3: Indirection table [{:08X}] = {:08X}", addr, *slot);
-    }
-  }
-
   auto main_thread = kernel_state_->LaunchModule(module);
   if (!main_thread) {
     return X_STATUS_UNSUCCESSFUL;
