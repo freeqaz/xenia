@@ -1064,6 +1064,7 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
 
   // DC3 title-specific guest code patches.
   // DC3 Title ID: 0x373307D9 (Dance Central 3)
+  bool dc3_is_decomp_layout = false;
   if (title_id_.has_value() && title_id_.value() == 0x373307D9) {
     Dc3MaybeCleanStaleContentCache(content_root_);
   }
@@ -1584,6 +1585,7 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
         "DC3: NUI patch layout={} reason={} (zero-padding {}/{})",
         is_decomp_layout ? "decomp" : "original", layout_reason, zero_count,
         total_patches);
+    dc3_is_decomp_layout = is_decomp_layout;
 
     // Select the appropriate patch table based on XEX layout.
     const Dc3NuiPatchSpec* active_patches =
@@ -1907,6 +1909,7 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
     dc3_hack_ctx.memory = memory_.get();
     dc3_hack_ctx.processor = processor_.get();
     dc3_hack_ctx.module = module.get();
+    dc3_hack_ctx.is_decomp_layout = dc3_is_decomp_layout;
 #ifdef XE_HEADLESS_BUILD
     dc3_hack_ctx.is_headless = true;
 #else

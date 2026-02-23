@@ -36,18 +36,22 @@ using Clock = std::chrono::steady_clock;
 
 struct UnresolvedKey {
   uint32_t guest_addr = 0;
+  uint32_t callsite_pc = 0;
   std::string reason;
 
   bool operator==(const UnresolvedKey& other) const {
-    return guest_addr == other.guest_addr && reason == other.reason;
+    return guest_addr == other.guest_addr && callsite_pc == other.callsite_pc &&
+           reason == other.reason;
   }
 };
 
 struct UnresolvedKeyHash {
   size_t operator()(const UnresolvedKey& key) const {
     size_t h1 = std::hash<uint32_t>{}(key.guest_addr);
-    size_t h2 = std::hash<std::string>{}(key.reason);
-    return h1 ^ (h2 + 0x9e3779b97f4a7c15ULL + (h1 << 6) + (h1 >> 2));
+    size_t h2 = std::hash<uint32_t>{}(key.callsite_pc);
+    size_t h3 = std::hash<std::string>{}(key.reason);
+    size_t h = h1 ^ (h2 + 0x9e3779b97f4a7c15ULL + (h1 << 6) + (h1 >> 2));
+    return h ^ (h3 + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2));
   }
 };
 
@@ -247,6 +251,9 @@ void FlushAggregatesLocked(Dc3TelemetryState& state, Clock::time_point now) {
     line += "\"";
     line += fmt::format(",\"guest_addr\":\"{:08X}\",\"count_delta\":{}",
                         key.guest_addr, count_delta);
+    if (key.callsite_pc) {
+      line += fmt::format(",\"callsite_pc\":\"{:08X}\"", key.callsite_pc);
+    }
     line += "}";
     WriteLineLocked(state, std::move(line));
   }
@@ -512,6 +519,7 @@ void Dc3RuntimeTelemetryRecordUnresolvedCallStubHit(std::string_view reason,
   if (!state.active) return;
   UnresolvedKey key;
   key.guest_addr = guest_addr;
+  key.callsite_pc = callsite_pc;
   key.reason = std::string(reason);
   state.unresolved_stub_hits[std::move(key)]++;
   state.total_unresolved_stub_hits++;

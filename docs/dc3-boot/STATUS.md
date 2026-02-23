@@ -1,6 +1,136 @@
-# Status: OODA Loop Iteration 3
+# Status: OODA Loop Iteration 4
 
-*Last updated: 2026-02-23 (Sessions 14-15 — JIT crash cascade fixed, SIGBUS handler, soft faults, game fully stable)*
+*Last updated: 2026-02-23 (Session 17 — NUI cutover validated; decomp boot blocker is data-as-code / invalid-SP corruption)*
+
+## 2026-02-23 Update (Session 17): Post-NUI Cutover Boot Bring-Up (decomp-only blocker)
+
+- Revalidated DC3 NUI/XBC resolver + guest-override path (`hybrid` default, `strict` coverage preserved).
+- Added runtime parity tooling improvements:
+  - `tools/dc3_runtime_parity_gate.sh` now normalizes boolean cvars (`0/1` -> `true/false`) and supports symbolized telemetry diffs.
+  - `tools/dc3_runtime_telemetry_diff.py` now ranks unresolved stub hits by `(reason, target, callsite)` and can symbolize callsites/hot-loop PCs from `symbols.txt`.
+- Added decomp stopgaps:
+  - `except_data_82910450` patch (`0x82910448`) to stop executing exception-data blob as code.
+  - `String::~String` decomp-only stopgap (`0x834BE094`) for invalid-SP prologue crash.
+- Fixed `Dc3HackContext.is_decomp_layout` propagation from `emulator.cc` into `dc3_hack_pack` so decomp-only hacks actually apply.
+- Current decomp 40s no-break run status:
+  - NUI/XBC path resolves/overrides cleanly (`85/85`, `patched=0`).
+  - unresolved-stub and hot-loop telemetry hotspots are now `0`.
+  - decomp still crashes into code-like blobs with `SP=0` (data-as-code / control-flow corruption), blocking progression to `DxRnd::Present` / `D3DDevice_Swap`.
+- Experimental headless-only runtime patch confirms progress:
+  - one-shot patch of late-materialized helper at `0x8311B8E0` moves the fault to a later site (`__savegprlr_28`), proving the blocker is shifting and NUI/XBC is not the limiting path.
+
+### Current actionable focus (Session 17)
+
+1. Track the first jump into non-text/data-as-code targets (caller + target) to identify the root corruption source.
+2. Keep parity/telemetry runs on matched decomp artifacts while iterating stopgaps/instrumentation.
+3. Prioritize fixes that move compilation toward `DxRnd::Present` / `D3DDevice_Swap`, not additional NUI work.
+
+## Current Milestone: Thread 6 Alive, D3D Rendering Pipeline Active, No Frame Presentation
+
+**Game runs full 40s, EXIT 0, 1 SIGSEGV (handled), Thread 6 executing Game::PostUpdate → D3D rendering.**
+
+Thread 6 is no longer frozen. It cycles through D3D functions at ~247 CS/sec:
+- `D3D::FlushCachedMemory` (memory.obj) — now a no-op thanks to dcbf fix
+- `D3D::UnlockResource` (resource.obj) — unlocking vertex/index buffers
+- `D3DVertexBuffer_Unlock` (resource.obj) — vertex buffer management
+- `PIXAddPixOpWithData` (pix.obj) — performance instrumentation markers
+
+**Key observation**: `VdSwap` is imported but **never called** — the game prepares render data
+(vertex buffers, PIX markers, cache flushes) but never submits a frame for display. The null GPU
+backend does NOT block (IssueSwap is a synchronous no-op), so the blocker is upstream: the game's
+rendering pipeline never reaches the Present/Swap call.
+
+### Session 16 Fixes
+
+1. **dcbf/dcbst → no-op in JIT** (x64_seq_memory.cc): Xenia JIT compiled PPC `dcbf` (data cache
+   block flush) to x86 `clflush`, which faults on unmapped physical memory. Cache line flushing is
+   unnecessary in an emulator. This eliminated 1.4M signal handler round-trips per run.
+
+2. **clflush/prefetch fault handler** (mmio_handler.cc): Safety net — detects x86 `clflush`
+   (0F AE /7) and `prefetch` (0F 18 /0-3) instructions in the soft fault handler. When they fault
+   on unmapped memory, skips them instead of crashing. Handles REX prefix + ModR/M + SIB + disp.
+
+### Thread State (test74)
+| Thread | State | LR | Notes |
+|--------|-------|-----|-------|
+| 1-5 | Idle | 0x00000000 | Not yet started |
+| 6 | **ALIVE** | Cycling | Game::PostUpdate → D3D rendering |
+| 7 | Sleeping | 0x8302D1BC | RtlSleep (joypad polling) |
+
+### Metrics
+| Metric | Value |
+|--------|-------|
+| SIGSEGV total | 1 (handled) |
+| CS counts | 39781→48654 over 39s (+247/sec, steady growth) |
+| VdSwap calls | 0 |
+| ResolveFunction failures | 9 (2 kernel imports: 0x40000058 ×5, 0x400042E0 ×4) |
+| Unimplemented instructions | 0 |
+
+## OBSERVE — Current Blocker Analysis
+
+### VdSwap Never Called
+The game is executing D3D vertex buffer operations in a loop but never calls VdSwap (Present).
+This means the rendering pipeline never completes a frame. Possible causes:
+
+1. **D3D device not fully initialized** — D3DDevice_Create or setup function returned error/stub value
+2. **Missing D3D state setup** — render target, depth stencil, or viewport not configured
+3. **Game loop stuck in resource loading** — preparing buffers but waiting for something to complete
+4. **Present is called but through a stub** — the function is implemented in an XDK .obj but
+   depends on something that's broken
+
+### Threads 1-5 Idle
+Five threads are created but never start executing (LR=0, SP at initial stack top). These are
+likely worker threads that get signaled after initialization completes. If the main thread (6) is
+stuck in the render pipeline, these threads may never activate.
+
+### What Functions Thread 6 Executes
+JIT IP samples across 13 reports show Thread 6 cycles through:
+- `Game::PostUpdate` (Game.obj) — main game tick
+- `NgEnviron::Select` / `UpdateApproxLighting` (Env_NG.obj) — environment rendering
+- `D3D::UnlockResource` (resource.obj) — D3D resource management
+- `D3DVertexBuffer_Unlock` (resource.obj) — vertex buffer unlock
+- `PIXAddPixOpWithData` (pix.obj) — profiling markers
+- `__savegprlr` / `__restgprlr` — register save/restore thunks
+- `guest 0x00000000` — null function calls (stubs)
+
+This is REAL game rendering code, not initialization. The game has reached the render loop
+but can't complete a frame.
+
+## ORIENT — What Does It Mean?
+
+### Critical Path (updated)
+```
+XEX loads → imports resolve → NUI stubbed → CRT init → main() → App::Init →
+Game::PostUpdate → D3D rendering → [STUCK: never reaches Present/Swap] → frame displayed
+```
+
+We are past main(), past App::Init(), and into the game's main render loop. The game is
+updating animations, processing environment lighting, and managing vertex buffers. But it
+never submits a completed frame.
+
+### Hypothesis: D3D Present path broken or unreachable
+The game calls `Game::PostUpdate` which drives rendering through NgEnviron. The D3D
+vertex buffer lock/unlock cycle suggests it's preparing geometry. But without calling
+Present/Swap, the frame is never submitted. Either:
+- A D3D function in the present path is stubbed/missing and returns error
+- The rendering state machine requires a condition that's never met
+- A synchronization primitive (event/semaphore) blocks the present call
+
+## DECIDE — Highest-Leverage Fixes
+
+**Priority 1**: Trace why VdSwap is never called. Find D3DDevice_Present or the
+swap chain in the MAP, check if it's called, and identify what blocks it.
+
+**Priority 2**: Check what `guest 0x00000000` calls represent — these are null
+function pointer calls happening frequently. If a critical D3D function resolves
+to null, that could be why the pipeline breaks.
+
+**Priority 3**: Look for D3D initialization functions that might have returned
+error values (stubs returning 0 or -1 instead of success).
+
+## ACT — See TODO.md
+
+---
 
 ## 2026-02-23 Update (Phase 2 Consolidation): Non-NUI DC3 Hack-Pack Extraction (Stable, Partial)
 

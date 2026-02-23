@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import argparse
+import bisect
 import json
+import re
 import sys
 from collections import Counter
 from dataclasses import dataclass, field
@@ -26,12 +28,63 @@ class TelemetryView:
     override_hits_by_name: Counter[str] = field(default_factory=Counter)
     override_hits_by_addr: Counter[str] = field(default_factory=Counter)
     unresolved_hits: Counter[tuple[str, str]] = field(default_factory=Counter)
+    unresolved_hits_by_callsite: Counter[tuple[str, str, str]] = field(default_factory=Counter)
     hot_loops: Counter[str] = field(default_factory=Counter)
     parse_errors: list[str] = field(default_factory=list)
 
     @property
     def summary(self) -> dict[str, Any] | None:
         return self.summaries[-1] if self.summaries else None
+
+
+@dataclass
+class SymbolIndex:
+    starts: list[int] = field(default_factory=list)
+    rows: list[tuple[int, int, str]] = field(default_factory=list)  # (start, end, name)
+
+    def lookup(self, addr_text: str) -> str | None:
+        try:
+            addr = int(str(addr_text), 16)
+        except ValueError:
+            return None
+        i = bisect.bisect_right(self.starts, addr) - 1
+        if i < 0 or i >= len(self.rows):
+            return None
+        start, end, name = self.rows[i]
+        if addr < start or addr >= end:
+            return None
+        off = addr - start
+        return f"{name}+0x{off:X}" if off else name
+
+
+_SYMBOL_RE = re.compile(
+    r"^(?P<name>.+?) = \.text:0x(?P<addr>[0-9A-Fa-f]+); .*?size:0x(?P<size>[0-9A-Fa-f]+)\b"
+)
+
+
+def load_symbol_index(path: Path | None) -> SymbolIndex | None:
+    if path is None:
+        return None
+    idx = SymbolIndex()
+    try:
+        with path.open("r", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                m = _SYMBOL_RE.match(line.strip())
+                if not m:
+                    continue
+                name = m.group("name")
+                start = int(m.group("addr"), 16)
+                size = int(m.group("size"), 16)
+                if size <= 0:
+                    continue
+                idx.starts.append(start)
+                idx.rows.append((start, start + size, name))
+    except FileNotFoundError:
+        return None
+    pairs = sorted(zip(idx.starts, idx.rows), key=lambda x: x[0])
+    idx.starts = [p[0] for p in pairs]
+    idx.rows = [p[1] for p in pairs]
+    return idx
 
 
 def load_jsonl(path: Path) -> TelemetryView:
@@ -65,8 +118,12 @@ def load_jsonl(path: Path) -> TelemetryView:
                     out.override_hits_by_addr[_hex_key(e.get("guest_addr"))] += count
                 elif et == "dc3_unresolved_call_stub_hit":
                     count = int(e.get("count_delta", 0) or 0)
-                    key = (str(e.get("reason", "<unknown>")), _hex_key(e.get("guest_addr")))
+                    reason = str(e.get("reason", "<unknown>"))
+                    guest_addr = _hex_key(e.get("guest_addr"))
+                    callsite = _hex_key(e.get("callsite_pc"))
+                    key = (reason, guest_addr)
                     out.unresolved_hits[key] += count
+                    out.unresolved_hits_by_callsite[(reason, guest_addr, callsite)] += count
                 elif et == "dc3_hot_loop_pc":
                     count = int(e.get("count", 0) or 0)
                     out.hot_loops[_hex_key(e.get("guest_pc"))] += count
@@ -147,6 +204,8 @@ def main() -> int:
     ap.add_argument("--orig", required=True, help="Original-run JSONL telemetry path")
     ap.add_argument("--decomp", required=True, help="Decomp-run JSONL telemetry path")
     ap.add_argument("--top", type=int, default=20, help="Top divergent entries per section")
+    ap.add_argument("--orig-symbols", help="symbols.txt path for original build (optional)")
+    ap.add_argument("--decomp-symbols", help="symbols.txt path for decomp build (optional)")
     ap.add_argument(
         "--require-summary",
         action="store_true",
@@ -156,6 +215,8 @@ def main() -> int:
 
     orig = load_jsonl(Path(args.orig))
     decomp = load_jsonl(Path(args.decomp))
+    orig_syms = load_symbol_index(Path(args.orig_symbols)) if args.orig_symbols else None
+    decomp_syms = load_symbol_index(Path(args.decomp_symbols)) if args.decomp_symbols else None
 
     print_summary("orig", orig)
     print_summary("decomp", decomp)
@@ -197,9 +258,30 @@ def main() -> int:
         lambda k: f"{k[0]}@{k[1]}",
     )
     print_top_delta(
+        f"Top unresolved-call stub deltas by callsite (top={args.top}):",
+        top_delta(orig.unresolved_hits_by_callsite, decomp.unresolved_hits_by_callsite, args.top),
+        lambda k: (
+            f"{k[0]}@{k[1]} caller={k[2]}"
+            + (
+                f" ({decomp_syms.lookup(k[2])})"
+                if decomp_syms and k[2] not in ("None", "0", "00000000")
+                and decomp_syms.lookup(k[2])
+                else ""
+            )
+        ),
+    )
+    print_top_delta(
         f"Top hot-loop PC deltas (top={args.top}):",
         top_delta(orig.hot_loops, decomp.hot_loops, args.top),
-        lambda k: str(k),
+        lambda k: (
+            str(k)
+            + (
+                f" ({decomp_syms.lookup(str(k))})"
+                if decomp_syms and str(k) not in ("None", "0", "00000000")
+                and decomp_syms.lookup(str(k))
+                else ""
+            )
+        ),
     )
 
     if orig.summary and decomp.summary:

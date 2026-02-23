@@ -21,6 +21,20 @@ TELEMETRY_DIFF_TOOL="${DC3_PARITY_TELEMETRY_DIFF_TOOL:-$XENIA_DIR/tools/dc3_runt
 TELEMETRY_DIFF_TOP="${DC3_PARITY_TELEMETRY_DIFF_TOP:-15}"
 FAIL_ON_STALE_MANIFEST="${DC3_PARITY_FAIL_ON_STALE_MANIFEST:-0}"
 FAIL_ON_MANIFEST_FP_MISMATCH="${DC3_PARITY_FAIL_ON_MANIFEST_FP_MISMATCH:-0}"
+BREAK_ON_UNIMPL="${DC3_PARITY_BREAK_ON_UNIMPL:-1}"
+
+normalize_bool() {
+  case "${1,,}" in
+    1|true|yes|on) echo "true" ;;
+    0|false|no|off) echo "false" ;;
+    *)
+      echo "error: invalid boolean value '$1' (expected 0/1/true/false)" >&2
+      return 1
+      ;;
+  esac
+}
+
+BREAK_ON_UNIMPL_BOOL="$(normalize_bool "$BREAK_ON_UNIMPL")" || exit 2
 
 mkdir -p "$TMPDIR_GATE"
 
@@ -119,6 +133,7 @@ run_case() {
   local -a args=(
     --gpu=null
     --stub_nui_functions=true
+    --break_on_unimplemented_instructions="$BREAK_ON_UNIMPL_BOOL"
     --target="$xex"
     --headless_timeout_ms="$HEADLESS_TIMEOUT_MS"
     --dc3_runtime_telemetry_enable=true
@@ -326,10 +341,18 @@ PY
 if [[ -f "$TMPDIR_GATE/orig.jsonl" && -f "$TMPDIR_GATE/decomp.jsonl" ]]; then
   if [[ -x "$TELEMETRY_DIFF_TOOL" || "$TELEMETRY_DIFF_TOOL" == *.py ]]; then
     echo "Telemetry diff (top=$TELEMETRY_DIFF_TOP):"
-    python3 "$TELEMETRY_DIFF_TOOL" \
-      --orig "$TMPDIR_GATE/orig.jsonl" \
-      --decomp "$TMPDIR_GATE/decomp.jsonl" \
-      --top "$TELEMETRY_DIFF_TOP" || true
+    diff_args=(
+      --orig "$TMPDIR_GATE/orig.jsonl"
+      --decomp "$TMPDIR_GATE/decomp.jsonl"
+      --top "$TELEMETRY_DIFF_TOP"
+    )
+    if [[ -n "$ORIG_SYMBOL_MAP_PATH" ]]; then
+      diff_args+=(--orig-symbols "$ORIG_SYMBOL_MAP_PATH")
+    fi
+    if [[ -n "$DECOMP_SYMBOL_MAP_PATH" ]]; then
+      diff_args+=(--decomp-symbols "$DECOMP_SYMBOL_MAP_PATH")
+    fi
+    python3 "$TELEMETRY_DIFF_TOOL" "${diff_args[@]}" || true
   fi
 fi
 
