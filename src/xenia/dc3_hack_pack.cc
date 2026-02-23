@@ -1,5 +1,6 @@
 #include "xenia/dc3_hack_pack.h"
 
+#include <atomic>
 #include <cstring>
 #include <set>
 #include <string>
@@ -14,7 +15,9 @@
 #include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/string.h"
+#include "xenia/cpu/ppc/ppc_context.h"
 #include "xenia/cpu/processor.h"
+#include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/user_module.h"
 #include "xenia/memory.h"
 
@@ -29,6 +32,15 @@ namespace {
 
 constexpr uint32_t kPpcLiR3_0 = 0x38600000;
 constexpr uint32_t kPpcBlr = 0x4E800020;
+static std::atomic<uint32_t> g_dc3_errno_guest_ptr{0};
+
+void Dc3ErrnoExtern(cpu::ppc::PPCContext* ppc_context,
+                    kernel::KernelState* kernel_state) {
+  (void)kernel_state;
+  if (!ppc_context) return;
+  uint32_t p = g_dc3_errno_guest_ptr.load(std::memory_order_relaxed);
+  ppc_context->r[3] = p;
+}
 
 Dc3HackApplyResult& GetResult(Dc3HackPackSummary& summary, Dc3HackCategory category) {
   for (auto& result : summary.results) {
@@ -309,6 +321,39 @@ void ApplyDc3ImportAndRuntimeStopgaps(const Dc3HackContext& ctx,
     if (PatchStub8(memory, 0x834B1240, 0,
                    "debug/assert helper 0x834B1240 (null object stopgap)")) {
       stopgap_result.applied++;
+    } else {
+      stopgap_result.skipped++;
+    }
+  }
+
+  // Decomp-only CRT/TLS stopgap: guest `_errno` currently returns a bogus
+  // handle-like pointer (observed `0x400006A8`) on the decomp build, which
+  // feeds `_vsnprintf_l` invalid-parameter loops. Provide a stable guest int*
+  // backing store via a guest extern override.
+  if (ctx.is_decomp_layout && ctx.processor) {
+    const uint32_t kErrnoAddr = 0x835B2D68;
+    auto* p_errno_fn = memory->TranslateVirtual<uint8_t*>(kErrnoAddr);
+    if (p_errno_fn && xe::load_and_swap<uint32_t>(p_errno_fn) != 0x00000000) {
+      uint32_t errno_ptr = g_dc3_errno_guest_ptr.load(std::memory_order_relaxed);
+      if (!errno_ptr) {
+        errno_ptr = memory->SystemHeapAlloc(4, 4);
+        if (errno_ptr) {
+          if (auto* p_errno = memory->TranslateVirtual<uint8_t*>(errno_ptr)) {
+            xe::store_and_swap<uint32_t>(p_errno, 0);
+          }
+          g_dc3_errno_guest_ptr.store(errno_ptr, std::memory_order_relaxed);
+        }
+      }
+      if (errno_ptr) {
+        ctx.processor->RegisterGuestFunctionOverride(kErrnoAddr, Dc3ErrnoExtern,
+                                                     "_errno (decomp stopgap)");
+        XELOGI("DC3: Registered decomp stopgap guest override for _errno at {:08X} -> {:08X}",
+               kErrnoAddr, errno_ptr);
+        stopgap_result.applied++;
+      } else {
+        XELOGW("DC3: Failed to allocate guest errno backing storage for decomp _errno override");
+        stopgap_result.failed++;
+      }
     } else {
       stopgap_result.skipped++;
     }
