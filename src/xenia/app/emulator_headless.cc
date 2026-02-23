@@ -251,6 +251,8 @@ void EmulatorHeadless::RunWithTimeout(int32_t timeout_ms) {
                 static bool dumped_invarg_region = false;
                 static bool dumped_vsnprintf_region = false;
                 static bool dumped_vsnprintf_stack = false;
+                static bool dumped_hx_snprintf_region = false;
+                static bool dumped_formatstring_region = false;
                 if (!dumped_invarg_region) {
                   dumped_invarg_region = true;
                   constexpr uint32_t kInvargStart = 0x835B9B08;  // _initp_misc_invarg
@@ -286,6 +288,50 @@ void EmulatorHeadless::RunWithTimeout(int32_t timeout_ms) {
                     auto* p = mem_words->TranslateVirtual(a);
                     uint32_t w = p ? xe::load_and_swap<uint32_t>(p) : 0;
                     fprintf(stderr, "      [sp%+04d] 0x%08X: %08X\n", i * 4, a, w);
+                  }
+                  fprintf(stderr,
+                          "    [dc3-debug] stack frame chain (saved LR at sp-8):\n");
+                  uint32_t frame_sp = sp;
+                  for (int fi = 0; fi < 8; ++fi) {
+                    auto* p_back = mem_words->TranslateVirtual(frame_sp);
+                    auto* p_lr = mem_words->TranslateVirtual(frame_sp - 8);
+                    uint32_t back = p_back ? xe::load_and_swap<uint32_t>(p_back) : 0;
+                    uint32_t saved_lr =
+                        p_lr ? xe::load_and_swap<uint32_t>(p_lr) : 0;
+                    fprintf(stderr,
+                            "      frame[%d] sp=0x%08X saved_lr=0x%08X next_sp=0x%08X\n",
+                            fi, frame_sp, saved_lr, back);
+                    if (!back || back == frame_sp || back < 0x70000000 ||
+                        back >= 0x80000000) {
+                      break;
+                    }
+                    frame_sp = back;
+                  }
+                }
+                if (!dumped_hx_snprintf_region) {
+                  dumped_hx_snprintf_region = true;
+                  constexpr uint32_t kHxSnprintfStart = 0x83477F78;
+                  constexpr uint32_t kHxSnprintfEnd = 0x83478020;
+                  fprintf(stderr,
+                          "    [dc3-debug] Hx_snprintf code dump (frame[1], saved LR=0x83477FC0):\n");
+                  for (uint32_t a = kHxSnprintfStart; a < kHxSnprintfEnd; a += 4) {
+                    auto* p = mem_words->TranslateVirtual(a);
+                    uint32_t w = p ? xe::load_and_swap<uint32_t>(p) : 0;
+                    const char* mark = (a == 0x83477FC0) ? "  <saved_lr>" : "";
+                    fprintf(stderr, "      0x%08X: %08X%s\n", a, w, mark);
+                  }
+                }
+                if (!dumped_formatstring_region) {
+                  dumped_formatstring_region = true;
+                  constexpr uint32_t kFmtStart = 0x83346E94;
+                  constexpr uint32_t kFmtEnd = 0x83346FA0;
+                  fprintf(stderr,
+                          "    [dc3-debug] FormatString::operator<< code dump (frame[2], saved LR=0x83346F4C):\n");
+                  for (uint32_t a = kFmtStart; a < kFmtEnd; a += 4) {
+                    auto* p = mem_words->TranslateVirtual(a);
+                    uint32_t w = p ? xe::load_and_swap<uint32_t>(p) : 0;
+                    const char* mark = (a == 0x83346F4C) ? "  <saved_lr>" : "";
+                    fprintf(stderr, "      0x%08X: %08X%s\n", a, w, mark);
                   }
                 }
               }

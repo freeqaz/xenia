@@ -1,6 +1,41 @@
 # Status: OODA Loop Iteration 4
 
-*Last updated: 2026-02-23 (Session 19 — `_errno` decomp stopgap added; `_vsnprintf_l` invalid-parameter loop narrowed)*
+*Last updated: 2026-02-23 (Session 20 — stale stopgap SIGSEGV fixed; `_invalid_parameter_noinfo` stubbed; clean 20s boot)*
+
+## 2026-02-23 Update (Session 20): Stale Stopgap Addresses Fixed + Clean Boot
+
+- Resumed from Session 19 blocker (`_vsnprintf_l` invalid-parameter trap loop at LR=0x835B3D5C).
+- **ROOT CAUSE FOUND**: 4 decomp-specific stopgaps in `dc3_hack_pack.cc` had hardcoded addresses from a previous XEX build. After relinking (more units set to matching in dc3-decomp), these addresses point to unrelated live code. PatchStub8 overwrites them, corrupting the binary and causing SIGSEGV (EXIT_CODE=139).
+- Verified all stopgap addresses against the current XEX binary:
+  - `0x834BE094` (String::~String) — now a `bl` instruction mid-function — **STALE**
+  - `0x82B324A0` (NUISPEECH::CSpCfgInst) — all zeros (target moved) — **STALE**
+  - `0x83346A2C` (recursive error-report) — function epilogue — **STALE**
+  - `0x834B1240` (debug/assert helper) — `bctrl` mid-function — **STALE**
+  - `0x835B2D68` (_errno) — valid function prologue ✓
+  - `0x835D428C` (_invalid_parameter_noinfo) — valid function prologue ✓ (new)
+  - `0x83477FBC` (Hx_snprintf) — valid entry ✓
+- **Disabled 4 stale stopgaps** with documentation explaining why (addresses shifted after relinking).
+- **Added `_invalid_parameter_noinfo` stub** at `0x835D428C`:
+  - CRT invarg.obj function checks `__pInvalidArgHandler` at `0x83C75734` — NULL since CRT not fully initialized
+  - Falls through to `twui r0, 0x16` (EINVAL trap) which crashes the JIT host
+  - Stubbed to `li r3, 0; blr` (just return)
+- **Validation**: Game boots cleanly for 20s with NUI stubs enabled, EXIT_CODE=0:
+  - Zero SIGSEGV (crash_guest seen in thread report is a handled host-level fault)
+  - CRT init: 390 constructors, 264 valid, 125 skipped
+  - NUI/XBC overrides: 85/85
+  - 3 stopgaps active: `_errno`, `_invalid_parameter_noinfo`, `Hx_snprintf _vsnprintf_l call`
+  - Thread 6 (main) alive in `D3D::FlushCachedMemory` (cache line flush loop, expected with null GPU)
+  - Thread 7 spawned and running (worker thread)
+
+### Key lesson
+
+**Hardcoded guest addresses in stopgaps become stale when dc3-decomp relinks.** All guest address constants in `dc3_hack_pack.cc` must be verified against the current XEX/MAP after relinking. The MAP file at `build/373307D9/default.map` is currently empty (overwritten by a failed build) — once dc3-decomp builds again, regenerate it and refresh any stopgap addresses.
+
+### Current actionable focus (Session 20)
+
+1. **Wait for dc3-decomp build fix** (linking errors being resolved in another thread).
+2. Once MAP is regenerated, refresh stale stopgap addresses (or confirm they're no longer needed).
+3. Continue investigating VdSwap/Present pipeline — game renders D3D vertex buffers but never calls Present.
 
 ## 2026-02-23 Update (Session 19): `_errno` root-cause fix (partial) + `_vsnprintf_l` loop narrowing
 
