@@ -1,6 +1,6 @@
 # TODO: DC3 Boot Progression
 
-*Last updated: 2026-02-23 (Iteration 2, post-JIT indirect call fix)*
+*Last updated: 2026-02-23 (Iteration 2, post-NUI/XBC cutover + validation)*
 
 Items are ordered by priority. Check off as completed. Add new items each iteration.
 
@@ -25,6 +25,11 @@ Items are ordered by priority. Check off as completed. Add new items each iterat
 
 ### Tier 0: CRITICAL PATH — NUI Callback Dispatch Loop
 
+- [x] **Cut over DC3 NUI/XBC stubs to resolver + guest overrides** [xenia] ✓ Session 11
+  - Default path now uses semantic resolution + guest extern overrides
+  - Legacy DC3 NUI/XBC byte-patch fallback removed after validation
+  - Strict signatures-only portability gate now covers original `59/59` and decomp `85/85`
+
 - [ ] **Break NUI callback dispatch loop at 0x834B1F40** [xenia]
   - Game stuck calling garbage function pointers (0x38600000, 0x00000000) in linked list
   - Callback list at object 0x83C16B40, offset 0x20
@@ -43,7 +48,23 @@ Items are ordered by priority. Check off as completed. Add new items each iterat
 
 - [ ] **Rebuild dc3-decomp for consistent MAP+XEX** [dc3-decomp]
   - Current MAP may not match XEX — need consistent pair for address lookups
-  - Update emulator.cc addresses from new MAP using `tools/dc3_extract_addresses.py`
+  - Update manifest (`xenia_dc3_patch_manifest.json`) from the rebuilt outputs
+  - Use `tools/dc3_extract_addresses.py` for non-NUI address diagnostics only
+
+### Tier 1.5: Runtime Parity / Validation Infrastructure (high leverage)
+
+- [x] **Add original-vs-decomp runtime parity gate** [xenia + test] ✓ Session 13
+  - Scripted milestone/log comparison beyond NUI cutover gate
+  - Track boot progression, recurring loop PCs, unresolved/no-op call patterns, and override hit counts
+  - Implemented `tools/dc3_runtime_parity_gate.sh` (`hybrid` + `strict`)
+  - Goal: a stable regression signal for `dc3-decomp` / `jeff` changes
+
+- [x] **Emit structured runtime telemetry (JSONL) for DC3 bring-up** [xenia] ✓ Session 13
+  - Guest override hits
+  - no-op stub hits / unresolvable calls
+  - hot loop PCs / repeated callsites
+  - Implemented cvar-gated JSONL telemetry (`dc3_runtime_telemetry_*`)
+  - Use for original vs decomp diffing and prioritization
 
 ### Tier 2: Reduce unresolved symbols (high leverage)
 
@@ -91,9 +112,24 @@ Items are ordered by priority. Check off as completed. Add new items each iterat
   - Currently hardcoded kCodeStart = 0x822C0000
   - Should derive from PE section headers at runtime
 
-- [ ] **Commit xenia working tree** [xenia]
-  - 18+ uncommitted files on headless-vulkan-linux branch
-  - Split into logical commits: platform fixes, DC3 patches, JIT fixes, docs
+- [x] **Commit and push xenia working tree** [xenia] ✓ Session 13
+  - Merged DC3 headless debugging + NUI/XBC cutover work
+  - Branch `headless-vulkan-linux` pushed to `origin`
+
+- [ ] **Extract non-NUI DC3 hacks into a title hack pack/module** [xenia]
+  - Move CRT/skeleton/debug/decomp workaround logic out of `src/xenia/emulator.cc`
+  - Keep NUI/XBC resolver path as the reference architecture
+  - Goal: clearer ownership and easier hack retirement
+
+- [x] **Create a hack retirement matrix (Xenia ↔ dc3-decomp/jeff)** [docs + xenia + decomp] ✓ Session 13 (initial scaffold)
+  - For each workaround: reason, scope, current necessity, retirement trigger, owner
+  - Initial matrix: `docs/dc3-boot/HACK_RETIREMENT_MATRIX.md`
+  - Use this to prioritize decomp fixes that delete emulator hacks
+
+- [ ] **Promote patch manifest as canonical machine-readable contract** [dc3-decomp + xenia]
+  - `.map` remains for human investigation
+  - Manifest should carry semantic targets + CRT sentinels + build identity + hash metadata
+  - Add runtime `.text` hash field in decomp build workflow when available
 
 ### Tier 4: Post-boot progression (after CRT init works)
 
@@ -131,6 +167,7 @@ Items are ordered by priority. Check off as completed. Add new items each iterat
 - Identify dispatch function at 0x834B1F40 from MAP
 - Stub or patch the callback list to break the loop
 - Re-test and observe next blocker
+- Keep NUI/XBC resolver `strict` mode green as a portability regression target while iterating
 
 ---
 
@@ -153,3 +190,10 @@ Items are ordered by priority. Check off as completed. Add new items each iterat
 | 2026-02-23 | 2 | Indirection table bounds checks in AddIndirection + PlaceGuestCode |
 | 2026-02-23 | 2 | **GAME RUNS STABLY**: 30s timeout, exit 124, zero crashes, 4.4MB output |
 | 2026-02-23 | 2 | Created DEBUGGING_TIPS.md — JIT architecture + debugging knowledge |
+| 2026-02-23 | 2 | **DC3 NUI/XBC CUTOVER**: resolver + guest extern overrides defaulted and validated |
+| 2026-02-23 | 2 | Removed legacy DC3 NUI/XBC byte-patch fallback after gate validation |
+| 2026-02-23 | 2 | Added/passed `tools/dc3_nui_cutover_gate.sh` (default + strict, original + decomp) |
+| 2026-02-23 | 2 | Pushed merged Xenia branch `headless-vulkan-linux` to `origin` |
+| 2026-02-23 | 2 | Added `tools/dc3_runtime_parity_gate.sh` (hybrid + strict original/decomp parity checks) |
+| 2026-02-23 | 2 | Added DC3 JSONL runtime telemetry (override/unresolved/hot-loop/milestone/summary events) |
+| 2026-02-23 | 2 | Added initial `HACK_RETIREMENT_MATRIX.md` with active workaround inventory + triggers |
