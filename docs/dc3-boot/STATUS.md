@@ -18,6 +18,10 @@
   - decomp still crashes into code-like blobs with `SP=0` (data-as-code / control-flow corruption), blocking progression to `DxRnd::Present` / `D3DDevice_Swap`.
 - Experimental headless-only runtime patch confirms progress:
   - one-shot patch of late-materialized helper at `0x8311B8E0` moves the fault to a later site (`__savegprlr_28`), proving the blocker is shifting and NUI/XBC is not the limiting path.
+- Crash forensics update (first decomp fault, pre-runtime patch):
+  - `PC=0x8311B8E4`, `LR=0x8311BAC4`, `CTR=0x00000000` (data-as-code path does not look like a normal indirect-resolve/CTR jump sequence).
+  - `r1` low 32 bits are zero at first fault (`r1=0x8204FCD800000000`), confirming invalid-SP state is present at the first crash (not just later thread-status sampling).
+- Added `ResolveFunction` non-text target instrumentation (x64 emitter) to capture caller->target edges for executable-but-non-`.text` calls; no hits on the current first-crash path, implying the bad control flow is bypassing the resolve thunk path.
 
 ### Current actionable focus (Session 17)
 

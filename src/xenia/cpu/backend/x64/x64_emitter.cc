@@ -36,6 +36,7 @@
 #include "xenia/cpu/processor.h"
 #include "xenia/cpu/symbol.h"
 #include "xenia/cpu/thread_state.h"
+#include "xenia/cpu/xex_module.h"
 #include "xenia/dc3_runtime_telemetry.h"
 
 DEFINE_bool(debugprint_trap_log, false,
@@ -59,6 +60,38 @@ static const size_t kMaxCodeSize = 1_MiB;
 
 static const size_t kStashOffset = 32;
 // static const size_t kStashOffsetHigh = 32 + 32;
+
+const char* ClassifyNonTextExecutableTarget(Processor* processor,
+                                            uint32_t target_address) {
+  if (!processor) {
+    return nullptr;
+  }
+  for (auto* module : processor->GetModules()) {
+    if (!module || !module->is_executable() || !module->ContainsAddress(target_address)) {
+      continue;
+    }
+    auto* xex = dynamic_cast<XexModule*>(module);
+    if (!xex) {
+      return "exec_non_xex";
+    }
+    auto in_section = [&](const char* name) -> bool {
+      if (auto* sec = xex->GetPESection(name)) {
+        return target_address >= sec->address &&
+               target_address < (sec->address + sec->size);
+      }
+      return false;
+    };
+    if (in_section(".text")) {
+      return nullptr;
+    }
+    if (in_section(".data")) return "data";
+    if (in_section(".rdata")) return "rdata";
+    if (in_section(".pdata")) return "pdata";
+    if (in_section(".idata")) return "idata";
+    return "exec_non_text";
+  }
+  return nullptr;
+}
 
 const uint32_t X64Emitter::gpr_reg_map_[X64Emitter::GPR_COUNT] = {
     Xbyak::Operand::RBX, Xbyak::Operand::R10, Xbyak::Operand::R11,
@@ -441,6 +474,23 @@ uint64_t ResolveFunction(void* raw_context, uint64_t target_address) {
     xe::Dc3RuntimeTelemetryRecordUnresolvedCallStubHit("null_target", 0,
                                                        callsite_pc);
     return GetNoopReturnStub(thread_state);
+  }
+
+  if (auto* reason =
+          ClassifyNonTextExecutableTarget(thread_state->processor(),
+                                         static_cast<uint32_t>(target_address))) {
+    std::string telemetry_reason = "resolved_non_text_";
+    telemetry_reason += reason;
+    xe::Dc3RuntimeTelemetryRecordUnresolvedCallStubHit(
+        telemetry_reason, static_cast<uint32_t>(target_address), callsite_pc);
+    static std::atomic<int> non_text_count{0};
+    int n = non_text_count.fetch_add(1, std::memory_order_relaxed);
+    if (n < 10 || (n < 100 && (n % 10) == 0) || (n % 1000) == 0) {
+      XELOGW(
+          "ResolveFunction({:08X}) from {:08X}: executable target outside .text "
+          "({})",
+          static_cast<uint32_t>(target_address), callsite_pc, reason);
+    }
   }
 
   auto fn = thread_state->processor()->ResolveFunction(
