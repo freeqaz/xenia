@@ -1867,220 +1867,25 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
         is_decomp_layout ? "decomp" : "original");
     Dc3RuntimeTelemetryRecordBootMilestone("dc3_nui_patch_apply_complete");
 
-    // Fake Kinect skeleton data injection
-    // Replaces the NuiSkeletonGetNextFrame stub with a PPC routine that
-    // copies pre-built T-pose skeleton data to the caller's output buffer
-    // with incrementing timestamps. Also patches SkeletonUpdate's thread
-    // to loop every 33ms instead of blocking on sNewSkeletonEvent, and
-    // NOPs the IsOverride check so SkeletonFrame::Create() always runs.
-    if (cvars::fake_kinect_data && !is_decomp_layout) {
-      const uint32_t kGetNextFrameAddr = 0x829C2790;
-      const uint32_t kSkeletonFrameSize = 0xAB0;  // 2736 bytes
-
-      // Allocate guest heap memory for skeleton template + frame counter.
-      // We MUST NOT place this data at kGetNextFrameAddr+N because the NUI
-      // library has internal functions (NuipConvertSTSkeletons at 0x829C2A10,
-      // NuipAccumulateSkeletonFrameStats at 0x829C2C50) adjacent to
-      // NuiSkeletonGetNextFrame that would be overwritten.
-      const uint32_t kDataSize = kSkeletonFrameSize + 4;  // +4 for counter
-      uint32_t data_guest_addr = memory_->SystemHeapAlloc(kDataSize, 0x10);
-      if (!data_guest_addr) {
-        XELOGW("DC3: Failed to allocate guest memory for fake skeleton data");
-      }
-      const uint32_t kSkeletonDataAddr = data_guest_addr;
-      const uint32_t kCounterAddr = data_guest_addr + kSkeletonFrameSize;
-
-      // Make the stub location writable (just the 19-instruction stub)
-      auto* heap = memory_->LookupHeap(kGetNextFrameAddr);
-      if (heap && data_guest_addr) {
-        heap->Protect(kGetNextFrameAddr, 0x4C,
-                      kMemoryProtectRead | kMemoryProtectWrite);
-
-        auto* stub_mem = memory_->TranslateVirtual<uint8_t*>(kGetNextFrameAddr);
-
-        // Write PPC stub code:
-        // NuiSkeletonGetNextFrame(DWORD timeout /*r3*/, NUI_SKELETON_FRAME* out /*r4*/)
-        //   mr r8, r4                       ; save output pointer
-        //   lis r5, hi(kSkeletonDataAddr)
-        //   ori r5, r5, lo(kSkeletonDataAddr)
-        //   li r6, word_count
-        //   mtctr r6
-        // loop:
-        //   lwz r7, 0(r5)
-        //   stw r7, 0(r4)
-        //   addi r5, r5, 4
-        //   addi r4, r4, 4
-        //   bdnz loop
-        //   lis r5, hi(kCounterAddr)        ; load frame counter
-        //   ori r5, r5, lo(kCounterAddr)
-        //   lwz r6, 0(r5)
-        //   addi r6, r6, 1                  ; increment
-        //   stw r6, 0(r5)                   ; store back
-        //   stw r6, 4(r8)                   ; timestamp low word in output
-        //   stw r6, 8(r8)                   ; frame number in output
-        //   li r3, 0                        ; return S_OK
-        //   blr
-        uint32_t ppc_stub[] = {
-            0x7C882378,                                // mr r8, r4
-            0x3CA00000 | (kSkeletonDataAddr >> 16),    // lis r5, hi16(data)
-            0x60A50000 | (kSkeletonDataAddr & 0xFFFF), // ori r5, r5, lo16(data)
-            0x38C00000 | (kSkeletonFrameSize / 4),     // li r6, word_count
-            0x7CC903A6,                                // mtctr r6
-            0x80E50000,                                // lwz r7, 0(r5)
-            0x90E40000,                                // stw r7, 0(r4)
-            0x38A50004,                                // addi r5, r5, 4
-            0x38840004,                                // addi r4, r4, 4
-            0x4200FFF0,                                // bdnz -16 (to lwz)
-            0x3CA00000 | (kCounterAddr >> 16),         // lis r5, hi16(counter)
-            0x60A50000 | (kCounterAddr & 0xFFFF),      // ori r5, r5, lo16(counter)
-            0x80C50000,                                // lwz r6, 0(r5)
-            0x38C60001,                                // addi r6, r6, 1
-            0x90C50000,                                // stw r6, 0(r5)
-            0x90C80004,                                // stw r6, 4(r8) (timestamp)
-            0x90C80008,                                // stw r6, 8(r8) (frame num)
-            0x38600000,                                // li r3, 0 (S_OK)
-            0x4E800020,                                // blr
-        };
-        for (size_t i = 0; i < sizeof(ppc_stub) / sizeof(ppc_stub[0]); i++) {
-          xe::store_and_swap<uint32_t>(stub_mem + i * 4, ppc_stub[i]);
-        }
-
-        // Initialize frame counter to 0
-        xe::store_and_swap<uint32_t>(
-            memory_->TranslateVirtual<uint8_t*>(kCounterAddr), 0);
-
-        // Write pre-built NUI_SKELETON_FRAME at kSkeletonDataAddr
-        auto* data_mem = memory_->TranslateVirtual<uint8_t*>(kSkeletonDataAddr);
-        std::memset(data_mem, 0, kSkeletonFrameSize);
-
-        // Helper to write a big-endian float at an offset
-        auto write_float = [data_mem](uint32_t offset, float value) {
-          xe::store_and_swap<float>(data_mem + offset, value);
-        };
-        auto write_u32 = [data_mem](uint32_t offset, uint32_t value) {
-          xe::store_and_swap<uint32_t>(data_mem + offset, value);
-        };
-
-        // NUI_SKELETON_FRAME layout:
-        //   0x0000: LARGE_INTEGER liTimeStamp (8 bytes)
-        //   0x0008: DWORD dwFrameNumber
-        //   0x000C: DWORD dwFlags
-        //   0x0010: XMVECTOR vFloorClipPlane (x,y,z,w)
-        //   0x0020: XMVECTOR vNormalToGravity (x,y,z,w)
-        //   0x0030: NUI_SKELETON_DATA[6] (each 0x1C0 = 448 bytes)
-        write_u32(0x0008, 1);  // dwFrameNumber = 1
-
-        // Floor clip plane: Y-up (0, 1, 0, 0)
-        write_float(0x0014, 1.0f);  // vFloorClipPlane.y
-
-        // Normal to gravity: Y-up (0, 1, 0, 0)
-        write_float(0x0024, 1.0f);  // vNormalToGravity.y
-
-        // NUI_SKELETON_DATA[0] at offset 0x30:
-        //   0x00: eTrackingState (DWORD)
-        //   0x04: dwTrackingID
-        //   0x08: dwEnrollmentIndex
-        //   0x0C: dwUserIndex
-        //   0x10: Position (XMVECTOR, 16 bytes)
-        //   0x20: SkeletonPositions[20] (20 × 16 bytes = 320 bytes)
-        //   0x160: TrackingStates[20] (20 × 4 bytes = 80 bytes)
-        //   0x1B0: dwQualityFlags
-        const uint32_t skel0 = 0x30;  // offset of SkeletonData[0]
-
-        write_u32(skel0 + 0x00, 2);  // eTrackingState = NUI_SKELETON_TRACKED
-        write_u32(skel0 + 0x04, 1);  // dwTrackingID = 1
-        write_u32(skel0 + 0x0C, 0);  // dwUserIndex = 0
-
-        // Center of mass position
-        write_float(skel0 + 0x10, 0.0f);  // Position.x
-        write_float(skel0 + 0x14, 0.9f);  // Position.y
-        write_float(skel0 + 0x18, 2.0f);  // Position.z
-        write_float(skel0 + 0x1C, 1.0f);  // Position.w
-
-        // T-pose joint positions (20 joints × XMVECTOR)
-        // Positions in meters, Kinect camera coordinates (X=left/right, Y=up, Z=depth)
-        struct JointPos {
-          float x, y, z;
-        };
-        JointPos joints[20] = {
-            {0.00f, 0.90f, 2.0f},   //  0: Hip Center
-            {0.00f, 1.10f, 2.0f},   //  1: Spine
-            {0.00f, 1.35f, 2.0f},   //  2: Shoulder Center
-            {0.00f, 1.60f, 2.0f},   //  3: Head
-            {-0.20f, 1.35f, 2.0f},  //  4: Shoulder Left
-            {-0.50f, 1.35f, 2.0f},  //  5: Elbow Left
-            {-0.75f, 1.35f, 2.0f},  //  6: Wrist Left
-            {-0.85f, 1.35f, 2.0f},  //  7: Hand Left
-            {0.20f, 1.35f, 2.0f},   //  8: Shoulder Right
-            {0.50f, 1.35f, 2.0f},   //  9: Elbow Right
-            {0.75f, 1.35f, 2.0f},   // 10: Wrist Right
-            {0.85f, 1.35f, 2.0f},   // 11: Hand Right
-            {-0.15f, 0.90f, 2.0f},  // 12: Hip Left
-            {-0.15f, 0.50f, 2.0f},  // 13: Knee Left
-            {-0.15f, 0.05f, 2.0f},  // 14: Ankle Left
-            {0.15f, 0.90f, 2.0f},   // 15: Hip Right
-            {0.15f, 0.50f, 2.0f},   // 16: Knee Right
-            {0.15f, 0.05f, 2.0f},   // 17: Ankle Right
-            {-0.15f, 0.00f, 2.0f},  // 18: Foot Left
-            {0.15f, 0.00f, 2.0f},   // 19: Foot Right
-        };
-
-        const uint32_t joints_offset = skel0 + 0x20;  // SkeletonPositions[0]
-        for (int j = 0; j < 20; j++) {
-          uint32_t off = joints_offset + j * 16;
-          write_float(off + 0, joints[j].x);
-          write_float(off + 4, joints[j].y);
-          write_float(off + 8, joints[j].z);
-          write_float(off + 12, 1.0f);  // w = 1.0
-        }
-
-        // Set all 20 joint tracking states to TRACKED (2)
-        const uint32_t tracking_offset = skel0 + 0x160;
-        for (int j = 0; j < 20; j++) {
-          write_u32(tracking_offset + j * 4, 2);  // NUI_SKELETON_POSITION_TRACKED
-        }
-
-        // Binary patches for SkeletonUpdate (debug build addresses).
-        //
-        // Problem: The SkeletonUpdateThread blocks forever on
-        // WaitForSingleObject(sNewSkeletonEvent, INFINITE) because the NUI SDK
-        // never signals the event. Even if the thread runs, Update() skips
-        // SkeletonFrame::Create() when IsOverride() is true (which it is for
-        // LiveCameraInput), so the NUI skeleton data never gets converted.
-        //
-        // Fix: (1) Change the wait timeout from INFINITE to 33ms so the thread
-        // polls in a loop. (2) NOP the IsOverride branch so Create() always
-        // runs when NuiSkeletonGetNextFrame succeeds.
-        struct BinaryPatch {
-          uint32_t address;
-          uint32_t value;
-          const char* name;
-        };
-        BinaryPatch skel_patches[] = {
-            // SkeletonUpdateThread: li r28, -1 -> li r28, 33
-            // Makes WaitForSingleObject poll every 33ms instead of blocking
-            {0x8242E74C, 0x3B800021,
-             "SkeletonUpdateThread: timeout INFINITE -> 33ms"},
-            // SkeletonUpdate::Update(): bne (IsOverride skip) -> nop
-            // Allows SkeletonFrame::Create() to run with NUI data
-            {0x8242E1B0, 0x60000000,
-             "SkeletonUpdate::Update: NOP IsOverride branch"},
-        };
-        for (const auto& p : skel_patches) {
-          auto* h = memory_->LookupHeap(p.address);
-          if (h) {
-            h->Protect(p.address, 4, kMemoryProtectRead | kMemoryProtectWrite);
-            auto* m = memory_->TranslateVirtual<uint8_t*>(p.address);
-            xe::store_and_swap<uint32_t>(m, p.value);
-            XELOGI("  Patched {:08X}: {}", p.address, p.name);
-          }
-        }
-
-        XELOGI("DC3: Fake Kinect skeleton data written at {:08X} ({} bytes), "
-               "PPC stub at {:08X}, counter at {:08X}",
-               kSkeletonDataAddr, kSkeletonFrameSize, kGetNextFrameAddr,
-               kCounterAddr);
-      }
+    // Fake Kinect skeleton data injection / SkeletonUpdate patches
+    // are extracted into dc3_hack_pack for the same reason as the non-NUI
+    // workarounds: keep emulator.cc orchestration-focused and preserve an
+    // explicit retirement path.
+    {
+      Dc3HackContext dc3_skeleton_ctx;
+      dc3_skeleton_ctx.memory = memory_.get();
+      dc3_skeleton_ctx.processor = processor_.get();
+      dc3_skeleton_ctx.module = module.get();
+      dc3_skeleton_ctx.is_decomp_layout = is_decomp_layout;
+#ifdef XE_HEADLESS_BUILD
+      dc3_skeleton_ctx.is_headless = true;
+#else
+      dc3_skeleton_ctx.is_headless = false;
+#endif
+      auto skel_result = ApplyDc3SkeletonHackPack(dc3_skeleton_ctx);
+      XELOGD("DC3: hack-pack category={} applied={} skipped={} failed={}",
+             Dc3HackCategoryName(skel_result.category), skel_result.applied,
+             skel_result.skipped, skel_result.failed);
     }
   }
 

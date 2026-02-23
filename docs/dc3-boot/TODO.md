@@ -124,7 +124,7 @@ Items are ordered by priority. Check off as completed. Add new items each iterat
 
 - [~] **Extract non-NUI DC3 hacks into a title hack pack/module** [xenia] (in progress)
   - Extracted (stable): CRT/imports/debug/decomp stopgaps into `src/xenia/dc3_hack_pack.{h,cc}`
-  - Deferred: `fake_kinect_data` skeleton injection remains inline in `src/xenia/emulator.cc` pending a second extraction pass
+  - Completed second-pass extraction: `fake_kinect_data` skeleton injection + SkeletonUpdate binary patches now route via `ApplyDc3SkeletonHackPack(...)`
   - Keep NUI/XBC resolver path as the reference architecture
   - Goal: clearer ownership and easier hack retirement
 
@@ -207,5 +207,6 @@ Items are ordered by priority. Check off as completed. Add new items each iterat
 | 2026-02-23 | 2 | Added `tools/dc3_runtime_telemetry_diff.py` and parity-gate per-run manifest/symbol overrides |
 | 2026-02-23 | 2 | Added initial `HACK_RETIREMENT_MATRIX.md` with active workaround inventory + triggers |
 | 2026-02-23 | 2 | Extracted stable non-NUI DC3 hack-pack module (`dc3_hack_pack`) for CRT/imports/debug/decomp stopgaps |
+| 2026-02-23 | 2 | Added parity-gate manifest/XEX preflight integrity checks and extracted `fake_kinect_data` skeleton injection into `ApplyDc3SkeletonHackPack` |
 | 2026-02-23 | 2 | Caught and reverted two extraction semantic drifts (full-image writable + `.text` zero-word `blr` patching) via cutover/parity validation |
 | 2026-02-23 | 2 | Hardened DC3 patch manifest contract: schema/version validation + manifest-fingerprint target gating in Xenia |
