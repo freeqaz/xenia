@@ -2,6 +2,35 @@
 
 *Last updated: 2026-02-23 (Sessions 12-13 — Game runs stably, NUI callback loop blocker)*
 
+## 2026-02-23 Update (Phase 1 Consolidation): Runtime Parity Gate + JSONL Telemetry
+
+- Implemented DC3 structured runtime telemetry (cvar-gated JSONL):
+  - `--dc3_runtime_telemetry_enable=true`
+  - `--dc3_runtime_telemetry_path=<file.jsonl>`
+- Telemetry currently emits:
+  - `dc3_boot_milestone`
+  - `dc3_nui_override_registered`
+  - aggregated `dc3_nui_override_hit`
+  - aggregated `dc3_unresolved_call_stub_hit`
+  - aggregated `dc3_hot_loop_pc`
+  - `dc3_summary`
+- Telemetry hooks are wired into:
+  - DC3 NUI/XBC resolver/apply path (`emulator.cc`)
+  - guest extern call path + unresolved no-op stub path (`x64_emitter.cc`)
+  - headless timeout / normal thread finish (`emulator_headless.cc`)
+- Implemented parity gate: `tools/dc3_runtime_parity_gate.sh`
+  - Runs original + decomp with telemetry enabled
+  - Supports `DC3_PARITY_MODE=hybrid|strict`
+  - Hard-fails on NUI/XBC resolver/apply regressions
+  - Warn-only on milestone/hot-loop/unresolved diffs (initially)
+- Validation (2026-02-23):
+  - Existing `tools/dc3_nui_cutover_gate.sh` still passes (`default` + `strict`)
+  - `xenia-core-tests "[dc3_nui_patch_resolver]"` still passes (`648 assertions / 10 test cases`)
+  - `tools/dc3_runtime_parity_gate.sh` passes in:
+    - `hybrid`
+    - `strict`
+  - Initial parity telemetry signal identifies a decomp-only hot loop PC (`8291044C`) as warn-only data
+
 ## 2026-02-23 Update (Sessions 12-13): JIT Indirect Call Fix + Game Stability
 
 ### Major Breakthrough: Game Runs Without Crashing

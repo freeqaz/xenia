@@ -45,6 +45,7 @@
 #include "xenia/cpu/cpu_flags.h"
 #include "xenia/cpu/thread_state.h"
 #include "xenia/dc3_nui_patch_resolver.h"
+#include "xenia/dc3_runtime_telemetry.h"
 #include "xenia/gpu/gpu_flags.h"
 #include "xenia/gpu/graphics_system.h"
 #include "xenia/hid/input_driver.h"
@@ -163,12 +164,20 @@ using namespace xe::dc3;
 void Dc3NuiReturnOkExtern(cpu::ppc::PPCContext* ppc_context,
                           kernel::KernelState* kernel_state) {
   (void)kernel_state;
+  if (ppc_context && ppc_context->scratch) {
+    Dc3RuntimeTelemetryRecordNuiOverrideHit(
+        static_cast<uint32_t>(ppc_context->scratch));
+  }
   ppc_context->r[3] = 0;
 }
 
 void Dc3NuiReturnNeg1Extern(cpu::ppc::PPCContext* ppc_context,
                             kernel::KernelState* kernel_state) {
   (void)kernel_state;
+  if (ppc_context && ppc_context->scratch) {
+    Dc3RuntimeTelemetryRecordNuiOverrideHit(
+        static_cast<uint32_t>(ppc_context->scratch));
+  }
   ppc_context->r[3] = UINT64_C(0xFFFFFFFFFFFFFFFF);
 }
 
@@ -372,6 +381,7 @@ X_STATUS Emulator::TerminateTitle() {
   if (processor_) {
     processor_->ClearGuestFunctionOverrides();
   }
+  Dc3RuntimeTelemetryEndSession("terminate_title");
   kernel_state_->TerminateTitle();
   title_id_ = std::nullopt;
   title_name_ = "";
@@ -381,6 +391,7 @@ X_STATUS Emulator::TerminateTitle() {
 }
 
 X_STATUS Emulator::LaunchPath(const std::filesystem::path& path) {
+  Dc3RuntimeTelemetryEndSession("launch_path_reset");
   if (processor_) {
     processor_->ClearGuestFunctionOverrides();
   }
@@ -1624,6 +1635,14 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
              resolver_mode);
       resolver_mode = "hybrid";
     }
+    Dc3RuntimeTelemetryConfig telemetry_config;
+    telemetry_config.title_id = "373307D9";
+    telemetry_config.build_kind = is_decomp_layout ? "decomp" : "original";
+    telemetry_config.resolver_mode = resolver_mode;
+    telemetry_config.signature_resolver = cvars::dc3_nui_enable_signature_resolver;
+    telemetry_config.guest_overrides = true;
+    Dc3RuntimeTelemetryBeginSession(telemetry_config);
+    Dc3RuntimeTelemetryRecordBootMilestone("dc3_nui_patch_block_begin");
 
     std::vector<Dc3ResolvedNuiPatch> resolved_patches;
     resolved_patches.reserve(active_count);
@@ -1664,6 +1683,10 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
         resolver_mode, resolved_by_manifest,
         resolved_by_symbol, resolved_by_signature,
         resolved_by_catalog, resolver_strict_rejects, active_count);
+    Dc3RuntimeTelemetryRecordNuiResolverSummary(
+        resolver_mode, resolved_by_manifest, resolved_by_symbol,
+        resolved_by_signature, resolved_by_catalog, resolver_strict_rejects,
+        active_count);
     if (cvars::dc3_nui_signature_trace) {
       auto should_trace_signature_target = [](std::string_view name) {
         return !name.empty();
@@ -1807,6 +1830,9 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
       XELOGI("DC3: Registered guest extern override {:08X}: {} (resolver={})",
              patch_addr, patch.name,
              Dc3PatchResolveMethodName(resolved_patch.resolve_method));
+      Dc3RuntimeTelemetryRecordNuiOverrideRegistered(
+          patch.name, patch_addr,
+          Dc3PatchResolveMethodName(resolved_patch.resolve_method));
       override_registered++;
     }
     XELOGI(
@@ -1830,6 +1856,10 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
         is_decomp_layout ? "decomp" : "original", override_unsupported,
         override_register_failed, override_register_non_text,
         override_register_unresolved);
+    Dc3RuntimeTelemetryRecordNuiPatchSummary(
+        patched, overridden, skipped, active_count,
+        is_decomp_layout ? "decomp" : "original");
+    Dc3RuntimeTelemetryRecordBootMilestone("dc3_nui_patch_apply_complete");
 
     // Fake Kinect skeleton data injection
     // Replaces the NuiSkeletonGetNextFrame stub with a PPC routine that
@@ -2185,6 +2215,25 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
           {0x8333D620, "GetSystemLocale", 0},    // may also recurse
           // --- DataNode.obj: Print loops infinitely on zero-page data ---
           {0x830EDFF4, "DataNode::Print", 0},    // void; logging only
+          // --- DataArray.obj: AddRef/Release write to bad pointers ---
+          // DataNodes have corrupt "DataArray*" pointing into the code/data
+          // section instead of heap. AddRef/Release try sth at this+0xA
+          // → WRITE fault on read-only image pages.
+          // Stubbing disables refcounting; acceptable for boot progression.
+          {0x832DD638, "DataArray::AddRef", 0},    // void; refcount++
+          {0x82F1A8D4, "DataArray::Release", 0},   // void; refcount-- & free
+          // --- Mat.obj: CreateMetaMaterial loops in NextName("{anon}") ---
+          {0x83140608, "RndMat::CreateMetaMaterial", 0},  // returns NULL
+          // --- rtlheap.obj: UCR linked list infinite loop ---
+          // The XDK heap calls NtAllocateVirtualMemory to commit/decommit
+          // pages within the heap region. In Xenia, all guest memory is
+          // already committed, so these operations are no-ops. The UCR list
+          // gets corrupt because NtAllocateVirtualMemory doesn't actually
+          // decommit anything, leaving stale entries. Fix: stub the wrapper
+          // to always succeed (return 0), and prevent UCR list corruption
+          // by stubbing InsertUnCommittedPages.
+          {0x8302D2EC, "NtAllocateVirtualMemoryWrapper", 0},
+          {0x8302D524, "RtlpInsertUnCommittedPages", 0},
           // --- HolmesClient.obj: comprehensive stub of all Holmes functions ---
           // Network/server communication
           {0x8310CD88, "HolmesClientInit", 0},
@@ -2557,6 +2606,44 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
             "{} nullified-skip",
             table.name, total, already_null, valid_count, nullified_oob,
             nullified_bisect, nullified_skip);
+      }
+
+      // DC3: Inject required init functions into nullified CRT slots.
+      //
+      // Some game-engine init functions (like InitMakeString) are NOT in the
+      // CRT constructor table — they're called explicitly during game init
+      // from call chains that may be broken in the decomp.  Without them,
+      // global CriticalSections and buffer pools are never initialized,
+      // causing deadlocks.
+      //
+      // We inject these into nullified NUI slots so _cinit() calls them
+      // at the right time (after heap init, before main).
+      struct CrtInject {
+        int slot;           // CRT index (must be in skip_set / already nulled)
+        uint32_t func_addr; // guest address to inject
+        const char* name;
+      };
+      CrtInject injections[] = {
+          // InitMakeString (MakeString.obj) initializes the FormatString
+          // buffer pool and its CriticalSection.  Without it, NextBuf()
+          // deadlocks on an uninitialized CS at 0x400007E8.
+          {69, 0x833468CC, "InitMakeString"},
+      };
+      const uint32_t xc_start = 0x83A7B2E0;
+      for (const auto& inj : injections) {
+        uint32_t slot_addr = xc_start + inj.slot * 4;
+        auto* p = memory_->TranslateVirtual<uint8_t*>(slot_addr);
+        uint32_t current = xe::load_and_swap<uint32_t>(p);
+        if (current == 0) {
+          xe::store_and_swap<uint32_t>(p, inj.func_addr);
+          XELOGI("DC3: CRT[{:3d}] injected {:08X} ({})", inj.slot,
+                  inj.func_addr, inj.name);
+        } else {
+          XELOGI(
+              "DC3: CRT[{:3d}] injection SKIPPED - slot not empty "
+              "(contains {:08X}), wanted to inject {:08X} ({})",
+              inj.slot, current, inj.func_addr, inj.name);
+        }
       }
     }
   }

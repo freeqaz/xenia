@@ -28,6 +28,7 @@
 #include "xenia/cpu/function.h"
 #include "xenia/cpu/processor.h"
 #include "xenia/cpu/ppc/ppc_context.h"
+#include "xenia/dc3_runtime_telemetry.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/xboxkrnl/xboxkrnl_rtl.h"
 #include "xenia/kernel/xthread.h"
@@ -130,6 +131,8 @@ void EmulatorHeadless::EmulatorThread(std::filesystem::path launch_path) {
     }
   }
 
+  xe::Dc3RuntimeTelemetryRecordBootMilestone("emulator_thread_finished");
+  xe::Dc3RuntimeTelemetryEndSession("emulator_thread_finished");
   XELOGI("Emulator thread finished");
 }
 
@@ -152,6 +155,8 @@ void EmulatorHeadless::RunWithTimeout(int32_t timeout_ms) {
 
     if (elapsed >= timeout_ms) {
       XELOGI("Timeout of {}ms reached, terminating...", timeout_ms);
+      xe::Dc3RuntimeTelemetryRecordBootMilestone("headless_timeout_reached");
+      xe::Dc3RuntimeTelemetryEndSession("headless_timeout", timeout_ms);
       std::cout << "TIMEOUT: " << timeout_ms << "ms reached" << std::endl;
       // Use _exit to avoid assertion failures during cleanup
       // The emulator thread is stuck in WaitUntilExit() and can't be cleanly joined
@@ -214,11 +219,78 @@ void EmulatorHeadless::RunWithTimeout(int32_t timeout_ms) {
             uint32_t r12 = (uint32_t)ppc_ctx->r[12];
             uint32_t r30 = (uint32_t)ppc_ctx->r[30];
             uint32_t r31 = (uint32_t)ppc_ctx->r[31];
-            fprintf(stderr, "    regs: r3=0x%08X r8=0x%08X r9=0x%08X r10=0x%08X\n",
-                    r3, r8, r9, r10);
+            uint32_t r4 = (uint32_t)ppc_ctx->r[4];
+            uint32_t r5 = (uint32_t)ppc_ctx->r[5];
+            fprintf(stderr, "    regs: r3=0x%08X r4=0x%08X r5=0x%08X r8=0x%08X r9=0x%08X r10=0x%08X\n",
+                    r3, r4, r5, r8, r9, r10);
             fprintf(stderr, "          r11=0x%08X r12=0x%08X r30=0x%08X r31=0x%08X CTR=0x%08X\n",
                     r11, r12, r30, r31, ctr);
             fflush(stderr);
+            // Read strings from registers that might be pointers to guest memory
+            auto* mem_str = emulator_->memory();
+            if (mem_str) {
+              auto read_guest_str = [&](const char* label, uint32_t addr) {
+                if (addr >= 0x82000000 && addr < 0x90000000) {
+                  auto* ptr = mem_str->TranslateVirtual(addr);
+                  if (ptr) {
+                    char buf[64] = {};
+                    memcpy(buf, ptr, 63);
+                    buf[63] = '\0';
+                    // Check if it looks like a printable string
+                    bool printable = true;
+                    int len = 0;
+                    for (int si = 0; si < 63 && buf[si]; si++) {
+                      if (buf[si] < 0x20 || buf[si] > 0x7E) { printable = false; break; }
+                      len++;
+                    }
+                    if (printable && len > 0) {
+                      fprintf(stderr, "    %s[0x%08X] = \"%.*s\"\n", label, addr, len, buf);
+                    }
+                  }
+                }
+              };
+              read_guest_str("r3", r3);
+              read_guest_str("r4", r4);
+              read_guest_str("r5", r5);
+              read_guest_str("r31", r31);
+              read_guest_str("r30", r30);
+              // Also read from stack - NextName stores path on stack
+              for (int si = 0; si < 4; si++) {
+                uint32_t stack_addr = sp + 0x30 + si * 0x20;
+                read_guest_str("stk", stack_addr);
+              }
+              fflush(stderr);
+              // Dump raw RTL_CRITICAL_SECTION bytes at r31+4 (CritSec wrapper)
+              // X_RTL_CRITICAL_SECTION: X_DISPATCH_HEADER(16B) lock_count(4B) recursion(4B) owner(4B)
+              // X_DISPATCH_HEADER: type(1B) absolute(1B) size(1B) insert(1B) signal(4B) wait_list(8B)
+              auto dump_cs_raw = [&](const char* label, uint32_t addr) {
+                if (addr >= 0x40000000 && addr < 0x50000000) {
+                  auto* p = mem_str->TranslateVirtual(addr);
+                  if (p) {
+                    fprintf(stderr, "    %s RTL_CS[0x%08X]: ", label, addr);
+                    for (int bi = 0; bi < 28; bi++) {
+                      fprintf(stderr, "%02X", p[bi]);
+                      if (bi == 3 || bi == 7 || bi == 11 || bi == 15 || bi == 19 || bi == 23) fprintf(stderr, " ");
+                    }
+                    // Parse key fields (big-endian in guest memory)
+                    uint8_t cs_type = p[0];
+                    uint8_t cs_abs = p[1];
+                    int32_t lock = xe::load_and_swap<int32_t>(p + 0x10);
+                    int32_t rec = xe::load_and_swap<int32_t>(p + 0x14);
+                    uint32_t owner = xe::load_and_swap<uint32_t>(p + 0x18);
+                    fprintf(stderr, "\n      type=%d abs=%d lock=%d rec=%d owner=0x%08X\n",
+                            cs_type, cs_abs, lock, rec, owner);
+                    fflush(stderr);
+                  }
+                }
+              };
+              // The CriticalSection C++ wrapper stores RTL_CS at offset 4
+              dump_cs_raw("r31+4", r31 + 4);
+              // Also check if r3 directly points to an RTL_CS (passed to RtlEnterCS)
+              if (r3 != r31 + 4 && r3 >= 0x40000000 && r3 < 0x50000000) {
+                dump_cs_raw("r3", r3);
+              }
+            }
 #ifdef __linux__
             // Sample the game thread's actual x86 instruction pointer via SIGUSR2.
             // PPCContext is stale during JIT execution, so this is the only way to
@@ -367,7 +439,7 @@ void EmulatorHeadless::RunWithTimeout(int32_t timeout_ms) {
             }
             fflush(stderr);
           }
-          // Walk PPC stack frames - wide range for all guest stacks
+          // Walk PPC stack frames using __savegprlr convention (LR at back_chain - 8)
           auto* mem = emulator_->memory();
           if (sp >= 0x70000010 && sp < 0x78000000 && (sp & 3) == 0 && (sp & 0xFFFF) != 0) {
             for (int frame = 0; frame < 15; frame++) {
@@ -376,14 +448,24 @@ void EmulatorHeadless::RunWithTimeout(int32_t timeout_ms) {
               if (!host_ptr) break;
               uint32_t back_chain = xe::load_and_swap<uint32_t>(host_ptr);
               uint32_t saved_lr = xe::load_and_swap<uint32_t>(host_ptr + 4);
+              // Also read lr from back_chain-8 (__savegprlr convention)
+              uint32_t lr_bc8 = 0;
+              if (back_chain >= 0x70000010 && back_chain < 0x78000000) {
+                auto* bc_ptr = mem->TranslateVirtual(back_chain - 8);
+                if (bc_ptr) lr_bc8 = xe::load_and_swap<uint32_t>(bc_ptr);
+              }
+              // Pick best LR: prefer lr_bc8 if it looks like a code address
+              uint32_t best_lr = saved_lr;
+              if (lr_bc8 >= 0x82000000 && lr_bc8 < 0x8A000000) best_lr = lr_bc8;
+              else if (saved_lr >= 0x82000000 && saved_lr < 0x8A000000) best_lr = saved_lr;
               // Resolve saved LR to function name
               std::string fn_name = "";
-              if (processor && saved_lr >= 0x82000000) {
-                auto* fn = processor->QueryFunction(saved_lr);
+              if (processor && best_lr >= 0x82000000) {
+                auto* fn = processor->QueryFunction(best_lr);
                 if (fn) fn_name = " [" + fn->name() + "]";
               }
-              fprintf(stderr, "    [%d] sp=0x%08X back=0x%08X lr=0x%08X%s\n",
-                      frame, sp, back_chain, saved_lr, fn_name.c_str());
+              fprintf(stderr, "    [%d] sp=0x%08X back=0x%08X lr_sp4=0x%08X lr_bc8=0x%08X%s\n",
+                      frame, sp, back_chain, saved_lr, lr_bc8, fn_name.c_str());
               fflush(stderr);
               if (back_chain == 0 || back_chain == sp || back_chain < 0x70000000 || back_chain >= 0x78000000) break;
               sp = back_chain;

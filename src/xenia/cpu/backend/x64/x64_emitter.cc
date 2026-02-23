@@ -36,6 +36,7 @@
 #include "xenia/cpu/processor.h"
 #include "xenia/cpu/symbol.h"
 #include "xenia/cpu/thread_state.h"
+#include "xenia/dc3_runtime_telemetry.h"
 
 DEFINE_bool(debugprint_trap_log, false,
             "Log debugprint traps to the active debugger", "CPU");
@@ -421,6 +422,11 @@ static uint64_t GetNoopReturnStub(ThreadState* thread_state) {
 // This is used by the X64ThunkEmitter's ResolveFunctionThunk.
 uint64_t ResolveFunction(void* raw_context, uint64_t target_address) {
   auto thread_state = *reinterpret_cast<ThreadState**>(raw_context);
+  auto* ppc_context = thread_state ? thread_state->context() : nullptr;
+  const uint32_t callsite_pc =
+      (ppc_context && ppc_context->lr >= 4)
+          ? static_cast<uint32_t>(ppc_context->lr - 4)
+          : 0;
 
   // Handle null function pointer calls gracefully (e.g. uninitialized
   // COM interface callbacks) instead of crashing.
@@ -432,6 +438,8 @@ uint64_t ResolveFunction(void* raw_context, uint64_t target_address) {
              "(count={})",
              n + 1);
     }
+    xe::Dc3RuntimeTelemetryRecordUnresolvedCallStubHit("null_target", 0,
+                                                       callsite_pc);
     return GetNoopReturnStub(thread_state);
   }
 
@@ -446,6 +454,8 @@ uint64_t ResolveFunction(void* raw_context, uint64_t target_address) {
           "(count={})",
           static_cast<uint32_t>(target_address), n + 1);
     }
+    xe::Dc3RuntimeTelemetryRecordUnresolvedCallStubHit(
+        "resolve_failed", static_cast<uint32_t>(target_address), callsite_pc);
     return GetNoopReturnStub(thread_state);
   }
   auto x64_fn = static_cast<X64Function*>(fn);
@@ -455,6 +465,9 @@ uint64_t ResolveFunction(void* raw_context, uint64_t target_address) {
         "ResolveFunction({:08X}): function '{}' resolved but machine_code is "
         "null — using no-op stub",
         static_cast<uint32_t>(target_address), fn->name());
+    xe::Dc3RuntimeTelemetryRecordUnresolvedCallStubHit(
+        "resolved_no_machine_code", static_cast<uint32_t>(target_address),
+        callsite_pc);
     return GetNoopReturnStub(thread_state);
   }
 
@@ -635,6 +648,8 @@ void X64Emitter::CallExtern(const hir::Instr* instr, const Function* function) {
       // r8  = arg1
       // r9  = arg2
       auto thunk = backend()->guest_to_host_thunk();
+      mov(eax, extern_function->address());
+      mov(qword[GetContextReg() + offsetof(ppc::PPCContext, scratch)], rax);
       mov(rax, reinterpret_cast<uint64_t>(thunk));
       mov(rcx, reinterpret_cast<uint64_t>(extern_function->extern_handler()));
       mov(rdx,
