@@ -261,6 +261,32 @@ void ApplyDc3ImportAndRuntimeStopgaps(const Dc3HackContext& ctx,
     }
   }
 
+  // Decomp-only crash stopgap: invalid-SP entry into String::~String causes a
+  // write to 0xFFFFFFF8 at the function prologue (observed crash_guest=0x834BE09C).
+  // Stub the destructor so corrupted control flow doesn't take down Thread 6
+  // before we can advance further toward present/swap.
+  if (ctx.is_decomp_layout) {
+    if (PatchStub8(memory, 0x834BE094, 0, "String::~String (invalid SP stopgap)")) {
+      stopgap_result.applied++;
+    } else {
+      stopgap_result.skipped++;
+    }
+  }
+
+  // Decomp-only exception-data blob accidentally executed as code.
+  // Telemetry hot-loop / unresolved-call tracing showed repeated execution at
+  // `except_data_82910450+0x4` (0x8291044C), which is an 8-byte exception data
+  // object between NavListSortMgr methods in .text. Patch the blob to a small
+  // stub so accidental control-flow into it returns safely instead of looping
+  // on unresolved/null calls.
+  if (ctx.is_decomp_layout) {
+    if (PatchStub8(memory, 0x82910448, 0, "except_data_82910450")) {
+      stopgap_result.applied++;
+    } else {
+      stopgap_result.skipped++;
+    }
+  }
+
   // Stub unresolved import entries (PE thunks + XEX markers).
   {
     const uint32_t kTextStart = 0x822E0000;

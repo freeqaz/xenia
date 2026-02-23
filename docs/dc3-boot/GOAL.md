@@ -39,6 +39,15 @@ ACT      →  Implement the fix, rebuild, test again
 
 ## Current Architecture Baseline (2026-02-23)
 
+### Current boot blocker (post NUI/XBC cutover)
+
+- NUI/XBC resolver + guest overrides are no longer the limiting factor for decomp boot.
+- The current decomp-only blocker is control-flow corruption leading to **data-as-code execution** and **invalid-SP (`r1=0`)** prologue faults before the game reaches `DxRnd::Present` / `D3DDevice_Swap`.
+- Active work should prioritize:
+  1. tracing first jumps into non-text targets,
+  2. parity/telemetry comparison on matched decomp artifacts,
+  3. narrow decomp-only stopgaps only when they clearly move the blocker.
+
 ### DC3 NUI/XBC path is now cut over
 
 - DC3 NUI/XBC patch targeting is no longer raw-address only.

@@ -342,6 +342,32 @@ void EmulatorHeadless::RunWithTimeout(int32_t timeout_ms) {
             // Dump IAT and thunk code for RtlEnterCriticalSection
             auto* mem2 = emulator_->memory();
             if (mem2) {
+              // Decomp bring-up experiment: patch a late-populated helper that
+              // is entered with SP=0 and faults in its prologue at 0x8311B8E4.
+              // This address is zero during launch-time hack-pack application,
+              // so apply a one-shot runtime stub here only after it materializes.
+              {
+                static bool patched_sp0_helper = false;
+                constexpr uint32_t kSp0HelperAddr = 0x8311B8E0;
+                if (!patched_sp0_helper) {
+                  auto* p = mem2->TranslateVirtual(kSp0HelperAddr);
+                  auto* heap = mem2->LookupHeap(kSp0HelperAddr);
+                  if (p && heap) {
+                    uint32_t w0 = xe::load_and_swap<uint32_t>(p + 0);
+                    uint32_t w1 = xe::load_and_swap<uint32_t>(p + 4);
+                    if (w0 != 0 && !(w0 == 0x38600000 && w1 == 0x4E800020)) {
+                      heap->Protect(kSp0HelperAddr, 8,
+                                    kMemoryProtectRead | kMemoryProtectWrite);
+                      xe::store_and_swap<uint32_t>(p + 0, 0x38600000);  // li r3,0
+                      xe::store_and_swap<uint32_t>(p + 4, 0x4E800020);  // blr
+                      patched_sp0_helper = true;
+                      fprintf(stderr,
+                              "    [dc3-debug] Patched late helper 0x%08X to li r3,0; blr\n",
+                              kSp0HelperAddr);
+                    }
+                  }
+                }
+              }
               auto* iat_ptr = mem2->TranslateVirtual(0x823996E8);
               if (iat_ptr) {
                 uint32_t iat_val = xe::load_and_swap<uint32_t>(iat_ptr);
@@ -379,6 +405,213 @@ void EmulatorHeadless::RunWithTimeout(int32_t timeout_ms) {
                     kernel::xboxkrnl::GetRtlEnterCsCount(),
                     kernel::xboxkrnl::GetRtlInitCsCount(),
                     kernel::xboxkrnl::GetRtlLeaveCsCount());
+            // Function probes: check if key present-pipeline functions are JIT-compiled
+            {
+              struct FnProbe {
+                uint32_t addr;
+                const char* name;
+              };
+              static const FnProbe probes[] = {
+                // CRT entry pipeline
+                {0x8302c4d0, "mainCRTStartup"},
+                {0x8241e708, "main()"},
+                {0x82f1c284, "App::App()"},
+                // Init functions called by App::App
+                {0x832d39e4, "DxRnd::PreInit"},
+                {0x83479d1c, "SystemInit"},
+                {0x83501820, "DataInit"},
+                {0x830672f0, "ObjectDir::PreInit"},
+                {0x83064ac0, "ObjectDir::Init"},
+                {0x8334a3f0, "FileInit"},
+                {0x83372080, "LoadMgr::Init"},
+                {0x832d3cd4, "DxRnd::Init"},
+                {0x83364bf4, "UIManager::Init"},
+                {0x83362660, "UIManager ctor"},
+                // App main loop
+                {0x82f1cb14, "App::Run()"},
+                {0x82f1b13c, "RunWithoutDbg"},
+                {0x82f1a0b8, "App::DrawRegular"},
+                {0x82f1a070, "MainThread"},
+                // Present pipeline
+                {0x832cfa20, "DxRnd::Present"},
+                {0x82f2abd8, "Game::PostUpdate"},
+                {0x8378ac44, "D3DDevice_Swap"},
+                // Current decomp-only loop / telemetry hotspots
+                {0x838e15c8, "PIXAddPixOpWithData"},
+                {0x82910400, "NavListSortMgr::ClearHeaders"},
+                {0x82910450, "NavListSortMgr::GetFirstChildSymbolFromHeaderSymbol"},
+              };
+              fprintf(stderr, "    Function probes (present pipeline):\n");
+              for (const auto& p : probes) {
+                auto* fn = processor->QueryFunction(p.addr);
+                if (fn) {
+                  auto* gfn = static_cast<cpu::GuestFunction*>(fn);
+                  fprintf(stderr, "      0x%08X %-22s COMPILED status=%d mc=%p\n",
+                          p.addr, p.name, (int)gfn->status(),
+                          gfn->machine_code());
+                } else {
+                  fprintf(stderr, "      0x%08X %-22s NOT COMPILED\n",
+                          p.addr, p.name);
+                }
+              }
+              fflush(stderr);
+            }
+            // One-shot: dump D3D::UnlockResource PPC code to understand the loop
+            {
+              static bool unlock_dumped = false;
+              if (!unlock_dumped) {
+                unlock_dumped = true;
+                // D3D::UnlockResource: 0x83779C98 to 0x83779DF0
+                fprintf(stderr, "    D3D::UnlockResource (0x83779C98) PPC code:\n");
+                for (uint32_t a = 0x83779C98; a < 0x83779DF0; a += 4) {
+                  auto* pp = mem2->TranslateVirtual(a);
+                  if (!pp) break;
+                  uint32_t instr = xe::load_and_swap<uint32_t>(pp);
+                  const char* note = "";
+                  if ((instr & 0xFC000001) == 0x48000001) {
+                    int32_t off = instr & 0x03FFFFFC;
+                    if (off & 0x02000000) off |= 0xFC000000;
+                    uint32_t t = a + off;
+                    fprintf(stderr, "      0x%08X: %08X  bl 0x%08X\n", a, instr, t);
+                    continue;
+                  }
+                  if ((instr & 0xFC000003) == 0x48000000) {
+                    int32_t off = instr & 0x03FFFFFC;
+                    if (off & 0x02000000) off |= 0xFC000000;
+                    uint32_t t = a + off;
+                    fprintf(stderr, "      0x%08X: %08X  b  0x%08X\n", a, instr, t);
+                    continue;
+                  }
+                  if (instr == 0x4E800020) note = "  blr";
+                  if ((instr >> 16) == 0x4200) note = "  bdnz (CTR loop)";
+                  if ((instr >> 16) == 0x4082) note = "  bne";
+                  if ((instr >> 16) == 0x4182) note = "  beq";
+                  if ((instr >> 16) == 0x409A) note = "  bge (cr2)";
+                  if ((instr >> 16) == 0x419A) note = "  blt (cr2)";
+                  if ((instr >> 16) == 0x4080) note = "  bge";
+                  if ((instr >> 16) == 0x4180) note = "  blt";
+                  fprintf(stderr, "      0x%08X: %08X%s\n", a, instr, note);
+                }
+                // Also dump D3DVertexBuffer_Unlock: 0x8377A188 to 0x8377A1E0
+                fprintf(stderr, "    D3DVertexBuffer_Unlock (0x8377A188) PPC code:\n");
+                for (uint32_t a = 0x8377A188; a < 0x8377A1E0; a += 4) {
+                  auto* pp = mem2->TranslateVirtual(a);
+                  if (!pp) break;
+                  uint32_t instr = xe::load_and_swap<uint32_t>(pp);
+                  if ((instr & 0xFC000001) == 0x48000001) {
+                    int32_t off = instr & 0x03FFFFFC;
+                    if (off & 0x02000000) off |= 0xFC000000;
+                    uint32_t t = a + off;
+                    fprintf(stderr, "      0x%08X: %08X  bl 0x%08X\n", a, instr, t);
+                    continue;
+                  }
+                  if ((instr & 0xFC000003) == 0x48000000) {
+                    int32_t off = instr & 0x03FFFFFC;
+                    if (off & 0x02000000) off |= 0xFC000000;
+                    uint32_t t = a + off;
+                    fprintf(stderr, "      0x%08X: %08X  b  0x%08X\n", a, instr, t);
+                    continue;
+                  }
+                  const char* note = "";
+                  if (instr == 0x4E800020) note = "  blr";
+                  fprintf(stderr, "      0x%08X: %08X%s\n", a, instr, note);
+                }
+                // Dump merged_VBLockDtor: 0x834B0184 to 0x834B019C
+                fprintf(stderr, "    merged_VBLockDtor (0x834B0184) PPC code:\n");
+                for (uint32_t a = 0x834B0184; a < 0x834B019C; a += 4) {
+                  auto* pp = mem2->TranslateVirtual(a);
+                  if (!pp) break;
+                  uint32_t instr = xe::load_and_swap<uint32_t>(pp);
+                  if ((instr & 0xFC000001) == 0x48000001) {
+                    int32_t off = instr & 0x03FFFFFC;
+                    if (off & 0x02000000) off |= 0xFC000000;
+                    uint32_t t = a + off;
+                    fprintf(stderr, "      0x%08X: %08X  bl 0x%08X\n", a, instr, t);
+                    continue;
+                  }
+                  const char* note = "";
+                  if (instr == 0x4E800020) note = "  blr";
+                  fprintf(stderr, "      0x%08X: %08X%s\n", a, instr, note);
+                }
+                // Dump D3D::FlushCachedMemory: 0x8379478C to 0x83794860
+                fprintf(stderr, "    D3D::FlushCachedMemory (0x8379478C) PPC code:\n");
+                for (uint32_t a = 0x8379478C; a < 0x83794860; a += 4) {
+                  auto* pp = mem2->TranslateVirtual(a);
+                  if (!pp) break;
+                  uint32_t instr = xe::load_and_swap<uint32_t>(pp);
+                  if ((instr & 0xFC000001) == 0x48000001) {
+                    int32_t off = instr & 0x03FFFFFC;
+                    if (off & 0x02000000) off |= 0xFC000000;
+                    uint32_t t = a + off;
+                    fprintf(stderr, "      0x%08X: %08X  bl 0x%08X\n", a, instr, t);
+                    continue;
+                  }
+                  if ((instr & 0xFC000003) == 0x48000000) {
+                    int32_t off = instr & 0x03FFFFFC;
+                    if (off & 0x02000000) off |= 0xFC000000;
+                    uint32_t t = a + off;
+                    fprintf(stderr, "      0x%08X: %08X  b  0x%08X\n", a, instr, t);
+                    continue;
+                  }
+                  const char* note = "";
+                  if (instr == 0x4E800020) note = "  blr";
+                  if ((instr >> 16) == 0x4200) note = "  bdnz (CTR loop)";
+                  if ((instr >> 16) == 0x4082) note = "  bne";
+                  if ((instr >> 16) == 0x4182) note = "  beq";
+                  fprintf(stderr, "      0x%08X: %08X%s\n", a, instr, note);
+                }
+                fflush(stderr);
+              }
+            }
+            // One-shot: dump key function call targets
+            {
+              static bool app_calls_dumped = false;
+              if (!app_calls_dumped) {
+                app_calls_dumped = true;
+                // Dump MainThread PPC instructions (small function, ~72 bytes)
+                fprintf(stderr, "    MainThread (0x82F1A070) PPC code:\n");
+                for (uint32_t a = 0x82F1A070; a < 0x82F1A0C0; a += 4) {
+                  auto* pp = mem2->TranslateVirtual(a);
+                  if (!pp) break;
+                  uint32_t instr = xe::load_and_swap<uint32_t>(pp);
+                  const char* note = "";
+                  if ((instr & 0xFC000001) == 0x48000001) {
+                    int32_t off = instr & 0x03FFFFFC;
+                    if (off & 0x02000000) off |= 0xFC000000;
+                    uint32_t t = a + off;
+                    fprintf(stderr, "      0x%08X: %08X  bl 0x%08X\n", a, instr, t);
+                    continue;
+                  }
+                  if (instr == 0x4E800020) note = "  blr";
+                  if ((instr >> 26) == 19 && ((instr >> 1) & 0x3FF) == 528)
+                    note = "  bctr/bctrl";
+                  fprintf(stderr, "      0x%08X: %08X%s\n", a, instr, note);
+                }
+                fflush(stderr);
+                // Dump App::App() call targets
+                uint32_t fn_start = 0x82F1C284;
+                uint32_t fn_end = 0x82F1CB14;
+                fprintf(stderr, "    App::App() call targets (bl instructions):\n");
+                for (uint32_t addr = fn_start; addr < fn_end; addr += 4) {
+                  auto* p = mem2->TranslateVirtual(addr);
+                  if (!p) continue;
+                  uint32_t instr = xe::load_and_swap<uint32_t>(p);
+                  // PPC bl instruction: opcode 18 (bits 0-5 = 010010), LK=1 (bit 31)
+                  if ((instr & 0xFC000001) == 0x48000001) {
+                    // Extract signed 26-bit offset
+                    int32_t offset = instr & 0x03FFFFFC;
+                    if (offset & 0x02000000) offset |= 0xFC000000; // sign extend
+                    uint32_t target = addr + offset;
+                    // Check if target function is compiled
+                    auto* fn = processor->QueryFunction(target);
+                    fprintf(stderr, "      +0x%03X bl 0x%08X %s\n",
+                            addr - fn_start, target,
+                            fn ? "COMPILED" : "not-compiled");
+                  }
+                }
+                fflush(stderr);
+              }
+            }
             // Check page state at XEX base (0x82000000) for SIGSEGV diagnosis
             {
               auto* heap82 = mem2->LookupHeap(0x82000000);
@@ -443,17 +676,28 @@ void EmulatorHeadless::RunWithTimeout(int32_t timeout_ms) {
             fflush(stderr);
           }
           // Walk PPC stack frames using __savegprlr convention (LR at back_chain - 8)
+          // Accept SPs in thread stack area (0x70000000-0x78000000) OR heap area
+          // (0x00010000-0x50000000) where game-allocated stacks live.
           auto* mem = emulator_->memory();
-          if (sp >= 0x70000010 && sp < 0x78000000 && (sp & 3) == 0 && (sp & 0xFFFF) != 0) {
-            for (int frame = 0; frame < 15; frame++) {
-              if (sp < 0x70000010 || sp >= 0x78000000 || (sp & 3) != 0) break;
+          auto sp_valid = [](uint32_t a) {
+            return (a & 3) == 0 && a >= 0x00010000 && a < 0x78000000;
+          };
+          if (sp_valid(sp) && (sp & 0xFFFF) != 0) {
+            for (int frame = 0; frame < 20; frame++) {
+              if (!sp_valid(sp)) {
+                fprintf(stderr, "    [%d] STOP: sp=0x%08X invalid\n", frame, sp);
+                break;
+              }
               auto* host_ptr = mem->TranslateVirtual(sp);
-              if (!host_ptr) break;
+              if (!host_ptr) {
+                fprintf(stderr, "    [%d] STOP: sp=0x%08X unmapped\n", frame, sp);
+                break;
+              }
               uint32_t back_chain = xe::load_and_swap<uint32_t>(host_ptr);
               uint32_t saved_lr = xe::load_and_swap<uint32_t>(host_ptr + 4);
               // Also read lr from back_chain-8 (__savegprlr convention)
               uint32_t lr_bc8 = 0;
-              if (back_chain >= 0x70000010 && back_chain < 0x78000000) {
+              if (sp_valid(back_chain) && back_chain >= 8) {
                 auto* bc_ptr = mem->TranslateVirtual(back_chain - 8);
                 if (bc_ptr) lr_bc8 = xe::load_and_swap<uint32_t>(bc_ptr);
               }
@@ -470,7 +714,12 @@ void EmulatorHeadless::RunWithTimeout(int32_t timeout_ms) {
               fprintf(stderr, "    [%d] sp=0x%08X back=0x%08X lr_sp4=0x%08X lr_bc8=0x%08X%s\n",
                       frame, sp, back_chain, saved_lr, lr_bc8, fn_name.c_str());
               fflush(stderr);
-              if (back_chain == 0 || back_chain == sp || back_chain < 0x70000000 || back_chain >= 0x78000000) break;
+              if (back_chain == 0 || back_chain == sp || !sp_valid(back_chain)) {
+                fprintf(stderr, "    [%d] END: back=0x%08X (zero=%d same=%d valid=%d)\n",
+                        frame, back_chain, back_chain == 0, back_chain == sp,
+                        sp_valid(back_chain));
+                break;
+              }
               sp = back_chain;
             }
           }
