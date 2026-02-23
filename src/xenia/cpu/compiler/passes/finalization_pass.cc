@@ -44,10 +44,9 @@ bool FinalizationPass::Run(HIRBuilder* builder) {
     auto label = block->label_head;
     while (label) {
       if (!label->name) {
-        const size_t label_len = 6 + 4;
+        const size_t label_len = 6 + 8;
         char* name = reinterpret_cast<char*>(arena->Alloc(label_len + 1, 1));
-        assert_true(label->id <= 65535);
-        auto end = fmt::format_to_n(name, label_len, "_label{:04X}", label->id);
+        auto end = fmt::format_to_n(name, label_len, "_label{:X}", label->id);
         name[end.size] = '\0';
         label->name = name;
       }

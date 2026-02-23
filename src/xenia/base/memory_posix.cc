@@ -12,7 +12,9 @@
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#include <cinttypes>
 #include <cstddef>
+#include <cstdio>
 
 #include "xenia/base/math.h"
 #include "xenia/base/platform.h"
@@ -114,6 +116,41 @@ bool Protect(void* base_address, size_t length, PageAccess access,
 }
 
 bool QueryProtect(void* base_address, size_t& length, PageAccess& access_out) {
+  // Parse /proc/self/maps to find the mapping containing base_address.
+  FILE* fp = fopen("/proc/self/maps", "r");
+  if (!fp) {
+    return false;
+  }
+
+  uintptr_t addr = reinterpret_cast<uintptr_t>(base_address);
+  char line[512];
+  while (fgets(line, sizeof(line), fp)) {
+    uintptr_t start, end;
+    char perms[5];
+    if (sscanf(line, "%" PRIxPTR "-%" PRIxPTR " %4s", &start, &end, perms) ==
+        3) {
+      if (addr >= start && addr < end) {
+        fclose(fp);
+        length = end - start;
+        bool readable = (perms[0] == 'r');
+        bool writable = (perms[1] == 'w');
+        bool executable = (perms[2] == 'x');
+        if (executable && writable) {
+          access_out = PageAccess::kExecuteReadWrite;
+        } else if (executable && readable) {
+          access_out = PageAccess::kExecuteReadOnly;
+        } else if (writable) {
+          access_out = PageAccess::kReadWrite;
+        } else if (readable) {
+          access_out = PageAccess::kReadOnly;
+        } else {
+          access_out = PageAccess::kNoAccess;
+        }
+        return true;
+      }
+    }
+  }
+  fclose(fp);
   return false;
 }
 

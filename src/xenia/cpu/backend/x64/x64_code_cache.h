@@ -76,11 +76,12 @@ class X64CodeCache : public CodeCache {
 
   GuestFunction* LookupFunction(uint64_t host_pc) override;
 
- protected:
   // All executable code falls within 0x80000000 to 0x9FFFFFFF, so we can
   // only map enough for lookups within that range.
   static const size_t kIndirectionTableSize = 0x1FFFFFFF;
   static const uintptr_t kIndirectionTableBase = 0x80000000;
+
+ protected:
   // The code range is 512MB, but we know the total code games will have is
   // pretty small (dozens of mb at most) and our expansion is reasonablish
   // so 256MB should be more than enough.

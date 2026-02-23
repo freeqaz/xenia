@@ -63,6 +63,7 @@ class UserModule : public XModule {
 
   uint32_t entry_point() const { return entry_point_; }
   uint32_t stack_size() const { return stack_size_; }
+  void set_stack_size(uint32_t size) { stack_size_ = size; }
 
   X_STATUS LoadFromFile(const std::string_view path);
   X_STATUS LoadFromMemory(const void* addr, const size_t length);

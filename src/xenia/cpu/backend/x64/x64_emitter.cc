@@ -11,6 +11,7 @@
 
 #include <stddef.h>
 
+#include <atomic>
 #include <climits>
 #include <cstring>
 
@@ -400,33 +401,61 @@ void X64Emitter::UnimplementedInstr(const hir::Instr* i) {
   assert_always();
 }
 
+// No-op stub: a single x86 'ret' instruction placed in the code cache.
+// Used when a function can't be resolved (e.g. XAM COM vtable entries).
+static std::atomic<uint64_t> noop_return_stub_addr_{0};
+
+static uint64_t GetNoopReturnStub(ThreadState* thread_state) {
+  auto addr = noop_return_stub_addr_.load(std::memory_order_acquire);
+  if (addr) return addr;
+  static const uint8_t ret_code[] = {0xC3};  // x86 ret
+  auto* backend =
+      static_cast<X64Backend*>(thread_state->processor()->backend());
+  uint32_t code_addr =
+      backend->code_cache()->PlaceData(ret_code, sizeof(ret_code));
+  addr = static_cast<uint64_t>(code_addr);
+  noop_return_stub_addr_.store(addr, std::memory_order_release);
+  return addr;
+}
+
 // This is used by the X64ThunkEmitter's ResolveFunctionThunk.
 uint64_t ResolveFunction(void* raw_context, uint64_t target_address) {
   auto thread_state = *reinterpret_cast<ThreadState**>(raw_context);
 
-  // TODO(benvanik): required?
-  assert_not_zero(target_address);
+  // Handle null function pointer calls gracefully (e.g. uninitialized
+  // COM interface callbacks) instead of crashing.
+  if (!target_address) {
+    static std::atomic<int> null_count{0};
+    int n = null_count.fetch_add(1, std::memory_order_relaxed);
+    if (n < 5 || (n < 100 && (n % 10) == 0) || (n % 1000) == 0) {
+      XELOGE("ResolveFunction(00000000): null target — using no-op stub "
+             "(count={})",
+             n + 1);
+    }
+    return GetNoopReturnStub(thread_state);
+  }
 
   auto fn = thread_state->processor()->ResolveFunction(
       static_cast<uint32_t>(target_address));
   if (!fn) {
-    XELOGE("ResolveFunction({:08X}): FAILED - no function found",
-           static_cast<uint32_t>(target_address));
-    // Fatal: returning 0 will crash at RIP=0 via jmp(rax) in the thunk.
-    xe::FatalError(fmt::format("ResolveFunction({:08X}): no function found",
-                               static_cast<uint32_t>(target_address)));
-    return 0;
+    static std::atomic<int> nofn_count{0};
+    int n = nofn_count.fetch_add(1, std::memory_order_relaxed);
+    if (n < 5 || (n < 100 && (n % 10) == 0) || (n % 1000) == 0) {
+      XELOGE(
+          "ResolveFunction({:08X}): no function found — using no-op stub "
+          "(count={})",
+          static_cast<uint32_t>(target_address), n + 1);
+    }
+    return GetNoopReturnStub(thread_state);
   }
   auto x64_fn = static_cast<X64Function*>(fn);
   uint64_t addr = reinterpret_cast<uint64_t>(x64_fn->machine_code());
   if (!addr) {
     XELOGE(
         "ResolveFunction({:08X}): function '{}' resolved but machine_code is "
-        "null",
+        "null — using no-op stub",
         static_cast<uint32_t>(target_address), fn->name());
-    xe::FatalError(fmt::format(
-        "ResolveFunction({:08X}): null machine_code for '{}'",
-        static_cast<uint32_t>(target_address), fn->name()));
+    return GetNoopReturnStub(thread_state);
   }
 
   return addr;
@@ -491,9 +520,21 @@ void X64Emitter::CallIndirect(const hir::Instr* instr,
   // Load the pointer to the indirection table maintained in X64CodeCache.
   // The target dword will either contain the address of the generated code
   // or a thunk to ResolveAddress.
+  Xbyak::Label skip_null_call;
   if (code_cache_->has_indirection_table()) {
     if (reg.cvt32() != ebx) {
       mov(ebx, reg.cvt32());
+    }
+    // Fast path for null function pointers: skip the call entirely.
+    // This avoids the expensive resolve thunk save/restore for each
+    // null virtual dispatch (e.g., 78M+ calls from uninitialized objects).
+    // For tail calls, null target → return to caller via epilogue.
+    // For non-tail calls, null target → skip the call and continue.
+    test(ebx, ebx);
+    if (instr->flags & hir::CALL_TAIL) {
+      je(epilog_label(), CodeGenerator::T_NEAR);
+    } else {
+      jz(skip_null_call, CodeGenerator::T_NEAR);
     }
     // Bounds check: the indirection table only covers guest addresses
     // [0x80000000, 0x9FFFFFFF].  Addresses outside this range (e.g. XAM
@@ -505,16 +546,15 @@ void X64Emitter::CallIndirect(const hir::Instr* instr,
     Xbyak::Label in_range;
     Xbyak::Label resolved;
     jb(in_range);
-    // Out of range: fall back to slow ResolveFunction call.
-    mov(rax, reinterpret_cast<uint64_t>(ResolveFunction));
-#if XE_PLATFORM_LINUX
-    mov(esi, ebx);
-    mov(rdi, GetContextReg());
-#else
-    mov(edx, ebx);
-    mov(rcx, GetContextReg());
-#endif
-    call(rax);
+    // Out of range: load the resolve function thunk address directly.
+    // We must NOT call ResolveFunction as a C function from here because
+    // that would clobber volatile host registers (rdi=membase, rsi=context,
+    // r10, r11, XMMs) that hold JIT guest state.  The resolve thunk
+    // properly saves and restores all volatile registers.
+    assert_zero(reinterpret_cast<uint64_t>(backend_->resolve_function_thunk()) &
+                0xFFFFFFFF00000000ull);
+    mov(eax, static_cast<uint32_t>(reinterpret_cast<uint64_t>(
+        backend_->resolve_function_thunk())));
     jmp(resolved, CodeGenerator::T_NEAR);
     L(in_range);
     mov(eax, dword[ebx]);
@@ -524,11 +564,12 @@ void X64Emitter::CallIndirect(const hir::Instr* instr,
     // Not too important because indirection table is almost always available.
     mov(rax, reinterpret_cast<uint64_t>(ResolveFunction));
 #if XE_PLATFORM_LINUX
-    mov(esi, reg.cvt32());
+    // Read rsi (context) before overwriting it with the target address.
     mov(rdi, GetContextReg());
+    mov(esi, reg.cvt32());
 #else
-    mov(edx, reg.cvt32());
     mov(rcx, GetContextReg());
+    mov(edx, reg.cvt32());
 #endif
     call(rax);
   }
@@ -549,6 +590,11 @@ void X64Emitter::CallIndirect(const hir::Instr* instr,
 
     call(rax);
   }
+  // Skip label for null function pointer fast path.
+  // For null targets, calling a no-op stub and returning is equivalent
+  // to skipping the call entirely (no side effects, return value undefined).
+  // For tail calls, skipping means we fall through to the epilogue.
+  L(skip_null_call);
 }
 
 uint64_t UndefinedCallExtern(void* raw_context, uint64_t function_ptr) {

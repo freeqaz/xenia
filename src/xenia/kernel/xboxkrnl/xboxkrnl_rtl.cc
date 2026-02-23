@@ -14,9 +14,11 @@
 
 #include "xenia/base/atomic.h"
 #include "xenia/base/chrono.h"
+#include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/string.h"
 #include "xenia/base/threading.h"
+#include "xenia/cpu/thread_state.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/user_module.h"
 #include "xenia/kernel/util/shim_utils.h"
@@ -25,9 +27,23 @@
 #include "xenia/kernel/xevent.h"
 #include "xenia/kernel/xthread.h"
 
+DEFINE_bool(crt_critical_section_diagnostics, false,
+            "Log diagnostic info for RtlEnterCriticalSection calls to detect "
+            "uninitialized or deadlocked critical sections during CRT init.",
+            "Kernel");
+
 namespace xe {
 namespace kernel {
 namespace xboxkrnl {
+
+// Global counters for diagnosing CRT init hang
+static std::atomic<uint32_t> g_rtl_enter_cs_count{0};
+static std::atomic<uint32_t> g_rtl_init_cs_count{0};
+static std::atomic<uint32_t> g_rtl_leave_cs_count{0};
+
+uint32_t GetRtlEnterCsCount() { return g_rtl_enter_cs_count.load(); }
+uint32_t GetRtlInitCsCount() { return g_rtl_init_cs_count.load(); }
+uint32_t GetRtlLeaveCsCount() { return g_rtl_leave_cs_count.load(); }
 
 // https://msdn.microsoft.com/en-us/library/ff561778
 dword_result_t RtlCompareMemory_entry(lpvoid_t source1, lpvoid_t source2,
@@ -340,6 +356,11 @@ pointer_result_t RtlImageXexHeaderField_entry(pointer_t<xex2_header> xex_header,
   uint32_t field_value = 0;
   uint32_t field = field_dword;  // VS acts weird going from dword_t -> enum
 
+  if (!xex_header) {
+    XELOGW("RtlImageXexHeaderField: null xex_header for field {:08X}", field);
+    return field_value;
+  }
+
   UserModule::GetOptHeader(kernel_memory(), xex_header, xex2_header_keys(field),
                            &field_value);
 
@@ -380,12 +401,27 @@ void xeRtlInitializeCriticalSection(X_RTL_CRITICAL_SECTION* cs,
   cs->header.type = 1;      // EventSynchronizationObject (auto reset)
   cs->header.absolute = 0;  // spin count div 256
   cs->header.signal_state = 0;
+  // Initialize the wait list as an empty circular list (self-referential).
+  // On real hardware the kernel sets these to &header->WaitListHead.
+  // Xenia previously left these uninitialized, which corrupts any guest
+  // data that shares these fields (e.g. XapiThreadNotifyHead in CRT).
+  uint32_t wait_list_ptr = cs_ptr + offsetof(X_DISPATCH_HEADER, wait_list_flink);
+  cs->header.wait_list_flink = wait_list_ptr;
+  cs->header.wait_list_blink = wait_list_ptr;
   cs->lock_count = -1;
   cs->recursion_count = 0;
   cs->owning_thread = 0;
 }
 
 void RtlInitializeCriticalSection_entry(pointer_t<X_RTL_CRITICAL_SECTION> cs) {
+  g_rtl_init_cs_count.fetch_add(1, std::memory_order_relaxed);
+  if (cvars::crt_critical_section_diagnostics) {
+    auto* thread = XThread::GetCurrentThread();
+    auto* context = thread->thread_state()->context();
+    uint32_t caller_lr = static_cast<uint32_t>(context->lr);
+    XELOGI("RtlInitializeCriticalSection cs=0x{:08X} caller_lr=0x{:08X} tid={}",
+           cs.guest_address(), caller_lr, thread->thread_id());
+  }
   xeRtlInitializeCriticalSection(cs, cs.guest_address());
 }
 DECLARE_XBOXKRNL_EXPORT1(RtlInitializeCriticalSection, kNone, kImplemented);
@@ -403,6 +439,10 @@ X_STATUS xeRtlInitializeCriticalSectionAndSpinCount(X_RTL_CRITICAL_SECTION* cs,
   cs->header.type = 1;  // EventSynchronizationObject (auto reset)
   cs->header.absolute = spin_count_div_256;
   cs->header.signal_state = 0;
+  // Initialize the wait list as an empty circular list (self-referential).
+  uint32_t wait_list_ptr = cs_ptr + offsetof(X_DISPATCH_HEADER, wait_list_flink);
+  cs->header.wait_list_flink = wait_list_ptr;
+  cs->header.wait_list_blink = wait_list_ptr;
   cs->lock_count = -1;
   cs->recursion_count = 0;
   cs->owning_thread = 0;
@@ -412,6 +452,16 @@ X_STATUS xeRtlInitializeCriticalSectionAndSpinCount(X_RTL_CRITICAL_SECTION* cs,
 
 dword_result_t RtlInitializeCriticalSectionAndSpinCount_entry(
     pointer_t<X_RTL_CRITICAL_SECTION> cs, dword_t spin_count) {
+  if (cvars::crt_critical_section_diagnostics) {
+    auto* thread = XThread::GetCurrentThread();
+    auto* context = thread->thread_state()->context();
+    uint32_t caller_lr = static_cast<uint32_t>(context->lr);
+    XELOGI(
+        "RtlInitializeCriticalSectionAndSpinCount cs=0x{:08X} spin={} "
+        "caller_lr=0x{:08X} tid={}",
+        cs.guest_address(), (uint32_t)spin_count, caller_lr,
+        thread->thread_id());
+  }
   return xeRtlInitializeCriticalSectionAndSpinCount(cs, cs.guest_address(),
                                                     spin_count);
 }
@@ -419,8 +469,58 @@ DECLARE_XBOXKRNL_EXPORT1(RtlInitializeCriticalSectionAndSpinCount, kNone,
                          kImplemented);
 
 void RtlEnterCriticalSection_entry(pointer_t<X_RTL_CRITICAL_SECTION> cs) {
+  g_rtl_enter_cs_count.fetch_add(1, std::memory_order_relaxed);
   uint32_t cur_thread = XThread::GetCurrentThread()->guest_object();
   uint32_t spin_count = cs->header.absolute * 256;
+
+  // Diagnostic: detect uninitialized or suspicious critical sections
+  if (cvars::crt_critical_section_diagnostics) {
+    auto* thread = XThread::GetCurrentThread();
+    auto* context = thread->thread_state()->context();
+    uint32_t caller_lr = static_cast<uint32_t>(context->lr);
+    uint32_t cs_addr = cs.guest_address();
+
+    // Check for signs of uninitialized CS:
+    // - header.type should be 1 (EventSynchronizationObject) after init
+    // - lock_count should be -1 after init (0 means never initialized)
+    // - owning_thread should be 0 or a valid KTHREAD pointer
+    bool looks_uninit = false;
+    uint8_t cs_type = cs->header.type;
+    int32_t lock_count = cs->lock_count;
+    int32_t recursion = cs->recursion_count;
+    uint32_t owner = cs->owning_thread;
+
+    if (cs_type != 1) {
+      looks_uninit = true;
+    }
+    // A CS with type==1 but lock_count==0 and owner==0 may be
+    // pre-initialized in .data but never had RtlInitializeCriticalSection
+    // called (lock_count should be -1 after proper init, not 0).
+    // Don't require recursion==0 since garbage data may be in that field.
+    bool needs_lock_fix = (cs_type == 1 && lock_count == 0 && owner == 0);
+
+    static uint32_t cs_enter_count = 0;
+    cs_enter_count++;
+    if (looks_uninit || needs_lock_fix || cs_enter_count <= 50 ||
+        (cs_enter_count % 1000) == 0) {
+      XELOGI(
+          "RtlEnterCS #{} cs=0x{:08X} type={} lock={} recursion={} "
+          "owner=0x{:08X} caller_lr=0x{:08X} tid={} {}{}",
+          cs_enter_count, cs_addr, cs_type, lock_count, recursion, owner,
+          caller_lr, thread->thread_id(),
+          looks_uninit ? "**UNINIT**" : "",
+          needs_lock_fix ? "**LOCK_NOT_MINUS_1**" : "");
+    }
+
+    if (looks_uninit || needs_lock_fix) {
+      XELOGW(
+          "RtlEnterCriticalSection: CS at 0x{:08X} appears UNINITIALIZED "
+          "(type={}, lock_count={}, expected type=1 lock=-1). "
+          "Caller LR=0x{:08X}. Auto-initializing.",
+          cs_addr, cs_type, lock_count, caller_lr);
+      xeRtlInitializeCriticalSection(cs, cs_addr);
+    }
+  }
 
   if (cs->owning_thread == cur_thread) {
     // We already own the lock.
@@ -475,6 +575,7 @@ DECLARE_XBOXKRNL_EXPORT2(RtlTryEnterCriticalSection, kNone, kImplemented,
                          kHighFrequency);
 
 void RtlLeaveCriticalSection_entry(pointer_t<X_RTL_CRITICAL_SECTION> cs) {
+  g_rtl_leave_cs_count.fetch_add(1, std::memory_order_relaxed);
   assert_true(cs->owning_thread == XThread::GetCurrentThread()->guest_object());
 
   // Drop recursion count - if it isn't zero we still have the lock.

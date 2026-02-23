@@ -24,6 +24,11 @@ X_STATUS xeRtlInitializeCriticalSectionAndSpinCount(X_RTL_CRITICAL_SECTION* cs,
                                                     uint32_t cs_ptr,
                                                     uint32_t spin_count);
 
+// Diagnostic counters for CRT init hang investigation
+uint32_t GetRtlEnterCsCount();
+uint32_t GetRtlInitCsCount();
+uint32_t GetRtlLeaveCsCount();
+
 }  // namespace xboxkrnl
 }  // namespace kernel
 }  // namespace xe

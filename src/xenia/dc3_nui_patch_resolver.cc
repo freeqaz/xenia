@@ -2631,7 +2631,6 @@ Dc3ResolvedNuiPatch Dc3ResolveNuiPatchTarget(
 
   const bool strict_mode = resolver_mode == "strict";
   const bool hybrid_mode = resolver_mode == "hybrid";
-  const bool legacy_mode = resolver_mode == "legacy";
 
   auto is_viable_target = [&](uint32_t address) {
     if (!Dc3PatchTargetInText(text_info, address)) {
@@ -2710,7 +2709,7 @@ Dc3ResolvedNuiPatch Dc3ResolveNuiPatchTarget(
     return resolved;
   }
 
-  if (legacy_mode || hybrid_mode || !strict_mode) {
+  if (hybrid_mode || !strict_mode) {
     resolved.resolved_address = spec.address;
     resolved.resolve_method = Dc3PatchResolveMethod::kCatalogAddress;
     resolved.resolved = true;

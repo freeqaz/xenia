@@ -1,6 +1,64 @@
-# Status: OODA Loop Iteration 1
+# Status: OODA Loop Iteration 2
 
-*Last updated: 2026-02-22 (Session 10 — Heap corruption SOLVED)*
+*Last updated: 2026-02-23 (Sessions 12-13 — Game runs stably, NUI callback loop blocker)*
+
+## 2026-02-23 Update (Sessions 12-13): JIT Indirect Call Fix + Game Stability
+
+### Major Breakthrough: Game Runs Without Crashing
+
+The game now runs for the full 30-second timeout (exit code 124) with **zero SIGSEGV crashes**.
+4.4MB of log output. The critical path advanced from "CRT init crash" to "game main loop running
+but stuck in NUI callback dispatch."
+
+### Fixes Applied (x64_emitter.cc, x64_code_cache.cc, x64_code_cache.h)
+
+1. **CallIndirect bounds check**: JIT indirect calls (`bctrl`) now check if the guest address
+   is within the indirection table range `[0x80000000, 0x9FFFFFFF]`. Out-of-range addresses
+   (like XAM COM vtable entries at `0x40002830`) fall through to the resolve function thunk
+   instead of reading unmapped memory.
+
+2. **Resolve function thunk for out-of-range calls**: The slow path uses the resolve function
+   thunk (which properly saves/restores volatile JIT registers) instead of calling ResolveFunction
+   as a C function. This prevents clobbering rsi (context), rdi (membase), r10, r11, xmm4-15.
+
+3. **No-op return stub for unresolvable functions**: When `ResolveFunction` can't find a function
+   (null target, XAM COM entries, garbage pointers), it returns a single `ret` instruction placed
+   in the code cache. This lets the game continue instead of crashing.
+
+4. **Indirection table bounds checks**: `AddIndirection` and `PlaceGuestCode` in x64_code_cache.cc
+   now skip indirection table updates for guest addresses outside the valid range.
+
+5. **Register ordering fix (Linux SysV ABI)**: Fixed the old-style resolve path to read `rsi`
+   (context) into `rdi` BEFORE overwriting `esi` with the target address.
+
+6. **Made indirection table constants public**: `kIndirectionTableBase` and `kIndirectionTableSize`
+   moved from `protected` to `public` in x64_code_cache.h for use in bounds checks.
+
+### Current Blocker: NUI Callback Dispatch Loop
+
+The game is stuck in a tight loop at guest `0x834B1F40` iterating a linked list of callback
+function pointers. The function pointers are garbage:
+- `0x38600000` (PPC instruction `li r3, 0` — not a valid function address)
+- `0x00000000` (null)
+
+These are handled gracefully by the no-op stub (~29,754 calls each in 30 seconds), but the loop
+never terminates. The callback list at `[r30+0x20]` (object at `0x83C16B40`) is part of the NUI
+subsystem and was never properly initialized because NUI was stubbed.
+
+```
+0x834B1F40: lwz r11, 0x0008(r29)   ; load function pointer from list node
+0x834B1F44: mtctr r11               ; CTR = function pointer
+0x834B1F48: bctrl                   ; call → no-op stub returns
+0x834B1F4C: lwz r29, 0x0000(r29)   ; r29 = next node in linked list
+0x834B1F50: cmplw cr6, r29, r30    ; compare with end sentinel
+0x834B1F54: bne- cr6, 0x834B1F40   ; loop if not done → infinite
+```
+
+### Documentation Created
+
+- `docs/dc3-boot/DEBUGGING_TIPS.md` — comprehensive debugging guide covering JIT architecture,
+  memory map, indirection table, volatile register dangers, crash patterns, and diagnostic
+  instrumentation. Captures hard-won knowledge from sessions 10-13.
 
 ## 2026-02-23 Update (Guest Override / Patch Hardening In Progress)
 
@@ -16,7 +74,7 @@
 - Added optional fingerprint cache file support (`docs/dc3-boot/dc3_nui_fingerprints.txt`) with auto-probe in Xenia.
 - Added a first-pass **resolver pipeline** for DC3 NUI/XBC patch targets:
   - patch manifest JSON (`xenia_dc3_patch_manifest.json`) -> symbol manifest (`symbols.txt`-style `.text` entries) -> signature hook (stub) -> catalog fallback
-  - `dc3_nui_patch_resolver_mode=legacy|hybrid|strict`
+  - `dc3_nui_patch_resolver_mode=hybrid|strict` (legacy mode removed later in the cutover)
   - per-entry resolver-method logging in patch/override output
 - Added `dc3-decomp` post-link manifest emitter (`scripts/build/generate_xenia_dc3_patch_manifest.py`) and `build_xex.py` integration (best-effort generation).
 - Fingerprint note: the decomp `.text` fingerprint must be computed from the **final packed XEX** (after thunk-marker rewriting), not the pre-pack `default.exe`.
@@ -24,11 +82,11 @@
 
 This is an **implementation enabler** for retiring raw guest byte patches. Full semantic resolver work (fingerprint cache + symbol/signature resolution) is still in progress.
 
-## Current Milestone: Reaching `main()`
+## Current Milestone: Past `main()`, Advancing Through Game Init
 
-Progress: **Heap corruption SOLVED.** CRT init now crashes with null vtable dereference
-(post-heap-corruption). `--dc3_crt_skip_indices=69,98-330` eliminates the heap crash.
-New blocker: null vtable at 0x830E3340 from uninitialized globals.
+Progress: **Game runs stably with zero crashes.** CRT init completes. `main()` reached.
+XAM loaded. JIT indirect calls to unresolvable functions (XAM COM vtables, null pointers)
+handled gracefully with no-op stubs. Current blocker: NUI callback dispatch infinite loop.
 
 ## OBSERVE — What happens when we run the test?
 
@@ -119,13 +177,15 @@ Safe to nullify since 62 NUI API functions are already stubbed.
 
 ## ORIENT — What does it mean?
 
-### Critical path
+### Critical path (updated)
 
 ```
-XEX loads -> imports resolve -> NUI stubbed -> CRT init -> [HEAP CORRUPTION] -> main() -> App::Init -> ...
+XEX loads -> imports resolve -> NUI stubbed -> CRT init -> main() -> XAM load -> [NUI CALLBACK LOOP] -> App::Init -> ...
 ```
 
-We are stuck at **CRT init -> heap corruption**. Wave 1 analysis identified two convergent causes:
+We are past `main()` and into the game's initialization sequence. The game is stuck in a
+**NUI callback dispatch loop** — iterating a linked list of function pointers from the NUI
+subsystem that were never properly initialized.
 
 ### Refined hypotheses (from Agent B + D convergence)
 
@@ -155,19 +215,19 @@ AND uninitialized globals cause indirect corruption when later code uses them.
 
 ## DECIDE — What's the highest-leverage fix?
 
-**Priority 1 (NOW): Rebuild xenia-headless + run bisect.**
-The `--dc3_crt_bisect_max` cvar was added to emulator.cc but the binary predates it.
-Rebuild, then run binary search to identify the specific corrupting constructor(s).
+**Priority 1 (NOW): Break the NUI callback dispatch loop.**
+The game is stuck calling garbage function pointers in a linked list at guest 0x834B1F40.
+Options: (a) stub the dispatch function itself to skip the loop, (b) patch the linked list
+to be empty (sentinel == head), (c) add a call-count limiter for no-op stub targets.
 
-**Priority 2 (AFTER BISECT): Nullify NUI SDK constructors wholesale.**
-Add address-range check in CRT sanitizer to nullify indices 98-330 (~110 NUI constructors).
-These are safe to disable since NUI API is already fully stubbed.
+**Priority 2: Identify what game code runs after the callback loop exits.**
+Once the loop is broken, observe the next crash/hang and iterate.
 
-**Priority 3 (NEXT ITERATION): Fix the 26 missing CRT constructors in dc3-decomp/jeff.**
+**Priority 3: Fix the 26 missing CRT constructors in dc3-decomp/jeff.**
 The 11 complex constructors (TheMemcardMgr, etc.) need their `??__E` symbols exported from
 the asm .obj files, or the decomp source must define proper C++ initializers.
 
-**Priority 4 (NEXT ITERATION): Fix COMDAT string extraction in jeff.**
+**Priority 4: Fix COMDAT string extraction in jeff.**
 Hash normalization in xex.rs to resolve 533 unresolved `??_C@` string literals.
 
 **Priority 5 (ONGOING): Reduce remaining 195 lbl_ + 48 SEH + 18 third-party symbols.**
@@ -230,7 +290,7 @@ Hash normalization in xex.rs to resolve 533 unresolved `??_C@` string literals.
   - Current filtered run: `All tests passed (648 assertions in 10 test cases)`
 - Runtime-validated decomp fingerprint for Xenia layout cache: `0x28F813763596C6C6`
 - NUI/XBC cutover defaults promoted in `emulator.cc`:
-  - `dc3_guest_overrides=true` (new default-on flag; `dc3_guest_override_poc` kept as deprecated alias)
+  - `dc3_guest_overrides=true` (default-on; legacy NUI/XBC byte-patch fallback removed)
   - `dc3_nui_enable_signature_resolver=true` (default on)
   - `dc3_nui_patch_resolver_mode` remains `hybrid` (default)
 - Cutover validation matrix (2026-02-23):
@@ -248,24 +308,20 @@ Hash normalization in xex.rs to resolve 533 unresolved `??_C@` string literals.
   - Strict signatures-only (no manifest/symbols), decomp:
     - `signature_hits=85`, `strict_rejects=0`
     - `patched=0 overridden=85 skipped=0 total=85`
-  - Explicit legacy fallback mode (`--dc3_guest_overrides=false --dc3_nui_patch_resolver_mode=legacy --dc3_nui_enable_signature_resolver=false`):
-    - original: `patched=59 overridden=0 skipped=0 total=59`
-    - decomp: `patched=85 overridden=0 skipped=0 total=85`
   - Conclusion:
-    - DC3 NUI/XBC is cut over to resolver+guest-override by default and legacy byte patching is now an explicit fallback path.
-    - Validation indicates we are clear to begin deleting the legacy DC3 NUI/XBC byte-patch path after a short parity gate period.
-- Legacy-removal roadmap (DC3 NUI/XBC only; not CRT/skeleton behavior hacks):
+    - DC3 NUI/XBC is cut over to resolver+guest-override by default.
+    - Follow-up validation cleared removal of the legacy DC3 NUI/XBC byte-patch path.
+- Legacy-removal roadmap (DC3 NUI/XBC only; not CRT/skeleton behavior hacks, now completed):
   1. Add a cutover gate script / CI check that runs `original+decomp` in `hybrid` and `strict` and asserts `patched=0`, `unresolved=0`.
-  2. Keep legacy fallback path for one validation window while collecting logs from real workflow runs.
-  3. Remove DC3 NUI/XBC byte-write application for entries fully handled by guest overrides (keep non-NUI legacy hacks separate).
-  4. Delete `dc3_guest_override_poc` alias and update docs/scripts to `dc3_guest_overrides`.
-  5. Reassess whether `resolver_mode=strict` can become the default after manifest/symbol workflows are stable.
+  2. Keep legacy fallback path for one validation window while collecting logs from real workflow runs. (Done)
+  3. Remove DC3 NUI/XBC byte-write application for entries fully handled by guest overrides (keep non-NUI legacy hacks separate). (Done)
+  4. Delete `dc3_guest_override_poc` alias and update docs/scripts to `dc3_guest_overrides`. (Done)
+  5. Reassess whether `resolver_mode=strict` can become the default after manifest/symbol workflows are stable. (Open)
 - Cutover gate automation added:
   - `tools/dc3_nui_cutover_gate.sh`
   - Runs original+decomp across:
     - default (`hybrid` + guest overrides)
     - strict signatures-only (manifest/symbol disabled)
-    - optional legacy byte-patch fallback (`DC3_GATE_INCLUDE_LEGACY=1`) for pre-removal commits
   - Asserts resolver/apply summaries and `TIMEOUT` completion.
   - Current result: passed twice consecutively (deterministic) on local runs.
 - Legacy DC3 NUI/XBC byte-patch application path removed after cutover validation:
@@ -279,6 +335,22 @@ Hash normalization in xex.rs to resolve 533 unresolved `??_C@` string literals.
 ---
 
 ## History
+
+### Sessions 12-13 (2026-02-23): JIT Indirect Call Fix — Game Runs Stably
+- Fixed SIGSEGV at host 0x40002830: XAM COM vtable indirect call outside indirection table range
+- Added bounds check in `CallIndirect` (x64_emitter.cc) with resolve thunk fallback
+- Fixed volatile register clobber: slow path was calling ResolveFunction as C function from JIT
+- Added no-op return stub for unresolvable functions (null target, XAM, garbage pointers)
+- Added bounds checks in `AddIndirection` and `PlaceGuestCode` (x64_code_cache.cc)
+- Fixed Linux SysV ABI register ordering bug in CallIndirect
+- Made `kIndirectionTableBase`/`kIndirectionTableSize` public in x64_code_cache.h
+- **Result**: Game runs full 30-second timeout, exit code 124, zero crashes
+- 4.4MB of log output, game is executing game code
+- New blocker: NUI callback dispatch loop at 0x834B1F40 (garbage function pointers)
+- Created `docs/dc3-boot/DEBUGGING_TIPS.md` capturing JIT architecture knowledge
+
+### Session 11 (2026-02-23): NUI/XBC Resolver + Guest Override Validation
+- (See detailed notes above in "2026-02-23 Update" section)
 
 ### Session 10 (2026-02-22): Heap Corruption SOLVED
 - Wave 1: 5 parallel research agents completed (see docs/dc3-boot/agent_*.md)
