@@ -64,7 +64,25 @@ bool PPCScanner::Scan(GuestFunction* function, FunctionDebugInfo* debug_info) {
   size_t blocks_found = 0;
   bool in_block = false;
   bool starts_with_mfspr_lr = false;
+  int consecutive_invalid = 0;
+  // Determine the maximum scannable address from the heap backing this range.
+  uint32_t max_scan_address = 0xFFFFFFFF;
+  {
+    auto* heap = memory->LookupHeap(start_address);
+    if (heap) {
+      uint32_t base = start_address;
+      uint32_t size = 0;
+      if (heap->QueryBaseAndSize(&base, &size) && size > 0) {
+        max_scan_address = heap->heap_base() + base + size;
+      }
+    }
+  }
   while (true) {
+    if (address >= max_scan_address) {
+      LOGPPC("function end {:08X} (past mapped memory)", address);
+      address -= 4;
+      break;
+    }
     uint32_t code =
         xe::load_and_swap<uint32_t>(memory->TranslateVirtual(address));
 
@@ -102,11 +120,23 @@ bool PPCScanner::Scan(GuestFunction* function, FunctionDebugInfo* debug_info) {
 
     bool ends_fn = false;
     bool ends_block = false;
+    if (opcode != PPCOpcode::kInvalid) {
+      consecutive_invalid = 0;
+    }
     if (opcode == PPCOpcode::kInvalid) {
       // Invalid instruction.
       // We can just ignore it because there's (very little)/no chance it'll
       // affect flow control.
       LOGPPC("Invalid instruction at {:08X}: {:08X}", address, code);
+      // If we hit too many consecutive invalid instructions, the scanner has
+      // wandered into unresolved stub / data territory.  Terminate the
+      // function here to avoid scanning megabytes of garbage.
+      consecutive_invalid++;
+      if (consecutive_invalid >= 8 && furthest_target <= address) {
+        LOGPPC("function end {:08X} (too many invalid instructions)", address);
+        ends_fn = true;
+        ends_block = true;
+      }
     } else if (code == 0x4E800020) {
       // blr -- unconditional branch to LR.
       // This is generally a return.

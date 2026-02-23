@@ -490,34 +490,48 @@ void RtlEnterCriticalSection_entry(pointer_t<X_RTL_CRITICAL_SECTION> cs) {
     int32_t recursion = cs->recursion_count;
     uint32_t owner = cs->owning_thread;
 
+    // Read the RAW lock_count (host-order int32 at offset 0x10) to detect
+    // corruption.  The xe::be<> accessor byte-swaps, but the atomic ops
+    // (CAS/inc/dec) work on the raw host-order value.  Valid raw values
+    // are -1 (unlocked) through ~thread_count (max contention).
+    auto* raw_cs_bytes = reinterpret_cast<volatile uint8_t*>(&*cs);
+    int32_t raw_lock =
+        *reinterpret_cast<volatile int32_t*>(raw_cs_bytes + 0x10);
+
     if (cs_type != 1) {
       looks_uninit = true;
     }
     // A CS with type==1 but lock_count==0 and owner==0 may be
     // pre-initialized in .data but never had RtlInitializeCriticalSection
     // called (lock_count should be -1 after proper init, not 0).
-    // Don't require recursion==0 since garbage data may be in that field.
     bool needs_lock_fix = (cs_type == 1 && lock_count == 0 && owner == 0);
+    // Also detect heap-corrupted CSes: if the raw lock value is outside
+    // the valid range [-1, max_threads] and no thread owns it, the CS
+    // memory was overwritten.  With max ~32 threads, raw_lock > 100 with
+    // owner==0 is clearly garbage.
+    bool lock_corrupted = (cs_type == 1 && owner == 0 &&
+                           (raw_lock < -1 || raw_lock > 100));
 
     static uint32_t cs_enter_count = 0;
     cs_enter_count++;
-    if (looks_uninit || needs_lock_fix || cs_enter_count <= 50 ||
-        (cs_enter_count % 1000) == 0) {
+    if (looks_uninit || needs_lock_fix || lock_corrupted ||
+        cs_enter_count <= 50 || (cs_enter_count % 1000) == 0) {
       XELOGI(
-          "RtlEnterCS #{} cs=0x{:08X} type={} lock={} recursion={} "
-          "owner=0x{:08X} caller_lr=0x{:08X} tid={} {}{}",
-          cs_enter_count, cs_addr, cs_type, lock_count, recursion, owner,
-          caller_lr, thread->thread_id(),
+          "RtlEnterCS #{} cs=0x{:08X} type={} lock={} raw_lock={} "
+          "recursion={} owner=0x{:08X} caller_lr=0x{:08X} tid={} {}{}{}",
+          cs_enter_count, cs_addr, cs_type, lock_count, raw_lock,
+          recursion, owner, caller_lr, thread->thread_id(),
           looks_uninit ? "**UNINIT**" : "",
-          needs_lock_fix ? "**LOCK_NOT_MINUS_1**" : "");
+          needs_lock_fix ? "**LOCK_NOT_MINUS_1**" : "",
+          lock_corrupted ? "**LOCK_CORRUPTED**" : "");
     }
 
-    if (looks_uninit || needs_lock_fix) {
+    if (looks_uninit || needs_lock_fix || lock_corrupted) {
       XELOGW(
-          "RtlEnterCriticalSection: CS at 0x{:08X} appears UNINITIALIZED "
-          "(type={}, lock_count={}, expected type=1 lock=-1). "
-          "Caller LR=0x{:08X}. Auto-initializing.",
-          cs_addr, cs_type, lock_count, caller_lr);
+          "RtlEnterCriticalSection: CS at 0x{:08X} needs re-init "
+          "(type={}, lock_count={}, raw_lock={}, expected type=1 "
+          "raw_lock=-1). Caller LR=0x{:08X}. Auto-initializing.",
+          cs_addr, cs_type, lock_count, raw_lock, caller_lr);
       xeRtlInitializeCriticalSection(cs, cs_addr);
     }
   }
@@ -529,7 +543,17 @@ void RtlEnterCriticalSection_entry(pointer_t<X_RTL_CRITICAL_SECTION> cs) {
     return;
   }
 
-  // Spin loop
+  // Always try the fast CAS path at least once before falling through
+  // to the slow waiter path. On real hardware, RtlEnterCriticalSection
+  // always attempts the lock before queuing. Without this, a CS with
+  // spin_count=0 would skip the CAS entirely and deadlock on first entry.
+  if (xe::atomic_cas(-1, 0, &cs->lock_count)) {
+    cs->owning_thread = cur_thread;
+    cs->recursion_count = 1;
+    return;
+  }
+
+  // Spin loop for additional attempts
   while (spin_count--) {
     if (xe::atomic_cas(-1, 0, &cs->lock_count)) {
       // Acquired.

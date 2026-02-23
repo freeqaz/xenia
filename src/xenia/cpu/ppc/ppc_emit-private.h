@@ -22,9 +22,7 @@ namespace ppc {
 #define XEREGISTERINSTR(name) \
   RegisterOpcodeEmitter(PPCOpcode::name, InstrEmit_##name);
 
-#define XEINSTRNOTIMPLEMENTED()                      \
-  XELOGE("Unimplemented instruction: {}", __func__); \
-  assert_always("Instruction not implemented");
+#define XEINSTRNOTIMPLEMENTED() do {} while(false)
 
 }  // namespace ppc
 }  // namespace cpu

@@ -497,6 +497,16 @@ void X64Emitter::Call(const hir::Instr* instr, GuestFunction* function) {
     // or a thunk to ResolveAddress.
     mov(ebx, function->address());
     mov(eax, dword[ebx]);
+    // Guard against uninitialized indirection table entries (0) — if the
+    // entry is null, skip the call to avoid SIGSEGV at address 0.
+    test(eax, eax);
+    Xbyak::Label has_target;
+    jnz(has_target);
+    // Null entry: use the resolve function thunk which handles failure
+    // gracefully by returning a noop stub.
+    mov(eax, static_cast<uint32_t>(reinterpret_cast<uint64_t>(
+        backend_->resolve_function_thunk())));
+    L(has_target);
   } else {
     // Old-style resolve.
     // Not too important because indirection table is almost always available.
@@ -571,6 +581,14 @@ void X64Emitter::CallIndirect(const hir::Instr* instr,
     jmp(resolved, CodeGenerator::T_NEAR);
     L(in_range);
     mov(eax, dword[ebx]);
+    // Guard against null indirection table entries — use resolve thunk
+    // instead of jumping to address 0.
+    test(eax, eax);
+    Xbyak::Label has_indirect_target;
+    jnz(has_indirect_target);
+    mov(eax, static_cast<uint32_t>(reinterpret_cast<uint64_t>(
+        backend_->resolve_function_thunk())));
+    L(has_indirect_target);
     L(resolved);
   } else {
     // Old-style resolve.

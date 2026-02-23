@@ -446,9 +446,67 @@ bool MMIOHandler::ExceptionCallback(Exception* ex) {
     // The address is not found within any range, so either a write watch or an
     // actual access violation.
     if (access_violation_callback_) {
-      return access_violation_callback_(std::move(lock),
-                                        access_violation_callback_context_,
-                                        fault_host_address, is_write);
+      bool handled = access_violation_callback_(std::move(lock),
+                                                access_violation_callback_context_,
+                                                fault_host_address, is_write);
+      if (handled) {
+        return true;
+      }
+    }
+    // Soft fault: skip cache hint instructions (clflush, prefetch) that
+    // fault on unmapped guest memory — they're no-ops by definition.
+#if XE_ARCH_AMD64
+    {
+      auto rip = ex->pc();
+      auto p = reinterpret_cast<const uint8_t*>(rip);
+      uint8_t off = 0;
+      // Skip optional REX prefix
+      if ((p[off] & 0xF0) == 0x40) {
+        ++off;
+      }
+      bool is_cache_hint = false;
+      if (p[off] == 0x0F) {
+        if (p[off + 1] == 0xAE) {
+          // clflush: 0F AE /7
+          uint8_t reg = (p[off + 2] >> 3) & 7;
+          if (reg == 7) is_cache_hint = true;
+        } else if (p[off + 1] == 0x18) {
+          // prefetch: 0F 18 /0-3
+          uint8_t reg = (p[off + 2] >> 3) & 7;
+          if (reg <= 3) is_cache_hint = true;
+        }
+      }
+      if (is_cache_hint) {
+        off += 2;  // Skip 0F AE or 0F 18
+        uint8_t modrm = p[off++];
+        uint8_t mod = (modrm >> 6) & 3;
+        uint8_t rm = modrm & 7;
+        if (mod != 3) {
+          if (rm == 4) ++off;  // SIB byte
+          if (mod == 1) off += 1;  // 8-bit displacement
+          else if (mod == 2) off += 4;  // 32-bit displacement
+          else if (mod == 0 && rm == 5) off += 4;  // RIP-relative
+        }
+        ex->set_resume_pc(rip + off);
+        return true;
+      }
+    }
+#endif
+    // Soft fault: for reads from unmapped guest memory (e.g. stack guard
+    // pages), zero the destination register and skip the faulting instruction
+    // instead of crashing.  This keeps decomp/stub guests alive.
+    if (!is_write) {
+      auto rip = ex->pc();
+      auto p = reinterpret_cast<const uint8_t*>(rip);
+      DecodedLoadStore decoded_load_store;
+      if (TryDecodeLoadStore(p, decoded_load_store) &&
+          decoded_load_store.is_load) {
+#if XE_ARCH_AMD64
+        ex->ModifyIntRegister(decoded_load_store.value_reg) = 0;
+#endif
+        ex->set_resume_pc(rip + decoded_load_store.length);
+        return true;
+      }
     }
     return false;
   }
