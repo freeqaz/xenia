@@ -1647,11 +1647,17 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
       }
     }
 
-    const bool enable_guest_overrides =
+    const bool requested_guest_overrides =
         cvars::dc3_guest_overrides || cvars::dc3_guest_override_poc;
+    const bool enable_guest_overrides = true;
     if (cvars::dc3_guest_override_poc && !cvars::dc3_guest_overrides) {
       XELOGW("DC3: --dc3_guest_override_poc is deprecated; use "
              "--dc3_guest_overrides=true");
+    }
+    if (!requested_guest_overrides) {
+      XELOGW(
+          "DC3: DC3 NUI/XBC legacy byte-patch path has been removed; "
+          "forcing guest overrides on (rollback by reverting commit)");
     }
     XELOGI("DC3: NUI/XBC apply path guest_overrides={} resolver_mode={} "
            "signature_resolver={}",
@@ -1688,154 +1694,86 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
     int override_register_failed = 0;
     int override_register_non_text = 0;
     int override_register_unresolved = 0;
-    std::set<uint32_t> registered_override_addrs;
-    if (enable_guest_overrides) {
-      for (int i = 0; i < active_count; i++) {
-        const auto& resolved_patch = resolved_patches[i];
-        const auto& patch = resolved_patch.spec;
-        if (!resolved_patch.resolved) {
-          XELOGW(
-              "DC3: Guest override registration skipped {:08X}: {} "
-              "(unresolved target; resolver mode={})",
-              patch.address, patch.name, cvars::dc3_nui_patch_resolver_mode);
-          override_register_unresolved++;
-          override_register_failed++;
-          continue;
-        }
-        const uint32_t patch_addr = resolved_patch.resolved_address;
-        auto handler = guest_extern_handler_for_patch(patch);
-        if (!handler) {
-          override_unsupported++;
-          continue;
-        }
-        if (!patch_target_in_text(patch_addr)) {
-          XELOGW(
-              "DC3: Guest override registration skipped {:08X}: {} "
-              "(outside .text range {:08X}-{:08X})",
-              patch_addr, patch.name, text_info.start, text_info.end);
-          override_register_non_text++;
-          override_register_failed++;
-          continue;
-        }
-        auto* heap = memory_->LookupHeap(patch_addr);
-        auto* mem = memory_->TranslateVirtual<uint8_t*>(patch_addr);
-        if (!heap || !mem) {
-          XELOGW(
-              "DC3: Guest override registration skipped {:08X}: {} "
-              "(invalid guest address)",
-              patch_addr, patch.name);
-          override_register_failed++;
-          continue;
-        }
-        uint32_t existing0 = xe::load_and_swap<uint32_t>(mem + 0);
-        if (existing0 == 0x00000000) {
-          XELOGW(
-              "DC3: Guest override registration skipped {:08X}: {} "
-              "(zero-filled target)",
-              patch_addr, patch.name);
-          override_register_failed++;
-          continue;
-        }
-        processor_->RegisterGuestFunctionOverride(patch_addr, handler,
-                                                  std::string(patch.name));
-        XELOGI(
-            "DC3: Registered guest extern override {:08X}: {} (resolver={})",
-            patch_addr, patch.name,
-            Dc3PatchResolveMethodName(resolved_patch.resolve_method));
-        registered_override_addrs.insert(patch_addr);
-        override_registered++;
-      }
-      XELOGI(
-          "DC3: Registered {} guest extern overrides from NUI patch table "
-          "({} entries left for byte patching, {} registration failures, "
-          "{} outside .text, {} unresolved)",
-          override_registered, active_count - override_registered,
-          override_register_failed, override_register_non_text,
-          override_register_unresolved);
-    }
-
-    int patched = 0;
-    int skipped = 0;
-    int overridden = 0;
-    int skipped_zero_filled = 0;
-    int skipped_unmapped = 0;
-    int skipped_non_text = 0;
-    int skipped_unresolved = 0;
     for (int i = 0; i < active_count; i++) {
       const auto& resolved_patch = resolved_patches[i];
       const auto& patch = resolved_patch.spec;
       if (!resolved_patch.resolved) {
-        XELOGW("  Skip {:08X}: {} (unresolved target; resolver mode={})",
-               patch.address, patch.name, cvars::dc3_nui_patch_resolver_mode);
-        skipped++;
-        skipped_unresolved++;
+        XELOGW(
+            "DC3: Guest override registration skipped {:08X}: {} "
+            "(unresolved target; resolver mode={})",
+            patch.address, patch.name, cvars::dc3_nui_patch_resolver_mode);
+        override_register_unresolved++;
+        override_register_failed++;
         continue;
       }
       const uint32_t patch_addr = resolved_patch.resolved_address;
-      if (registered_override_addrs.count(patch_addr)) {
-        overridden++;
+      auto handler = guest_extern_handler_for_patch(patch);
+      if (!handler) {
+        XELOGW(
+            "DC3: Guest override registration skipped {:08X}: {} "
+            "(unsupported patch shape for override; legacy byte patch path "
+            "removed)",
+            patch_addr, patch.name);
+        override_unsupported++;
+        override_register_failed++;
         continue;
       }
       if (!patch_target_in_text(patch_addr)) {
-        XELOGW("  Skip {:08X}: {} (outside .text range {:08X}-{:08X})",
-               patch_addr, patch.name, text_info.start, text_info.end);
-        skipped++;
-        skipped_non_text++;
+        XELOGW(
+            "DC3: Guest override registration skipped {:08X}: {} "
+            "(outside .text range {:08X}-{:08X})",
+            patch_addr, patch.name, text_info.start, text_info.end);
+        override_register_non_text++;
+        override_register_failed++;
         continue;
       }
       auto* heap = memory_->LookupHeap(patch_addr);
-      if (!heap) {
-        XELOGW("  Skip {:08X}: {} (no heap)", patch_addr, patch.name);
-        skipped++;
-        skipped_unmapped++;
-        continue;
-      }
       auto* mem = memory_->TranslateVirtual<uint8_t*>(patch_addr);
-      if (!mem) {
-        XELOGW("  Skip {:08X}: {} (translate failed)", patch_addr, patch.name);
-        skipped++;
-        skipped_unmapped++;
+      if (!heap || !mem) {
+        XELOGW(
+            "DC3: Guest override registration skipped {:08X}: {} "
+            "(invalid guest address)",
+            patch_addr, patch.name);
+        override_register_failed++;
         continue;
       }
       uint32_t existing0 = xe::load_and_swap<uint32_t>(mem + 0);
-      uint32_t existing1 = xe::load_and_swap<uint32_t>(mem + 4);
-
-      if (existing0 == 0x00000000 && existing1 == 0x00000000) {
-        XELOGW("  Skip {:08X}: {} (zero-filled target)", patch_addr,
-               patch.name);
-        skipped++;
-        skipped_zero_filled++;
+      if (existing0 == 0x00000000) {
+        XELOGW(
+            "DC3: Guest override registration skipped {:08X}: {} "
+            "(zero-filled target)",
+            patch_addr, patch.name);
+        override_register_failed++;
         continue;
       }
-
-      heap->Protect(patch_addr, 8,
-                    kMemoryProtectRead | kMemoryProtectWrite);
-
-      // Skip if already patched (idempotent).
-      if (existing0 == patch.insn0 && existing1 == patch.insn1) {
-        continue;
-      }
-
-      xe::store_and_swap<uint32_t>(mem + 0, patch.insn0);
-      xe::store_and_swap<uint32_t>(mem + 4, patch.insn1);
-      patched++;
-
-      XELOGI(
-          "  Patched {:08X}: {} [{:08X} {:08X}] -> [{:08X} {:08X}] "
-          "(resolver={})",
-          patch_addr, patch.name, existing0, existing1, patch.insn0, patch.insn1,
-          Dc3PatchResolveMethodName(resolved_patch.resolve_method));
+      processor_->RegisterGuestFunctionOverride(patch_addr, handler,
+                                                std::string(patch.name));
+      XELOGI("DC3: Registered guest extern override {:08X}: {} (resolver={})",
+             patch_addr, patch.name,
+             Dc3PatchResolveMethodName(resolved_patch.resolve_method));
+      override_registered++;
     }
+    XELOGI(
+        "DC3: Registered {} guest extern overrides from NUI patch table "
+        "({} entries not overridden, {} registration failures, "
+        "{} outside .text, {} unresolved)",
+        override_registered, active_count - override_registered,
+        override_register_failed, override_register_non_text,
+        override_register_unresolved);
+
+    const int patched = 0;
+    const int overridden = override_registered;
+    const int skipped = active_count - overridden;
     XELOGI(
         "DC3: NUI patch/override summary: patched={} overridden={} skipped={} "
         "total={} layout={} unsupported_override_entries={} "
-        "override_registration_failures={} skipped_zero_filled={} "
-        "skipped_unmapped={} skipped_non_text={} "
-        "override_registration_non_text={} skipped_unresolved={}",
+        "override_registration_failures={} "
+        "override_registration_non_text={} skipped_unresolved={} "
+        "legacy_byte_patching_removed=1",
         patched, overridden, skipped, active_count,
         is_decomp_layout ? "decomp" : "original", override_unsupported,
-        override_register_failed, skipped_zero_filled, skipped_unmapped,
-        skipped_non_text, override_register_non_text, skipped_unresolved);
+        override_register_failed, override_register_non_text,
+        override_register_unresolved);
 
     // Fake Kinect skeleton data injection
     // Replaces the NuiSkeletonGetNextFrame stub with a PPC routine that
