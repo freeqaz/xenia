@@ -13,6 +13,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "xenia/base/cvar.h"
@@ -115,6 +116,11 @@ class Processor {
   Function* LookupFunction(uint32_t address);
   Function* LookupFunction(Module* module, uint32_t address);
   Function* ResolveFunction(uint32_t address);
+  void RegisterGuestFunctionOverride(uint32_t address,
+                                     GuestFunction::ExternHandler handler,
+                                     std::string name = {});
+  void UnregisterGuestFunctionOverride(uint32_t address);
+  void ClearGuestFunctionOverrides();
 
   bool Execute(ThreadState* thread_state, uint32_t address);
   bool ExecuteRaw(ThreadState* thread_state, uint32_t address);
@@ -237,6 +243,7 @@ class Processor {
                                          uint32_t current_pc);
 
   bool DemandFunction(Function* function);
+  void ApplyGuestFunctionOverride(GuestFunction* function);
 
   Memory* memory_ = nullptr;
   std::unique_ptr<StackWalker> stack_walker_;
@@ -260,6 +267,9 @@ class Processor {
   std::vector<std::unique_ptr<Module>> modules_;
   Module* builtin_module_ = nullptr;
   uint32_t next_builtin_address_ = 0xFFFF0000u;
+  std::unordered_map<uint32_t, GuestFunction::ExternHandler>
+      guest_function_overrides_;
+  std::unordered_map<uint32_t, std::string> guest_function_override_names_;
 
   // Maps thread ID to state. Updated on thread create, and threads are never
   // removed. Must be guarded with the global lock.

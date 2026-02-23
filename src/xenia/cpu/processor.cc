@@ -194,6 +194,55 @@ std::vector<Module*> Processor::GetModules() {
   return clone;
 }
 
+void Processor::RegisterGuestFunctionOverride(
+    uint32_t address, GuestFunction::ExternHandler handler, std::string name) {
+  assert_not_zero(address);
+  assert_not_null(handler);
+  {
+    auto global_lock = global_critical_region_.Acquire();
+    guest_function_overrides_[address] = handler;
+    if (name.empty()) {
+      guest_function_override_names_.erase(address);
+    } else {
+      guest_function_override_names_[address] = name;
+    }
+  }
+
+  // If the function was already resolved earlier, bind the override now too.
+  for (auto* existing_function : FindFunctionsWithAddress(address)) {
+    if (!existing_function || !existing_function->is_guest()) {
+      continue;
+    }
+    auto global_lock = global_critical_region_.Acquire();
+    ApplyGuestFunctionOverride(static_cast<GuestFunction*>(existing_function));
+  }
+}
+
+void Processor::UnregisterGuestFunctionOverride(uint32_t address) {
+  auto global_lock = global_critical_region_.Acquire();
+  guest_function_overrides_.erase(address);
+  guest_function_override_names_.erase(address);
+}
+
+void Processor::ClearGuestFunctionOverrides() {
+  auto global_lock = global_critical_region_.Acquire();
+  guest_function_overrides_.clear();
+  guest_function_override_names_.clear();
+}
+
+void Processor::ApplyGuestFunctionOverride(GuestFunction* function) {
+  assert_not_null(function);
+  auto it = guest_function_overrides_.find(function->address());
+  if (it == guest_function_overrides_.end()) {
+    return;
+  }
+  function->SetupExtern(it->second, nullptr);
+  auto name_it = guest_function_override_names_.find(function->address());
+  if (name_it != guest_function_override_names_.end()) {
+    function->set_name(name_it->second);
+  }
+}
+
 Function* Processor::DefineBuiltin(const std::string_view name,
                                    BuiltinFunction::Handler handler, void* arg0,
                                    void* arg1) {
@@ -284,6 +333,14 @@ Function* Processor::LookupFunction(Module* module, uint32_t address) {
   Function* function = nullptr;
   auto symbol_status = module->DeclareFunction(address, &function);
   if (symbol_status == Symbol::Status::kNew) {
+    {
+      auto global_lock = global_critical_region_.Acquire();
+      ApplyGuestFunctionOverride(static_cast<GuestFunction*>(function));
+    }
+    if (function->behavior() == Function::Behavior::kExtern) {
+      function->set_status(Symbol::Status::kDeclared);
+      return function;
+    }
     // Symbol is undeclared, so declare now.
     assert_true(function->is_guest());
     if (!frontend_->DeclareFunction(static_cast<GuestFunction*>(function))) {
@@ -291,6 +348,10 @@ Function* Processor::LookupFunction(Module* module, uint32_t address) {
       return nullptr;
     }
     function->set_status(Symbol::Status::kDeclared);
+  }
+  if (function && function->is_guest()) {
+    auto global_lock = global_critical_region_.Acquire();
+    ApplyGuestFunctionOverride(static_cast<GuestFunction*>(function));
   }
   return function;
 }
@@ -301,6 +362,20 @@ bool Processor::DemandFunction(Function* function) {
   auto module = function->module();
   auto symbol_status = module->DefineFunction(function);
   if (symbol_status == Symbol::Status::kNew) {
+    if (function->behavior() == Function::Behavior::kExtern) {
+      // Extern functions (kernel imports) have guest code (sc 2; blr) that
+      // can be compiled.  We compile it so the indirection table has machine
+      // code for indirect calls (CallIndirect via bctr/bctrl).  Direct calls
+      // still use the inline CallExtern path.  If compilation fails, the
+      // extern handler still works for direct calls.
+      if (function->is_guest()) {
+        frontend_->DefineFunction(static_cast<GuestFunction*>(function),
+                                  debug_info_flags_);
+      }
+      OnFunctionDefined(function);
+      function->set_status(Symbol::Status::kDefined);
+      return true;
+    }
     // Symbol is undefined, so define now.
     assert_true(function->is_guest());
     if (!frontend_->DefineFunction(static_cast<GuestFunction*>(function),

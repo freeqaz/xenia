@@ -129,7 +129,14 @@ bool GuestFunction::Call(ThreadState* thread_state, uint32_t return_address) {
     ThreadState::Bind(thread_state);
   }
 
-  bool result = CallImpl(thread_state, return_address);
+  bool result = false;
+  if (behavior_ == Behavior::kExtern && extern_handler_) {
+    extern_handler_(thread_state->context(),
+                    thread_state->context()->kernel_state);
+    result = true;
+  } else {
+    result = CallImpl(thread_state, return_address);
+  }
 
   if (original_thread_state != thread_state) {
     ThreadState::Bind(original_thread_state);

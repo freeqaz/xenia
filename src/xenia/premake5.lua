@@ -27,3 +27,5 @@ project("xenia-core-headless")
     "XE_HEADLESS_BUILD",
   })
   files({"*.h", "*.cc"})
+
+include("testing")

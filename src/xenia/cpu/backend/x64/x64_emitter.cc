@@ -359,7 +359,12 @@ uint64_t TrapDebugPrint(void* raw_context, uint64_t address) {
 
 uint64_t TrapDebugBreak(void* raw_context, uint64_t address) {
   auto thread_state = *reinterpret_cast<ThreadState**>(raw_context);
-  XELOGE("tw/td forced trap hit! This should be a crash!");
+  auto* ctx = thread_state->context();
+  XELOGE("tw/td forced trap hit! LR={:08X} CTR={:08X} r3={:08X} r4={:08X}",
+         static_cast<uint32_t>(ctx->lr),
+         static_cast<uint32_t>(ctx->ctr),
+         static_cast<uint32_t>(ctx->r[3]),
+         static_cast<uint32_t>(ctx->r[4]));
   if (cvars::break_on_debugbreak) {
     xe::debugging::Break();
   }
@@ -404,15 +409,39 @@ uint64_t ResolveFunction(void* raw_context, uint64_t target_address) {
 
   auto fn = thread_state->processor()->ResolveFunction(
       static_cast<uint32_t>(target_address));
-  assert_not_null(fn);
+  if (!fn) {
+    XELOGE("ResolveFunction({:08X}): FAILED - no function found",
+           static_cast<uint32_t>(target_address));
+    // Fatal: returning 0 will crash at RIP=0 via jmp(rax) in the thunk.
+    xe::FatalError(fmt::format("ResolveFunction({:08X}): no function found",
+                               static_cast<uint32_t>(target_address)));
+    return 0;
+  }
   auto x64_fn = static_cast<X64Function*>(fn);
   uint64_t addr = reinterpret_cast<uint64_t>(x64_fn->machine_code());
+  if (!addr) {
+    XELOGE(
+        "ResolveFunction({:08X}): function '{}' resolved but machine_code is "
+        "null",
+        static_cast<uint32_t>(target_address), fn->name());
+    xe::FatalError(fmt::format(
+        "ResolveFunction({:08X}): null machine_code for '{}'",
+        static_cast<uint32_t>(target_address), fn->name()));
+  }
 
   return addr;
 }
 
 void X64Emitter::Call(const hir::Instr* instr, GuestFunction* function) {
   assert_not_null(function);
+  if (function->behavior() == Function::Behavior::kExtern) {
+    CallExtern(instr, function);
+    if (instr->flags & hir::CALL_TAIL) {
+      EmitTraceUserCallReturn();
+      jmp(epilog_label(), CodeGenerator::T_NEAR);
+    }
+    return;
+  }
   auto fn = static_cast<X64Function*>(function);
   // Resolve address to the function to call and store in rax.
   if (fn->machine_code()) {
@@ -466,7 +495,30 @@ void X64Emitter::CallIndirect(const hir::Instr* instr,
     if (reg.cvt32() != ebx) {
       mov(ebx, reg.cvt32());
     }
+    // Bounds check: the indirection table only covers guest addresses
+    // [0x80000000, 0x9FFFFFFF].  Addresses outside this range (e.g. XAM
+    // COM vtable entries at 0x40000000+) must use the slow resolve path
+    // to avoid reading from unmapped host memory.
+    mov(eax, ebx);
+    sub(eax, static_cast<uint32_t>(X64CodeCache::kIndirectionTableBase));
+    cmp(eax, static_cast<uint32_t>(X64CodeCache::kIndirectionTableSize));
+    Xbyak::Label in_range;
+    Xbyak::Label resolved;
+    jb(in_range);
+    // Out of range: fall back to slow ResolveFunction call.
+    mov(rax, reinterpret_cast<uint64_t>(ResolveFunction));
+#if XE_PLATFORM_LINUX
+    mov(esi, ebx);
+    mov(rdi, GetContextReg());
+#else
+    mov(edx, ebx);
+    mov(rcx, GetContextReg());
+#endif
+    call(rax);
+    jmp(resolved, CodeGenerator::T_NEAR);
+    L(in_range);
     mov(eax, dword[ebx]);
+    L(resolved);
   } else {
     // Old-style resolve.
     // Not too important because indirection table is almost always available.
