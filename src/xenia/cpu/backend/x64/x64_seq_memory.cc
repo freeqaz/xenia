@@ -1051,7 +1051,10 @@ struct CACHE_CONTROL
         break;
       case CacheControlType::CACHE_CONTROL_TYPE_DATA_STORE:
       case CacheControlType::CACHE_CONTROL_TYPE_DATA_STORE_AND_FLUSH:
-        is_clflush = true;
+        // clflush is unnecessary in emulation — memory coherency between
+        // guest CPU and GPU is handled at a higher level.  Emitting it
+        // causes faults on unmapped physical memory (e.g. D3D
+        // FlushCachedMemory) and costs ~36K signal handler round-trips/sec.
         break;
       default:
         assert_unhandled_case(CacheControlType(i.instr->flags));

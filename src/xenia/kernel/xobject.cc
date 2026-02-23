@@ -429,7 +429,7 @@ object_ref<XObject> XObject::GetNativeObject(KernelState* kernel_state,
       case 23:  // ProfileObject
       case 24:  // ThreadedDpcObject
       default:
-        assert_always();
+        XELOGW("GetNativeObject: unhandled object type {}", as_type);
         return NULL;
     }
 

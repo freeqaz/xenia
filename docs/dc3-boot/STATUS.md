@@ -1,6 +1,6 @@
-# Status: OODA Loop Iteration 2
+# Status: OODA Loop Iteration 3
 
-*Last updated: 2026-02-23 (Sessions 12-13 — Game runs stably, NUI callback loop blocker)*
+*Last updated: 2026-02-23 (Sessions 14-15 — JIT crash cascade fixed, SIGBUS handler, soft faults, game fully stable)*
 
 ## 2026-02-23 Update (Phase 2 Consolidation): Non-NUI DC3 Hack-Pack Extraction (Stable, Partial)
 
@@ -180,11 +180,14 @@ subsystem and was never properly initialized because NUI was stubbed.
 
 This is an **implementation enabler** for retiring raw guest byte patches. Full semantic resolver work (fingerprint cache + symbol/signature resolution) is still in progress.
 
-## Current Milestone: Past `main()`, Advancing Through Game Init
+## Current Milestone: Game Runs Full 40s, CRT + Init Complete, Memory Scanning Loop
 
-Progress: **Game runs stably with zero crashes.** CRT init completes. `main()` reached.
-XAM loaded. JIT indirect calls to unresolvable functions (XAM COM vtables, null pointers)
-handled gracefully with no-op stubs. Current blocker: NUI callback dispatch infinite loop.
+Progress: **Game runs stably for full 40-second timeout with EXIT 0, only 2 SIGSEGV (handled).**
+All JIT compilation crashes fixed. SIGBUS handler added. Soft fault handler for unmapped guest
+memory. Pre-mapped guard pages. Thread 6 (main game) reaches initialization scanning phase at
+0x834AA920 — walking through all of guest memory (SP traverses 0x00000000-0xFFFFFFFF range).
+Thread 7 (joypad) running steadily. CS operations balanced and growing (~735/3s interval).
+No GPU commands issued yet — game hasn't reached rendering. 13 thread status reports per run.
 
 ## OBSERVE — What happens when we run the test?
 
@@ -433,6 +436,58 @@ Hash normalization in xex.rs to resolve 533 unresolved `??_C@` string literals.
 ---
 
 ## History
+
+### Sessions 14-15 (2026-02-23): JIT Crash Cascade Fixed — Game Fully Stable
+
+**Problem**: Game crashed between 3-6s during JIT compilation of zero-filled stub functions.
+Cascading failures: null Function* in CALL emitter, constant-as-register in CALL_INDIRECT,
+null machine_code pointers, null indirection table entries, SIGBUS on `movbe`, out-of-bounds
+HIR builder arena allocation, and unmapped guest memory reads.
+
+**Fixes applied** (10 files, ~20 individual changes):
+
+1. **SIGBUS handler** (exception_handler_posix.cc): Added SIGBUS to signal handler registration.
+   Linux sends SIGBUS (not SIGSEGV) for file-backed mmap accesses past the backing file size.
+   Xenia's MMIO handler now sees these faults.
+
+2. **Soft fault handler** (mmio_handler.cc): For unmapped guest memory reads (stack guard pages,
+   unmapped regions), zero the destination register and advance past the faulting instruction
+   instead of crashing. Uses existing TryDecodeLoadStore mechanism.
+
+3. **CALL null guard** (x64_seq_control.cc): Skip CALL when Function* is null.
+   Also added null guards to all 6 CALL_TRUE variants.
+
+4. **CALL_INDIRECT constant handling** (x64_seq_control.cc): When I64Op target is a constant,
+   load into rax and call through that. Skip if constant is 0. Covers all CALL_INDIRECT_TRUE.
+
+5. **XObject::GetNativeObject tolerance** (xobject.cc): Changed assert_always to XELOGW
+   for unknown object types.
+
+6. **Null machine_code guard** (x64_function.cc): Return false from CallImpl when
+   machine_code_ is null.
+
+7. **Null indirection table entries** (x64_emitter.cc): After loading from indirection table,
+   check for 0 and redirect to resolve function thunk. Both Call() and CallIndirect().
+
+8. **PPC scanner bounds check** (ppc_scanner.cc): Added max_scan_address using
+   QueryBaseAndSize to prevent scanning past mapped memory.
+
+9. **HIR builder bounds check** (ppc_hir_builder.cc): Cap function size to 1MB, compute
+   instr_count from capped size (before arena allocation), clamp end_address to mapped memory.
+
+10. **Guard page pre-mapping** (dc3_hack_pack.cc): Map 0x7F000000 (16MB GPU writeback) and
+    0xFFFFF000 (top-of-address-space guard) as anonymous readable pages at startup.
+    Eliminates ~807K faults/run → only 2 remaining.
+
+**Thread status reporting fix** (emulator_headless.cc): Run() now delegates to RunWithTimeout(-1)
+for continuous reporting. Enhanced JIT IP sampling to 3 samples 50ms apart for loop detection.
+
+**Progression**: test52 (CALL crash) → test54 (CALL_INDIRECT assert) → test55 (XObject assert) →
+test57 (null machine_code) → test59 (HIR builder crash) → test62 (SIGBUS) → test63 (13 reports,
+game alive!) → test65 (soft faults, 807K) → test70 (guard pages, 112 faults) → test72 (2 faults)
+
+**Current state**: Game runs full 40s timeout, EXIT 0, 2 handled faults, Thread 6 in
+memory scanning loop at 0x834AA920, no GPU commands yet.
 
 ### Sessions 12-13 (2026-02-23): JIT Indirect Call Fix — Game Runs Stably
 - Fixed SIGSEGV at host 0x40002830: XAM COM vtable indirect call outside indirection table range

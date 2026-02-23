@@ -137,10 +137,9 @@ void EmulatorHeadless::EmulatorThread(std::filesystem::path launch_path) {
 }
 
 void EmulatorHeadless::Run() {
-  // Run until emulator thread exits (title ends)
-  if (emulator_thread_.joinable()) {
-    emulator_thread_.join();
-  }
+  // Run with periodic status reporting until emulator thread exits.
+  // This enables diagnostics even when using shell `timeout` externally.
+  RunWithTimeout(-1);
 }
 
 void EmulatorHeadless::RunWithTimeout(int32_t timeout_ms) {
@@ -153,7 +152,7 @@ void EmulatorHeadless::RunWithTimeout(int32_t timeout_ms) {
                       std::chrono::steady_clock::now() - start_time)
                       .count();
 
-    if (elapsed >= timeout_ms) {
+    if (timeout_ms >= 0 && elapsed >= timeout_ms) {
       XELOGI("Timeout of {}ms reached, terminating...", timeout_ms);
       xe::Dc3RuntimeTelemetryRecordBootMilestone("headless_timeout_reached");
       xe::Dc3RuntimeTelemetryEndSession("headless_timeout", timeout_ms);
@@ -292,9 +291,8 @@ void EmulatorHeadless::RunWithTimeout(int32_t timeout_ms) {
               }
             }
 #ifdef __linux__
-            // Sample the game thread's actual x86 instruction pointer via SIGUSR2.
-            // PPCContext is stale during JIT execution, so this is the only way to
-            // find where the thread is actually executing.
+            // Sample the game thread's x86 IP via SIGUSR2 multiple times to
+            // detect tight loops vs forward progress.
             {
               InstallJitIpSampler();
               auto* xe_thread = thread->thread();
@@ -302,36 +300,41 @@ void EmulatorHeadless::RunWithTimeout(int32_t timeout_ms) {
                 auto* native = xe_thread->native_handle();
                 if (native) {
                   pthread_t pt = reinterpret_cast<pthread_t>(native);
-                  g_sampled_rip.store(0, std::memory_order_release);
-                  pthread_kill(pt, SIGUSR2);
-                  // Brief spin to let the signal handler fire
-                  for (int w = 0; w < 100 && g_sampled_rip.load(std::memory_order_acquire) == 0; w++) {
-                    std::this_thread::sleep_for(std::chrono::microseconds(100));
-                  }
-                  uintptr_t rip = g_sampled_rip.load(std::memory_order_acquire);
-                  if (rip != 0) {
-                    fprintf(stderr, "    JIT IP sample: host RIP=0x%lX", rip);
-                    // Map host JIT address to guest PPC address
-                    auto* backend = processor->backend();
-                    auto* code_cache = backend ? backend->code_cache() : nullptr;
-                    if (code_cache) {
+                  auto* backend = processor->backend();
+                  auto* code_cache = backend ? backend->code_cache() : nullptr;
+                  uint32_t guest_samples[3] = {};
+                  std::string fn_names[3];
+                  for (int si = 0; si < 3; si++) {
+                    if (si > 0) std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                    g_sampled_rip.store(0, std::memory_order_release);
+                    pthread_kill(pt, SIGUSR2);
+                    for (int w = 0; w < 100 && g_sampled_rip.load(std::memory_order_acquire) == 0; w++) {
+                      std::this_thread::sleep_for(std::chrono::microseconds(100));
+                    }
+                    uintptr_t rip = g_sampled_rip.load(std::memory_order_acquire);
+                    if (rip != 0 && code_cache) {
                       auto* jit_fn = code_cache->LookupFunction(static_cast<uint64_t>(rip));
                       if (jit_fn) {
-                        uint32_t guest_pc = jit_fn->MapMachineCodeToGuestAddress(rip);
-                        fprintf(stderr, " → guest 0x%08X [%s @ 0x%08X]",
-                                guest_pc, jit_fn->name().c_str(), jit_fn->address());
-                      } else {
-                        // Check if it's in the code cache range at all
-                        if (rip >= 0xA0000000 && rip < 0xB0000000) {
-                          fprintf(stderr, " (in JIT range but no function found)");
-                        } else {
-                          fprintf(stderr, " (NOT in JIT code cache — host/runtime code)");
-                        }
+                        guest_samples[si] = jit_fn->MapMachineCodeToGuestAddress(rip);
+                        fn_names[si] = jit_fn->name();
                       }
                     }
-                    fprintf(stderr, "\n");
-                    fflush(stderr);
                   }
+                  fprintf(stderr, "    JIT IP samples (50ms apart):\n");
+                  for (int si = 0; si < 3; si++) {
+                    fprintf(stderr, "      [%d] guest 0x%08X [%s]\n",
+                            si, guest_samples[si], fn_names[si].c_str());
+                  }
+                  if (guest_samples[0] != 0 && guest_samples[0] == guest_samples[1] &&
+                      guest_samples[1] == guest_samples[2]) {
+                    fprintf(stderr, "    *** LIKELY TIGHT LOOP at guest 0x%08X ***\n",
+                            guest_samples[0]);
+                  } else if (fn_names[0] == fn_names[1] && fn_names[1] == fn_names[2] &&
+                             !fn_names[0].empty()) {
+                    fprintf(stderr, "    *** SPINNING IN SAME FUNCTION: %s ***\n",
+                            fn_names[0].c_str());
+                  }
+                  fflush(stderr);
                 }
               }
             }

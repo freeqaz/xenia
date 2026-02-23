@@ -119,6 +119,34 @@ void ApplyDc3ImportAndRuntimeStopgaps(const Dc3HackContext& ctx,
     }
   }
 
+  // Map guard/overflow pages as readable zeros.
+  // The decomp has stubs that return -1, causing game code to dereference
+  // r31=0xFFFFFFFF in tight loops.  Guest addresses near 0xFFFFFFFF map to
+  // file offsets past the shm backing size, so the kernel can't serve the
+  // pages.  Also pre-map the 0x7F000000-0x7FFFFFFF GPU writeback region
+  // and other unmapped areas to avoid tens of thousands of page faults
+  // during register scanning.
+#if defined(__linux__)
+  {
+    struct { uint32_t start; uint32_t size; const char* name; } regions[] = {
+      {0x7F000000, 0x01000000, "GPU writeback 0x7F000000"},
+      {0xFFFFF000, 0x00002000, "top-of-address-space guard"},
+    };
+    for (auto& r : regions) {
+      uint8_t* host = memory->TranslateVirtual<uint8_t*>(r.start);
+      void* result = mmap(host, r.size, PROT_READ | PROT_WRITE,
+                          MAP_ANONYMOUS | MAP_PRIVATE | MAP_FIXED, -1, 0);
+      if (result != MAP_FAILED) {
+        XELOGI("DC3: Mapped {} ({} bytes)", r.name, r.size);
+        stopgap_result.applied++;
+      } else {
+        XELOGW("DC3: Failed to map {}: {}", r.name, strerror(errno));
+        stopgap_result.skipped++;
+      }
+    }
+  }
+#endif
+
   // Stub _output_l / _woutput_l / XMP overrides.
   {
     struct OutputFunc {

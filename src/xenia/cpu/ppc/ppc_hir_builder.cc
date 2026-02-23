@@ -89,7 +89,13 @@ bool PPCHIRBuilder::Emit(GuestFunction* function, uint32_t flags) {
 
   function_ = function;
   start_address_ = function_->address();
-  instr_count_ = (function_->end_address() - function_->address()) / 4 + 1;
+
+  // Cap function size to 1MB to prevent arena overflow from garbage functions.
+  uint32_t fn_size = function_->end_address() - function_->address();
+  if (fn_size > 1024 * 1024) {
+    fn_size = 1024 * 1024;
+  }
+  instr_count_ = fn_size / 4 + 1;
 
   with_debug_info_ = (flags & EMIT_DEBUG_COMMENTS) == EMIT_DEBUG_COMMENTS;
   if (with_debug_info_) {
@@ -114,7 +120,21 @@ bool PPCHIRBuilder::Emit(GuestFunction* function, uint32_t flags) {
   label_list_[0] = NewLabel();
 
   uint32_t start_address = function_->address();
-  uint32_t end_address = function_->end_address();
+  uint32_t end_address = start_address + fn_size;
+  // Clamp end_address to mapped memory to avoid SIGSEGV.
+  {
+    auto* heap = memory->LookupHeap(start_address);
+    if (heap) {
+      uint32_t base = start_address;
+      uint32_t size = 0;
+      if (heap->QueryBaseAndSize(&base, &size) && size > 0) {
+        uint32_t max_addr = heap->heap_base() + base + size;
+        if (max_addr >= 4 && end_address > max_addr - 4) {
+          end_address = max_addr - 4;
+        }
+      }
+    }
+  }
   for (uint32_t address = start_address, offset = 0; address <= end_address;
        address += 4, offset++) {
     trace_info_.dest_count = 0;
@@ -154,9 +174,7 @@ bool PPCHIRBuilder::Emit(GuestFunction* function, uint32_t flags) {
     instr_offset_list_[offset] = first_instr;
 
     if (opcode == PPCOpcode::kInvalid) {
-      XELOGE("Invalid instruction {:08X} {:08X}", address, code);
       Comment("INVALID!");
-      // TraceInvalidInstruction(i);
       continue;
     }
     ++opcode_translation_counts[static_cast<int>(opcode)];
@@ -176,13 +194,13 @@ bool PPCHIRBuilder::Emit(GuestFunction* function, uint32_t flags) {
     i.opcode = opcode;
     i.opcode_info = &opcode_info;
     if (!opcode_info.emit || opcode_info.emit(*this, i)) {
-      auto& disasm_info = GetOpcodeDisasmInfo(opcode);
-      XELOGE(
-          "Unimplemented instr {:08X} {:08X} {} - report the game to Xenia "
-          "developers; to skip, disable break_on_unimplemented_instructions",
-          address, code, disasm_info.name);
       Comment("UNIMPLEMENTED!");
       if (cvars::break_on_unimplemented_instructions) {
+        auto& disasm_info = GetOpcodeDisasmInfo(opcode);
+        XELOGE(
+            "Unimplemented instr {:08X} {:08X} {} - report the game to Xenia "
+            "developers; to skip, disable break_on_unimplemented_instructions",
+            address, code, disasm_info.name);
         DebugBreak();
       }
     }

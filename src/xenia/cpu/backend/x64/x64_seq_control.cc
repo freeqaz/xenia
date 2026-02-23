@@ -184,6 +184,7 @@ EMITTER_OPCODE_TABLE(OPCODE_TRAP_TRUE, TRAP_TRUE_I8, TRAP_TRUE_I16,
 // ============================================================================
 struct CALL : Sequence<CALL, I<OPCODE_CALL, VoidOp, SymbolOp>> {
   static void Emit(X64Emitter& e, const EmitArgType& i) {
+    if (!i.src1.value) return;
     assert_true(i.src1.value->is_guest());
     e.Call(i.instr, static_cast<GuestFunction*>(i.src1.value));
   }
@@ -196,6 +197,7 @@ EMITTER_OPCODE_TABLE(OPCODE_CALL, CALL);
 struct CALL_TRUE_I8
     : Sequence<CALL_TRUE_I8, I<OPCODE_CALL_TRUE, VoidOp, I8Op, SymbolOp>> {
   static void Emit(X64Emitter& e, const EmitArgType& i) {
+    if (!i.src2.value) return;
     assert_true(i.src2.value->is_guest());
     e.test(i.src1, i.src1);
     Xbyak::Label skip;
@@ -207,6 +209,7 @@ struct CALL_TRUE_I8
 struct CALL_TRUE_I16
     : Sequence<CALL_TRUE_I16, I<OPCODE_CALL_TRUE, VoidOp, I16Op, SymbolOp>> {
   static void Emit(X64Emitter& e, const EmitArgType& i) {
+    if (!i.src2.value) return;
     assert_true(i.src2.value->is_guest());
     e.test(i.src1, i.src1);
     Xbyak::Label skip;
@@ -218,6 +221,7 @@ struct CALL_TRUE_I16
 struct CALL_TRUE_I32
     : Sequence<CALL_TRUE_I32, I<OPCODE_CALL_TRUE, VoidOp, I32Op, SymbolOp>> {
   static void Emit(X64Emitter& e, const EmitArgType& i) {
+    if (!i.src2.value) return;
     assert_true(i.src2.value->is_guest());
     e.test(i.src1, i.src1);
     Xbyak::Label skip;
@@ -229,6 +233,7 @@ struct CALL_TRUE_I32
 struct CALL_TRUE_I64
     : Sequence<CALL_TRUE_I64, I<OPCODE_CALL_TRUE, VoidOp, I64Op, SymbolOp>> {
   static void Emit(X64Emitter& e, const EmitArgType& i) {
+    if (!i.src2.value) return;
     assert_true(i.src2.value->is_guest());
     e.test(i.src1, i.src1);
     Xbyak::Label skip;
@@ -240,6 +245,7 @@ struct CALL_TRUE_I64
 struct CALL_TRUE_F32
     : Sequence<CALL_TRUE_F32, I<OPCODE_CALL_TRUE, VoidOp, F32Op, SymbolOp>> {
   static void Emit(X64Emitter& e, const EmitArgType& i) {
+    if (!i.src2.value) return;
     assert_true(i.src2.value->is_guest());
     e.vptest(i.src1, i.src1);
     Xbyak::Label skip;
@@ -251,6 +257,7 @@ struct CALL_TRUE_F32
 struct CALL_TRUE_F64
     : Sequence<CALL_TRUE_F64, I<OPCODE_CALL_TRUE, VoidOp, F64Op, SymbolOp>> {
   static void Emit(X64Emitter& e, const EmitArgType& i) {
+    if (!i.src2.value) return;
     assert_true(i.src2.value->is_guest());
     e.vptest(i.src1, i.src1);
     Xbyak::Label skip;
@@ -269,7 +276,14 @@ EMITTER_OPCODE_TABLE(OPCODE_CALL_TRUE, CALL_TRUE_I8, CALL_TRUE_I16,
 struct CALL_INDIRECT
     : Sequence<CALL_INDIRECT, I<OPCODE_CALL_INDIRECT, VoidOp, I64Op>> {
   static void Emit(X64Emitter& e, const EmitArgType& i) {
-    e.CallIndirect(i.instr, i.src1);
+    if (i.src1.is_constant) {
+      auto constant = i.src1.constant();
+      if (constant == 0) return;
+      e.mov(e.rax, constant);
+      e.CallIndirect(i.instr, e.rax);
+    } else {
+      e.CallIndirect(i.instr, i.src1);
+    }
   }
 };
 EMITTER_OPCODE_TABLE(OPCODE_CALL_INDIRECT, CALL_INDIRECT);
@@ -284,7 +298,13 @@ struct CALL_INDIRECT_TRUE_I8
     e.test(i.src1, i.src1);
     Xbyak::Label skip;
     e.jz(skip, CodeGenerator::T_NEAR);
-    e.CallIndirect(i.instr, i.src2);
+    if (i.src2.is_constant) {
+      if (i.src2.constant() == 0) { e.L(skip); return; }
+      e.mov(e.rax, i.src2.constant());
+      e.CallIndirect(i.instr, e.rax);
+    } else {
+      e.CallIndirect(i.instr, i.src2);
+    }
     e.L(skip);
   }
 };
@@ -295,7 +315,13 @@ struct CALL_INDIRECT_TRUE_I16
     e.test(i.src1, i.src1);
     Xbyak::Label skip;
     e.jz(skip, CodeGenerator::T_NEAR);
-    e.CallIndirect(i.instr, i.src2);
+    if (i.src2.is_constant) {
+      if (i.src2.constant() == 0) { e.L(skip); return; }
+      e.mov(e.rax, i.src2.constant());
+      e.CallIndirect(i.instr, e.rax);
+    } else {
+      e.CallIndirect(i.instr, i.src2);
+    }
     e.L(skip);
   }
 };
@@ -306,7 +332,13 @@ struct CALL_INDIRECT_TRUE_I32
     e.test(i.src1, i.src1);
     Xbyak::Label skip;
     e.jz(skip, CodeGenerator::T_NEAR);
-    e.CallIndirect(i.instr, i.src2);
+    if (i.src2.is_constant) {
+      if (i.src2.constant() == 0) { e.L(skip); return; }
+      e.mov(e.rax, i.src2.constant());
+      e.CallIndirect(i.instr, e.rax);
+    } else {
+      e.CallIndirect(i.instr, i.src2);
+    }
     e.L(skip);
   }
 };
@@ -317,7 +349,13 @@ struct CALL_INDIRECT_TRUE_I64
     e.test(i.src1, i.src1);
     Xbyak::Label skip;
     e.jz(skip, CodeGenerator::T_NEAR);
-    e.CallIndirect(i.instr, i.src2);
+    if (i.src2.is_constant) {
+      if (i.src2.constant() == 0) { e.L(skip); return; }
+      e.mov(e.rax, i.src2.constant());
+      e.CallIndirect(i.instr, e.rax);
+    } else {
+      e.CallIndirect(i.instr, i.src2);
+    }
     e.L(skip);
   }
 };
@@ -328,7 +366,13 @@ struct CALL_INDIRECT_TRUE_F32
     e.vptest(i.src1, i.src1);
     Xbyak::Label skip;
     e.jz(skip, CodeGenerator::T_NEAR);
-    e.CallIndirect(i.instr, i.src2);
+    if (i.src2.is_constant) {
+      if (i.src2.constant() == 0) { e.L(skip); return; }
+      e.mov(e.rax, i.src2.constant());
+      e.CallIndirect(i.instr, e.rax);
+    } else {
+      e.CallIndirect(i.instr, i.src2);
+    }
     e.L(skip);
   }
 };
@@ -339,7 +383,13 @@ struct CALL_INDIRECT_TRUE_F64
     e.vptest(i.src1, i.src1);
     Xbyak::Label skip;
     e.jz(skip, CodeGenerator::T_NEAR);
-    e.CallIndirect(i.instr, i.src2);
+    if (i.src2.is_constant) {
+      if (i.src2.constant() == 0) { e.L(skip); return; }
+      e.mov(e.rax, i.src2.constant());
+      e.CallIndirect(i.instr, e.rax);
+    } else {
+      e.CallIndirect(i.instr, i.src2);
+    }
     e.L(skip);
   }
 };
