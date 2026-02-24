@@ -100,7 +100,7 @@ DEFINE_string(dc3_crt_skip_indices, "",
               "DC3");
 DEFINE_bool(dc3_crt_skip_nui, true,
             "DC3: auto-nullify NUI/Kinect SDK CRT constructors (indices "
-            "69,75,98-101,210-328). These call unresolved internal NUI "
+            "75,98-101,210-328). These call unresolved internal NUI "
             "functions that corrupt the heap. Set false to disable.",
             "DC3");
 DEFINE_bool(dc3_guest_overrides, true,
@@ -111,6 +111,22 @@ DEFINE_bool(dc3_guest_overrides, true,
             "fallback path has been removed; false logs a warning and is "
             "ignored for this path.",
             "DC3");
+DEFINE_bool(dc3_debug_read_cache_stream_step_override, false,
+            "DC3: enable invasive ReadCacheStream step-by-step guest override "
+            "for DTB debugging. WARNING: performs extra reads/seeks and can "
+            "perturb checksum/parser behavior; use only in dedicated probe runs.",
+            "DC3");
+DEFINE_bool(dc3_debug_memmgr_assert_nop_bypass, false,
+            "DC3: debug-only bypass of selected MemMgr Debug::Fail callsites "
+            "(replaces assert calls with nop). Temporary progression tool only; "
+            "can mask data/config corruption.",
+            "DC3");
+DEFINE_string(
+    dc3_debug_findarray_override_mode, "off",
+    "DC3: debug mode for DataArray::FindArray(Symbol,bool) override "
+    "(off|log_only|stub_on_fail|null_on_fail). Use only for DC3 decomp runtime "
+    "forensics/progression.",
+    "DC3");
 DEFINE_string(dc3_nui_patch_layout, "auto",
               "DC3: NUI/XBC patch address layout selector "
               "(auto|original|decomp). 'auto' uses the zero-padding heuristic "
@@ -154,6 +170,11 @@ DEFINE_bool(dc3_nui_signature_trace, false,
             "DC3: log runtime PPC words for NUI/XBC patch targets "
             "at catalog and resolved addresses (debugging signature resolver).",
             "DC3");
+DEFINE_string(
+    dc3_crash_snapshot_path, "",
+    "DC3: optional JSON crash snapshot output path written from guest crash "
+    "dumps (headless-friendly structured artifact for postmortem tools).",
+    "DC3");
 
 namespace xe {
 
@@ -161,6 +182,101 @@ using namespace xe::literals;
 
 namespace {
 using namespace xe::dc3;
+
+const char* AccessOpName(Exception::AccessViolationOperation op) {
+  switch (op) {
+    case Exception::AccessViolationOperation::kRead:
+      return "READ";
+    case Exception::AccessViolationOperation::kWrite:
+      return "WRITE";
+    default:
+      return "UNKNOWN";
+  }
+}
+
+void MaybeWriteDc3CrashSnapshotJson(const Emulator* emulator, Exception* ex,
+                                    kernel::XThread* current_thread,
+                                    const cpu::Function* guest_function,
+                                    const cpu::ppc::PPCContext* context) {
+  if (cvars::dc3_crash_snapshot_path.empty() || !emulator || !ex ||
+      !current_thread || !context) {
+    return;
+  }
+
+  uint32_t guest_pc = 0;
+  if (guest_function && guest_function->is_guest()) {
+    guest_pc = static_cast<const cpu::GuestFunction*>(guest_function)
+                   ->MapMachineCodeToGuestAddress(ex->pc());
+  }
+
+  uint64_t host_fault = 0;
+  uint32_t guest_fault = 0;
+  bool has_fault = ex->code() == Exception::Code::kAccessViolation;
+  if (has_fault) {
+    host_fault = ex->fault_address();
+    if (emulator->memory() && emulator->memory()->virtual_membase()) {
+      uint64_t membase =
+          reinterpret_cast<uintptr_t>(emulator->memory()->virtual_membase());
+      guest_fault = static_cast<uint32_t>(host_fault - membase);
+    }
+  }
+
+  std::ofstream out(cvars::dc3_crash_snapshot_path,
+                    std::ios::out | std::ios::trunc);
+  if (!out.is_open()) {
+    XELOGW("DC3 crash snapshot: failed to open {}", cvars::dc3_crash_snapshot_path);
+    return;
+  }
+
+  out << "{\n";
+  out << fmt::format("  \"host_pc\": {},\n", static_cast<uint64_t>(ex->pc()));
+  out << fmt::format("  \"guest_pc\": {},\n", guest_pc);
+  out << fmt::format("  \"guest_lr\": {},\n", static_cast<uint32_t>(context->lr));
+  out << fmt::format("  \"guest_ctr\": {},\n", static_cast<uint32_t>(context->ctr));
+  out << fmt::format("  \"guest_cr\": {},\n", static_cast<uint32_t>(context->cr()));
+  out << fmt::format(
+      "  \"guest_xer\": {{\"ca\": {}, \"ov\": {}, \"so\": {}}},\n",
+      static_cast<uint32_t>(context->xer_ca), static_cast<uint32_t>(context->xer_ov),
+      static_cast<uint32_t>(context->xer_so));
+  out << fmt::format("  \"thread\": {{\"host_id\": {}, \"guest_id\": {}, \"handle\": {}}},\n",
+                     current_thread->thread()->system_id(), current_thread->thread_id(),
+                     current_thread->handle());
+  out << "  \"gpr\": [";
+  for (int i = 0; i < 32; ++i) {
+    if (i) out << ", ";
+    out << static_cast<uint64_t>(context->r[i]);
+  }
+  out << "],\n";
+  if (has_fault) {
+    out << fmt::format(
+        "  \"fault\": {{\"host\": {}, \"guest\": {}, \"access\": \"{}\"}},\n",
+        host_fault, guest_fault, AccessOpName(ex->access_violation_operation()));
+  } else {
+    out << "  \"fault\": null,\n";
+  }
+  out << "  \"guest_code_words\": [";
+  bool first = true;
+  if (guest_pc && emulator->memory() && guest_pc >= 0x80000000 && guest_pc < 0xA0000000) {
+    uint32_t dump_start = (guest_pc > 0x20) ? (guest_pc - 0x20) : guest_pc;
+    uint32_t dump_end = guest_pc + 0x20;
+    for (uint32_t addr = dump_start; addr < dump_end; addr += 4) {
+      auto* mem_ptr = emulator->memory()->TranslateVirtual<uint8_t*>(addr);
+      if (!mem_ptr) break;
+      uint32_t instr = xe::load_and_swap<uint32_t>(mem_ptr);
+      if (!first) out << ", ";
+      first = false;
+      out << fmt::format("{{\"addr\": {}, \"word\": {}}}", addr, instr);
+    }
+  }
+  out << "]\n";
+  out << "}\n";
+  out.flush();
+  if (!out.good()) {
+    XELOGW("DC3 crash snapshot: write failed {}", cvars::dc3_crash_snapshot_path);
+    return;
+  }
+  XELOGI("DC3 crash snapshot JSON written: {}", cvars::dc3_crash_snapshot_path);
+}
 
 void Dc3NuiReturnOkExtern(cpu::ppc::PPCContext* ppc_context,
                           kernel::KernelState* kernel_state) {
@@ -731,6 +847,8 @@ bool Emulator::ExceptionCallback(Exception* ex) {
            context->v[i].u32[3]);
   }
 
+  MaybeWriteDc3CrashSnapshotJson(this, ex, current_thread, guest_function, context);
+
   // Dump fault address details for access violations.
   if (ex->code() == Exception::Code::kAccessViolation) {
     uint64_t host_fault = ex->fault_address();
@@ -1071,8 +1189,33 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
   // DC3 title-specific guest code patches.
   // DC3 Title ID: 0x373307D9 (Dance Central 3)
   bool dc3_is_decomp_layout = false;
+  std::optional<Dc3NuiPatchManifest> dc3_patch_manifest;
   if (title_id_.has_value() && title_id_.value() == 0x373307D9) {
     Dc3MaybeCleanStaleContentCache(content_root_);
+
+    // Load the patch manifest early so it's available for both NUI patching
+    // and the hack pack (which runs independently of --stub_nui_functions).
+    std::filesystem::path early_manifest_path;
+    if (!cvars::dc3_nui_patch_manifest_path.empty()) {
+      early_manifest_path = cvars::dc3_nui_patch_manifest_path;
+    } else if (auto auto_path = Dc3AutoProbePatchManifestPath()) {
+      early_manifest_path = *auto_path;
+    }
+    if (!early_manifest_path.empty()) {
+      dc3_patch_manifest = Dc3LoadNuiPatchManifest(early_manifest_path);
+      if (dc3_patch_manifest) {
+        XELOGI("DC3: Loaded patch manifest '{}' (build_label={} targets={} "
+               "crt={} hack_pack_stubs={})",
+               xe::path_to_utf8(early_manifest_path),
+               dc3_patch_manifest->build_label,
+               dc3_patch_manifest->targets.size(),
+               dc3_patch_manifest->crt_sentinels.size(),
+               dc3_patch_manifest->hack_pack_stubs.size());
+      } else {
+        XELOGW("DC3: Failed to load patch manifest '{}'",
+               xe::path_to_utf8(early_manifest_path));
+      }
+    }
   }
 
   //
@@ -1455,27 +1598,10 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
 
     bool is_decomp_layout = (zero_count > total_patches / 4);
     std::string_view layout_reason = "zero-padding heuristic";
-    std::optional<Dc3NuiPatchManifest> patch_manifest;
-    std::filesystem::path patch_manifest_path;
-    if (!cvars::dc3_nui_patch_manifest_path.empty()) {
-      patch_manifest_path = cvars::dc3_nui_patch_manifest_path;
-    } else if (auto auto_manifest_path = Dc3AutoProbePatchManifestPath()) {
-      patch_manifest_path = *auto_manifest_path;
-    }
+    // Reuse manifest loaded earlier (before NUI block).
+    auto& patch_manifest = dc3_patch_manifest;
     const bool explicit_patch_manifest_path =
         !cvars::dc3_nui_patch_manifest_path.empty();
-    if (!patch_manifest_path.empty()) {
-      patch_manifest = Dc3LoadNuiPatchManifest(patch_manifest_path);
-      if (patch_manifest) {
-        XELOGI(
-            "DC3: Loaded patch manifest '{}' (build_label={} targets={} crt={})",
-            xe::path_to_utf8(patch_manifest_path), patch_manifest->build_label,
-            patch_manifest->targets.size(), patch_manifest->crt_sentinels.size());
-      } else {
-        XELOGW("DC3: Failed to load patch manifest '{}'",
-               xe::path_to_utf8(patch_manifest_path));
-      }
-    }
     std::optional<Dc3FingerprintCache> fingerprint_cache;
     std::filesystem::path fingerprint_cache_path;
     if (!cvars::dc3_nui_layout_fingerprint_cache_path.empty()) {
@@ -1916,6 +2042,32 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
     dc3_hack_ctx.processor = processor_.get();
     dc3_hack_ctx.module = module.get();
     dc3_hack_ctx.is_decomp_layout = dc3_is_decomp_layout;
+    if (dc3_patch_manifest.has_value()) {
+      if (!dc3_patch_manifest->hack_pack_stubs.empty()) {
+        dc3_hack_ctx.hack_pack_stubs = &dc3_patch_manifest->hack_pack_stubs;
+        XELOGI("DC3: Passing {} hack-pack stub addresses from manifest",
+               dc3_patch_manifest->hack_pack_stubs.size());
+      }
+      if (!dc3_patch_manifest->crt_sentinels.empty()) {
+        dc3_hack_ctx.crt_sentinels = &dc3_patch_manifest->crt_sentinels;
+        XELOGI("DC3: Passing {} CRT sentinel addresses from manifest",
+               dc3_patch_manifest->crt_sentinels.size());
+      }
+      if (!dc3_patch_manifest->xdk_overrides.empty()) {
+        dc3_hack_ctx.xdk_overrides = &dc3_patch_manifest->xdk_overrides;
+        XELOGI("DC3: Passing {} XDK override addresses from manifest",
+               dc3_patch_manifest->xdk_overrides.size());
+      }
+      if (!dc3_patch_manifest->xdk_code_ranges.empty()) {
+        // Reinterpret-cast is safe: both CodeRange structs have identical
+        // layout {uint32_t start; uint32_t end;}.
+        dc3_hack_ctx.xdk_code_ranges = reinterpret_cast<
+            const std::vector<Dc3HackContext::CodeRange>*>(
+            &dc3_patch_manifest->xdk_code_ranges);
+        XELOGI("DC3: Passing {} XDK code ranges for prologue scanning",
+               dc3_patch_manifest->xdk_code_ranges.size());
+      }
+    }
 #ifdef XE_HEADLESS_BUILD
     dc3_hack_ctx.is_headless = true;
 #else

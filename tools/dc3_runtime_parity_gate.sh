@@ -19,6 +19,14 @@ ORIG_SYMBOL_MAP_PATH="${DC3_ORIG_SYMBOL_MAP_PATH:-$COMMON_SYMBOL_MAP_PATH}"
 DECOMP_SYMBOL_MAP_PATH="${DC3_DECOMP_SYMBOL_MAP_PATH:-$COMMON_SYMBOL_MAP_PATH}"
 TELEMETRY_DIFF_TOOL="${DC3_PARITY_TELEMETRY_DIFF_TOOL:-$XENIA_DIR/tools/dc3_runtime_telemetry_diff.py}"
 TELEMETRY_DIFF_TOP="${DC3_PARITY_TELEMETRY_DIFF_TOP:-15}"
+PARITY_SYMBOLIZE="${DC3_PARITY_SYMBOLIZE:-0}"
+PARITY_TRIAGE="${DC3_PARITY_TRIAGE:-1}"
+GUEST_DISASM_TOOL="${DC3_PARITY_GUEST_DISASM_TOOL:-$XENIA_DIR/tools/dc3_guest_disasm.py}"
+CRASH_TRIAGE_TOOL="${DC3_PARITY_CRASH_TRIAGE_TOOL:-$XENIA_DIR/tools/dc3_crash_signature_triage.py}"
+GUEST_DISASM_BEFORE="${DC3_PARITY_GUEST_DISASM_BEFORE:-8}"
+GUEST_DISASM_AFTER="${DC3_PARITY_GUEST_DISASM_AFTER:-16}"
+MILESTONE_POLICY="${DC3_PARITY_MILESTONE_POLICY:-warn}"
+MILESTONE_CONTRACT="${DC3_PARITY_MILESTONE_CONTRACT:-session_begin,dc3_nui_patch_block_begin,dc3_nui_patch_apply_complete,dc3_hack_pack_apply_complete,headless_timeout_reached}"
 FAIL_ON_STALE_MANIFEST="${DC3_PARITY_FAIL_ON_STALE_MANIFEST:-0}"
 FAIL_ON_MANIFEST_FP_MISMATCH="${DC3_PARITY_FAIL_ON_MANIFEST_FP_MISMATCH:-0}"
 BREAK_ON_UNIMPL="${DC3_PARITY_BREAK_ON_UNIMPL:-1}"
@@ -35,8 +43,128 @@ normalize_bool() {
 }
 
 BREAK_ON_UNIMPL_BOOL="$(normalize_bool "$BREAK_ON_UNIMPL")" || exit 2
+PARITY_SYMBOLIZE_BOOL="$(normalize_bool "$PARITY_SYMBOLIZE")" || exit 2
+PARITY_TRIAGE_BOOL="$(normalize_bool "$PARITY_TRIAGE")" || exit 2
 
 mkdir -p "$TMPDIR_GATE"
+
+maybe_emit_crash_disasm() {
+  local case_name="$1" image_path="$2" symbols_path="$3"
+  local logfile="$TMPDIR_GATE/${case_name}.log"
+  local artifact="$TMPDIR_GATE/${case_name}_crash_disasm.txt"
+  if [[ "$PARITY_SYMBOLIZE_BOOL" != "true" ]]; then
+    return 0
+  fi
+  if [[ ! -f "$logfile" ]]; then
+    return 0
+  fi
+  if ! rg -q "==== CRASH DUMP ====" "$logfile"; then
+    printf "No crash dump found in %s; crash disasm skipped.\n" "$logfile" >"$artifact"
+    echo "Crash disasm artifact ($case_name): $artifact (no crash dump in log)"
+    return 0
+  fi
+  if [[ ! -f "$image_path" ]]; then
+    echo "WARN: $case_name crash disasm skipped (image missing: $image_path)"
+    return 0
+  fi
+  if [[ ! -f "$GUEST_DISASM_TOOL" ]]; then
+    echo "WARN: $case_name crash disasm skipped (tool missing: $GUEST_DISASM_TOOL)"
+    return 0
+  fi
+  local -a disasm_args=(
+    --image "$image_path"
+    --xenia-log "$logfile"
+    --before "$GUEST_DISASM_BEFORE"
+    --after "$GUEST_DISASM_AFTER"
+  )
+  if [[ -n "$symbols_path" && -f "$symbols_path" ]]; then
+    disasm_args+=(--symbols "$symbols_path")
+  fi
+  if python3 "$GUEST_DISASM_TOOL" "${disasm_args[@]}" >"$artifact" 2>&1; then
+    echo "Crash disasm artifact ($case_name): $artifact"
+  else
+    echo "WARN: $case_name crash disasm helper failed (see $artifact)"
+  fi
+}
+
+maybe_emit_symbolized_telemetry_diff_artifact() {
+  local artifact="$TMPDIR_GATE/telemetry_diff_symbolized.txt"
+  if [[ "$PARITY_SYMBOLIZE_BOOL" != "true" ]]; then
+    return 0
+  fi
+  if [[ ! -f "$TMPDIR_GATE/orig.jsonl" || ! -f "$TMPDIR_GATE/decomp.jsonl" ]]; then
+    return 0
+  fi
+  if [[ ! -f "$TELEMETRY_DIFF_TOOL" && "$TELEMETRY_DIFF_TOOL" == /* ]]; then
+    echo "WARN: telemetry diff artifact skipped (tool missing: $TELEMETRY_DIFF_TOOL)"
+    return 0
+  fi
+  local -a diff_args=(
+    --orig "$TMPDIR_GATE/orig.jsonl"
+    --decomp "$TMPDIR_GATE/decomp.jsonl"
+    --top "$TELEMETRY_DIFF_TOP"
+  )
+  if [[ -n "$ORIG_SYMBOL_MAP_PATH" && -f "$ORIG_SYMBOL_MAP_PATH" ]]; then
+    diff_args+=(--orig-symbols "$ORIG_SYMBOL_MAP_PATH")
+  fi
+  if [[ -n "$DECOMP_SYMBOL_MAP_PATH" && -f "$DECOMP_SYMBOL_MAP_PATH" ]]; then
+    diff_args+=(--decomp-symbols "$DECOMP_SYMBOL_MAP_PATH")
+  fi
+  if python3 "$TELEMETRY_DIFF_TOOL" "${diff_args[@]}" >"$artifact" 2>&1; then
+    echo "Telemetry diff artifact: $artifact"
+  else
+    echo "WARN: telemetry diff artifact generation failed (see $artifact)"
+  fi
+}
+
+maybe_emit_crash_triage_artifact() {
+  local case_name="$1" image_path="$2" symbols_path="$3"
+  local logfile="$TMPDIR_GATE/${case_name}.log"
+  local txt_artifact="$TMPDIR_GATE/${case_name}_crash_triage.txt"
+  local json_artifact="$TMPDIR_GATE/${case_name}_crash_triage.json"
+  if [[ "$PARITY_TRIAGE_BOOL" != "true" ]]; then
+    return 0
+  fi
+  if [[ ! -f "$logfile" ]]; then
+    return 0
+  fi
+  if [[ ! -f "$CRASH_TRIAGE_TOOL" ]]; then
+    echo "WARN: $case_name crash triage skipped (tool missing: $CRASH_TRIAGE_TOOL)"
+    return 0
+  fi
+  local -a triage_args=(--log "$logfile" --allow-no-crash --json-out "$json_artifact")
+  if [[ -f "$image_path" ]]; then
+    triage_args+=(--image "$image_path")
+  fi
+  if [[ -n "$symbols_path" && -f "$symbols_path" ]]; then
+    triage_args+=(--symbols "$symbols_path")
+  fi
+  if python3 "$CRASH_TRIAGE_TOOL" "${triage_args[@]}" >"$txt_artifact" 2>&1; then
+    echo "Crash triage artifact ($case_name): $txt_artifact"
+  else
+    echo "WARN: $case_name crash triage failed (see $txt_artifact)"
+  fi
+}
+
+emit_symbolized_artifacts() {
+  maybe_emit_crash_disasm orig "$ORIG_XEX" "$ORIG_SYMBOL_MAP_PATH"
+  maybe_emit_crash_disasm decomp "$DECOMP_XEX" "$DECOMP_SYMBOL_MAP_PATH"
+  maybe_emit_crash_triage_artifact orig "$ORIG_XEX" "$ORIG_SYMBOL_MAP_PATH"
+  maybe_emit_crash_triage_artifact decomp "$DECOMP_XEX" "$DECOMP_SYMBOL_MAP_PATH"
+  maybe_emit_symbolized_telemetry_diff_artifact
+}
+
+parity_gate_on_exit() {
+  local rc=$?
+  if [[ $rc -ne 0 && ( "$PARITY_SYMBOLIZE_BOOL" == "true" || "$PARITY_TRIAGE_BOOL" == "true" ) ]]; then
+    set +e
+    echo "Parity gate failed (rc=$rc); emitting failure artifacts into $TMPDIR_GATE"
+    emit_symbolized_artifacts
+  fi
+  return "$rc"
+}
+
+trap parity_gate_on_exit EXIT
 
 if [[ ! -x "$BIN" ]]; then
   echo "error: xenia-headless not found at $BIN" >&2
@@ -284,14 +412,26 @@ preflight_case_inputs decomp "$DECOMP_XEX" decomp "$DECOMP_MANIFEST_PATH" "$DECO
 run_case orig "$ORIG_XEX" 59 original "$ORIG_MANIFEST_PATH" "$ORIG_SYMBOL_MAP_PATH"
 run_case decomp "$DECOMP_XEX" 85 decomp "$DECOMP_MANIFEST_PATH" "$DECOMP_SYMBOL_MAP_PATH"
 
-python3 - "$TMPDIR_GATE/orig.jsonl" "$TMPDIR_GATE/decomp.jsonl" "$REQUIRE_EQUAL_MILESTONES" "$FAIL_ON_NEW_HOT_LOOP" <<'PY'
+# Emit symbolized artifacts on successful runs too when enabled, so parity investigations have
+# ready-to-open files without rerunning the gate.
+emit_symbolized_artifacts
+
+python3 - "$TMPDIR_GATE/orig.jsonl" "$TMPDIR_GATE/decomp.jsonl" "$REQUIRE_EQUAL_MILESTONES" "$FAIL_ON_NEW_HOT_LOOP" "$MILESTONE_POLICY" "$MILESTONE_CONTRACT" "$TMPDIR_GATE/orig.log" "$TMPDIR_GATE/decomp.log" <<'PY'
 import json, sys
 from collections import Counter
 from pathlib import Path
+import re
 
 orig_path = Path(sys.argv[1]); decomp_path = Path(sys.argv[2])
 require_equal_milestones = sys.argv[3] == "1"
 fail_on_new_hot_loop = sys.argv[4] == "1"
+milestone_policy = sys.argv[5].strip().lower()
+milestone_contract = [s for s in sys.argv[6].split(",") if s]
+orig_log_path = Path(sys.argv[7]); decomp_log_path = Path(sys.argv[8])
+
+if milestone_policy not in ("off", "warn", "fail"):
+    print(f"WARN: invalid milestone policy {milestone_policy!r}; using 'warn'")
+    milestone_policy = "warn"
 
 def load(path):
     events = []
@@ -322,6 +462,103 @@ new_hot = sorted(pc for pc in dec_hot_pcs if pc not in orig_hot_pcs and pc)
 if new_hot:
     msg = "new decomp hot-loop PCs vs orig: " + ", ".join(new_hot[:10])
     (errs if fail_on_new_hot_loop else warns).append(msg)
+
+contract_rank = {name: i for i, name in enumerate(milestone_contract)}
+def highest_contract_rank(seq):
+    rank = -1
+    for item in seq:
+        if item in contract_rank:
+            rank = max(rank, contract_rank[item])
+    return rank
+
+def highest_contract_name(seq):
+    r = highest_contract_rank(seq)
+    return milestone_contract[r] if 0 <= r < len(milestone_contract) else "<none>"
+
+common_prefix = 0
+for a, b in zip(orig_m, dec_m):
+    if a != b:
+        break
+    common_prefix += 1
+
+orig_rank = highest_contract_rank(orig_m)
+dec_rank = highest_contract_rank(dec_m)
+milestone_verdict = "PASS"
+milestone_msgs = []
+if milestone_policy != "off":
+    if dec_rank < orig_rank:
+        milestone_verdict = "FAIL" if milestone_policy == "fail" else "WARN"
+        milestone_msgs.append(
+            f"decomp reached earlier contract milestone (decomp={highest_contract_name(dec_m)} "
+            f"orig={highest_contract_name(orig_m)})"
+        )
+    elif orig_m != dec_m:
+        milestone_verdict = "WARN"
+        milestone_msgs.append(
+            f"sequence divergence after common_prefix={common_prefix} "
+            f"(orig_len={len(orig_m)} decomp_len={len(dec_m)})"
+        )
+print(
+    "Milestone contract verdict: "
+    f"{milestone_verdict} policy={milestone_policy} common_prefix={common_prefix} "
+    f"orig_reached={highest_contract_name(orig_m)} decomp_reached={highest_contract_name(dec_m)}"
+)
+for msg in milestone_msgs:
+    print("  milestone:", msg)
+if milestone_verdict == "FAIL":
+    errs.append("milestone contract regression")
+
+CRT_RE = re.compile(
+    r"DC3: CRT table (__x[ci]_a\.\.__x[ci]_z).*?:\s*(\d+) total entries, .*?(\d+) valid, .*?(\d+) nullified-oob, .*?(\d+) nullified-bisect, .*?(\d+) nullified-skip"
+)
+SUM_RE = re.compile(r"DC3: NUI resolver summary")
+
+def parse_crt(log_path: Path):
+    out = {}
+    if not log_path.exists():
+        return out
+    text = log_path.read_text(encoding="utf-8", errors="ignore")
+    for m in CRT_RE.finditer(text):
+        out[m.group(1)] = {
+            "total": int(m.group(2)),
+            "valid": int(m.group(3)),
+            "nullified_oob": int(m.group(4)),
+            "nullified_bisect": int(m.group(5)),
+            "nullified_skip": int(m.group(6)),
+        }
+    return out
+
+orig_crt = parse_crt(orig_log_path)
+dec_crt = parse_crt(decomp_log_path)
+def cxx_row(rows):
+    for k, v in rows.items():
+        if "__xc_a" in k:
+            return v
+    return None
+
+o_cxx = cxx_row(orig_crt)
+d_cxx = cxx_row(dec_crt)
+print("CRT impact triage:")
+if o_cxx and d_cxx:
+    print(
+        "  cxx_ctor_table: "
+        f"orig valid={o_cxx['valid']} skip={o_cxx['nullified_skip']} "
+        f"decomp valid={d_cxx['valid']} skip={d_cxx['nullified_skip']}"
+    )
+    skip_delta = d_cxx["nullified_skip"] - o_cxx["nullified_skip"]
+    valid_delta = d_cxx["valid"] - o_cxx["valid"]
+    print(f"  deltas: valid={valid_delta:+} nullified_skip={skip_delta:+}")
+    if skip_delta > 0 and dec_rank < orig_rank:
+        print(
+            "  REPRIORITIZE: decomp/jeff CRT constructor export fixes ahead of low-impact cleanup "
+            "(milestone regression + higher decomp CRT nullified-skip)."
+        )
+    elif skip_delta > 0:
+        print("  HINT: decomp CRT skip count is higher than original; watch for init-stage regressions.")
+    else:
+        print("  HINT: no CRT skip regression vs original in this parity run.")
+else:
+    print("  <CRT table summary missing in one or both logs>")
 
 if warns:
     for w in warns:

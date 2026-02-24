@@ -342,7 +342,11 @@ Function* Processor::LookupFunction(Module* module, uint32_t address) {
       return function;
     }
     // Symbol is undeclared, so declare now.
-    assert_true(function->is_guest());
+    if (!function->is_guest()) {
+      XELOGW("LookupFunction(0x{:08X}): function is neither extern nor guest — returning nullptr", address);
+      function->set_status(Symbol::Status::kFailed);
+      return nullptr;
+    }
     if (!frontend_->DeclareFunction(static_cast<GuestFunction*>(function))) {
       function->set_status(Symbol::Status::kFailed);
       return nullptr;

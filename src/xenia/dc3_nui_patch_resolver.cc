@@ -2637,6 +2637,28 @@ std::optional<Dc3NuiPatchManifest> Dc3LoadNuiPatchManifest(
       crt_it != doc.MemberEnd()) {
     parse_target_table(crt_it->value, &manifest.crt_sentinels);
   }
+  if (auto hps_it = doc.FindMember("hack_pack_stubs");
+      hps_it != doc.MemberEnd()) {
+    parse_target_table(hps_it->value, &manifest.hack_pack_stubs);
+  }
+  if (auto xdk_it = doc.FindMember("xdk_overrides");
+      xdk_it != doc.MemberEnd()) {
+    parse_target_table(xdk_it->value, &manifest.xdk_overrides);
+  }
+  if (auto ranges_it = doc.FindMember("xdk_code_ranges");
+      ranges_it != doc.MemberEnd() && ranges_it->value.IsArray()) {
+    for (auto& r : ranges_it->value.GetArray()) {
+      if (r.IsObject()) {
+        auto s_it = r.FindMember("start");
+        auto e_it = r.FindMember("end");
+        if (s_it != r.MemberEnd() && e_it != r.MemberEnd() &&
+            s_it->value.IsUint() && e_it->value.IsUint()) {
+          manifest.xdk_code_ranges.push_back(
+              {s_it->value.GetUint(), e_it->value.GetUint()});
+        }
+      }
+    }
+  }
   if (manifest.targets.empty()) {
     XELOGW("DC3: Patch manifest '{}' contains no targets; ignoring manifest",
            xe::path_to_utf8(path));

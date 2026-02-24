@@ -1,6 +1,171 @@
 # Status: OODA Loop Iteration 4
 
-*Last updated: 2026-02-23 (Session 20 — stale stopgap SIGSEGV fixed; `_invalid_parameter_noinfo` stubbed; clean 20s boot)*
+*Last updated: 2026-02-24 (Session 26 — ReadCacheStream probe restored)*
+
+## 2026-02-24 Update (Session 26): `ReadCacheStream` Probe Restored (Invasive BufStream Overrides)
+
+- Restored the `--dc3_debug_read_cache_stream_step_override=true` debugging path after the partial rollback (it was previously a no-op warning in the recovered snapshot).
+- Implementation detail (important):
+  - this is now implemented as an **invasive BufStream probe suite** rather than a literal `ReadCacheStream` call-through override (Xenia guest extern overrides do not support calling the original guest function body).
+  - active overrides:
+    - `BufStream::ReadImpl` (`0x82BC3AC8`)
+    - `BufStream::SeekImpl` (`0x82BC3BC8`)
+  - it logs `DC3:RCS ...` step traces (read/seek counts, LR, tell/size/fail, byte previews)
+- Probe caveat (same practical warning, now better explained):
+  - the `BufStream::ReadImpl` host override cannot call the guest `StreamChecksumValidator::Update()` method
+  - it advances `mBytesChecksummed` for visibility, but checksum validation may fail in dedicated probe runs
+  - treat this as a **diagnostic-only mode** for DTB/DataArray forensics, not a correctness run
+- Validation:
+  - `xenia-headless` rebuild succeeded
+  - default boot smoke still logs `ReadCacheStream step override disabled (default; non-invasive)`
+  - probe-enabled smoke logs the invasive probe registration banner (short smokes did not yet reach DTB read path, so `DC3:RCS ReadImpl/SeekImpl` traces were not exercised in that short window)
+
+## 2026-02-24 Update (Session 25): Partial Rollback Recovery + MemMgr/FindArray Debug Gating
+
+- Recovered `src/xenia/dc3_hack_pack.cc` from a partial rollback while preserving newer DTB/runtime progress (`gConditional` relink fix, MemMgr assert bypass sites, `FindArray` forensics target address).
+- Restored key debugging/runtime behavior that had regressed:
+  - `Debug::Print` guest override (logs decomp `Debug::Print` strings to XELOG)
+  - `Debug::Fail` guest override (logs LR/message and uses a layout-safe live `Debug*` probe from `r3`)
+  - `_write` / `_write_nolock` guest overrides (bridge guest stdout/stderr writes to host stdout/stderr)
+  - default output stub list no longer patches core CRT formatters (`_output_l`, `_woutput_l`)
+- Hardened the temporary MemMgr assert bypass (`nop`) work:
+  - new cvar (default off): `--dc3_debug_memmgr_assert_nop_bypass=true`
+  - patches are now applied only when explicitly enabled
+  - both patch sites validate the expected original instruction word before replacing with `nop` (skips with warning on layout drift / code mismatch)
+  - this remains a **debug-only progression tool** and is not a correctness fix
+- Hardened `DataArray::FindArray(Symbol,bool)` forensics override:
+  - new mode cvar (default off): `--dc3_debug_findarray_override_mode=off|log_only|stub_on_fail|null_on_fail`
+  - default `off` keeps original behavior
+  - `stub_on_fail` and `null_on_fail` register the override explicitly and log returns
+  - `log_only` currently leaves original behavior active (call-through logging not yet implemented with the current override API)
+- Re-applied CRT slot-drift fix and removed the brittle reinjection behavior:
+  - default auto-NUI skip list remains `75,98-101,210-328` (slot `69` excluded)
+  - `InitMakeString` hardcoded `CRT[69]` reinjection remains removed
+- Found an additional relink/staleness issue during recovery:
+  - patch manifest CRT sentinels were stale (`__xc_*` / `__xi_*`) for the current decomp build
+  - the CRT sanitizer now uses map-synced constructor table bounds for this build and logs when manifest sentinels differ
+  - validation again shows `CRT[69] = 0x82A3F6D0 (valid)`
+- Validation:
+  - `make -C build xenia-headless` succeeds
+  - default headless smoke reaches timeout (`RC=124`) with:
+    - `ReadCacheStream` invasive step override disabled by default
+    - MemMgr assert `nop` bypass disabled by default
+    - `FindArray` override disabled by default
+    - CRT auto-skip active without slot `69`
+  - explicit debug-mode smoke confirms MemMgr `nop` bypass + `FindArray` `stub_on_fail` mode are opt-in and active only when requested
+
+## 2026-02-24 Update (Session 24): DTB/Config Debugging Cleanup (Probe Isolation + `gConditional` Fix)
+
+- Isolated an invasive-debugging side effect:
+  - the step-by-step `ReadCacheStream` guest override (used for DTB diagnostics) performs extra `ReadImpl` + `Seek` operations and can perturb checksum/parser behavior.
+  - this manifested as repeated `Unrecognized node type: %x` failures during DTB parse in probe runs.
+- Made the `ReadCacheStream` step override **opt-in** (default off):
+  - new cvar: `--dc3_debug_read_cache_stream_step_override=true`
+  - normal runs now log that the invasive probe is disabled unless explicitly requested.
+- Continued root-cause work on empty `gSystemConfig` and found another relinked global drift:
+  - the `gConditional` STL list sentinel stopgap in `dc3_hack_pack.cc` was still writing an old hardcoded address (`0x82F648C4`)
+  - fresh `default.map` maps old label `lbl_82F648C4` to `0x83C7D354` (`DataArray.obj`) in the current build
+  - updated the stopgap to the current address
+- Validation:
+  - with the invasive `ReadCacheStream` override disabled (default), the DTB parse-garbage spam no longer appears
+  - after the `gConditional` address refresh, `gSystemConfig` is no longer empty (observed `size=26`, non-null `nodes`)
+  - remaining failures have moved downstream (`MemMgr.cpp` heap asserts), which is expected progress
+
+### Workflow / debugging lessons reinforced
+
+- Use non-invasive runs first; only enable heavy guest function step-overrides in dedicated probe passes.
+- Treat relink-sensitive globals (not just CRT slots) as build-volatile and refresh against `build/373307D9/default.map`.
+
+## 2026-02-24 Update (Session 23): CRT Slot Drift Root Cause (TheDebug ctor) + Fix
+
+- Investigated the `TheDebug`/`printf` debugging path regression and found the root cause was **not** generic CRT init failure:
+  - `symbols.txt` in `dc3-decomp/config/373307D9/` was stale relative to the current `default.xex`/`default.exe`, so hardcoded `TheDebug` probe addresses were invalid.
+  - Current `default.map` shows `??__ETheDebug@@YAXXZ = 0x82A3F6D0`, which is **`CRT[69]`** in the current build.
+  - The default auto-NUI CRT skip list still included slot `69`, and the hardcoded `InitMakeString` CRT reinjection also targeted slot `69`.
+  - Result: `TheDebug` constructor was being nullified/replaced after relinks.
+- Fixed in `src/xenia/dc3_hack_pack.cc` / `src/xenia/emulator.cc`:
+  - removed hardcoded `CRT[69]` from the default auto-NUI skip list (`75,98-101,210-328` now)
+  - retired hardcoded `InitMakeString` reinjection into `CRT[69]`
+  - made the `Debug::Fail` "TheDebug" probe layout-safe by inspecting the live `Debug*` from `r3` instead of a hardcoded global address
+- Validation:
+  - default boot smoke (`xenia-headless` + decomp `default.xex`) now reaches timeout (`RC=124`) again under default settings with auto-NUI skip enabled
+  - log confirms `CRT[69]` remains valid and is no longer reinjected
+  - layout-safe probe confirms a non-null vtable on the live `Debug*` object (`TheDebug`)
+
+## 2026-02-24 Update (Session 22): Phase 4 Headless In-Process GDB RSP MVP (Linux, Headless)
+
+- Implemented an in-process GDB RSP listener in `src/xenia/app/emulator_headless.cc` (Linux path):
+  - attached as a real `cpu::DebugListener` to the `Processor`
+  - translates a minimal RSP packet subset to existing debugger APIs (`Pause`, `Continue`, `StepGuestInstruction`, `AddBreakpoint`/`RemoveBreakpoint`)
+  - snapshots guest thread state via `QueryThreadDebugInfos()` for register reads
+  - now uses reusable protocol/packet helpers extracted to `src/xenia/debug/dc3_gdb_rsp_protocol.h` (packet framing, checksums, hex helpers, socket packet RX/TX)
+- New headless cvars (Phase 4 MVP):
+  - `--dc3_gdb_rsp_stub=true`
+  - `--dc3_gdb_rsp_host=127.0.0.1`
+  - `--dc3_gdb_rsp_port=9001`
+  - `--dc3_gdb_rsp_break_on_connect=true`
+- Implemented packet coverage (MVP subset + common probes):
+  - `?`, `qSupported`, `QStartNoAckMode`, `qAttached`
+  - `qfThreadInfo`, `qsThreadInfo`, `qC`, `T`, `Hg`/`Hc`
+  - `g`, `p`, `m`
+  - `Z0` / `z0`
+  - `c`, `s`, `vCont?`, `vCont;`
+  - `qXfer:features:read:target.xml`
+  - `qOffsets`, `qTStatus`, `qSymbol`, `QThreadSuffixSupported`, `vMustReplyEmpty`, `D`, `k`
+- Build/compile validation:
+  - fixed prior `emulator.cc` crash-snapshot compile issue (`GuestFunction` cast for host->guest PC mapping)
+  - `xenia-headless` rebuild now succeeds on Linux (`make -C build xenia-headless`)
+  - direct object compile smoke for `emulator_headless.cc` passes
+  - `dc3_hack_pack.cc` rebuilt after console `printf`/`fprintf`/`vprintf` stub block hardening (manifest-aware quiet fallback + skipped accounting)
+
+### Runtime validation status (current)
+
+- In-process stub listener is confirmed to start (`dc3_gdb_rsp_stub: listening on 127.0.0.1:<port>` in headless log).
+- Reliable live in-process attach/read smoke is now captured on Linux headless:
+  - confirmed `target remote` from `powerpc-none-eabi-gdb`
+  - confirmed `info registers` (LR/CTR/R1 sampled from live guest thread context in fallback mode)
+  - confirmed guest memory reads (`x/4wx 0x82000000`) and `detach`
+- Headless limitation (current build):
+  - this `xenia-headless` build reports no stack walker, so stack-walker-dependent debugger ops are disabled in the in-process stub (live `Pause`/step/software breakpoints)
+  - stub degrades gracefully instead of crashing: handshake + thread list + register snapshot fallback + memory reads still work
+- Standalone protocol groundwork remains validated (mock + bridge + real GDB attach from Session 21), so packet behavior is already de-risked; remaining work is runtime integration hardening / attach timing.
+
+## 2026-02-24 Update (Tooling): Postmortem + Parity Triage Workflow Strengthening
+
+- Added `tools/dc3_guest_disasm.py`:
+  - symbolized PPC disassembly around guest `PC/LR/CTR`
+  - supports `--xenia-log` crash tuple extraction
+  - supports XEX (auto-decompress), Xbox PE (`default.exe`), and raw extracted guest blobs
+- Extended `tools/dc3_runtime_telemetry_diff.py`:
+  - symbolized unresolved/hot-loop summaries
+  - grouped symbolized rankings by unresolved caller, unresolved target, caller->target pair
+  - aggregate "top divergent functions" summary (hot loops + unresolved-caller signal)
+- Extended `tools/dc3_runtime_parity_gate.sh`:
+  - `DC3_PARITY_SYMBOLIZE=1` emits symbolized telemetry diff and crash disasm artifacts
+  - failure-path artifact generation via `EXIT` trap (no manual rerun required)
+  - milestone contract verdict (`PASS/WARN/FAIL`) with policy control
+  - CRT-vs-milestone triage summary to support constructor-impact prioritization
+- Added `tools/dc3_crash_signature_triage.py`:
+  - auto-labels common crash signatures from headless logs (invalid SP, stack-underflow prologue, non-text/data-as-code PC, trap-loop hints, etc.)
+  - parity gate emits per-run triage artifacts (`orig` / `decomp`)
+- Added `tools/dc3_trace_on_break.sh`:
+  - headless `--break_on_instruction` wrapper with telemetry + disasm artifact capture
+  - intended as the repeatable "middle ground" before interactive debugger work
+- Started GDB RSP protocol groundwork with `tools/dc3_gdb_rsp_mvp_mock.py`:
+  - standalone crash-snapshot-backed remote stub mock (regs + memory + break/continue packet subset)
+  - useful for client/protocol experiments before in-process Xenia guest-stub integration
+- Added `tools/dc3_gdb_rsp_snapshot_bridge.sh`:
+  - wraps a crash log (or short headless capture run) and launches the RSP mock server
+  - prints a ready-to-run GDB attach command and emits triage/disasm artifacts
+  - supports snapshot-JSON-first flow (`DC3_RSP_BRIDGE_SNAPSHOT_JSON`) and optional capture request (`DC3_RSP_BRIDGE_CAPTURE_SNAPSHOT_JSON=1`)
+- Added Xenia crash snapshot artifact cvar in `emulator.cc`:
+  - `--dc3_crash_snapshot_path=<file.json>` writes a structured crash snapshot during guest crash dump handling
+
+### Workflow impact
+
+- Failing parity runs now produce investigation artifacts in one pass (telemetry diff, crash triage, crash disasm).
+- Known decomp crashes can be classified quickly without manually grepping thread dumps.
+- Milestone and CRT summaries now show a clearer signal for when to prioritize constructor/export work versus other cleanup.
 
 ## 2026-02-23 Update (Session 20): Stale Stopgap Addresses Fixed + Clean Boot
 

@@ -266,6 +266,13 @@ def build_extra_symbols() -> list:
     add("__xi_z", obj="auto_08_82F05C00_data.obj", cat=cat,
         comment="C initializer table end")
 
+    # -- DC3 Globals / Probes --
+    cat = "dc3_probes"
+    add("TheDebug", map_name="?TheDebug@@3VDebug@@A", obj="Debug.obj", cat=cat)
+    add("Debug::Fail", map_name="?Fail@Debug@@QAAXPBDPAX@Z", obj="Debug.obj", cat=cat)
+    add("gSystemConfig", map_name="?gSystemConfig@@3PAVDataArray@@A", obj="System.obj", cat=cat)
+    add("MemInit", map_name="?MemInit@@YAXXZ", obj="MemMgr.obj", cat=cat)
+    add("MemAlloc", map_name="?MemAlloc@@YAPAXHPBDH0H@Z", obj="MemMgr.obj", cat=cat)
     return symbols
 
 
@@ -443,6 +450,7 @@ CATEGORY_NAMES = OrderedDict([
     ("misc",         "Misc"),
     ("thread_notify","CRT thread notify routines"),
     ("crt_tables",   "CRT initializer table bounds"),
+    ("dc3_probes",    "DC3 Globals / Probes"),
 ])
 
 

@@ -135,8 +135,28 @@ Current status:
 - Supports explicit per-run manifest/symbol overrides (`DC3_{ORIG,DECOMP}_{MANIFEST_PATH,SYMBOL_MAP_PATH}`)
 - Adds manifest/XEX preflight integrity checks (schema/targets/build-label + stale manifest warnings)
 - Hard checks currently enforce NUI/XBC override counts + strict signature coverage
-- Higher-level parity diffs (hot loops / unresolved patterns / milestones) are warn-only for now
- - `tools/dc3_runtime_telemetry_diff.py` provides ranked JSONL diffs (override hits, unresolved stubs, hot-loop PCs)
+- Higher-level parity diffs now include symbolized function-grouped summaries
+  - `tools/dc3_runtime_telemetry_diff.py` provides symbolized caller/target rankings and a "top divergent functions" summary
+- Parity gate can emit one-pass investigation artifacts
+  - `DC3_PARITY_SYMBOLIZE=1` emits symbolized telemetry diff + crash disasm artifacts
+  - `DC3_PARITY_TRIAGE=1` emits crash signature triage artifacts (`orig` / `decomp`)
+- Milestone comparison is now explicit in parity output
+  - milestone contract verdict (`PASS/WARN/FAIL`) with policy control (`DC3_PARITY_MILESTONE_POLICY`)
+  - CRT-vs-milestone triage summary to support constructor-impact prioritization
+
+Related debugging helpers:
+- `tools/dc3_guest_disasm.py` (symbolized PPC disasm around `PC/LR/CTR`, supports `--xenia-log`)
+- `tools/dc3_trace_on_break.sh` (headless `--break_on_instruction` workflow wrapper)
+- `tools/dc3_crash_signature_triage.py` (log-based crash signature auto-labeling)
+- `tools/dc3_gdb_rsp_mvp_mock.py` (Phase 4 protocol groundwork: crash-snapshot-backed GDB RSP mock)
+- `tools/dc3_gdb_rsp_snapshot_bridge.sh` (captures/uses a crash log and launches the RSP mock with a ready-to-run GDB attach command)
+- `--dc3_crash_snapshot_path=/path/to/crash_snapshot.json` (Xenia structured crash snapshot artifact; future-proof input for Phase 4 tools)
+- `--dc3_gdb_rsp_stub=true` + `--dc3_gdb_rsp_port=<port>` (Linux `xenia-headless` in-process Phase 4 MVP RSP listener for live guest state)
+
+Runbook note:
+- `docs/dc3-boot/DEBUGGING_TIPS.md` now includes a "Tooling Runbook (Post-Debugging Leverage Loop)" section documenting the recommended escalation order:
+  parity gate -> crash disasm/triage -> trace-on-break -> RSP (snapshot/live).
+- DTB/config parsing investigations should start non-invasively; the `ReadCacheStream` step probe is now opt-in via `--dc3_debug_read_cache_stream_step_override=true` because it can perturb checksum/parser behavior.
 
 ### 3. Promote manifest as the canonical Xenia input from `dc3-decomp`
 

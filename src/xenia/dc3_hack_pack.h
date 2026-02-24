@@ -3,6 +3,7 @@
 
 #include <filesystem>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace xe {
@@ -33,6 +34,19 @@ struct Dc3HackContext {
   kernel::UserModule* module = nullptr;
   bool is_headless = false;
   bool is_decomp_layout = false;
+  // Manifest-resolved addresses for hack-pack stubs (display_name -> guest addr).
+  // When populated, these override hardcoded fallback addresses.
+  const std::unordered_map<std::string, uint32_t>* hack_pack_stubs = nullptr;
+  // CRT sentinel addresses from the manifest (__xc_a, __xc_z, __xi_a, __xi_z).
+  const std::unordered_map<std::string, uint32_t>* crt_sentinels = nullptr;
+  // TODO: Remove xdk_overrides once Xenia APU/NUI backends handle XDK APIs.
+  const std::unordered_map<std::string, uint32_t>* xdk_overrides = nullptr;
+  // XDK code ranges for prologue scanning (catches unlisted internal functions).
+  struct CodeRange {
+    uint32_t start;
+    uint32_t end;
+  };
+  const std::vector<CodeRange>* xdk_code_ranges = nullptr;
 };
 
 struct Dc3HackApplyResult {
