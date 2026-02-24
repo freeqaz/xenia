@@ -125,10 +125,12 @@ Items are ordered by priority. Check off as completed. Add new items each iterat
   - Replace or resolver-back the remaining hardcoded global addresses in `dc3_hack_pack.cc` where practical (example: `gConditional` sentinel currently requires fresh `default.map` refresh after relinks)
   - Keep invasive `ReadCacheStream` step override off by default (done) and split it into safer sub-modes if deeper DTB debugging is needed (`safe state log` vs `extra ReadImpl/Seek` perturbing probe)
   - Current restored RCS probe uses invasive `BufStream::ReadImpl/SeekImpl` overrides; investigate a lower-perturbation DTB probe path that preserves guest checksum-validator updates
+  - Expand DTB probe coverage / diagnostics for pre-`ReadCacheStream` failures (current RCS probe may show zero hits when the crash occurs before `ReadCacheStream`; breakpoint check at `0x83116664` is the current reachability test)
   - Document any future relink-sensitive globals in `DEBUGGING_TIPS.md` with fresh-map lookup steps
   - Restore patch-manifest CRT sentinel freshness/validation so the CRT sanitizer can trust manifest values again (current recovery path uses map-synced constants when manifest is stale)
   - Replace temporary hardcoded MemMgr assert bypass addresses with manifest/symbol-backed resolution if the bypass remains needed for debugging
   - Add a true call-through `FindArray` logging path (current `log_only` mode intentionally leaves original behavior active without per-call logs)
+  - Keep CRT formatter bridges (`_output_l` / `_woutput_l`) pinned to verified map-synced addresses unless the manifest gains a duplicate-safe symbol identity scheme (generic name remaps can target unrelated implementations)
 
 ### Tier 2: Reduce unresolved symbols (high leverage)
 
