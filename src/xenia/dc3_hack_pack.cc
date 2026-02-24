@@ -33,6 +33,15 @@ DECLARE_bool(fake_kinect_data);
 
 namespace xe {
 
+namespace kernel {
+namespace xboxkrnl {
+void _vsnprintf_entry(cpu::ppc::PPCContext* ppc_context,
+                      kernel::KernelState* kernel_state);
+void _vsnwprintf_entry(cpu::ppc::PPCContext* ppc_context,
+                       kernel::KernelState* kernel_state);
+}  // namespace xboxkrnl
+}  // namespace kernel
+
 namespace {
 
 constexpr uint32_t kPpcLiR3_0 = 0x38600000;
@@ -41,6 +50,13 @@ static uint32_t g_dc3_errno_guest_ptr = 0;
 constexpr uint32_t kDc3RcsReadCacheStreamAddr = 0x83116664;
 constexpr uint32_t kDc3RcsBufStreamReadImplAddr = 0x82BC3AC8;
 constexpr uint32_t kDc3RcsBufStreamSeekImplAddr = 0x82BC3BC8;
+constexpr uint32_t kDc3OutputLAddr = 0x8361CBE0;
+constexpr uint32_t kDc3WOutputLAddr = 0x83622778;
+constexpr uint32_t kDc3IoStrgFlag = 0x0040;
+constexpr uint32_t kDc3TempNarrowBufSize = 4096;
+constexpr uint32_t kDc3TempWideBufChars = 2048;
+static uint32_t g_dc3_output_l_scratch_narrow = 0;
+static uint32_t g_dc3_output_l_scratch_wide = 0;
 
 std::string Dc3FmtBytePreview(const uint8_t* data, size_t len) {
   if (!data || !len) return "";
@@ -249,6 +265,18 @@ bool PatchStub8(Memory* memory, uint32_t address, uint32_t return_value,
   return true;
 }
 
+bool PatchStub8Resolved(Memory* memory,
+                        const std::unordered_map<std::string, uint32_t>* manifest,
+                        uint32_t fallback_address, uint32_t return_value,
+                        const char* name) {
+  uint32_t address = LookupStubAddr(manifest, name, fallback_address);
+  if (address != fallback_address) {
+    XELOGI("DC3: Resolved hack-pack stub '{}' {:08X} -> {:08X} via manifest",
+           name, fallback_address, address);
+  }
+  return PatchStub8(memory, address, return_value, name);
+}
+
 bool PatchCheckedNop(Memory* memory, uint32_t address, uint32_t expected_word,
                      const char* name) {
   constexpr uint32_t kPpcNop = 0x60000000;
@@ -277,6 +305,188 @@ bool PatchCheckedNop(Memory* memory, uint32_t address, uint32_t expected_word,
   XELOGI("DC3: Debug-only MemMgr assert bypass active at {:08X} ({})", address,
          name);
   return true;
+}
+
+uint32_t Dc3EnsureScratchBuffer(kernel::KernelState* kernel_state,
+                                uint32_t* guest_ptr, uint32_t size,
+                                const char* label) {
+  if (!kernel_state || !guest_ptr) return 0;
+  if (*guest_ptr) return *guest_ptr;
+  auto* memory = kernel_state->memory();
+  if (!memory) return 0;
+  *guest_ptr = memory->SystemHeapAlloc(size, 0x10);
+  if (*guest_ptr) {
+    XELOGI("DC3: Allocated {} scratch buffer at {:08X} ({} bytes)", label,
+           *guest_ptr, size);
+  } else {
+    XELOGW("DC3: Failed to allocate {} scratch buffer ({} bytes)", label, size);
+  }
+  return *guest_ptr;
+}
+
+void Dc3OutputLBridgeExtern(cpu::ppc::PPCContext* ppc_context,
+                            kernel::KernelState* kernel_state) {
+  if (!ppc_context || !kernel_state) return;
+  auto* memory = kernel_state->memory();
+  if (!memory) return;
+
+  uint32_t file_ptr = static_cast<uint32_t>(ppc_context->r[3]);
+  uint32_t format_ptr = static_cast<uint32_t>(ppc_context->r[4]);
+  uint32_t locale_ptr = static_cast<uint32_t>(ppc_context->r[5]);
+  uint32_t arg_ptr = static_cast<uint32_t>(ppc_context->r[6]);
+
+  auto* file = (file_ptr && file_ptr < 0xF0000000)
+                   ? memory->TranslateVirtual<uint8_t*>(file_ptr)
+                   : nullptr;
+  auto* fmt = (format_ptr && format_ptr < 0xF0000000)
+                  ? memory->TranslateVirtual<const char*>(format_ptr)
+                  : nullptr;
+  if (!file || !fmt) {
+    ppc_context->r[3] = static_cast<uint64_t>(-1);
+    return;
+  }
+
+  uint32_t flags = xe::load_and_swap<uint32_t>(file + 0x0C);
+  bool is_string_stream = (flags & kDc3IoStrgFlag) != 0;
+
+  if (is_string_stream) {
+    uint32_t dst_ptr = xe::load_and_swap<uint32_t>(file + 0x00);
+    int32_t dst_cnt = xe::load_and_swap<int32_t>(file + 0x04);
+    if (!dst_ptr || dst_cnt <= 0) {
+      ppc_context->r[3] = static_cast<uint64_t>(-1);
+      return;
+    }
+
+    cpu::ppc::PPCContext tmp = *ppc_context;
+    tmp.r[3] = dst_ptr;
+    tmp.r[4] = static_cast<uint32_t>(dst_cnt);
+    tmp.r[5] = format_ptr;
+    tmp.r[6] = arg_ptr;
+    kernel::xboxkrnl::_vsnprintf_entry(&tmp, kernel_state);
+    int32_t count = static_cast<int32_t>(tmp.r[3]);
+
+    int32_t advance = 0;
+    if (count > 0) {
+      advance = std::min<int32_t>(count, dst_cnt);
+    }
+    xe::store_and_swap<uint32_t>(file + 0x00, dst_ptr + advance);
+    xe::store_and_swap<int32_t>(file + 0x04,
+                                std::max<int32_t>(0, dst_cnt - advance));
+    ppc_context->r[3] = static_cast<uint64_t>(count);
+
+    static uint32_t str_count = 0;
+    ++str_count;
+    if (str_count <= 32 || (str_count % 500) == 0) {
+      XELOGI(
+          "DC3: _output_l string FILE={:08X} flags={:08X} cnt={} fmt='{}' "
+          "arg={:08X} -> {}",
+          file_ptr, flags, dst_cnt, fmt, arg_ptr, count);
+    }
+    return;
+  }
+
+  uint32_t scratch =
+      Dc3EnsureScratchBuffer(kernel_state, &g_dc3_output_l_scratch_narrow,
+                             kDc3TempNarrowBufSize, "_output_l");
+  if (!scratch) {
+    ppc_context->r[3] = 0;
+    return;
+  }
+  cpu::ppc::PPCContext tmp = *ppc_context;
+  tmp.r[3] = scratch;
+  tmp.r[4] = kDc3TempNarrowBufSize - 1;
+  tmp.r[5] = format_ptr;
+  tmp.r[6] = arg_ptr;
+  kernel::xboxkrnl::_vsnprintf_entry(&tmp, kernel_state);
+  int32_t count = static_cast<int32_t>(tmp.r[3]);
+
+  auto* buf = memory->TranslateVirtual<char*>(scratch);
+  if (buf) {
+    int32_t emit = count;
+    if (emit < 0) {
+      emit = static_cast<int32_t>(::strnlen(buf, kDc3TempNarrowBufSize - 1));
+    } else if (emit > static_cast<int32_t>(kDc3TempNarrowBufSize - 1)) {
+      emit = kDc3TempNarrowBufSize - 1;
+    }
+    if (emit > 0) {
+      std::fwrite(buf, 1, static_cast<size_t>(emit), stderr);
+      std::fflush(stderr);
+    }
+  }
+  ppc_context->r[3] = static_cast<uint64_t>(count < 0 ? 0 : count);
+
+  static uint32_t console_count = 0;
+  ++console_count;
+  if (console_count <= 32 || (console_count % 500) == 0) {
+    XELOGI(
+        "DC3: _output_l console FILE={:08X} flags={:08X} locale={:08X} "
+        "fmt={:08X} arg={:08X} -> {}",
+        file_ptr, flags, locale_ptr, format_ptr, arg_ptr, count);
+  }
+}
+
+void Dc3WOutputLBridgeExtern(cpu::ppc::PPCContext* ppc_context,
+                             kernel::KernelState* kernel_state) {
+  if (!ppc_context || !kernel_state) return;
+  auto* memory = kernel_state->memory();
+  if (!memory) return;
+
+  uint32_t file_ptr = static_cast<uint32_t>(ppc_context->r[3]);
+  uint32_t format_ptr = static_cast<uint32_t>(ppc_context->r[4]);
+  uint32_t arg_ptr = static_cast<uint32_t>(ppc_context->r[6]);
+  auto* file = (file_ptr && file_ptr < 0xF0000000)
+                   ? memory->TranslateVirtual<uint8_t*>(file_ptr)
+                   : nullptr;
+  if (!file || !format_ptr) {
+    ppc_context->r[3] = 0;
+    return;
+  }
+  uint32_t flags = xe::load_and_swap<uint32_t>(file + 0x0C);
+  bool is_string_stream = (flags & kDc3IoStrgFlag) != 0;
+
+  if (is_string_stream) {
+    // Defer wide string-file emulation for now; returning 0 avoids CRT spin
+    // and keeps debug runs moving. Narrow MakeString paths are handled by _output_l.
+    ppc_context->r[3] = 0;
+    static bool warned = false;
+    if (!warned) {
+      warned = true;
+      XELOGW(
+          "DC3: _woutput_l string-stream path not fully emulated yet; returning 0");
+    }
+    return;
+  }
+
+  uint32_t scratch = Dc3EnsureScratchBuffer(kernel_state, &g_dc3_output_l_scratch_wide,
+                                            kDc3TempWideBufChars * 2, "_woutput_l");
+  if (!scratch) {
+    ppc_context->r[3] = 0;
+    return;
+  }
+  cpu::ppc::PPCContext tmp = *ppc_context;
+  tmp.r[3] = scratch;
+  tmp.r[4] = kDc3TempWideBufChars - 1;
+  tmp.r[5] = format_ptr;
+  tmp.r[6] = arg_ptr;
+  kernel::xboxkrnl::_vsnwprintf_entry(&tmp, kernel_state);
+  int32_t count = static_cast<int32_t>(tmp.r[3]);
+  auto* wbuf = memory->TranslateVirtual<xe::be<uint16_t>*>(scratch);
+  if (wbuf) {
+    int32_t emit = count;
+    if (emit < 0) emit = 0;
+    emit = std::min<int32_t>(emit, kDc3TempWideBufChars - 1);
+    std::u16string u16;
+    u16.reserve(static_cast<size_t>(emit));
+    for (int32_t i = 0; i < emit; ++i) {
+      u16.push_back(static_cast<char16_t>(uint16_t(wbuf[i])));
+    }
+    auto utf8 = xe::to_utf8(u16);
+    if (!utf8.empty()) {
+      std::fwrite(utf8.data(), 1, utf8.size(), stderr);
+      std::fflush(stderr);
+    }
+  }
+  ppc_context->r[3] = static_cast<uint64_t>(count < 0 ? 0 : count);
 }
 
 void RegisterDc3WriteBridges(const Dc3HackContext& ctx, Dc3HackApplyResult& debug_result) {
@@ -318,6 +528,45 @@ void RegisterDc3WriteBridges(const Dc3HackContext& ctx, Dc3HackApplyResult& debu
     XELOGI("DC3: Registered {} host bridge at {:08X}", bridge.name, bridge.addr);
     debug_result.applied++;
   }
+}
+
+void RegisterDc3OutputFormatterBridges(const Dc3HackContext& ctx,
+                                       Dc3HackApplyResult& debug_result) {
+  if (!ctx.processor) {
+    debug_result.skipped++;
+    return;
+  }
+
+  // Do not consume generic hack-pack stub manifest remaps for CRT formatters.
+  // The manifest may contain duplicate-name entries that resolve to unrelated
+  // implementations, causing the bridge to register on the wrong function and
+  // silently miss the live _output_l/_woutput_l path.
+  if (ctx.hack_pack_stubs) {
+    auto it = ctx.hack_pack_stubs->find("_output_l");
+    if (it != ctx.hack_pack_stubs->end() && it->second != kDc3OutputLAddr) {
+      XELOGW("DC3: Ignoring manifest _output_l remap {:08X} -> {:08X}; using "
+             "map-synced CRT address",
+             kDc3OutputLAddr, it->second);
+    }
+    it = ctx.hack_pack_stubs->find("_woutput_l");
+    if (it != ctx.hack_pack_stubs->end() && it->second != kDc3WOutputLAddr) {
+      XELOGW("DC3: Ignoring manifest _woutput_l remap {:08X} -> {:08X}; using "
+             "map-synced CRT address",
+             kDc3WOutputLAddr, it->second);
+    }
+  }
+  const uint32_t output_l_addr = kDc3OutputLAddr;
+  const uint32_t woutput_l_addr = kDc3WOutputLAddr;
+
+  ctx.processor->RegisterGuestFunctionOverride(output_l_addr, Dc3OutputLBridgeExtern,
+                                               "DC3:_output_l(bridge)");
+  XELOGI("DC3: Registered _output_l bridge at {:08X}", output_l_addr);
+  debug_result.applied++;
+
+  ctx.processor->RegisterGuestFunctionOverride(woutput_l_addr, Dc3WOutputLBridgeExtern,
+                                               "DC3:_woutput_l(bridge)");
+  XELOGI("DC3: Registered _woutput_l bridge at {:08X}", woutput_l_addr);
+  debug_result.applied++;
 }
 
 void RegisterDc3FindArrayOverride(const Dc3HackContext& ctx,
@@ -702,7 +951,8 @@ void ApplyDc3ImportAndRuntimeStopgaps(const Dc3HackContext& ctx,
         {0x835FAB64, "XMPRestoreBackgroundMusic"},
     };
     for (const auto& func : output_funcs) {
-      if (PatchStub8(memory, func.address, 0, func.name)) {
+      if (PatchStub8Resolved(memory, ctx.hack_pack_stubs, func.address, 0,
+                             func.name)) {
         debug_result.applied++;
       } else {
         debug_result.skipped++;
@@ -711,6 +961,7 @@ void ApplyDc3ImportAndRuntimeStopgaps(const Dc3HackContext& ctx,
   }
 
   RegisterDc3WriteBridges(ctx, debug_result);
+  RegisterDc3OutputFormatterBridges(ctx, debug_result);
 
   // Debug/Holmes/String-related stubs and deadlock breakers.
   {
@@ -770,7 +1021,8 @@ void ApplyDc3ImportAndRuntimeStopgaps(const Dc3HackContext& ctx,
         {0x8310E048, "HolmesClientSendMessage", 0},
     };
     for (const auto& func : debug_funcs) {
-      if (PatchStub8(memory, func.address, func.return_value, func.name)) {
+      if (PatchStub8Resolved(memory, ctx.hack_pack_stubs, func.address,
+                             func.return_value, func.name)) {
         debug_result.applied++;
       } else {
         debug_result.skipped++;

@@ -444,9 +444,17 @@ Interpretation tips:
 - If the invasive run shows parse garbage (`Unrecognized node type`) but the
   normal run does not, treat that as probe interference, not proof of a runtime
   parser bug.
+- If the invasive probe is enabled but you see **no** `DC3:RCS ...` logs:
+  - verify whether the runtime is crashing before `ReadCacheStream`
+  - quick check: add `--break_on_instruction=0x83116664` (`ReadCacheStream`)
+    in a short run; if it never hits, the missing `DC3:RCS` traces are expected
+    (the current blocker is earlier in boot)
 - If `gSystemConfig` is empty (`size=0`), check relink-sensitive globals (for
   example the `gConditional` STL sentinel stopgap) against the fresh
   `build/373307D9/default.map`.
+- Do not resolve CRT formatter bridges (`_output_l`, `_woutput_l`) through the
+  generic hack-pack stub manifest. Duplicate symbol names can map to unrelated
+  implementations and silently register the bridge on the wrong address.
 
 ### D3. Temporary progression bypasses (MemMgr / FindArray) - use explicitly
 

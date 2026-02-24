@@ -1,6 +1,33 @@
 # Status: OODA Loop Iteration 4
 
-*Last updated: 2026-02-24 (Session 26 — ReadCacheStream probe restored)*
+*Last updated: 2026-02-24 (Session 27 — `_output_l` bridge restored + pre-RCS crash characterized)*
+
+## 2026-02-24 Update (Session 27): `_output_l` Bridge Recovery + Pre-`ReadCacheStream` Crash (XTL path)
+
+- Recovered and fixed the smart `_output_l` / `_woutput_l` guest formatter bridges after the partial rollback:
+  - `_output_l` string-buffer paths now execute through the host bridge again (uses Xenia's `_vsnprintf_entry` shim)
+  - this removed the previous long stall spinning in guest `_output_l` (`~0x8361CCF0`)
+- Important relink/manifest pitfall found and fixed:
+  - generic `hack_pack_stubs` manifest remaps **must not** be used for `_output_l` / `_woutput_l`
+  - the manifest resolved duplicate-name entries to unrelated addresses (`_output_l: 0x841E37E0`, `_woutput_l: 0x841E9378`)
+  - result: bridge registered successfully but never intercepted the live CRT formatter path
+  - fix: force map-synced CRT formatter addresses (`0x8361CBE0`, `0x83622778`) and log+ignore conflicting manifest entries
+- Runtime progression after the formatter fix:
+  - boot now passes the prior `_output_l` stall and quickly reaches a stable crash site
+  - observed crash signature (baseline and RCS-probe runs match):
+    - `crash_guest=0x8393E9BC` (symbolizes near `XTLGetLanguage`)
+    - fault write to `0x7014FFF8`
+  - `dc3_crash_signature_triage.py` classifies this as a CRT invalid-parameter / trap-loop signature (warning-level triage)
+- DTB probe validation result (important for workflow):
+  - `--dc3_debug_read_cache_stream_step_override=true` correctly enables the invasive probe banner
+  - however, no `DC3:RCS` read/seek hits were observed in the compared runs
+  - `--break_on_instruction=0x83116664` (`ReadCacheStream`) still does not hit in the tested window
+  - conclusion: current crash is occurring **before** the `ReadCacheStream` binary DTB decode path is reached (even though `_output_l` logs show DTB path-string formatting)
+- Validation:
+  - `xenia-headless` rebuild succeeds after bridge fix
+  - `_output_l` bridge hit logs confirmed in runtime (`DC3: _output_l string ...`)
+  - pre-RCS crash is reproducible in both non-invasive and invasive-RCS runs
+  - invasive RCS probe remains registered but idle until the pre-RCS crash is addressed
 
 ## 2026-02-24 Update (Session 26): `ReadCacheStream` Probe Restored (Invasive BufStream Overrides)
 
