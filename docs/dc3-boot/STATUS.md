@@ -1,6 +1,32 @@
 # Status: OODA Loop Iteration 4
 
-*Last updated: 2026-02-24 (Session 27 — `_output_l` bridge restored + pre-RCS crash characterized)*
+*Last updated: 2026-02-24 (Session 28 — manifest duplicate-name fallback hardening + XTL crash bypass)*
+
+## 2026-02-24 Update (Session 28): Manifest Duplicate-Name Stub Collision Hardening + Crash Moved Past `XTLGetLanguage`
+
+- Found a broader patch-manifest issue while validating the `_output_l`/RCS work:
+  - some manifest-resolved hack-pack stubs were mapping by duplicate symbol name to invalid/unmapped addresses (for example `XGetLocale`, `XTLGetLanguage`, `GetSystemLanguage`, `GetSystemLocale`)
+  - symptom:
+    - log shows a manifest remap, but the intended live function remains unstubbed
+    - runtime still crashes in the real function (observed at `XTLGetLanguage`, `0x8393E9BC`)
+- Hardened `PatchStub8Resolved(...)` behavior:
+  - if a manifest-resolved target cannot be patched, it now logs a warning and retries the hardcoded fallback address instead of silently failing the stub application
+- Refreshed locale/system-language fallback stub addresses to current map values (`build/373307D9/default.map`):
+  - `XGetLocale` -> `0x8393E7B0`
+  - `XTLGetLanguage` -> `0x8393E9B8`
+  - `GetSystemLanguage` -> `0x83409AA8`
+  - `GetSystemLocale` -> `0x83409F68`
+- Validation:
+  - logs now show fallback retry + successful stub application at the live addresses
+  - crash moved off `XTLGetLanguage` / `XGetLocale`
+  - new crash site:
+    - `PC=0x82C1BA44` (`__savegprlr_23`)
+    - fault write to `0xFFFFFFF0`
+    - `SP=0x40`, `CTR=0`, `LR=0x83445EE8`
+  - this indicates an invalid stack / bad indirect call target path (caller-side state corruption or unresolved indirect target), not the previous locale/XTL path
+- Next debugging focus:
+  - investigate caller at `LR=0x83445EE8` (`mtctr` / `bctrl` path leading to `CTR=0`)
+  - continue using non-invasive run first; keep RCS probe for later once `ReadCacheStream` is actually reached
 
 ## 2026-02-24 Update (Session 27): `_output_l` Bridge Recovery + Pre-`ReadCacheStream` Crash (XTL path)
 

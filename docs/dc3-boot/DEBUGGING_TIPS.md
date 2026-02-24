@@ -455,6 +455,10 @@ Interpretation tips:
 - Do not resolve CRT formatter bridges (`_output_l`, `_woutput_l`) through the
   generic hack-pack stub manifest. Duplicate symbol names can map to unrelated
   implementations and silently register the bridge on the wrong address.
+- More generally, treat manifest remaps as hints, not truth, for duplicate-prone
+  names. Prefer code that:
+  - validates the remapped target can actually be patched/executed
+  - falls back to a verified map-synced hardcoded address when validation fails
 
 ### D3. Temporary progression bypasses (MemMgr / FindArray) - use explicitly
 
