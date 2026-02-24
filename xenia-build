@@ -1279,18 +1279,62 @@ class GenTestsCommand(Command):
         print('')
 
         binutils_path = os.path.join('third_party', 'binutils-ppc-cygwin')
-        def pick_binutils_tool(name):
-            base = os.path.join(binutils_path, name)
-            if os.path.exists(base):
-                return base
-            if os.path.exists(base + '.exe'):
-                return base + '.exe'
-            return base
+        def with_runner(tool):
+            if tool.endswith('.exe') and os.name != 'nt':
+                return ['wine', tool]
+            return [tool]
 
-        ppc_as = pick_binutils_tool('powerpc-none-elf-as')
-        ppc_ld = pick_binutils_tool('powerpc-none-elf-ld')
-        ppc_objdump = pick_binutils_tool('powerpc-none-elf-objdump')
-        ppc_nm = pick_binutils_tool('powerpc-none-elf-nm')
+        def supports_vmx128(as_tool):
+            try:
+                result = subprocess.run(
+                    with_runner(as_tool) + ['--target-help'],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    universal_newlines=True,
+                    check=False)
+                return 'mvmx128' in (result.stdout or '')
+            except Exception:
+                return False
+
+        def pick_binutils_tool(tool_basename):
+            # Prefer a native cross toolchain on PATH (faster, no Wine
+            # dependency), then fall back to the bundled Cygwin binutils.
+            for prefix in ('powerpc-none-eabi-', 'powerpc-none-elf-'):
+                candidate = shutil.which(prefix + tool_basename)
+                if candidate:
+                    return candidate
+
+            for prefix in ('powerpc-none-elf-', 'powerpc-none-eabi-'):
+                base = os.path.join(binutils_path, prefix + tool_basename)
+                if os.path.exists(base):
+                    return base
+                if os.path.exists(base + '.exe'):
+                    return base + '.exe'
+
+            # Return a sensible native candidate so the error message points to
+            # a real expected tool name if nothing is installed.
+            return 'powerpc-none-eabi-' + tool_basename
+
+        ppc_as = pick_binutils_tool('as')
+        ppc_ld = pick_binutils_tool('ld')
+        ppc_objdump = pick_binutils_tool('objdump')
+        ppc_nm = pick_binutils_tool('nm')
+
+        if not supports_vmx128(ppc_as):
+            print('Native PPC assembler lacks -mvmx128 support; '
+                  'falling back to bundled Xenia binutils.')
+            def pick_bundled_tool(tool_basename):
+                for prefix in ('powerpc-none-elf-', 'powerpc-none-eabi-'):
+                    base = os.path.join(binutils_path, prefix + tool_basename)
+                    if os.path.exists(base):
+                        return base
+                    if os.path.exists(base + '.exe'):
+                        return base + '.exe'
+                return 'powerpc-none-elf-' + tool_basename
+            ppc_as = pick_bundled_tool('as')
+            ppc_ld = pick_bundled_tool('ld')
+            ppc_objdump = pick_bundled_tool('objdump')
+            ppc_nm = pick_bundled_tool('nm')
 
         test_src = os.path.join('src', 'xenia', 'cpu', 'ppc', 'testing')
         test_bin = os.path.join(test_src, 'bin')
