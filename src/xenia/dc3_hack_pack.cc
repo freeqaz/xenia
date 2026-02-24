@@ -273,8 +273,15 @@ bool PatchStub8Resolved(Memory* memory,
   if (address != fallback_address) {
     XELOGI("DC3: Resolved hack-pack stub '{}' {:08X} -> {:08X} via manifest",
            name, fallback_address, address);
+    if (!PatchStub8(memory, address, return_value, name)) {
+      XELOGW("DC3: Manifest-resolved stub '{}' at {:08X} could not be patched; "
+             "retrying fallback {:08X}",
+             name, address, fallback_address);
+      return PatchStub8(memory, fallback_address, return_value, name);
+    }
+    return true;
   }
-  return PatchStub8(memory, address, return_value, name);
+  return PatchStub8(memory, fallback_address, return_value, name);
 }
 
 bool PatchCheckedNop(Memory* memory, uint32_t address, uint32_t expected_word,
@@ -971,11 +978,11 @@ void ApplyDc3ImportAndRuntimeStopgaps(const Dc3HackContext& ctx,
       uint32_t return_value;
     };
     DebugFunc debug_funcs[] = {
-        {0x838DEE34, "XGetLocale", 0},
-        {0x838DF03C, "XTLGetLanguage", 1},
+        {0x8393E7B0, "XGetLocale", 0},
+        {0x8393E9B8, "XTLGetLanguage", 1},
         {0x838DF0DC, "DebugBreak", 0},
-        {0x8333D160, "GetSystemLanguage", 0},
-        {0x8333D620, "GetSystemLocale", 0},
+        {0x83409AA8, "GetSystemLanguage", 0},
+        {0x83409F68, "GetSystemLocale", 0},
         {0x830EDFF4, "DataNode::Print", 0},
         {0x83140608, "RndMat::CreateMetaMaterial", 0},
         {0x8310CD88, "HolmesClientInit", 0},

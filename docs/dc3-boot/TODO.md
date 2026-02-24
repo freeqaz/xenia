@@ -128,6 +128,7 @@ Items are ordered by priority. Check off as completed. Add new items each iterat
   - Expand DTB probe coverage / diagnostics for pre-`ReadCacheStream` failures (current RCS probe may show zero hits when the crash occurs before `ReadCacheStream`; breakpoint check at `0x83116664` is the current reachability test)
   - Document any future relink-sensitive globals in `DEBUGGING_TIPS.md` with fresh-map lookup steps
   - Restore patch-manifest CRT sentinel freshness/validation so the CRT sanitizer can trust manifest values again (current recovery path uses map-synced constants when manifest is stale)
+  - Replace duplicate-name-only hack-pack stub manifest resolution with a duplicate-safe identity scheme (current resolver now retries fallback on invalid remap, but collisions still occur for names like `XTLGetLanguage` / `XGetLocale`)
   - Replace temporary hardcoded MemMgr assert bypass addresses with manifest/symbol-backed resolution if the bypass remains needed for debugging
   - Add a true call-through `FindArray` logging path (current `log_only` mode intentionally leaves original behavior active without per-call logs)
   - Keep CRT formatter bridges (`_output_l` / `_woutput_l`) pinned to verified map-synced addresses unless the manifest gains a duplicate-safe symbol identity scheme (generic name remaps can target unrelated implementations)
