@@ -794,13 +794,18 @@ EMITTER_OPCODE_TABLE(OPCODE_VECTOR_SUB, VECTOR_SUB);
 // OPCODE_VECTOR_SHL
 // ============================================================================
 template <typename T, std::enable_if_t<std::is_integral<T>::value, int> = 0>
-static __m128i EmulateVectorShl(void*, __m128i src1, __m128i src2) {
+static __m128i EmulateVectorShl(void*, const vec128_t* src1_ptr,
+                                const vec128_t* src2_ptr) {
   alignas(16) T value[16 / sizeof(T)];
   alignas(16) T shamt[16 / sizeof(T)];
 
-  // Load SSE registers into a C array.
-  _mm_store_si128(reinterpret_cast<__m128i*>(value), src1);
-  _mm_store_si128(reinterpret_cast<__m128i*>(shamt), src2);
+  if (!src1_ptr || !src2_ptr) {
+    std::memset(value, 0, sizeof(value));
+    std::memset(shamt, 0, sizeof(shamt));
+  } else {
+    std::memcpy(value, src1_ptr, sizeof(value));
+    std::memcpy(shamt, src2_ptr, sizeof(shamt));
+  }
 
   for (size_t i = 0; i < (16 / sizeof(T)); ++i) {
     value[i] = value[i] << (shamt[i] & ((sizeof(T) * 8) - 1));
@@ -1002,13 +1007,18 @@ EMITTER_OPCODE_TABLE(OPCODE_VECTOR_SHL, VECTOR_SHL_V128);
 // OPCODE_VECTOR_SHR
 // ============================================================================
 template <typename T, std::enable_if_t<std::is_integral<T>::value, int> = 0>
-static __m128i EmulateVectorShr(void*, __m128i src1, __m128i src2) {
+static __m128i EmulateVectorShr(void*, const vec128_t* src1_ptr,
+                                const vec128_t* src2_ptr) {
   alignas(16) T value[16 / sizeof(T)];
   alignas(16) T shamt[16 / sizeof(T)];
 
-  // Load SSE registers into a C array.
-  _mm_store_si128(reinterpret_cast<__m128i*>(value), src1);
-  _mm_store_si128(reinterpret_cast<__m128i*>(shamt), src2);
+  if (!src1_ptr || !src2_ptr) {
+    std::memset(value, 0, sizeof(value));
+    std::memset(shamt, 0, sizeof(shamt));
+  } else {
+    std::memcpy(value, src1_ptr, sizeof(value));
+    std::memcpy(shamt, src2_ptr, sizeof(shamt));
+  }
 
   for (size_t i = 0; i < (16 / sizeof(T)); ++i) {
     value[i] = value[i] >> (shamt[i] & ((sizeof(T) * 8) - 1));
@@ -1372,13 +1382,18 @@ EMITTER_OPCODE_TABLE(OPCODE_VECTOR_SHA, VECTOR_SHA_V128);
 // OPCODE_VECTOR_ROTATE_LEFT
 // ============================================================================
 template <typename T, std::enable_if_t<std::is_integral<T>::value, int> = 0>
-static __m128i EmulateVectorRotateLeft(void*, __m128i src1, __m128i src2) {
+static __m128i EmulateVectorRotateLeft(void*, const vec128_t* src1_ptr,
+                                       const vec128_t* src2_ptr) {
   alignas(16) T value[16 / sizeof(T)];
   alignas(16) T shamt[16 / sizeof(T)];
 
-  // Load SSE registers into a C array.
-  _mm_store_si128(reinterpret_cast<__m128i*>(value), src1);
-  _mm_store_si128(reinterpret_cast<__m128i*>(shamt), src2);
+  if (!src1_ptr || !src2_ptr) {
+    std::memset(value, 0, sizeof(value));
+    std::memset(shamt, 0, sizeof(shamt));
+  } else {
+    std::memcpy(value, src1_ptr, sizeof(value));
+    std::memcpy(shamt, src2_ptr, sizeof(shamt));
+  }
 
   for (size_t i = 0; i < (16 / sizeof(T)); ++i) {
     value[i] = xe::rotate_left<T>(value[i], shamt[i] & ((sizeof(T) * 8) - 1));
@@ -1466,14 +1481,19 @@ EMITTER_OPCODE_TABLE(OPCODE_VECTOR_ROTATE_LEFT, VECTOR_ROTATE_LEFT_V128);
 // OPCODE_VECTOR_AVERAGE
 // ============================================================================
 template <typename T, std::enable_if_t<std::is_integral<T>::value, int> = 0>
-static __m128i EmulateVectorAverage(void*, __m128i src1, __m128i src2) {
+static __m128i EmulateVectorAverage(void*, const vec128_t* src1_ptr,
+                                    const vec128_t* src2_ptr) {
   alignas(16) T src1v[16 / sizeof(T)];
   alignas(16) T src2v[16 / sizeof(T)];
   alignas(16) T value[16 / sizeof(T)];
 
-  // Load SSE registers into a C array.
-  _mm_store_si128(reinterpret_cast<__m128i*>(src1v), src1);
-  _mm_store_si128(reinterpret_cast<__m128i*>(src2v), src2);
+  if (!src1_ptr || !src2_ptr) {
+    std::memset(src1v, 0, sizeof(src1v));
+    std::memset(src2v, 0, sizeof(src2v));
+  } else {
+    std::memcpy(src1v, src1_ptr, sizeof(src1v));
+    std::memcpy(src2v, src2_ptr, sizeof(src2v));
+  }
 
   for (size_t i = 0; i < (16 / sizeof(T)); ++i) {
     auto t = (uint64_t(src1v[i]) + uint64_t(src2v[i]) + 1) / 2;
@@ -2119,10 +2139,14 @@ struct PACK : Sequence<PACK, I<OPCODE_PACK, V128Op, V128Op, V128Op>> {
     //     ((src1.uy & 0xFF) << 8) | (src1.uz & 0xFF)
     e.vpshufb(i.dest, i.dest, e.GetXmmConstPtr(XMMPackD3DCOLOR));
   }
-  static __m128i EmulateFLOAT16_2(void*, __m128 src1) {
+  static __m128i EmulateFLOAT16_2(void*, const vec128_t* src1_ptr) {
     alignas(16) float a[4];
     alignas(16) uint16_t b[8];
-    _mm_store_ps(a, src1);
+    if (src1_ptr) {
+      std::memcpy(a, src1_ptr, sizeof(a));
+    } else {
+      std::memset(a, 0, sizeof(a));
+    }
     std::memset(b, 0, sizeof(b));
 
     for (int i = 0; i < 2; i++) {
@@ -2158,10 +2182,14 @@ struct PACK : Sequence<PACK, I<OPCODE_PACK, V128Op, V128Op, V128Op>> {
       e.vmovaps(i.dest, e.xmm0);
     }
   }
-  static __m128i EmulateFLOAT16_4(void*, __m128 src1) {
+  static __m128i EmulateFLOAT16_4(void*, const vec128_t* src1_ptr) {
     alignas(16) float a[4];
     alignas(16) uint16_t b[8];
-    _mm_store_ps(a, src1);
+    if (src1_ptr) {
+      std::memcpy(a, src1_ptr, sizeof(a));
+    } else {
+      std::memset(a, 0, sizeof(a));
+    }
     std::memset(b, 0, sizeof(b));
 
     for (int i = 0; i < 4; i++) {
@@ -2289,25 +2317,36 @@ struct PACK : Sequence<PACK, I<OPCODE_PACK, V128Op, V128Op, V128Op>> {
     // Merge XZ and YW.
     e.vorps(i.dest, e.xmm0);
   }
-  static __m128i EmulatePack8_IN_16_UN_UN_SAT(void*, __m128i src1,
-                                              __m128i src2) {
+  static __m128i EmulatePack8_IN_16_UN_UN_SAT(void*, const vec128_t* src1_ptr,
+                                              const vec128_t* src2_ptr) {
     alignas(16) uint16_t a[8];
     alignas(16) uint16_t b[8];
     alignas(16) uint8_t c[16];
-    _mm_store_si128(reinterpret_cast<__m128i*>(a), src1);
-    _mm_store_si128(reinterpret_cast<__m128i*>(b), src2);
+    if (!src1_ptr || !src2_ptr) {
+      std::memset(a, 0, sizeof(a));
+      std::memset(b, 0, sizeof(b));
+    } else {
+      std::memcpy(a, src1_ptr, sizeof(a));
+      std::memcpy(b, src2_ptr, sizeof(b));
+    }
     for (int i = 0; i < 8; ++i) {
       c[i] = uint8_t(std::max(uint16_t(0), std::min(uint16_t(255), a[i])));
       c[i + 8] = uint8_t(std::max(uint16_t(0), std::min(uint16_t(255), b[i])));
     }
     return _mm_load_si128(reinterpret_cast<__m128i*>(c));
   }
-  static __m128i EmulatePack8_IN_16_UN_UN(void*, __m128i src1, __m128i src2) {
+  static __m128i EmulatePack8_IN_16_UN_UN(void*, const vec128_t* src1_ptr,
+                                          const vec128_t* src2_ptr) {
     alignas(16) uint8_t a[16];
     alignas(16) uint8_t b[16];
     alignas(16) uint8_t c[16];
-    _mm_store_si128(reinterpret_cast<__m128i*>(a), src1);
-    _mm_store_si128(reinterpret_cast<__m128i*>(b), src2);
+    if (!src1_ptr || !src2_ptr) {
+      std::memset(a, 0, sizeof(a));
+      std::memset(b, 0, sizeof(b));
+    } else {
+      std::memcpy(a, src1_ptr, sizeof(a));
+      std::memcpy(b, src2_ptr, sizeof(b));
+    }
     for (int i = 0; i < 8; ++i) {
       c[i] = a[i * 2];
       c[i + 8] = b[i * 2];
