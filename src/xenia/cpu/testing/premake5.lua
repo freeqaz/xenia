@@ -5,9 +5,11 @@ test_suite("xenia-cpu-tests", project_root, ".", {
   links = {
     "capstone",
     "fmt",
+    "mspack",
     "xenia-base",
     "xenia-core",
     "xenia-cpu",
+    "xenia-vfs",
 
     -- TODO(benvanik): cut these dependencies?
     "xenia-kernel",

@@ -2983,12 +2983,16 @@ struct SHL_V128 : Sequence<SHL_V128, I<OPCODE_SHL, V128Op, V128Op, I8Op>> {
     e.CallNativeSafe(reinterpret_cast<void*>(EmulateShlV128));
     e.vmovaps(i.dest, e.xmm0);
   }
-  static __m128i EmulateShlV128(void*, __m128i src1, uint8_t src2) {
+  static __m128i EmulateShlV128(void*, const vec128_t* src1_ptr, uint8_t src2) {
     // Almost all instances are shamt = 1, but non-constant.
     // shamt is [0,7]
     uint8_t shamt = src2 & 0x7;
     alignas(16) vec128_t value;
-    _mm_store_si128(reinterpret_cast<__m128i*>(&value), src1);
+    if (src1_ptr) {
+      value = *src1_ptr;
+    } else {
+      std::memset(&value, 0, sizeof(value));
+    }
     for (int i = 0; i < 15; ++i) {
       value.u8[i ^ 0x3] = (value.u8[i ^ 0x3] << shamt) |
                           (value.u8[(i + 1) ^ 0x3] >> (8 - shamt));
@@ -3060,12 +3064,16 @@ struct SHR_V128 : Sequence<SHR_V128, I<OPCODE_SHR, V128Op, V128Op, I8Op>> {
     e.CallNativeSafe(reinterpret_cast<void*>(EmulateShrV128));
     e.vmovaps(i.dest, e.xmm0);
   }
-  static __m128i EmulateShrV128(void*, __m128i src1, uint8_t src2) {
+  static __m128i EmulateShrV128(void*, const vec128_t* src1_ptr, uint8_t src2) {
     // Almost all instances are shamt = 1, but non-constant.
     // shamt is [0,7]
     uint8_t shamt = src2 & 0x7;
     alignas(16) vec128_t value;
-    _mm_store_si128(reinterpret_cast<__m128i*>(&value), src1);
+    if (src1_ptr) {
+      value = *src1_ptr;
+    } else {
+      std::memset(&value, 0, sizeof(value));
+    }
     for (int i = 15; i > 0; --i) {
       value.u8[i ^ 0x3] = (value.u8[i ^ 0x3] >> shamt) |
                           (value.u8[(i - 1) ^ 0x3] << (8 - shamt));
