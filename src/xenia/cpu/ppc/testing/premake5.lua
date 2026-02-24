@@ -11,8 +11,10 @@ project("xenia-cpu-ppc-tests")
     "fmt",
     "mspack",
     "xenia-core",
+    "xenia-kernel-headless",
     "xenia-cpu",
     "xenia-base",
+    "xenia-vfs",
   })
   files({
     "ppc_testing_main.cc",
