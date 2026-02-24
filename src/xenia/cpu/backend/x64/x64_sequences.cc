@@ -1659,7 +1659,7 @@ struct MUL_HI_I32
         e.mov(e.edx, i.src1);
         if (i.src2.is_constant) {
           e.mov(e.eax, i.src2.constant());
-          e.mulx(i.dest, e.edx, e.eax);
+          e.mulx(i.dest, e.eax, e.eax);
         } else {
           e.mulx(i.dest, e.edx, i.src2);
         }
@@ -1707,7 +1707,7 @@ struct MUL_HI_I64
         e.mov(e.rdx, i.src1);
         if (i.src2.is_constant) {
           e.mov(e.rax, i.src2.constant());
-          e.mulx(i.dest, e.rdx, e.rax);
+          e.mulx(i.dest, e.rax, e.rax);
         } else {
           e.mulx(i.dest, e.rax, i.src2);
         }
@@ -2465,9 +2465,9 @@ EMITTER_OPCODE_TABLE(OPCODE_RECIP, RECIP_F32, RECIP_F64, RECIP_V128);
 // TODO(benvanik): use approx here:
 //     https://jrfonseca.blogspot.com/2008/09/fast-sse2-pow-tables-or-polynomials.html
 struct POW2_F32 : Sequence<POW2_F32, I<OPCODE_POW2, F32Op, F32Op>> {
-  static __m128 EmulatePow2(void*, __m128 src) {
+  static __m128 EmulatePow2(void*, const vec128_t* src_ptr) {
     float src_value;
-    _mm_store_ss(&src_value, src);
+    src_value = src_ptr ? src_ptr->f32[0] : 0.0f;
     float result = std::exp2(src_value);
     return _mm_load_ss(&result);
   }
@@ -2479,9 +2479,9 @@ struct POW2_F32 : Sequence<POW2_F32, I<OPCODE_POW2, F32Op, F32Op>> {
   }
 };
 struct POW2_F64 : Sequence<POW2_F64, I<OPCODE_POW2, F64Op, F64Op>> {
-  static __m128d EmulatePow2(void*, __m128d src) {
+  static __m128d EmulatePow2(void*, const vec128_t* src_ptr) {
     double src_value;
-    _mm_store_sd(&src_value, src);
+    src_value = src_ptr ? src_ptr->f64[0] : 0.0;
     double result = std::exp2(src_value);
     return _mm_load_sd(&result);
   }
@@ -2493,9 +2493,13 @@ struct POW2_F64 : Sequence<POW2_F64, I<OPCODE_POW2, F64Op, F64Op>> {
   }
 };
 struct POW2_V128 : Sequence<POW2_V128, I<OPCODE_POW2, V128Op, V128Op>> {
-  static __m128 EmulatePow2(void*, __m128 src) {
+  static __m128 EmulatePow2(void*, const vec128_t* src_ptr) {
     alignas(16) float values[4];
-    _mm_store_ps(values, src);
+    if (src_ptr) {
+      std::memcpy(values, src_ptr, sizeof(values));
+    } else {
+      std::memset(values, 0, sizeof(values));
+    }
     for (size_t i = 0; i < 4; ++i) {
       values[i] = std::exp2(values[i]);
     }
@@ -2516,9 +2520,9 @@ EMITTER_OPCODE_TABLE(OPCODE_POW2, POW2_F32, POW2_F64, POW2_V128);
 //     https://jrfonseca.blogspot.com/2008/09/fast-sse2-pow-tables-or-polynomials.html
 // TODO(benvanik): this emulated fn destroys all xmm registers! don't do it!
 struct LOG2_F32 : Sequence<LOG2_F32, I<OPCODE_LOG2, F32Op, F32Op>> {
-  static __m128 EmulateLog2(void*, __m128 src) {
+  static __m128 EmulateLog2(void*, const vec128_t* src_ptr) {
     float src_value;
-    _mm_store_ss(&src_value, src);
+    src_value = src_ptr ? src_ptr->f32[0] : 0.0f;
     float result = std::log2(src_value);
     return _mm_load_ss(&result);
   }
@@ -2534,9 +2538,9 @@ struct LOG2_F32 : Sequence<LOG2_F32, I<OPCODE_LOG2, F32Op, F32Op>> {
   }
 };
 struct LOG2_F64 : Sequence<LOG2_F64, I<OPCODE_LOG2, F64Op, F64Op>> {
-  static __m128d EmulateLog2(void*, __m128d src) {
+  static __m128d EmulateLog2(void*, const vec128_t* src_ptr) {
     double src_value;
-    _mm_store_sd(&src_value, src);
+    src_value = src_ptr ? src_ptr->f64[0] : 0.0;
     double result = std::log2(src_value);
     return _mm_load_sd(&result);
   }
@@ -2552,9 +2556,13 @@ struct LOG2_F64 : Sequence<LOG2_F64, I<OPCODE_LOG2, F64Op, F64Op>> {
   }
 };
 struct LOG2_V128 : Sequence<LOG2_V128, I<OPCODE_LOG2, V128Op, V128Op>> {
-  static __m128 EmulateLog2(void*, __m128 src) {
+  static __m128 EmulateLog2(void*, const vec128_t* src_ptr) {
     alignas(16) float values[4];
-    _mm_store_ps(values, src);
+    if (src_ptr) {
+      std::memcpy(values, src_ptr, sizeof(values));
+    } else {
+      std::memset(values, 0, sizeof(values));
+    }
     for (size_t i = 0; i < 4; ++i) {
       values[i] = std::log2(values[i]);
     }
