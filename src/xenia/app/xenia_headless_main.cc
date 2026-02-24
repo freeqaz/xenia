@@ -74,6 +74,11 @@ DEFINE_string(scripted_input, "",
               "Scripted controller input. Format: '5s:A,7s:START,10s:A'. "
               "Simulates a connected controller with timed button presses.",
               "HID");
+DEFINE_int32(
+    dc3_gdb_rsp_prelaunch_sleep_ms, 0,
+    "DC3: optional sleep before starting the emulator thread (after headless "
+    "init / RSP stub startup) to allow debugger attach setup.",
+    "DC3");
 
 namespace xe {
 namespace app {
@@ -227,6 +232,12 @@ static int HeadlessMain(const std::vector<std::string>& args) {
   }
 
   // Start the emulator thread (this will call LaunchPath internally)
+  if (cvars::dc3_gdb_rsp_prelaunch_sleep_ms > 0) {
+    XELOGI("DC3: prelaunch sleep {}ms (RSP attach window)",
+           cvars::dc3_gdb_rsp_prelaunch_sleep_ms);
+    std::this_thread::sleep_for(
+        std::chrono::milliseconds(cvars::dc3_gdb_rsp_prelaunch_sleep_ms));
+  }
   app->StartEmulatorThread(abs_path);
 
   // Run emulator until exit or timeout

@@ -8,31 +8,59 @@
  */
 
 #include <atomic>
+#include <array>
 #include <chrono>
+#include <condition_variable>
+#include <cstring>
 #include <cstdlib>
 #include <iostream>
+#include <map>
+#include <mutex>
 #include <thread>
+#include <vector>
 
 #ifdef __linux__
+#include <arpa/inet.h>
+#include <netinet/in.h>
 #include <signal.h>
+#include <sys/socket.h>
 #include <ucontext.h>
+#include <unistd.h>
 #include <pthread.h>
 #endif
 
 #include "xenia/app/emulator_headless.h"
+#include "xenia/base/cvar.h"
 #include "xenia/base/exception_handler.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/platform.h"
+#include "xenia/cpu/breakpoint.h"
 #include "xenia/cpu/backend/backend.h"
 #include "xenia/cpu/backend/code_cache.h"
+#include "xenia/cpu/debug_listener.h"
 #include "xenia/cpu/function.h"
 #include "xenia/cpu/processor.h"
 #include "xenia/cpu/ppc/ppc_context.h"
 #include "xenia/dc3_runtime_telemetry.h"
+#include "xenia/debug/dc3_gdb_rsp_protocol.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/xboxkrnl/xboxkrnl_rtl.h"
 #include "xenia/kernel/xthread.h"
 #include "third_party/fmt/include/fmt/format.h"
+
+DEFINE_bool(
+    dc3_gdb_rsp_stub, false,
+    "DC3: enable an in-process GDB RSP stub in xenia-headless (Phase 4 MVP).",
+    "DC3");
+DEFINE_string(dc3_gdb_rsp_host, "127.0.0.1",
+              "DC3: listen host for the headless GDB RSP stub.", "DC3");
+DEFINE_int32(dc3_gdb_rsp_port, 9001,
+             "DC3: listen port for the headless GDB RSP stub.", "DC3");
+DEFINE_bool(
+    dc3_gdb_rsp_break_on_connect, true,
+    "DC3: pause target execution when a GDB client connects to the headless "
+    "RSP stub.",
+    "DC3");
 
 #ifdef __linux__
 // Signal-based JIT IP sampler: sends SIGUSR2 to a target thread,
@@ -60,12 +88,782 @@ static void InstallJitIpSampler() {
 namespace xe {
 namespace app {
 
+#ifdef __linux__
+
+class Dc3GdbRspHeadlessListener final : public cpu::DebugListener {
+ public:
+  explicit Dc3GdbRspHeadlessListener(cpu::Processor* processor)
+      : processor_(processor) {
+    BuildTargetXml();
+    server_thread_ = std::thread([this]() { ServerMain(); });
+  }
+
+  ~Dc3GdbRspHeadlessListener() {
+    {
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      stop_requested_ = true;
+      detached_ = true;
+      state_cv_.notify_all();
+    }
+    CloseSocketLocked(listen_fd_);
+    CloseSocketLocked(client_fd_);
+    if (server_thread_.joinable()) {
+      server_thread_.join();
+    }
+    ClearAllBreakpoints();
+  }
+
+  void OnFocus() override {}
+
+  void OnDetached() override {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    detached_ = true;
+    state_cv_.notify_all();
+  }
+
+  void OnExecutionPaused() override {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    paused_ = true;
+    snapshots_valid_ = false;
+    ++stop_epoch_;
+    last_signal_ = "S05";
+    state_cv_.notify_all();
+  }
+
+  void OnExecutionContinued() override {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    paused_ = false;
+    snapshots_valid_ = false;
+  }
+
+  void OnExecutionEnded() override {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    ended_ = true;
+    paused_ = true;
+    snapshots_valid_ = false;
+    ++stop_epoch_;
+    last_signal_ = "W00";
+    state_cv_.notify_all();
+  }
+
+  void OnStepCompleted(cpu::ThreadDebugInfo* thread_info) override {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    if (thread_info) {
+      selected_thread_id_ = thread_info->thread_id;
+    }
+    snapshots_valid_ = false;
+  }
+
+  void OnBreakpointHit(cpu::Breakpoint* breakpoint,
+                       cpu::ThreadDebugInfo* thread_info) override {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    if (thread_info) {
+      selected_thread_id_ = thread_info->thread_id;
+    }
+    if (breakpoint) {
+      last_break_guest_pc_ = breakpoint->guest_address();
+    }
+    snapshots_valid_ = false;
+  }
+
+ private:
+  using RspPacketReadResult = xe::debug::dc3_gdb_rsp::PacketReadResult;
+  static constexpr auto kRspPacketKindPacket =
+      xe::debug::dc3_gdb_rsp::PacketReadKind::kPacket;
+  static constexpr auto kRspPacketKindInterrupt =
+      xe::debug::dc3_gdb_rsp::PacketReadKind::kInterrupt;
+  static constexpr auto kRspPacketKindBadChecksum =
+      xe::debug::dc3_gdb_rsp::PacketReadKind::kBadChecksum;
+  static constexpr auto kRspPacketKindEof =
+      xe::debug::dc3_gdb_rsp::PacketReadKind::kEof;
+
+  struct ThreadSnapshot {
+    uint32_t thread_id = 0;
+    bool alive = false;
+    bool suspended = false;
+    uint32_t pc = 0;
+    std::array<uint32_t, 32> gpr{};
+    uint32_t lr = 0;
+    uint32_t ctr = 0;
+    uint32_t cr = 0;
+    uint32_t xer = 0;
+    uint32_t fpscr = 0;
+  };
+
+  static void CloseSocketLocked(int& fd) {
+    if (fd >= 0) {
+      shutdown(fd, SHUT_RDWR);
+      close(fd);
+      fd = -1;
+    }
+  }
+
+  static bool ParseHexU32(const std::string& s, uint32_t& value) {
+    return xe::debug::dc3_gdb_rsp::ParseHexU32(s, value);
+  }
+
+  static bool ParseHexSize(const std::string& s, size_t& value) {
+    return xe::debug::dc3_gdb_rsp::ParseHexSize(s, value);
+  }
+
+  bool CanUsePauseDebugOps() const { return processor_->stack_walker() != nullptr; }
+
+  void LogNoStackWalkerOnce() {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    if (warned_no_stack_walker_) return;
+    warned_no_stack_walker_ = true;
+    XELOGW("dc3_gdb_rsp_stub: stack walker unavailable in this headless build; "
+           "live pause/step/breakpoint debugging is disabled (memory reads + "
+           "handshake packets remain available)");
+  }
+
+  void BuildTargetXml() {
+    std::string xml;
+    xml += "<?xml version=\"1.0\"?>\n";
+    xml += "<!DOCTYPE target SYSTEM \"gdb-target.dtd\">\n";
+    xml += "<target version=\"1.0\">\n";
+    xml += "  <architecture>powerpc:common</architecture>\n";
+    xml += "  <feature name=\"org.gnu.gdb.power.core\">\n";
+    int regnum = 0;
+    for (int i = 0; i < 32; ++i, ++regnum) {
+      xml += fmt::format(
+          "    <reg name=\"r{}\" bitsize=\"32\" regnum=\"{}\" type=\"uint32\"/>\n",
+          i, regnum);
+    }
+    for (const char* name : {"pc", "msr", "cr", "lr", "ctr", "xer",
+                             "fpscr"}) {
+      xml += fmt::format(
+          "    <reg name=\"{}\" bitsize=\"32\" regnum=\"{}\" type=\"uint32\"/>\n",
+          name, regnum++);
+    }
+    xml += "  </feature>\n";
+    xml += "</target>\n";
+    target_xml_ = std::move(xml);
+  }
+
+  int OpenListenSocket() {
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) {
+      XELOGE("dc3_gdb_rsp_stub: socket() failed");
+      return -1;
+    }
+    int opt = 1;
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+    sockaddr_in addr = {};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(static_cast<uint16_t>(cvars::dc3_gdb_rsp_port));
+    if (cvars::dc3_gdb_rsp_host.empty() || cvars::dc3_gdb_rsp_host == "*" ||
+        cvars::dc3_gdb_rsp_host == "0.0.0.0") {
+      addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    } else if (inet_pton(AF_INET, cvars::dc3_gdb_rsp_host.c_str(),
+                         &addr.sin_addr) != 1) {
+      XELOGE("dc3_gdb_rsp_stub: invalid listen host '{}'",
+             cvars::dc3_gdb_rsp_host);
+      close(fd);
+      return -1;
+    }
+
+    if (bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
+      XELOGE("dc3_gdb_rsp_stub: bind({}:{}) failed", cvars::dc3_gdb_rsp_host,
+             cvars::dc3_gdb_rsp_port);
+      close(fd);
+      return -1;
+    }
+    if (listen(fd, 1) != 0) {
+      XELOGE("dc3_gdb_rsp_stub: listen() failed");
+      close(fd);
+      return -1;
+    }
+    return fd;
+  }
+
+  void ServerMain() {
+    listen_fd_ = OpenListenSocket();
+    if (listen_fd_ < 0) {
+      return;
+    }
+    XELOGI("dc3_gdb_rsp_stub: listening on {}:{}",
+           cvars::dc3_gdb_rsp_host.empty() ? "0.0.0.0" : cvars::dc3_gdb_rsp_host,
+           cvars::dc3_gdb_rsp_port);
+    while (true) {
+      {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        if (stop_requested_ || detached_) break;
+      }
+      sockaddr_in client_addr = {};
+      socklen_t client_len = sizeof(client_addr);
+      int fd = accept(listen_fd_, reinterpret_cast<sockaddr*>(&client_addr),
+                      &client_len);
+      if (fd < 0) {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        if (stop_requested_ || detached_) break;
+        continue;
+      }
+      {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        client_fd_ = fd;
+        no_ack_mode_ = false;
+      }
+      char ip_buf[64] = {};
+      inet_ntop(AF_INET, &client_addr.sin_addr, ip_buf, sizeof(ip_buf));
+      XELOGI("dc3_gdb_rsp_stub: client connected {}:{}", ip_buf,
+             ntohs(client_addr.sin_port));
+
+      if (cvars::dc3_gdb_rsp_break_on_connect &&
+          processor_->execution_state() == cpu::ExecutionState::kRunning) {
+        if (CanUsePauseDebugOps()) {
+          uint64_t epoch = 0;
+          {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            epoch = stop_epoch_;
+          }
+          processor_->Pause();
+          WaitForStop(epoch);
+        } else {
+          LogNoStackWalkerOnce();
+        }
+      }
+      XELOGI("dc3_gdb_rsp_stub: entering serve loop");
+
+      ServeClient(fd);
+
+      {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        CloseSocketLocked(client_fd_);
+      }
+      XELOGI("dc3_gdb_rsp_stub: client disconnected");
+    }
+    CloseSocketLocked(listen_fd_);
+  }
+
+  void ServeClient(int fd) {
+    while (true) {
+      {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        if (stop_requested_ || detached_) return;
+      }
+      RspPacketReadResult pkt = ReadPacket(fd);
+      if (pkt.kind == kRspPacketKindEof) {
+        return;
+      }
+      if (pkt.kind == kRspPacketKindBadChecksum) {
+        if (!no_ack_mode_) {
+          send(fd, "-", 1, 0);
+        }
+        continue;
+      }
+      if (pkt.kind == kRspPacketKindInterrupt) {
+        if (processor_->execution_state() == cpu::ExecutionState::kRunning) {
+          if (CanUsePauseDebugOps()) {
+            uint64_t epoch = 0;
+            {
+              std::lock_guard<std::mutex> lock(state_mutex_);
+              epoch = stop_epoch_;
+            }
+            processor_->Pause();
+            WaitForStop(epoch);
+          } else {
+            LogNoStackWalkerOnce();
+          }
+        }
+        SendPacket(fd, CurrentStopSignal());
+        continue;
+      }
+      if (!no_ack_mode_) {
+        send(fd, "+", 1, 0);
+      }
+      std::string resp = HandlePacket(pkt.payload);
+      if (!SendPacket(fd, resp)) {
+        return;
+      }
+      if (pkt.payload == "D" || pkt.payload == "k") {
+        return;
+      }
+    }
+  }
+
+  RspPacketReadResult ReadPacket(int fd) {
+    return xe::debug::dc3_gdb_rsp::ReadPacketFromSocket(fd);
+  }
+
+  bool SendPacket(int fd, const std::string& payload) {
+    return xe::debug::dc3_gdb_rsp::SendPacketToSocket(fd, payload);
+  }
+
+  std::string HandlePacket(const std::string& pkt) {
+    if (pkt == "?") {
+      EnsureSnapshotsForDebugRead();
+      return CurrentStopSignal();
+    }
+    if (pkt == "qSupported" || pkt.rfind("qSupported:", 0) == 0) {
+      std::string caps = "PacketSize=4000;QStartNoAckMode+;qXfer:features:read+";
+      if (CanUsePauseDebugOps()) {
+        caps += ";swbreak+";
+      }
+      return caps;
+    }
+    if (pkt == "QStartNoAckMode") {
+      no_ack_mode_ = true;
+      return "OK";
+    }
+    if (pkt == "qAttached") return "1";
+    if (pkt == "qfThreadInfo" || pkt == "qfThreadInfo:") return ThreadInfoList();
+    if (pkt == "qsThreadInfo") return "l";
+    if (pkt.rfind("Hg", 0) == 0 || pkt.rfind("Hc", 0) == 0) {
+      HandleThreadSelect(pkt.substr(2));
+      return "OK";
+    }
+    if (pkt == "qTStatus") return "";
+    if (pkt.rfind("qSymbol", 0) == 0) return "OK";
+    if (pkt == "QThreadSuffixSupported") return "OK";
+    if (pkt == "vMustReplyEmpty") return "";
+    if (pkt == "vCont?") return "vCont;c;s";
+    if (pkt.rfind("vCont;", 0) == 0) return HandleVCont(pkt.substr(6));
+    if (pkt.rfind("qOffsets", 0) == 0) return "Text=0;Data=0;Bss=0";
+    if (pkt.rfind("qC", 0) == 0) return CurrentThreadPacket();
+    if (pkt.rfind("T", 0) == 0) return HandleThreadAlive(pkt.substr(1));
+    if (pkt == "g") return ReadAllRegistersPacket();
+    if (pkt.rfind("p", 0) == 0) return ReadSingleRegisterPacket(pkt.substr(1));
+    if (pkt.rfind("m", 0) == 0) return ReadMemoryPacket(pkt.substr(1));
+    if (pkt.rfind("Z0,", 0) == 0 || pkt.rfind("z0,", 0) == 0) {
+      return HandleBreakpointPacket(pkt);
+    }
+    if (pkt == "c" || pkt.rfind("c", 0) == 0) return ContinueOrStep(false);
+    if (pkt == "s" || pkt.rfind("s", 0) == 0) return ContinueOrStep(true);
+    if (pkt.rfind("qXfer:features:read:target.xml:", 0) == 0) {
+      return HandleTargetXmlXfer(pkt);
+    }
+    if (pkt == "D" || pkt == "k") return "OK";
+    return "";
+  }
+
+  std::string HandleTargetXmlXfer(const std::string& pkt) {
+    auto pos = pkt.find("target.xml:");
+    if (pos == std::string::npos) return "E20";
+    std::string suffix = pkt.substr(pos + std::strlen("target.xml:"));
+    auto comma = suffix.find(',');
+    if (comma == std::string::npos) return "E20";
+    uint32_t off = 0;
+    size_t length = 0;
+    if (!ParseHexU32(suffix.substr(0, comma), off) ||
+        !ParseHexSize(suffix.substr(comma + 1), length)) {
+      return "E20";
+    }
+    if (off >= target_xml_.size()) return "l";
+    size_t chunk_len = std::min(length, target_xml_.size() - off);
+    bool more = (off + chunk_len) < target_xml_.size();
+    return std::string(more ? "m" : "l") +
+           target_xml_.substr(off, chunk_len);
+  }
+
+  std::string ContinueOrStep(bool step) {
+    if (!CanUsePauseDebugOps()) {
+      LogNoStackWalkerOnce();
+      return step ? "E33" : CurrentStopSignal();
+    }
+    uint64_t epoch = 0;
+    {
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      epoch = stop_epoch_;
+    }
+
+    if (step) {
+      if (!EnsureSnapshotsForDebugRead()) return "E32";
+      uint32_t tid = 0;
+      {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        tid = selected_thread_id_;
+      }
+      if (!tid) return "E30";
+      if (processor_->execution_state() != cpu::ExecutionState::kPaused) {
+        return "E31";
+      }
+      processor_->StepGuestInstruction(tid);
+    } else if (processor_->execution_state() == cpu::ExecutionState::kPaused) {
+      processor_->Continue();
+    }
+
+    WaitForStop(epoch);
+    EnsureSnapshotsForDebugRead();
+    return CurrentStopSignal();
+  }
+
+  void WaitForStop(uint64_t prev_epoch) {
+    std::unique_lock<std::mutex> lock(state_mutex_);
+    state_cv_.wait(lock, [&]() {
+      return stop_requested_ || detached_ || stop_epoch_ != prev_epoch;
+    });
+  }
+
+  std::string CurrentStopSignal() {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    if (last_signal_ == "S05" && selected_thread_id_) {
+      return fmt::format("T05thread:{:x};", selected_thread_id_);
+    }
+    return last_signal_;
+  }
+
+  bool EnsureSnapshotsForDebugRead() {
+    {
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      if (snapshots_valid_) return true;
+      if (!paused_ && CanUsePauseDebugOps()) return false;
+    }
+    RefreshSnapshots();
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    return snapshots_valid_;
+  }
+
+  void HandleThreadSelect(const std::string& spec) {
+    if (spec.empty() || spec == "0" || spec == "-1") return;
+    uint32_t tid = 0;
+    if (!ParseHexU32(spec, tid)) return;
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    selected_thread_id_ = tid;
+  }
+
+  std::string CurrentThreadPacket() {
+    if (!EnsureSnapshotsForDebugRead()) return "QC1";
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    if (!selected_thread_id_) return "QC1";
+    return fmt::format("QC{:x}", selected_thread_id_);
+  }
+
+  std::string ThreadInfoList() {
+    if (!EnsureSnapshotsForDebugRead()) return "m1";
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    if (snapshots_.empty()) return "m1";
+    std::string out = "m";
+    bool first = true;
+    for (const auto& kv : snapshots_) {
+      if (!first) out.push_back(',');
+      out += fmt::format("{:x}", kv.first);
+      first = false;
+    }
+    return out;
+  }
+
+  std::string HandleThreadAlive(const std::string& spec) {
+    uint32_t tid = 0;
+    if (!ParseHexU32(spec, tid)) return "E40";
+    if (!EnsureSnapshotsForDebugRead()) return (tid == 1) ? "OK" : "E41";
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    return snapshots_.count(tid) ? "OK" : "E41";
+  }
+
+  void RefreshSnapshots() {
+    auto infos = processor_->QueryThreadDebugInfos();
+    std::map<uint32_t, ThreadSnapshot> next;
+    bool can_pause_debug = CanUsePauseDebugOps();
+    for (auto* info : infos) {
+      if (!info || !info->thread) continue;
+      if (!info->thread->can_debugger_suspend()) continue;
+      if (info->state == cpu::ThreadDebugInfo::State::kExited ||
+          info->state == cpu::ThreadDebugInfo::State::kZombie) {
+        continue;
+      }
+      ThreadSnapshot snap;
+      snap.thread_id = info->thread_id;
+      snap.alive = true;
+      snap.suspended = info->suspended;
+      const cpu::ppc::PPCContext* ctx = nullptr;
+      if (can_pause_debug) {
+        ctx = &info->guest_context;
+      } else if (info->thread->thread_state() && info->thread->thread_state()->context()) {
+        // Headless fallback without a stack walker: sample directly from the
+        // live PPC context. Guest PC is not available here, so it remains 0.
+        ctx = info->thread->thread_state()->context();
+      }
+      if (!ctx) continue;
+      for (size_t i = 0; i < 32; ++i) {
+        snap.gpr[i] = static_cast<uint32_t>(ctx->r[i]);
+      }
+      snap.lr = static_cast<uint32_t>(ctx->lr);
+      snap.ctr = static_cast<uint32_t>(ctx->ctr);
+      snap.cr = static_cast<uint32_t>(ctx->cr());
+      snap.xer = (ctx->xer_ca ? (1u << 29) : 0) | (ctx->xer_ov ? (1u << 30) : 0) |
+                 (ctx->xer_so ? (1u << 31) : 0);
+      snap.fpscr = ctx->fpscr.value;
+      if (can_pause_debug) {
+        for (const auto& frame : info->frames) {
+          if (frame.guest_pc) {
+            snap.pc = frame.guest_pc;
+            break;
+          }
+        }
+      }
+      next.emplace(snap.thread_id, std::move(snap));
+    }
+
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    snapshots_ = std::move(next);
+    snapshots_valid_ = true;
+    if (!selected_thread_id_ || !snapshots_.count(selected_thread_id_)) {
+      auto plausible_sp = [](const ThreadSnapshot& s) {
+        uint32_t sp = s.gpr[1];
+        return (sp & 3) == 0 && sp >= 0x00010000u && sp < 0x80000000u;
+      };
+      for (const auto& kv : snapshots_) {
+        if (kv.second.suspended) {
+          selected_thread_id_ = kv.first;
+          return;
+        }
+      }
+      for (const auto& kv : snapshots_) {
+        if (plausible_sp(kv.second) && kv.second.pc) {
+          selected_thread_id_ = kv.first;
+          return;
+        }
+      }
+      for (const auto& kv : snapshots_) {
+        if (plausible_sp(kv.second) && kv.second.lr) {
+          selected_thread_id_ = kv.first;
+          return;
+        }
+      }
+      for (const auto& kv : snapshots_) {
+        if (plausible_sp(kv.second)) {
+          selected_thread_id_ = kv.first;
+          return;
+        }
+      }
+      for (const auto& kv : snapshots_) {
+        if (kv.second.pc || kv.second.lr) {
+          selected_thread_id_ = kv.first;
+          return;
+        }
+      }
+      if (!snapshots_.empty()) {
+        selected_thread_id_ = snapshots_.begin()->first;
+      }
+    }
+  }
+
+  const ThreadSnapshot* SelectedSnapshotLocked() const {
+    if (selected_thread_id_) {
+      auto it = snapshots_.find(selected_thread_id_);
+      if (it != snapshots_.end()) return &it->second;
+    }
+    if (!snapshots_.empty()) return &snapshots_.begin()->second;
+    return nullptr;
+  }
+
+  std::string ReadAllRegistersPacket() {
+    if (!EnsureSnapshotsForDebugRead()) return "E10";
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    const ThreadSnapshot* snap = SelectedSnapshotLocked();
+    if (!snap) return "E10";
+    std::string out;
+    out.reserve((32 + 7) * 8);
+    for (uint32_t v : snap->gpr) {
+      xe::debug::dc3_gdb_rsp::AppendBe32Hex(out, v);
+    }
+    xe::debug::dc3_gdb_rsp::AppendBe32Hex(out, snap->pc);
+    xe::debug::dc3_gdb_rsp::AppendBe32Hex(out, 0);  // msr
+    xe::debug::dc3_gdb_rsp::AppendBe32Hex(out, snap->cr);
+    xe::debug::dc3_gdb_rsp::AppendBe32Hex(out, snap->lr);
+    xe::debug::dc3_gdb_rsp::AppendBe32Hex(out, snap->ctr);
+    xe::debug::dc3_gdb_rsp::AppendBe32Hex(out, snap->xer);
+    xe::debug::dc3_gdb_rsp::AppendBe32Hex(out, snap->fpscr);
+    return out;
+  }
+
+  std::string ReadSingleRegisterPacket(const std::string& reg_hex) {
+    uint32_t regno = 0;
+    if (!ParseHexU32(reg_hex, regno)) return "E11";
+    if (!EnsureSnapshotsForDebugRead()) return "E12";
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    const ThreadSnapshot* snap = SelectedSnapshotLocked();
+    if (!snap) return "E12";
+    uint32_t value = 0;
+    if (regno < 32) {
+      value = snap->gpr[regno];
+    } else {
+      switch (regno) {
+        case 32:
+          value = snap->pc;
+          break;
+        case 33:
+          value = 0;
+          break;
+        case 34:
+          value = snap->cr;
+          break;
+        case 35:
+          value = snap->lr;
+          break;
+        case 36:
+          value = snap->ctr;
+          break;
+        case 37:
+          value = snap->xer;
+          break;
+        case 38:
+          value = snap->fpscr;
+          break;
+        default:
+          return "E13";
+      }
+    }
+    std::string out;
+    xe::debug::dc3_gdb_rsp::AppendBe32Hex(out, value);
+    return out;
+  }
+
+  bool IsReadableGuestRange(uint32_t addr, size_t size) const {
+    if (!size) return true;
+    uint64_t end = uint64_t(addr) + uint64_t(size) - 1;
+    if (end > 0xFFFFFFFFull) return false;
+    // Memory page protection isn't exposed via xe::Memory; MVP only bounds
+    // checks the range and relies on expected code/data accesses from GDB.
+    return true;
+  }
+
+  std::string ReadMemoryPacket(const std::string& args) {
+    auto comma = args.find(',');
+    if (comma == std::string::npos) return "E01";
+    uint32_t addr = 0;
+    size_t length = 0;
+    if (!ParseHexU32(args.substr(0, comma), addr) ||
+        !ParseHexSize(args.substr(comma + 1), length)) {
+      return "E01";
+    }
+    if (length > 0x1000) {
+      length = 0x1000;
+    }
+    if (!IsReadableGuestRange(addr, length)) return "E02";
+    auto* p = processor_->memory()->TranslateVirtual<const uint8_t*>(addr);
+    std::string out;
+    out.reserve(length * 2);
+    for (size_t i = 0; i < length; ++i) {
+      xe::debug::dc3_gdb_rsp::AppendHexByte(out, p[i]);
+    }
+    return out;
+  }
+
+  std::string HandleBreakpointPacket(const std::string& pkt) {
+    bool add = pkt[0] == 'Z';
+    auto first_comma = pkt.find(',');
+    auto second_comma = pkt.find(',', first_comma + 1);
+    if (first_comma == std::string::npos || second_comma == std::string::npos) {
+      return "E03";
+    }
+    uint32_t addr = 0;
+    if (!ParseHexU32(pkt.substr(first_comma + 1, second_comma - first_comma - 1),
+                     addr)) {
+      return "E03";
+    }
+    if (add) {
+      return AddGuestBreakpoint(addr) ? "OK" : "E04";
+    }
+    RemoveGuestBreakpoint(addr);
+    return "OK";
+  }
+
+  bool AddGuestBreakpoint(uint32_t addr) {
+    if (!CanUsePauseDebugOps()) {
+      LogNoStackWalkerOnce();
+      return false;
+    }
+    std::lock_guard<std::mutex> lock(bp_mutex_);
+    if (guest_breakpoints_.count(addr)) return true;
+    auto bp = std::make_unique<cpu::Breakpoint>(
+        processor_, cpu::Breakpoint::AddressType::kGuest, addr,
+        [this](cpu::Breakpoint* breakpoint, cpu::ThreadDebugInfo* thread_info,
+               uint64_t /*host_pc*/) {
+          std::lock_guard<std::mutex> state_lock(state_mutex_);
+          if (thread_info) {
+            selected_thread_id_ = thread_info->thread_id;
+          }
+          if (breakpoint) {
+            last_break_guest_pc_ = breakpoint->guest_address();
+          }
+          last_signal_ = "S05";
+        });
+    processor_->AddBreakpoint(bp.get());
+    guest_breakpoints_.emplace(addr, std::move(bp));
+    return true;
+  }
+
+  void RemoveGuestBreakpoint(uint32_t addr) {
+    std::lock_guard<std::mutex> lock(bp_mutex_);
+    auto it = guest_breakpoints_.find(addr);
+    if (it == guest_breakpoints_.end()) return;
+    processor_->RemoveBreakpoint(it->second.get());
+    guest_breakpoints_.erase(it);
+  }
+
+  void ClearAllBreakpoints() {
+    std::lock_guard<std::mutex> lock(bp_mutex_);
+    for (auto& it : guest_breakpoints_) {
+      processor_->RemoveBreakpoint(it.second.get());
+    }
+    guest_breakpoints_.clear();
+  }
+
+  std::string HandleVCont(const std::string& args) {
+    if (args.empty()) return "";
+    // MVP: honor the first action only, ignore thread suffixes.
+    char action = args[0];
+    if (action == 'c') return ContinueOrStep(false);
+    if (action == 's') return ContinueOrStep(true);
+    return "";
+  }
+
+  cpu::Processor* processor_ = nullptr;
+
+  std::thread server_thread_;
+  int listen_fd_ = -1;
+  int client_fd_ = -1;
+  bool no_ack_mode_ = false;
+
+  mutable std::mutex state_mutex_;
+  std::condition_variable state_cv_;
+  bool stop_requested_ = false;
+  bool detached_ = false;
+  bool paused_ = false;
+  bool ended_ = false;
+  bool snapshots_valid_ = false;
+  bool warned_no_stack_walker_ = false;
+  uint64_t stop_epoch_ = 0;
+  std::string last_signal_ = "S05";
+  uint32_t selected_thread_id_ = 0;
+  uint32_t last_break_guest_pc_ = 0;
+  std::map<uint32_t, ThreadSnapshot> snapshots_;
+  std::string target_xml_;
+
+  std::mutex bp_mutex_;
+  std::map<uint32_t, std::unique_ptr<cpu::Breakpoint>> guest_breakpoints_;
+};
+
+#else
+
+class Dc3GdbRspHeadlessListener : public cpu::DebugListener {
+ public:
+  void OnFocus() override {}
+  void OnDetached() override {}
+  void OnExecutionPaused() override {}
+  void OnExecutionContinued() override {}
+  void OnExecutionEnded() override {}
+  void OnStepCompleted(cpu::ThreadDebugInfo*) override {}
+  void OnBreakpointHit(cpu::Breakpoint*, cpu::ThreadDebugInfo*) override {}
+};
+
+#endif  // __linux__
+
 EmulatorHeadless::EmulatorHeadless(Emulator* emulator)
     : emulator_(emulator),
       emulator_thread_quit_requested_(false),
       emulator_thread_event_(nullptr) {}
 
 EmulatorHeadless::~EmulatorHeadless() {
+  if (emulator_ && emulator_->processor() &&
+      emulator_->processor()->debug_listener() == dc3_gdb_rsp_listener_.get()) {
+    emulator_->processor()->set_debug_listener(nullptr);
+  }
+  dc3_gdb_rsp_listener_.reset();
+
   // Shutdown emulator thread
   emulator_thread_quit_requested_.store(true, std::memory_order_relaxed);
   if (emulator_thread_event_) {
@@ -98,6 +896,18 @@ bool EmulatorHeadless::Initialize(AudioSystemFactory audio_factory,
   XELOGI("  GPU: null");
   XELOGI("  APU: nop");
   XELOGI("  HID: nop");
+
+  if (cvars::dc3_gdb_rsp_stub) {
+#ifdef __linux__
+    dc3_gdb_rsp_listener_ =
+        std::make_unique<Dc3GdbRspHeadlessListener>(emulator_->processor());
+    emulator_->processor()->set_debug_listener(dc3_gdb_rsp_listener_.get());
+    XELOGI("DC3 headless RSP stub enabled ({}:{})", cvars::dc3_gdb_rsp_host,
+           cvars::dc3_gdb_rsp_port);
+#else
+    XELOGW("dc3_gdb_rsp_stub is only implemented for Linux in xenia-headless");
+#endif
+  }
 
   return true;
 }
@@ -207,6 +1017,44 @@ void EmulatorHeadless::RunWithTimeout(int32_t timeout_ms) {
           fprintf(stderr, "  Thread %d: LR=0x%08X [%s] SP=0x%08X\n",
                   thread->thread_id(), lr, lr_name.c_str(), sp);
           fflush(stderr);
+          // Generic stack frame walk for active threads (nonzero LR), once only
+          static uint32_t walked_threads = 0;
+          uint32_t tid_bit = 1u << (thread->thread_id() & 31);
+          if (lr != 0 && !(walked_threads & tid_bit) && emulator_->memory()) {
+            walked_threads |= tid_bit;
+            auto* mem_walk = emulator_->memory();
+            fprintf(stderr, "    Stack frame walk:\n");
+            uint32_t frame_sp = sp;
+            for (int fi = 0; fi < 16; ++fi) {
+              if (frame_sp < 0x70000000 || frame_sp >= 0x80000000) break;
+              auto* p_frame = mem_walk->TranslateVirtual(frame_sp);
+              if (!p_frame) break;
+              uint32_t back_sp = xe::load_and_swap<uint32_t>(p_frame);
+              // Saved LR is at back_sp + 4 (PPC ABI: LR save area at sp+4 in caller's frame)
+              // But in the PPC calling convention, LR is saved by the callee at caller_sp+4
+              // So we read saved_lr from frame_sp + some offset. Typically at sp+N where
+              // the function stored mflr r0; stw r0, N(r1). On Xbox 360, LR is usually
+              // saved at offset 0x04 relative to the *caller's* frame pointer (back chain).
+              uint32_t saved_lr = 0;
+              if (back_sp >= 0x70000000 && back_sp < 0x80000000) {
+                auto* p_back = mem_walk->TranslateVirtual(back_sp);
+                if (p_back) {
+                  // LR save word is at back_sp + 4 in Xbox 360 PPC ABI
+                  saved_lr = xe::load_and_swap<uint32_t>(p_back + 4);
+                }
+              }
+              std::string fn_name = "";
+              if (processor && saved_lr >= 0x82000000) {
+                auto* fn = processor->QueryFunction(saved_lr);
+                if (fn) fn_name = fn->name();
+              }
+              fprintf(stderr, "      [%2d] sp=0x%08X -> 0x%08X  LR=0x%08X [%s]\n",
+                      fi, frame_sp, back_sp, saved_lr, fn_name.c_str());
+              if (!back_sp || back_sp <= frame_sp || back_sp >= 0x80000000) break;
+              frame_sp = back_sp;
+            }
+            fflush(stderr);
+          }
           // For the main game thread, dump key registers to help debug guest code spins
           if (thread->thread_id() == 6) {
             uint32_t ctr = (uint32_t)ppc_ctx->ctr;
@@ -454,32 +1302,9 @@ void EmulatorHeadless::RunWithTimeout(int32_t timeout_ms) {
             // Dump IAT and thunk code for RtlEnterCriticalSection
             auto* mem2 = emulator_->memory();
             if (mem2) {
-              // Decomp bring-up experiment: patch a late-populated helper that
-              // is entered with SP=0 and faults in its prologue at 0x8311B8E4.
-              // This address is zero during launch-time hack-pack application,
-              // so apply a one-shot runtime stub here only after it materializes.
-              {
-                static bool patched_sp0_helper = false;
-                constexpr uint32_t kSp0HelperAddr = 0x8311B8E0;
-                if (!patched_sp0_helper) {
-                  auto* p = mem2->TranslateVirtual(kSp0HelperAddr);
-                  auto* heap = mem2->LookupHeap(kSp0HelperAddr);
-                  if (p && heap) {
-                    uint32_t w0 = xe::load_and_swap<uint32_t>(p + 0);
-                    uint32_t w1 = xe::load_and_swap<uint32_t>(p + 4);
-                    if (w0 != 0 && !(w0 == 0x38600000 && w1 == 0x4E800020)) {
-                      heap->Protect(kSp0HelperAddr, 8,
-                                    kMemoryProtectRead | kMemoryProtectWrite);
-                      xe::store_and_swap<uint32_t>(p + 0, 0x38600000);  // li r3,0
-                      xe::store_and_swap<uint32_t>(p + 4, 0x4E800020);  // blr
-                      patched_sp0_helper = true;
-                      fprintf(stderr,
-                              "    [dc3-debug] Patched late helper 0x%08X to li r3,0; blr\n",
-                              kSp0HelperAddr);
-                    }
-                  }
-                }
-              }
+              // NOTE: SP=0 helper patch DISABLED -- address 0x8311B8E0 is stale
+              // after dc3-decomp relink (now falls inside SleepEx). Re-enable
+              // only if the SP=0 fault recurs at a new address.
               auto* iat_ptr = mem2->TranslateVirtual(0x823996E8);
               if (iat_ptr) {
                 uint32_t iat_val = xe::load_and_swap<uint32_t>(iat_ptr);
@@ -525,33 +1350,33 @@ void EmulatorHeadless::RunWithTimeout(int32_t timeout_ms) {
               };
               static const FnProbe probes[] = {
                 // CRT entry pipeline
-                {0x8302c4d0, "mainCRTStartup"},
-                {0x8241e708, "main()"},
-                {0x82f1c284, "App::App()"},
+                {0x8311ab84, "mainCRTStartup"},
+                {0x82463b60, "main()"},
+                {0x8300d43c, "App::App()"},
                 // Init functions called by App::App
-                {0x832d39e4, "DxRnd::PreInit"},
-                {0x83479d1c, "SystemInit"},
-                {0x83501820, "DataInit"},
-                {0x830672f0, "ObjectDir::PreInit"},
-                {0x83064ac0, "ObjectDir::Init"},
-                {0x8334a3f0, "FileInit"},
-                {0x83372080, "LoadMgr::Init"},
-                {0x832d3cd4, "DxRnd::Init"},
-                {0x83364bf4, "UIManager::Init"},
-                {0x83362660, "UIManager ctor"},
+                {0x833a3c74, "DxRnd::PreInit"},
+                {0x835182f8, "SystemInit"},
+                {0x82ae9d48, "DataInit"},
+                {0x83154278, "ObjectDir::PreInit"},
+                {0x83151a48, "ObjectDir::Init"},
+                {0x83413dbc, "FileInit"},
+                {0x8343b98c, "LoadMgr::Init"},
+                {0x833a3f64, "DxRnd::Init"},
+                {0x8342e508, "UIManager::Init"},
+                {0x8342bf88, "UIManager ctor"},
                 // App main loop
-                {0x82f1cb14, "App::Run()"},
-                {0x82f1b13c, "RunWithoutDbg"},
-                {0x82f1a0b8, "App::DrawRegular"},
-                {0x82f1a070, "MainThread"},
+                {0x8300dccc, "App::Run()"},
+                {0x8300c2f4, "RunWithoutDbg"},
+                {0x8300ad30, "App::DrawRegular"},
+                {0x8300b228, "MainThread"},
                 // Present pipeline
-                {0x832cfa20, "DxRnd::Present"},
-                {0x82f2abd8, "Game::PostUpdate"},
-                {0x8378ac44, "D3DDevice_Swap"},
+                {0x8339fcb0, "DxRnd::Present"},
+                {0x8301bd90, "Game::PostUpdate"},
+                {0x837ea5c0, "D3DDevice_Swap"},
                 // Current decomp-only loop / telemetry hotspots
-                {0x838e15c8, "PIXAddPixOpWithData"},
-                {0x82910400, "NavListSortMgr::ClearHeaders"},
-                {0x82910450, "NavListSortMgr::GetFirstChildSymbolFromHeaderSymbol"},
+                {0x83940f44, "PIXAddPixOpWithData"},
+                {0x8256ef00, "NavListSortMgr::ClearHeaders"},
+                {0x8256f020, "NavListSortMgr::GetFirstChildSymbolFromHeaderSymbol"},
               };
               fprintf(stderr, "    Function probes (present pipeline):\n");
               for (const auto& p : probes) {
@@ -756,6 +1581,27 @@ void EmulatorHeadless::RunWithTimeout(int32_t timeout_ms) {
                 uint32_t instr = xe::load_and_swap<uint32_t>(cip);
                 fprintf(stderr, "      0x%08X: %08X%s\n",
                         addr, instr, (addr == lr) ? "  <-- LR" : "");
+              }
+            }
+            // Verify XAUDIO2 stubs are still in guest memory
+            {
+              struct { uint32_t addr; const char* name; } stubs[] = {
+                {0x8340E198, "CX2SourceVoice::Initialize"},
+                {0x8340E578, "CX2SourceVoice::Start"},
+                {0x8340E6CC, "CX2SourceVoice::Stop"},
+              };
+              for (const auto& s : stubs) {
+                auto* sp = mem2->TranslateVirtual(s.addr);
+                if (sp) {
+                  uint32_t w0 = xe::load_and_swap<uint32_t>(sp);
+                  uint32_t w1 = xe::load_and_swap<uint32_t>(
+                      reinterpret_cast<const uint8_t*>(sp) + 4);
+                  bool is_stub = (w0 == 0x38600000 && w1 == 0x4E800020);
+                  fprintf(stderr,
+                      "    Stub@0x%08X %-30s: %08X %08X %s\n",
+                      s.addr, s.name, w0, w1,
+                      is_stub ? "OK (li r3,0; blr)" : "*** NOT STUBBED ***");
+                }
               }
             }
             // Dump linked list at XapiThreadNotifyRoutineList (from MAP)

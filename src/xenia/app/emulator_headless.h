@@ -24,6 +24,8 @@
 namespace xe {
 namespace app {
 
+class Dc3GdbRspHeadlessListener;
+
 // Headless emulator wrapper - runs Xenia without any UI dependencies.
 // Uses null/nop backends for GPU/APU/HID.
 class EmulatorHeadless {
@@ -75,6 +77,7 @@ class EmulatorHeadless {
 
   bool boot_reporting_enabled_ = false;
   bool module_reporting_enabled_ = false;
+  std::unique_ptr<Dc3GdbRspHeadlessListener> dc3_gdb_rsp_listener_;
 };
 
 }  // namespace app

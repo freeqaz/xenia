@@ -315,3 +315,197 @@ If thunk memory is all zeros, the import was not properly resolved.
 | `src/xenia/base/exception_handler_posix.cc` | SIGSEGV handler |
 | `src/xenia/base/memory_posix.cc` | AllocFixed (mprotect/mmap) |
 | `src/xenia/app/emulator_headless.cc` | Headless runner, thread status reports |
+
+---
+
+## 9. Tooling Runbook (Post-Debugging Leverage Loop)
+
+This is the preferred workflow now that the DC3 tooling stack exists. Use the
+lowest-friction tool first, and only escalate to interactive debugging when the
+artifacts stop being informative.
+
+### A. Default daily loop: parity gate + symbolized artifacts
+
+Run the parity gate with symbolization/triage enabled so failures produce
+usable artifacts in one pass.
+
+```bash
+DC3_PARITY_SYMBOLIZE=1 \
+DC3_PARITY_TRIAGE=1 \
+DC3_DECOMP_SYMBOL_MAP_PATH=/home/free/code/milohax/dc3-decomp/config/373307D9/symbols.txt \
+../xenia/tools/dc3_runtime_parity_gate.sh
+```
+
+What you get (success or failure path):
+- symbolized telemetry diff (`orig` vs `decomp`)
+- crash triage artifacts (`orig_crash_triage.*`, `decomp_crash_triage.*`)
+- crash disasm artifacts around `PC/LR/CTR` when crash tuples are present
+- milestone contract verdict (`PASS/WARN/FAIL`) + CRT impact hints
+
+Probe hygiene (important after relinks):
+- Prefer `build/373307D9/default.map` for global-object and CRT-constructor slot work.
+- `config/373307D9/symbols.txt` is fine for most `.text` symbolization, but it can lag relinks and mislead hardcoded object/constructor probes.
+
+Use this first for:
+- regressions after decomp relinks
+- constructor skip / resolver changes
+- “works but boots differently” cases
+
+### B. Fast crash inspection: log -> symbolized guest disasm
+
+Use `dc3_guest_disasm.py` when you already have a headless log and want
+immediate symbolized context around a crash.
+
+```bash
+python3 ../xenia/tools/dc3_guest_disasm.py \
+  --image ../dc3-decomp/build/373307D9/default.exe \
+  --symbols ../dc3-decomp/config/373307D9/symbols.txt \
+  --xenia-log ../xenia/xenia-headless.log
+```
+
+Use this when:
+- parity artifacts already point at a crash site
+- you want to classify “bad return / data-as-code / bad prologue” quickly
+- you need a disasm snippet to compare against decomp source
+
+### C. Structured crash labeling before manual investigation
+
+Use `dc3_crash_signature_triage.py` when multiple runs are failing in different
+ways and you want to bucket them before deeper work.
+
+```bash
+python3 ../xenia/tools/dc3_crash_signature_triage.py \
+  --log ../xenia/xenia-headless.log \
+  --image ../dc3-decomp/build/373307D9/default.xex \
+  --symbols ../dc3-decomp/config/373307D9/symbols.txt
+```
+
+This is especially useful for recurring patterns:
+- invalid SP / stack-underflow-prologue
+- non-text PC (data-as-code)
+- trap-loop / invalid-parameter paths
+
+### D. Escalate to repeatable runtime probe: trace-on-break
+
+When parity/disasm says “the divergence is near X” but root cause is still
+unclear, use the headless trace-on-break wrapper.
+
+```bash
+DC3_TRACE_BREAK_PC=0x835B3D5C \
+DC3_TRACE_SYMBOLS_PATH=/home/free/code/milohax/dc3-decomp/config/373307D9/symbols.txt \
+../xenia/tools/dc3_trace_on_break.sh
+```
+
+This captures:
+- run log
+- optional runtime telemetry JSONL
+- optional function trace data
+- tracer lines (`t>`) if present
+- symbolized break/crash disasm artifacts
+
+Use this before interactive debugging whenever the issue can be isolated to a
+known PC / return path / trap site.
+
+### D2. DTB / config parse debugging (non-invasive first)
+
+When investigating `DataFile` / `ReadCacheStream` / `gSystemConfig` issues:
+
+1. Start with the default boot path (no invasive stream shims).
+2. Use `default.map` to refresh any relink-sensitive globals/constructors before trusting old probes.
+3. Only enable the `ReadCacheStream` step override in a dedicated probe run.
+
+Why:
+- The step-by-step `ReadCacheStream` override performs extra `ReadImpl` + `Seek`
+  diagnostics and can perturb checksum/parser behavior.
+- It is now **opt-in** via:
+  - `--dc3_debug_read_cache_stream_step_override=true`
+- Implementation note:
+  - The restored probe is implemented with invasive `BufStream::ReadImpl` /
+    `BufStream::SeekImpl` host overrides (not a literal `ReadCacheStream`
+    call-through wrapper, which Xenia's guest extern override API cannot do).
+  - It emits `DC3:RCS ...` logs when the DTB read path is reached.
+  - It cannot invoke the guest checksum validator `Update()` method from the
+    host override, so checksum validation may fail in probe runs.
+
+Recommended sequence:
+
+```bash
+# 1) Normal (non-invasive) run first
+../xenia/build/bin/Linux/Checked/xenia-headless \
+  --target=../dc3-decomp/build/373307D9/default.xex
+
+# 2) Invasive DTB probe only when needed
+../xenia/build/bin/Linux/Checked/xenia-headless \
+  --target=../dc3-decomp/build/373307D9/default.xex \
+  --dc3_debug_read_cache_stream_step_override=true
+```
+
+Interpretation tips:
+- If the invasive run shows parse garbage (`Unrecognized node type`) but the
+  normal run does not, treat that as probe interference, not proof of a runtime
+  parser bug.
+- If `gSystemConfig` is empty (`size=0`), check relink-sensitive globals (for
+  example the `gConditional` STL sentinel stopgap) against the fresh
+  `build/373307D9/default.map`.
+
+### D3. Temporary progression bypasses (MemMgr / FindArray) - use explicitly
+
+These are debugging/progression tools and should stay **off** in baseline runs.
+
+MemMgr assert `nop` bypass (default off):
+- `--dc3_debug_memmgr_assert_nop_bypass=true`
+- Purpose: temporarily bypass selected `Debug::Fail` callsites in `MemInit` /
+  `MemAlloc` so runtime can progress past known downstream assertion blockers.
+- Safety: the patch code now validates expected instruction words before writing
+  `nop`; if addresses drift, it logs a warning and skips patching.
+- Caveat: this can mask real data/config corruption. Use it to progress, then
+  return to a non-bypass run for correctness checks.
+
+`DataArray::FindArray(Symbol,bool)` debug override (default off):
+- `--dc3_debug_findarray_override_mode=off|log_only|stub_on_fail|null_on_fail`
+- Recommended sequence:
+  1. `off` (baseline correctness)
+  2. `stub_on_fail` (progression when null-deref cascades block later systems)
+  3. `null_on_fail` (A/B behavior check versus stub returns)
+- `log_only` note: call-through logging is not implemented in the current
+  override API path, so `log_only` leaves original behavior active and only logs
+  a startup note.
+
+CRT constructor table caveat (relinks / stale manifests):
+- If CRT sanitizer logs a mismatch between patch-manifest sentinels and map
+  values, trust the fresh `build/373307D9/default.map`.
+- A stale manifest can make `CRT[69]` look corrupted even when the decomp build
+  is fine; this can re-break `TheDebug` constructor debugging path.
+
+### E. Interactive debugging (Phase 4): choose the right path
+
+1. **Snapshot-backed (stable, currently most reliable)**
+   - Use `tools/dc3_gdb_rsp_snapshot_bridge.sh` + `tools/dc3_gdb_rsp_mvp_mock.py`
+   - Best for postmortem register/memory inspection without live timing issues
+
+2. **Live headless in-process RSP MVP (Linux, experimental)**
+   - Enable in `xenia-headless`:
+   ```bash
+   ../xenia/build/bin/Linux/Checked/xenia-headless \
+     --target=../dc3-decomp/build/373307D9/default.xex \
+     --store_all_context_values=true \
+     --dc3_gdb_rsp_stub=true \
+     --dc3_gdb_rsp_port=9001 \
+     --dc3_gdb_rsp_prelaunch_sleep_ms=5000 \
+     --headless_timeout_ms=30000
+   ```
+   - `--dc3_gdb_rsp_prelaunch_sleep_ms` creates a deterministic attach window
+   - Current status:
+     - live in-process attach + register snapshot fallback + guest memory reads + detach validated
+     - if the headless build lacks a stack walker, live pause/step/software breakpoints are disabled (fallback mode keeps the stub stable instead of crashing)
+
+### F. When to prefer which tool (decision rule)
+
+- `parity gate` first: almost always
+- `guest_disasm` next: any crash site needs symbolized context
+- `crash triage` next: repeated failures / multiple signatures
+- `trace-on-break` next: known suspect PC but unclear cause
+- `RSP mock / live RSP` last: only when scriptable artifacts are insufficient
+
+This ordering keeps decomp iteration fast and minimizes time spent in manual
+debugger sessions.

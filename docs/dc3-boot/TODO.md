@@ -1,6 +1,6 @@
 # TODO: DC3 Boot Progression
 
-*Last updated: 2026-02-23 (Iteration 3, Thread 6 alive, tracing VdSwap blocker)*
+*Last updated: 2026-02-24 (Iteration 3+, tooling workflow upgrades for parity/triage)*
 
 Items are ordered by priority. Check off as completed. Add new items each iteration.
 
@@ -93,6 +93,42 @@ Items are ordered by priority. Check off as completed. Add new items each iterat
   - Implemented `tools/dc3_runtime_telemetry_diff.py`
   - Ranks decomp-vs-original deltas for override hits, unresolved stubs, and hot-loop PCs
   - Tolerates partial/crashed runs (missing `dc3_summary`) and still emits useful diffs
+
+- [x] **Add guest crash/disasm helper (symbolized `PC/LR/CTR`)** [xenia] ✓ Session 21
+  - Implemented `tools/dc3_guest_disasm.py`
+  - Supports `--xenia-log` crash tuple extraction and XEX/PE/raw image inputs
+  - Used by parity/trace tooling for postmortem artifacts
+
+- [x] **Auto-triage common DC3 crash signatures** [xenia] ✓ Session 21
+  - Implemented `tools/dc3_crash_signature_triage.py`
+  - Labels invalid-SP / stack-underflow-prologue / trap-loop patterns from headless logs
+  - Wired into parity gate artifact output (`orig` + `decomp`)
+
+- [x] **Trace-on-break headless workflow wrapper** [xenia] ✓ Session 21
+  - Implemented `tools/dc3_trace_on_break.sh`
+  - Standardizes `--break_on_instruction` runs with telemetry + postmortem disasm outputs
+
+- [x] **Milestone contract verdict + CRT impact triage in parity gate** [xenia] ✓ Session 21
+  - Parity gate now prints milestone `PASS/WARN/FAIL` verdict (configurable policy)
+  - Adds CRT-vs-milestone comparison summary to support constructor-impact prioritization
+
+- [~] **GDB RSP Phase A protocol groundwork** [xenia] (in progress, Session 21)
+  - Added `tools/dc3_gdb_rsp_mvp_mock.py` (crash-snapshot-backed mock server)
+  - Added `tools/dc3_gdb_rsp_snapshot_bridge.sh` (one-command snapshot->RSP mock->GDB attach workflow)
+  - Added Xenia-side structured crash snapshot output (`--dc3_crash_snapshot_path`) for tool-friendly postmortem inputs
+  - Added Linux `xenia-headless` in-process RSP MVP listener (`--dc3_gdb_rsp_stub`) with Phase-A packet subset wired to `cpu::Processor` debugger APIs (Session 22)
+  - Live smoke validated (Session 22): real `powerpc-none-eabi-gdb` attach + register snapshot fallback + guest memory read + detach on in-process headless stub
+  - Current limit: headless build has no stack walker, so live pause/step/software breakpoints are disabled in fallback mode
+  - Next: validate stack-walker-enabled `Pause`/`c`/`s`/`Z0` flow in a build/config with debugger pause support, then move the packet engine out of headless-only code into reusable Xenia-side guest-stub plumbing
+
+- [ ] **Harden relink-sensitive DC3 stopgaps / probes** [xenia]
+  - Replace or resolver-back the remaining hardcoded global addresses in `dc3_hack_pack.cc` where practical (example: `gConditional` sentinel currently requires fresh `default.map` refresh after relinks)
+  - Keep invasive `ReadCacheStream` step override off by default (done) and split it into safer sub-modes if deeper DTB debugging is needed (`safe state log` vs `extra ReadImpl/Seek` perturbing probe)
+  - Current restored RCS probe uses invasive `BufStream::ReadImpl/SeekImpl` overrides; investigate a lower-perturbation DTB probe path that preserves guest checksum-validator updates
+  - Document any future relink-sensitive globals in `DEBUGGING_TIPS.md` with fresh-map lookup steps
+  - Restore patch-manifest CRT sentinel freshness/validation so the CRT sanitizer can trust manifest values again (current recovery path uses map-synced constants when manifest is stale)
+  - Replace temporary hardcoded MemMgr assert bypass addresses with manifest/symbol-backed resolution if the bypass remains needed for debugging
+  - Add a true call-through `FindArray` logging path (current `log_only` mode intentionally leaves original behavior active without per-call logs)
 
 ### Tier 2: Reduce unresolved symbols (high leverage)
 

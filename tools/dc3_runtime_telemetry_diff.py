@@ -58,7 +58,7 @@ class SymbolIndex:
 
 
 _SYMBOL_RE = re.compile(
-    r"^(?P<name>.+?) = \.text:0x(?P<addr>[0-9A-Fa-f]+); .*?size:0x(?P<size>[0-9A-Fa-f]+)\b"
+    r"^(?P<name>.+?) = (?P<section>\.[^:]+):0x(?P<addr>[0-9A-Fa-f]+); .*?(?:size:0x(?P<size>[0-9A-Fa-f]+))?\b"
 )
 
 
@@ -74,9 +74,9 @@ def load_symbol_index(path: Path | None) -> SymbolIndex | None:
                     continue
                 name = m.group("name")
                 start = int(m.group("addr"), 16)
-                size = int(m.group("size"), 16)
+                size = int(m.group("size"), 16) if m.group("size") else 1
                 if size <= 0:
-                    continue
+                    size = 1
                 idx.starts.append(start)
                 idx.rows.append((start, start + size, name))
     except FileNotFoundError:
@@ -186,6 +186,96 @@ def top_delta(
     return rows[:top]
 
 
+def _is_nullish_addr(addr_text: str) -> bool:
+    return str(addr_text) in ("None", "0", "00000000")
+
+
+def _symbolize_addr(addr_text: str, syms: SymbolIndex | None) -> str | None:
+    if syms is None or _is_nullish_addr(addr_text):
+        return None
+    return syms.lookup(str(addr_text))
+
+
+def _symbolize_addr_with_fallback(addr_text: str, syms: SymbolIndex | None) -> str:
+    sym = _symbolize_addr(addr_text, syms)
+    if sym:
+        return sym
+    return f"addr:{addr_text}"
+
+
+def _dual_symbol_text(addr_text: str, orig_syms: SymbolIndex | None, decomp_syms: SymbolIndex | None) -> str:
+    raw = f"addr:{addr_text}"
+    if _is_nullish_addr(addr_text):
+        return raw
+    o = _symbolize_addr(addr_text, orig_syms)
+    d = _symbolize_addr(addr_text, decomp_syms)
+    if o and d:
+        if o == d:
+            return f"{o} [{raw}]"
+        return f"orig:{o} | decomp:{d} [{raw}]"
+    if d:
+        return f"decomp:{d} [{raw}]"
+    if o:
+        return f"orig:{o} [{raw}]"
+    return raw
+
+
+def group_counter_keys(counter: Counter[Any], key_fn) -> Counter[Any]:
+    out: Counter[Any] = Counter()
+    for key, count in counter.items():
+        try:
+            mapped = key_fn(key)
+        except Exception:
+            mapped = str(key)
+        out[mapped] += int(count)
+    return out
+
+
+def build_symbolized_unresolved_target_counter(
+    tv: TelemetryView, syms: SymbolIndex | None
+) -> Counter[tuple[str, str]]:
+    return group_counter_keys(
+        tv.unresolved_hits,
+        lambda k: (k[0], _symbolize_addr_with_fallback(k[1], syms)),
+    )
+
+
+def build_symbolized_unresolved_caller_counter(
+    tv: TelemetryView, syms: SymbolIndex | None
+) -> Counter[tuple[str, str]]:
+    return group_counter_keys(
+        tv.unresolved_hits_by_callsite,
+        lambda k: (k[0], _symbolize_addr_with_fallback(k[2], syms)),
+    )
+
+
+def build_symbolized_unresolved_pair_counter(
+    tv: TelemetryView, syms: SymbolIndex | None
+) -> Counter[tuple[str, str, str]]:
+    return group_counter_keys(
+        tv.unresolved_hits_by_callsite,
+        lambda k: (
+            k[0],
+            _symbolize_addr_with_fallback(k[1], syms),
+            _symbolize_addr_with_fallback(k[2], syms),
+        ),
+    )
+
+
+def build_symbolized_hotloop_counter(tv: TelemetryView, syms: SymbolIndex | None) -> Counter[str]:
+    return group_counter_keys(tv.hot_loops, lambda k: _symbolize_addr_with_fallback(str(k), syms))
+
+
+def build_function_divergence_counter(tv: TelemetryView, syms: SymbolIndex | None) -> Counter[str]:
+    # Aggregates two high-value signals into a function-level ranking:
+    # hot-loop samples at PCs + unresolved stub hits grouped by caller function.
+    out: Counter[str] = Counter()
+    out.update(build_symbolized_hotloop_counter(tv, syms))
+    for (_reason, caller_fn), count in build_symbolized_unresolved_caller_counter(tv, syms).items():
+        out[caller_fn] += int(count)
+    return out
+
+
 def print_top_delta(
     title: str, rows: list[tuple[Any, int, int, int]], formatter
 ) -> None:
@@ -255,33 +345,60 @@ def main() -> int:
     print_top_delta(
         f"Top unresolved-call stub deltas (top={args.top}):",
         top_delta(orig.unresolved_hits, decomp.unresolved_hits, args.top),
-        lambda k: f"{k[0]}@{k[1]}",
+        lambda k: f"{k[0]}@{k[1]} ({_dual_symbol_text(k[1], orig_syms, decomp_syms)})",
     )
     print_top_delta(
         f"Top unresolved-call stub deltas by callsite (top={args.top}):",
         top_delta(orig.unresolved_hits_by_callsite, decomp.unresolved_hits_by_callsite, args.top),
         lambda k: (
-            f"{k[0]}@{k[1]} caller={k[2]}"
-            + (
-                f" ({decomp_syms.lookup(k[2])})"
-                if decomp_syms and k[2] not in ("None", "0", "00000000")
-                and decomp_syms.lookup(k[2])
-                else ""
-            )
+            f"{k[0]}@{k[1]} ({_dual_symbol_text(k[1], orig_syms, decomp_syms)}) "
+            f"caller={k[2]} ({_dual_symbol_text(k[2], orig_syms, decomp_syms)})"
         ),
     )
     print_top_delta(
         f"Top hot-loop PC deltas (top={args.top}):",
         top_delta(orig.hot_loops, decomp.hot_loops, args.top),
-        lambda k: (
-            str(k)
-            + (
-                f" ({decomp_syms.lookup(str(k))})"
-                if decomp_syms and str(k) not in ("None", "0", "00000000")
-                and decomp_syms.lookup(str(k))
-                else ""
-            )
-        ),
+        lambda k: f"{k} ({_dual_symbol_text(str(k), orig_syms, decomp_syms)})",
+    )
+
+    orig_un_target_sym = build_symbolized_unresolved_target_counter(orig, orig_syms)
+    dec_un_target_sym = build_symbolized_unresolved_target_counter(decomp, decomp_syms)
+    print_top_delta(
+        f"Top unresolved-call stub deltas by target function (symbolized, top={args.top}):",
+        top_delta(orig_un_target_sym, dec_un_target_sym, args.top),
+        lambda k: f"{k[0]} target={k[1]}",
+    )
+
+    orig_un_caller_sym = build_symbolized_unresolved_caller_counter(orig, orig_syms)
+    dec_un_caller_sym = build_symbolized_unresolved_caller_counter(decomp, decomp_syms)
+    print_top_delta(
+        f"Top unresolved-call stub deltas by caller function (symbolized, top={args.top}):",
+        top_delta(orig_un_caller_sym, dec_un_caller_sym, args.top),
+        lambda k: f"{k[0]} caller={k[1]}",
+    )
+
+    orig_un_pair_sym = build_symbolized_unresolved_pair_counter(orig, orig_syms)
+    dec_un_pair_sym = build_symbolized_unresolved_pair_counter(decomp, decomp_syms)
+    print_top_delta(
+        f"Top unresolved-call stub deltas by caller->target function pair (symbolized, top={args.top}):",
+        top_delta(orig_un_pair_sym, dec_un_pair_sym, args.top),
+        lambda k: f"{k[0]} caller={k[2]} -> target={k[1]}",
+    )
+
+    orig_hot_sym = build_symbolized_hotloop_counter(orig, orig_syms)
+    dec_hot_sym = build_symbolized_hotloop_counter(decomp, decomp_syms)
+    print_top_delta(
+        f"Top hot-loop deltas by function (symbolized, top={args.top}):",
+        top_delta(orig_hot_sym, dec_hot_sym, args.top),
+        lambda k: str(k),
+    )
+
+    orig_fn = build_function_divergence_counter(orig, orig_syms)
+    dec_fn = build_function_divergence_counter(decomp, decomp_syms)
+    print_top_delta(
+        f"Top divergent functions (aggregate hot-loop + unresolved-caller signals, top={args.top}):",
+        top_delta(orig_fn, dec_fn, args.top),
+        lambda k: str(k),
     )
 
     if orig.summary and decomp.summary:

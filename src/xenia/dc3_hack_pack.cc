@@ -1,6 +1,9 @@
 #include "xenia/dc3_hack_pack.h"
 
+#include <algorithm>
+#include <cstdio>
 #include <cstring>
+#include <sstream>
 #include <set>
 #include <string>
 
@@ -23,6 +26,9 @@
 DECLARE_int32(dc3_crt_bisect_max);
 DECLARE_string(dc3_crt_skip_indices);
 DECLARE_bool(dc3_crt_skip_nui);
+DECLARE_bool(dc3_debug_read_cache_stream_step_override);
+DECLARE_bool(dc3_debug_memmgr_assert_nop_bypass);
+DECLARE_string(dc3_debug_findarray_override_mode);
 DECLARE_bool(fake_kinect_data);
 
 namespace xe {
@@ -32,6 +38,182 @@ namespace {
 constexpr uint32_t kPpcLiR3_0 = 0x38600000;
 constexpr uint32_t kPpcBlr = 0x4E800020;
 static uint32_t g_dc3_errno_guest_ptr = 0;
+constexpr uint32_t kDc3RcsReadCacheStreamAddr = 0x83116664;
+constexpr uint32_t kDc3RcsBufStreamReadImplAddr = 0x82BC3AC8;
+constexpr uint32_t kDc3RcsBufStreamSeekImplAddr = 0x82BC3BC8;
+
+std::string Dc3FmtBytePreview(const uint8_t* data, size_t len) {
+  if (!data || !len) return "";
+  std::ostringstream os;
+  os << std::hex;
+  for (size_t i = 0; i < len; ++i) {
+    if (i) os << ' ';
+    char tmp[4];
+    std::snprintf(tmp, sizeof(tmp), "%02X", data[i]);
+    os << tmp;
+  }
+  return os.str();
+}
+
+void Dc3RcsBufStreamReadImplProbe(cpu::ppc::PPCContext* ppc_context,
+                                  kernel::KernelState* kernel_state) {
+  if (!ppc_context || !kernel_state) return;
+  auto* memory = kernel_state->memory();
+  if (!memory) return;
+
+  uint32_t this_ptr = static_cast<uint32_t>(ppc_context->r[3]);
+  uint32_t dst_ptr = static_cast<uint32_t>(ppc_context->r[4]);
+  int32_t req_bytes = static_cast<int32_t>(ppc_context->r[5]);
+  uint32_t lr = static_cast<uint32_t>(ppc_context->lr);
+
+  auto* bs = memory->TranslateVirtual<uint8_t*>(this_ptr);
+  if (!bs) {
+    static uint32_t bad_count = 0;
+    if (bad_count++ < 16) {
+      XELOGW("DC3:RCS ReadImpl translate fail this={:08X} dst={:08X} bytes={} "
+             "LR={:08X}",
+             this_ptr, dst_ptr, req_bytes, lr);
+    }
+    return;
+  }
+
+  uint32_t src_buf_ptr = xe::load_and_swap<uint32_t>(bs + 0x10);
+  bool fail = bs[0x14] != 0;
+  int32_t tell_before = xe::load_and_swap<int32_t>(bs + 0x18);
+  int32_t size = xe::load_and_swap<int32_t>(bs + 0x1C);
+  uint32_t checksum_ptr = xe::load_and_swap<uint32_t>(bs + 0x20);
+  int32_t bytes_checksummed = xe::load_and_swap<int32_t>(bs + 0x24);
+
+  int32_t bytes = req_bytes;
+  bool truncated = false;
+  if (tell_before + bytes > size) {
+    fail = true;
+    truncated = true;
+    bytes = size - tell_before;
+  }
+  if (bytes < 0) {
+    bytes = 0;
+    fail = true;
+    truncated = true;
+  }
+
+  auto* src = (src_buf_ptr && src_buf_ptr < 0xF0000000)
+                  ? memory->TranslateVirtual<uint8_t*>(src_buf_ptr + tell_before)
+                  : nullptr;
+  auto* dst = (dst_ptr && dst_ptr < 0xF0000000)
+                  ? memory->TranslateVirtual<uint8_t*>(dst_ptr)
+                  : nullptr;
+
+  uint8_t preview[16] = {};
+  size_t preview_len =
+      static_cast<size_t>(bytes > 0 ? std::min<int32_t>(bytes, 16) : 0);
+  if (src && preview_len) {
+    std::memcpy(preview, src, preview_len);
+  }
+
+  if (src && dst && bytes > 0) {
+    std::memcpy(dst, src, static_cast<size_t>(bytes));
+  } else if (dst && bytes > 0) {
+    std::memset(dst, 0, static_cast<size_t>(bytes));
+    fail = true;
+  }
+
+  int32_t tell_after = tell_before + bytes;
+
+  if (checksum_ptr && !fail) {
+    bytes_checksummed += bytes;
+    static bool warned_checksum = false;
+    if (!warned_checksum) {
+      warned_checksum = true;
+      XELOGW("DC3:RCS ReadImpl probe active with checksum object present; "
+             "guest checksum validator Update() is not invoked from host "
+             "override. Dedicated probe runs may fail checksum validation.");
+    }
+  }
+
+  bs[0x14] = fail ? 1 : 0;
+  xe::store_and_swap<int32_t>(bs + 0x18, tell_after);
+  xe::store_and_swap<int32_t>(bs + 0x24, bytes_checksummed);
+
+  static uint32_t read_count = 0;
+  ++read_count;
+  if (read_count <= 256 || (read_count % 512) == 0 || truncated ||
+      lr == kDc3RcsReadCacheStreamAddr) {
+    std::string preview_suffix;
+    if (preview_len) {
+      preview_suffix = " bytes=[" + Dc3FmtBytePreview(preview, preview_len) + "]";
+    }
+    XELOGI(
+        "DC3:RCS ReadImpl #{} this={:08X} LR={:08X} dst={:08X} req={} got={} "
+        "tell {}->{} size={} fail={} chk={:08X} chk_bytes={}{}{}",
+        read_count, this_ptr, lr, dst_ptr, req_bytes, bytes, tell_before,
+        tell_after, size, fail ? 1 : 0, checksum_ptr, bytes_checksummed,
+        truncated ? " truncated" : "", src ? "" : " src_xlate_fail", preview_suffix);
+  }
+}
+
+void Dc3RcsBufStreamSeekImplProbe(cpu::ppc::PPCContext* ppc_context,
+                                  kernel::KernelState* kernel_state) {
+  if (!ppc_context || !kernel_state) return;
+  auto* memory = kernel_state->memory();
+  if (!memory) return;
+
+  uint32_t this_ptr = static_cast<uint32_t>(ppc_context->r[3]);
+  int32_t offset = static_cast<int32_t>(ppc_context->r[4]);
+  int32_t seek_type = static_cast<int32_t>(ppc_context->r[5]);
+  uint32_t lr = static_cast<uint32_t>(ppc_context->lr);
+  auto* bs = memory->TranslateVirtual<uint8_t*>(this_ptr);
+  if (!bs) return;
+
+  bool fail = bs[0x14] != 0;
+  int32_t tell_before = xe::load_and_swap<int32_t>(bs + 0x18);
+  int32_t size = xe::load_and_swap<int32_t>(bs + 0x1C);
+  int32_t pos = tell_before;
+  switch (seek_type) {
+    case 0:
+      pos = offset;
+      break;
+    case 1:
+      pos = tell_before + offset;
+      break;
+    case 2:
+      pos = size + offset;
+      break;
+    default:
+      return;
+  }
+
+  int32_t tell_after = tell_before;
+  if (pos < 0 || pos > size) {
+    fail = true;
+  } else {
+    tell_after = pos;
+    xe::store_and_swap<int32_t>(bs + 0x18, tell_after);
+  }
+  bs[0x14] = fail ? 1 : 0;
+
+  static uint32_t seek_count = 0;
+  ++seek_count;
+  if (seek_count <= 128 || (seek_count % 256) == 0 || fail) {
+    XELOGI(
+        "DC3:RCS SeekImpl #{} this={:08X} LR={:08X} type={} off={} tell {}->{} "
+        "size={} fail={}",
+        seek_count, this_ptr, lr, seek_type, offset, tell_before, tell_after,
+        size, fail ? 1 : 0);
+  }
+}
+
+uint32_t LookupStubAddr(
+    const std::unordered_map<std::string, uint32_t>* manifest,
+    const char* name, uint32_t fallback) {
+  if (manifest) {
+    auto it = manifest->find(name);
+    if (it != manifest->end()) {
+      return it->second;
+    }
+  }
+  return fallback;
+}
 
 void Dc3ErrnoExtern(cpu::ppc::PPCContext* ppc_context,
                     kernel::KernelState* kernel_state) {
@@ -67,6 +249,237 @@ bool PatchStub8(Memory* memory, uint32_t address, uint32_t return_value,
   return true;
 }
 
+bool PatchCheckedNop(Memory* memory, uint32_t address, uint32_t expected_word,
+                     const char* name) {
+  constexpr uint32_t kPpcNop = 0x60000000;
+  auto* heap = memory->LookupHeap(address);
+  if (!heap) {
+    XELOGW("DC3: {} bypass skipped at {:08X} (no heap)", name, address);
+    return false;
+  }
+  auto* mem = memory->TranslateVirtual<uint8_t*>(address);
+  if (!mem) {
+    XELOGW("DC3: {} bypass skipped at {:08X} (translate failed)", name, address);
+    return false;
+  }
+  uint32_t current = xe::load_and_swap<uint32_t>(mem);
+  if (current != expected_word && current != kPpcNop) {
+    XELOGW(
+        "DC3: {} bypass skipped at {:08X} (expected {:08X}, found {:08X}; "
+        "layout drift or code changed)",
+        name, address, expected_word, current);
+    return false;
+  }
+  heap->Protect(address, 4, kMemoryProtectRead | kMemoryProtectWrite);
+  if (current != kPpcNop) {
+    xe::store_and_swap<uint32_t>(mem, kPpcNop);
+  }
+  XELOGI("DC3: Debug-only MemMgr assert bypass active at {:08X} ({})", address,
+         name);
+  return true;
+}
+
+void RegisterDc3WriteBridges(const Dc3HackContext& ctx, Dc3HackApplyResult& debug_result) {
+  if (!ctx.processor) {
+    debug_result.skipped++;
+    return;
+  }
+  struct WriteBridge {
+    uint32_t addr;
+    const char* name;
+  };
+  const WriteBridge bridges[] = {
+      {0x83617E1C, "_write_nolock"},
+      {0x8361805C, "_write"},
+  };
+  for (const auto& bridge : bridges) {
+    auto handler = [](cpu::ppc::PPCContext* ppc_context,
+                      kernel::KernelState* kernel_state) {
+      if (!ppc_context || !kernel_state) return;
+      auto* memory = kernel_state->memory();
+      int fd = static_cast<int>(ppc_context->r[3]);
+      uint32_t buf_addr = static_cast<uint32_t>(ppc_context->r[4]);
+      uint32_t count = static_cast<uint32_t>(ppc_context->r[5]);
+      if (!memory || !buf_addr || buf_addr >= 0xF0000000 || count > (1u << 20)) {
+        ppc_context->r[3] = static_cast<uint64_t>(-1);
+        return;
+      }
+      auto* src = memory->TranslateVirtual<const uint8_t*>(buf_addr);
+      if (!src) {
+        ppc_context->r[3] = static_cast<uint64_t>(-1);
+        return;
+      }
+      FILE* out = (fd == 1) ? stdout : stderr;
+      size_t written = std::fwrite(src, 1, count, out);
+      std::fflush(out);
+      ppc_context->r[3] = static_cast<uint64_t>(written);
+    };
+    ctx.processor->RegisterGuestFunctionOverride(bridge.addr, handler, bridge.name);
+    XELOGI("DC3: Registered {} host bridge at {:08X}", bridge.name, bridge.addr);
+    debug_result.applied++;
+  }
+}
+
+void RegisterDc3FindArrayOverride(const Dc3HackContext& ctx,
+                                  Dc3HackApplyResult& debug_result) {
+  if (!ctx.is_decomp_layout || !ctx.processor) {
+    debug_result.skipped++;
+    return;
+  }
+  const std::string mode = cvars::dc3_debug_findarray_override_mode;
+  if (mode.empty() || mode == "off") {
+    XELOGI("DC3: FindArray override disabled (dc3_debug_findarray_override_mode=off)");
+    debug_result.skipped++;
+    return;
+  }
+  if (mode == "log_only") {
+    XELOGI("DC3: FindArray log_only requested; call-through logging is not "
+           "implemented with current override API, leaving original behavior active");
+    debug_result.skipped++;
+    return;
+  }
+  if (mode != "stub_on_fail" && mode != "null_on_fail") {
+    XELOGW("DC3: Unknown FindArray override mode '{}'; expected off|log_only|"
+           "stub_on_fail|null_on_fail. Leaving original behavior active.",
+           mode);
+    debug_result.skipped++;
+    return;
+  }
+
+  static uint32_t s_find_array_stub = 0;
+  constexpr uint32_t kFindArrayAddr = 0x83543424;
+  auto find_array_handler = [](cpu::ppc::PPCContext* ppc_context,
+                               kernel::KernelState* kernel_state) {
+    if (!ppc_context || !kernel_state) return;
+    auto* memory = kernel_state->memory();
+    if (!memory) return;
+
+    const std::string mode_local = cvars::dc3_debug_findarray_override_mode;
+    const bool use_stub_on_fail = (mode_local == "stub_on_fail");
+    const bool force_null_on_fail = (mode_local == "null_on_fail");
+    if (!use_stub_on_fail && !force_null_on_fail) {
+      return;
+    }
+
+    if (use_stub_on_fail && !s_find_array_stub) {
+      s_find_array_stub = memory->SystemHeapAlloc(0x20, 0x10);
+      if (s_find_array_stub) {
+        if (auto* stub = memory->TranslateVirtual<uint8_t*>(s_find_array_stub)) {
+          std::memset(stub, 0, 0x20);
+          xe::store_and_swap<uint32_t>(stub + 0x0, 0);   // nodes
+          xe::store_and_swap<int16_t>(stub + 0x8, 0);    // size
+          xe::store_and_swap<int16_t>(stub + 0xA, 0);    // line
+          xe::store_and_swap<int16_t>(stub + 0xC, 0);    // deprecated
+          xe::store_and_swap<int16_t>(stub + 0xE, 1);    // refs
+          XELOGI("DC3: Allocated FindArray stub DataArray at {:08X} (size=0)",
+                 s_find_array_stub);
+        }
+      }
+    }
+
+    uint32_t da_addr = static_cast<uint32_t>(ppc_context->r[3]);
+    uint32_t sym_addr = static_cast<uint32_t>(ppc_context->r[4]);
+    uint32_t fail_flag = static_cast<uint32_t>(ppc_context->r[5]);
+
+    char sym_str[64] = {};
+    if (sym_addr && sym_addr < 0xF0000000) {
+      if (auto* s = memory->TranslateVirtual<const char*>(sym_addr)) {
+        std::strncpy(sym_str, s, sizeof(sym_str) - 1);
+      }
+    }
+
+    uint32_t found_addr = 0;
+    if (da_addr && da_addr < 0xF0000000) {
+      if (auto* da = memory->TranslateVirtual<uint8_t*>(da_addr)) {
+        uint32_t nodes_ptr = xe::load_and_swap<uint32_t>(da + 0x0);
+        int16_t da_size = xe::load_and_swap<int16_t>(da + 0x8);
+        if (nodes_ptr && nodes_ptr < 0xF0000000 && da_size > 0 && da_size < 0x2000) {
+          if (auto* nodes = memory->TranslateVirtual<uint8_t*>(nodes_ptr)) {
+            for (int i = 0; i < da_size; ++i) {
+              uint8_t* n = nodes + i * 8;
+              uint32_t val = xe::load_and_swap<uint32_t>(n + 0);
+              uint32_t type = xe::load_and_swap<uint32_t>(n + 4);
+              if (type != 16 || !val || val >= 0xF0000000) continue;
+              auto* sub = memory->TranslateVirtual<uint8_t*>(val);
+              if (!sub) continue;
+              uint32_t sub_nodes = xe::load_and_swap<uint32_t>(sub + 0x0);
+              int16_t sub_size = xe::load_and_swap<int16_t>(sub + 0x8);
+              if (!sub_nodes || sub_nodes >= 0xF0000000 || sub_size <= 0 ||
+                  sub_size >= 0x2000) {
+                continue;
+              }
+              auto* sn = memory->TranslateVirtual<uint8_t*>(sub_nodes);
+              if (!sn) continue;
+              uint32_t sn_val = xe::load_and_swap<uint32_t>(sn + 0);
+              uint32_t sn_type = xe::load_and_swap<uint32_t>(sn + 4);
+              if (sn_type != 5 || !sn_val || sn_val >= 0xF0000000) continue;
+              auto* sn_str = memory->TranslateVirtual<const char*>(sn_val);
+              if (sn_str && std::strcmp(sn_str, sym_str) == 0) {
+                found_addr = val;
+                break;
+              }
+            }
+          }
+        }
+      }
+    }
+
+    uint32_t result = 0;
+    const char* result_kind = "null";
+    if (found_addr) {
+      result = found_addr;
+      result_kind = "real";
+    } else if (use_stub_on_fail && fail_flag && s_find_array_stub) {
+      result = s_find_array_stub;
+      result_kind = "stub";
+    } else if (force_null_on_fail) {
+      result = 0;
+      result_kind = "null";
+    } else {
+      result = (fail_flag ? s_find_array_stub : 0);
+      result_kind = (result ? "stub" : "null");
+    }
+    ppc_context->r[3] = result;
+
+    static uint32_t log_count = 0;
+    ++log_count;
+    if (log_count <= 200 || (log_count % 1000) == 0) {
+      XELOGI(
+          "DC3: FindArray mode={} da={:08X} sym='{}' fail={} found={:08X} -> {} "
+          "{:08X}",
+          mode_local, da_addr, sym_str[0] ? sym_str : "<null>", fail_flag,
+          found_addr, result_kind, result);
+    }
+  };
+
+  ctx.processor->RegisterGuestFunctionOverride(kFindArrayAddr, find_array_handler,
+                                               "DC3:FindArray");
+  XELOGI("DC3: Registered FindArray(Symbol,bool) override at {:08X} (mode={})",
+         kFindArrayAddr, mode);
+  debug_result.applied++;
+}
+
+void RegisterDc3ReadCacheStreamProbe(const Dc3HackContext& ctx,
+                                     Dc3HackApplyResult& debug_result) {
+  if (!ctx.processor) {
+    debug_result.skipped++;
+    return;
+  }
+
+  ctx.processor->RegisterGuestFunctionOverride(kDc3RcsBufStreamReadImplAddr,
+                                               Dc3RcsBufStreamReadImplProbe,
+                                               "DC3:RCS:BufStream::ReadImpl");
+  ctx.processor->RegisterGuestFunctionOverride(kDc3RcsBufStreamSeekImplAddr,
+                                               Dc3RcsBufStreamSeekImplProbe,
+                                               "DC3:RCS:BufStream::SeekImpl");
+  XELOGW("DC3: ReadCacheStream invasive probe active via BufStream overrides "
+         "(ReadImpl={:08X}, SeekImpl={:08X}, ReadCacheStream={:08X}); may perturb "
+         "checksum/parser behavior in dedicated probe runs",
+         kDc3RcsBufStreamReadImplAddr, kDc3RcsBufStreamSeekImplAddr,
+         kDc3RcsReadCacheStreamAddr);
+  debug_result.applied += 2;
+}
+
 void ApplyDc3ImportAndRuntimeStopgaps(const Dc3HackContext& ctx,
                                       Dc3HackPackSummary& summary) {
   auto& import_result = GetResult(summary, Dc3HackCategory::kImports);
@@ -83,6 +496,12 @@ void ApplyDc3ImportAndRuntimeStopgaps(const Dc3HackContext& ctx,
     debug_result.failed++;
     crt_result.failed++;
     return;
+  }
+
+  if (cvars::dc3_debug_read_cache_stream_step_override) {
+    RegisterDc3ReadCacheStreamProbe(ctx, debug_result);
+  } else {
+    XELOGI("DC3: ReadCacheStream step override disabled (default; non-invasive)");
   }
 
   // Stub XapiCallThreadNotifyRoutines and XRegisterThreadNotifyRoutine.
@@ -125,9 +544,121 @@ void ApplyDc3ImportAndRuntimeStopgaps(const Dc3HackContext& ctx,
                     kMemoryProtectRead | kMemoryProtectWrite);
       XELOGI("DC3: Made full image 0x82000000-0x83ED0000 writable");
       stopgap_result.applied++;
+
+      // Temporary debug-only progression tool. These assertions trip after
+      // known config/data corruption and should not be left enabled by default.
+      if (cvars::dc3_debug_memmgr_assert_nop_bypass) {
+        XELOGW("DC3: MemMgr assert nop bypass ENABLED (temporary debug mode)");
+        struct MemPatch {
+          uint32_t addr;
+          uint32_t expected_word;
+          const char* name;
+        };
+        const MemPatch mem_patches[] = {
+            {0x83447AF4, 0x481032B9, "MemInit line 690: Debug::Fail call"},
+            {0x83446A24, 0x48104389, "MemAlloc line 961: Debug::Fail call"},
+        };
+        for (const auto& p : mem_patches) {
+          if (PatchCheckedNop(memory, p.addr, p.expected_word, p.name)) {
+            stopgap_result.applied++;
+          } else {
+            stopgap_result.failed++;
+          }
+        }
+      } else {
+        XELOGI("DC3: MemMgr assert nop bypass disabled (default)");
+        stopgap_result.skipped++;
+      }
+
+    // Initialize STLport std::list<bool> gConditional sentinel (0x83C7D354).
+    {
+      constexpr uint32_t kGConditionalAddr = 0x83C7D354;
+      auto* pcond = memory->TranslateVirtual<uint8_t*>(kGConditionalAddr);
+      if (pcond) {
+        xe::store_and_swap<uint32_t>(pcond + 0, kGConditionalAddr); // _M_next
+        xe::store_and_swap<uint32_t>(pcond + 4, kGConditionalAddr); // _M_prev
+        XELOGI("DC3: Initialized gConditional sentinel at {:08X}", kGConditionalAddr);
+        stopgap_result.applied++;
+      }
+    }
+
     } else {
       stopgap_result.skipped++;
     }
+  }
+
+  // Redirect DECOMP Debug::Print to XELOG so MILO_LOG output remains visible
+  // without stubbing the CRT formatter path.
+  if (ctx.processor) {
+    constexpr uint32_t kDebugPrint = 0x835499C4;
+    auto debug_print_handler = [](cpu::ppc::PPCContext* ppc_context,
+                                  kernel::KernelState* kernel_state) {
+      if (!ppc_context || !kernel_state) return;
+      auto* memory = kernel_state->memory();
+      uint32_t this_ptr = static_cast<uint32_t>(ppc_context->r[3]);
+      uint32_t str_ptr = static_cast<uint32_t>(ppc_context->r[4]);
+      uint32_t lr = static_cast<uint32_t>(ppc_context->lr);
+      if (memory && str_ptr && str_ptr < 0xF0000000) {
+        if (auto* s = memory->TranslateVirtual<const char*>(str_ptr)) {
+          XELOGI("DC3: Debug::Print this={:08X} LR={:08X}: {}", this_ptr, lr, s);
+          return;
+        }
+      }
+      XELOGI("DC3: Debug::Print this={:08X} LR={:08X} str={:08X}",
+             this_ptr, lr, str_ptr);
+    };
+    ctx.processor->RegisterGuestFunctionOverride(
+        kDebugPrint, debug_print_handler, "DC3:Debug::Print(decomp)");
+    XELOGI("DC3: Registered Debug::Print redirect at DECOMP {:08X}", kDebugPrint);
+  }
+
+  // Restore Debug::Fail visibility while keeping the runtime moving.
+  if (ctx.processor) {
+    constexpr uint32_t kDebugFail = 0x8354ADAC;
+    auto fail_handler = [](cpu::ppc::PPCContext* ppc_context,
+                           kernel::KernelState* kernel_state) {
+      if (!ppc_context || !kernel_state) return;
+      auto* memory = kernel_state->memory();
+      uint32_t lr = static_cast<uint32_t>(ppc_context->lr);
+      uint32_t r3 = static_cast<uint32_t>(ppc_context->r[3]);  // Debug*
+      uint32_t r4 = static_cast<uint32_t>(ppc_context->r[4]);  // msg
+      static int fail_count = 0;
+      fail_count++;
+      XELOGE("DC3: Debug::Fail called! LR={:08X} r3={:08X} r4={:08X}", lr, r3, r4);
+      if (memory) {
+        static bool logged_debug_obj = false;
+        if (!logged_debug_obj) {
+          logged_debug_obj = true;
+          if (auto* dbg = memory->TranslateVirtual<uint8_t*>(r3)) {
+            uint32_t vtbl = xe::load_and_swap<uint32_t>(dbg + 0x00);
+            uint32_t w1 = xe::load_and_swap<uint32_t>(dbg + 0x04);
+            uint32_t w2 = xe::load_and_swap<uint32_t>(dbg + 0x08);
+            uint32_t w3 = xe::load_and_swap<uint32_t>(dbg + 0x0C);
+            XELOGE("DC3: TheDebug probe @{:08X}: vtbl={:08X} w1={:08X} w2={:08X} w3={:08X}",
+                   r3, vtbl, w1, w2, w3);
+          } else {
+            XELOGE("DC3: TheDebug probe failed to translate object at {:08X}", r3);
+          }
+        }
+        if (r4 && r4 < 0xF0000000) {
+          if (auto* msg = memory->TranslateVirtual<const char*>(r4)) {
+            XELOGE("DC3: Debug::Fail message: {}", msg);
+          }
+        }
+      }
+      if (fail_count <= 200) {
+        XELOGW("DC3: Debug::Fail returning to caller (count={})", fail_count);
+      } else if (fail_count == 201) {
+        XELOGE("DC3: Debug::Fail called >200 times, spinning forever");
+        while (true) {
+        }
+      }
+      ppc_context->r[3] = 0;
+    };
+    ctx.processor->RegisterGuestFunctionOverride(
+        kDebugFail, fail_handler, "DC3:Debug::Fail(log)");
+    XELOGI("DC3: Registered Debug::Fail handler at {:08X} (logs LR + hangs)",
+           kDebugFail);
   }
 
   // Map guard/overflow pages as readable zeros.
@@ -158,15 +689,15 @@ void ApplyDc3ImportAndRuntimeStopgaps(const Dc3HackContext& ctx,
   }
 #endif
 
-  // Stub _output_l / _woutput_l / XMP overrides.
+  // Stub XMP overrides.
+  // Do NOT stub _output_l/_woutput_l here: they are core CRT formatters used
+  // by printf/sprintf/MakeString and stubbing them breaks string formatting.
   {
     struct OutputFunc {
       uint32_t address;
       const char* name;
     };
     OutputFunc output_funcs[] = {
-        {0x835BAC88, "_output_l"},
-        {0x835C0994, "_woutput_l"},
         {0x835FAA8C, "XMPOverrideBackgroundMusic"},
         {0x835FAB64, "XMPRestoreBackgroundMusic"},
     };
@@ -179,6 +710,8 @@ void ApplyDc3ImportAndRuntimeStopgaps(const Dc3HackContext& ctx,
     }
   }
 
+  RegisterDc3WriteBridges(ctx, debug_result);
+
   // Debug/Holmes/String-related stubs and deadlock breakers.
   {
     struct DebugFunc {
@@ -187,18 +720,13 @@ void ApplyDc3ImportAndRuntimeStopgaps(const Dc3HackContext& ctx,
       uint32_t return_value;
     };
     DebugFunc debug_funcs[] = {
-        {0x834B1DFC, "Debug::Fail", 0},
         {0x838DEE34, "XGetLocale", 0},
         {0x838DF03C, "XTLGetLanguage", 1},
         {0x838DF0DC, "DebugBreak", 0},
         {0x8333D160, "GetSystemLanguage", 0},
         {0x8333D620, "GetSystemLocale", 0},
         {0x830EDFF4, "DataNode::Print", 0},
-        {0x832DD638, "DataArray::AddRef", 0},
-        {0x82F1A8D4, "DataArray::Release", 0},
         {0x83140608, "RndMat::CreateMetaMaterial", 0},
-        {0x8302D2EC, "NtAllocateVirtualMemoryWrapper", 0},
-        {0x8302D524, "RtlpInsertUnCommittedPages", 0},
         {0x8310CD88, "HolmesClientInit", 0},
         {0x8310D058, "HolmesClientReInit", 0},
         {0x8310D0D8, "HolmesClientPoll", 0},
@@ -478,9 +1006,27 @@ void ApplyDc3ImportAndRuntimeStopgaps(const Dc3HackContext& ctx,
       uint32_t end;
       const char* name;
     };
+    // Source-of-truth is the current decomp MAP. Some manifests/symbols files
+    // can lag relinks and point at stale constructor tables.
+    constexpr uint32_t kXcA = 0x83ADED98;
+    constexpr uint32_t kXcZ = 0x83ADF3B0;
+    constexpr uint32_t kXiA = 0x83ADF3B4;
+    constexpr uint32_t kXiZ = 0x83ADF3C0;
+    if (ctx.crt_sentinels) {
+      uint32_t m_xc_a = LookupStubAddr(ctx.crt_sentinels, "__xc_a", kXcA);
+      uint32_t m_xc_z = LookupStubAddr(ctx.crt_sentinels, "__xc_z", kXcZ);
+      uint32_t m_xi_a = LookupStubAddr(ctx.crt_sentinels, "__xi_a", kXiA);
+      uint32_t m_xi_z = LookupStubAddr(ctx.crt_sentinels, "__xi_z", kXiZ);
+      if (m_xc_a != kXcA || m_xc_z != kXcZ || m_xi_a != kXiA || m_xi_z != kXiZ) {
+        XELOGW(
+            "DC3: Manifest CRT sentinels differ from map-synced constants; "
+            "using map values (__xc_a={:08X} __xc_z={:08X} __xi_a={:08X} __xi_z={:08X})",
+            kXcA, kXcZ, kXiA, kXiZ);
+      }
+    }
     CrtTable tables[] = {
-        {0x83A7B2E0, 0x83A7B8F8, "__xc_a..__xc_z (C++ constructors)"},
-        {0x83A7B8FC, 0x83A7B908, "__xi_a..__xi_z (C initializers)"},
+        {kXcA, kXcZ, "__xc_a..__xc_z (C++ constructors)"},
+        {kXiA, kXiZ, "__xi_a..__xi_z (C initializers)"},
     };
     const int32_t bisect_max = cvars::dc3_crt_bisect_max;
     if (bisect_max >= 0) {
@@ -510,8 +1056,8 @@ void ApplyDc3ImportAndRuntimeStopgaps(const Dc3HackContext& ctx,
       }
     };
     if (cvars::dc3_crt_skip_nui && cvars::dc3_crt_skip_indices.empty()) {
-      parse_skip_list("69,75,98-101,210-328");
-      XELOGI("DC3: Auto-NUI skip enabled (69,75,98-101,210-328)");
+      parse_skip_list("75,98-101,210-328");
+      XELOGI("DC3: Auto-NUI skip enabled (75,98-101,210-328)");
     }
     if (!cvars::dc3_crt_skip_indices.empty()) {
       parse_skip_list(cvars::dc3_crt_skip_indices);
@@ -576,32 +1122,6 @@ void ApplyDc3ImportAndRuntimeStopgaps(const Dc3HackContext& ctx,
              nullified_bisect, nullified_skip);
       crt_result.applied++;
     }
-
-    struct CrtInject {
-      int slot;
-      uint32_t func_addr;
-      const char* name;
-    };
-    CrtInject injections[] = {
-        {69, 0x833468CC, "InitMakeString"},
-    };
-    const uint32_t xc_start = 0x83A7B2E0;
-    for (const auto& inj : injections) {
-      uint32_t slot_addr = xc_start + inj.slot * 4;
-      auto* p = memory->TranslateVirtual<uint8_t*>(slot_addr);
-      uint32_t current = xe::load_and_swap<uint32_t>(p);
-      if (current == 0) {
-        xe::store_and_swap<uint32_t>(p, inj.func_addr);
-        XELOGI("DC3: CRT[{:3d}] injected {:08X} ({})", inj.slot, inj.func_addr,
-               inj.name);
-        crt_result.applied++;
-      } else {
-        XELOGI("DC3: CRT[{:3d}] injection SKIPPED - slot not empty "
-               "(contains {:08X}), wanted to inject {:08X} ({})",
-               inj.slot, current, inj.func_addr, inj.name);
-        crt_result.skipped++;
-      }
-    }
   }
 
   // Diagnostics: check JIT indirection table state for import thunk area.
@@ -620,8 +1140,9 @@ void ApplyDc3ImportAndRuntimeStopgaps(const Dc3HackContext& ctx,
       import_result.applied++;
     }
   }
-}
 
+  RegisterDc3FindArrayOverride(ctx, debug_result);
+}
 }  // namespace
 
 const char* Dc3HackCategoryName(Dc3HackCategory category) {

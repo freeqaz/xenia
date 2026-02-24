@@ -12,6 +12,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <vector>
 
 namespace xe {
 
@@ -59,6 +60,19 @@ struct Dc3NuiPatchManifest {
   std::optional<uint64_t> runtime_text_fingerprint;
   std::unordered_map<std::string, uint32_t> targets;
   std::unordered_map<std::string, uint32_t> crt_sentinels;
+  std::unordered_map<std::string, uint32_t> hack_pack_stubs;
+  // TODO: Remove xdk_overrides once Xenia's APU/NUI backends properly handle
+  // XAUDIO2/Kinect or the decomp provides its own abstraction layer.
+  // Blanket JIT-override of XDK SDK functions (XAUDIO2, NUI, Speech) that
+  // deadlock or crash under nop APU / headless mode.
+  std::unordered_map<std::string, uint32_t> xdk_overrides;
+  // Contiguous address ranges of XDK code, used to scan for unlisted internal
+  // function prologues that aren't in any MAP file.
+  struct CodeRange {
+    uint32_t start;
+    uint32_t end;
+  };
+  std::vector<CodeRange> xdk_code_ranges;
 };
 
 struct Dc3FingerprintCache {
