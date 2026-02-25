@@ -474,12 +474,13 @@ MemMgr assert `nop` bypass (default off):
   return to a non-bypass run for correctness checks.
 
 `DataArray::FindArray(Symbol,bool)` debug override (default off):
-- `--dc3_debug_findarray_override_mode=off|log_only|stub_on_fail|null_on_fail`
+- `--dc3_debug_findarray_override_mode=off|log_only|stub_on_fail|null_on_fail|setupfont_fix`
 - Recommended sequence:
   1. `off` (baseline correctness)
   2. `log_only` (emulated probe mode; logs caller LR + symbol + hit/miss)
-  3. `stub_on_fail` (progression when null-deref cascades block later systems)
-  4. `null_on_fail` (A/B behavior check versus stub returns)
+  3. `setupfont_fix` (targeted progression repair for known bad `Rnd::SetupFont` arg2 key literal in some decomp builds)
+  4. `stub_on_fail` (progression when null-deref cascades block later systems)
+  5. `null_on_fail` (A/B behavior check versus stub returns)
 - `log_only` behavior:
   - this is an emulated `FindArray` path (not true call-through)
   - it returns `found` or `NULL`, logs caller `LR`, and hex-dumps non-printable
@@ -494,6 +495,30 @@ MemMgr assert `nop` bypass (default off):
     to survive the `mFont == NULL` crash path and log the condition
   - this is a progression aid while investigating the upstream `Symbol("font")`
     corruption; it is not a correctness fix for renderer config setup.
+  - before chasing `Symbol` hash/string-table corruption, confirm the linked
+    `SetupFont` literals are sane:
+    - `Rnd::SetupFont` passes the two `Symbol` temporaries to `SystemConfig`
+      in reverse register order, so check both ctor literals:
+      - ctor2 / `SystemConfig` arg1 (`s1`) currently maps to `0x82053BF8`
+        and should be `"rnd"`
+      - ctor1 / `SystemConfig` arg2 (`s2`) currently maps to `0x82027684`
+        and should be `"font"` (current known bad build shows non-string data)
+    - this can be caused by a stale decomp object / partial relink mismatch
+      (the linker response files currently point at
+      `build/373307D9/obj/system/rndobj/Rnd.obj`)
+  - practical check:
+    - run with `--dc3_debug_findarray_override_mode=log_only`
+    - look for `DC3: SetupFont literal sanity ...` in the Xenia log
+    - if it warns that `ctor1/arg2` is not `"font"`, fix the decomp build
+      artifacts (or literal relocation bug) first
+  - temporary Xenia-side progression aid:
+    - `--dc3_debug_findarray_override_mode=setupfont_fix`
+    - this keeps `FindArray(Symbol,bool)` behavior original, but enables an
+      emulated `SystemConfig(Symbol,Symbol)` repair for the single `SetupFont`
+      callsite (`LR=0x8317FF14`) by substituting pooled `"font"` when arg2 is
+      the known bad binary literal
+    - use only to move past the `SetupFont` null-font crash while continuing to
+      debug the underlying decomp literal/relink issue
 
 CRT constructor table caveat (relinks / stale manifests):
 - If CRT sanitizer logs a mismatch between patch-manifest sentinels and map
