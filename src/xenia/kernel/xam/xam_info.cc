@@ -311,7 +311,7 @@ void XamLoaderLaunchTitle_entry(lpstring_t raw_name_ptr, dword_t flags) {
       loader_data.launch_path = path;
     }
   } else {
-    assert_always("Game requested exit to dashboard via XamLoaderLaunchTitle");
+    XELOGE("Game requested exit to dashboard via XamLoaderLaunchTitle");
   }
 
   // This function does not return.
