@@ -1,6 +1,6 @@
-# DC3/Xenia Continuation Plan (Post-Session 36)
+# DC3/Xenia Continuation Plan (Post-Session 37)
 
-*Last updated: 2026-02-25 (3rd-pass review)*
+*Last updated: 2026-02-25 (Session 37 — CRT blocker resolved)*
 
 ## Where We Are Now
 
@@ -9,22 +9,25 @@
 mainCRTStartup
   -> _cinit
        -> __xi loop (C initializers)     ✓ works (_ioinit injection fixed)
-       -> __xc loop (C++ constructors)   ✗ BLOCKED HERE
-            -> __xc[0] = PPC trampoline  ✓ executes, calls Symbol::PreInit
-            -> Symbol::PreInit           ✗ produces gStringTable=0x14 (garbage)
-            -> subsequent __xc entries   ✗ Symbol::Symbol -> StringTable::Add
-                                            -> gStringTable=0x14 -> crash
-  -> main                                  (never reached in current state)
+       -> __xc loop (C++ constructors)   ✓ FIXED (Session 37)
+            -> gStringTable + gHashTable host-constructed before _cinit
+            -> Symbol::PreInit override blocks original (heap not ready)
+            -> all __xc entries run successfully
+  -> main()                               ✓ reached
+  -> game init                            ✗ BLOCKED HERE (file system assertions)
+       -> File_Win.cpp:36 !strieq(drive, "game")
+       -> File.cpp:768 iRoot
 ```
 
 ### Completed phases
 - **Phase A** (baseline validation): done
 - **Phase B** (String::reserve / MemOrPoolAlloc): done (root-caused to heap exhaustion)
-- **Phase E** (documentation): done (STATUS.md updated through Session 36)
-- **Phase F partial**: CRT init fixes landed (CS auto-init, _ioinit injection, Debug::Fail guard, TextStream NULL safety, PE protection, address refresh)
+- **Phase E** (documentation): done (STATUS.md updated through Session 37)
+- **Phase F**: CRT init fixes complete (CS auto-init, _ioinit injection, Debug::Fail guard, TextStream NULL safety, PE protection, address refresh, gStringTable/gHashTable host construction)
+- **Phase 1** (gStringTable fix): **COMPLETE** (Session 37)
 
 ### Current blocker
-`gStringTable` (a `StringTable*` at `0x83AE0190`) is not properly initialized. `Symbol::PreInit` IS being called (via PPC trampoline at `__xc[0]`), but it produces `gStringTable=0x14` (garbage) instead of a valid heap pointer. Every subsequent `Symbol::Symbol` constructor passes this garbage pointer to `StringTable::Add`, which crashes or loops.
+File system initialization: game code expects file paths with `"game:"` drive prefix and an initialized file root (`iRoot`). The assertions in `File_Win.cpp` and `File.cpp` indicate the Milo file system layer needs either host-side path mapping or initialization overrides.
 
 ### Critical JIT constraint discovered (Session 36)
 **The x64 JIT embeds `extern_handler_` as a hardcoded immediate in generated x86 code** (`x64_emitter.cc:746`). This means:
@@ -33,16 +36,14 @@ mainCRTStartup
 - `SetupExtern(nullptr)` changes the function object but has zero effect on JIT-compiled call sites
 - Any approach requiring "intercept then delegate" at the same address is fundamentally broken
 
-### Committed code state (cleanup needed before next test)
-Both the PPC trampoline at `__xc[0]` (attempt #6) **and** the `StringTable::Add` guest override (attempt #7) are active simultaneously in the committed code (`dc3_hack_pack.cc`, commit `19d54a7`). Before the next real test run:
-- The `StringTable::Add` override has broken forwarding code (`Processor::Execute` at same address → infinite recursion). This needs to be either removed or rewritten as a full host implementation.
-- The `_cinit` diagnostic dump (60 instructions) is also committed — minor log noise, can keep for debugging or remove.
-
 This eliminates several entire categories of solutions. Valid approaches must either:
 1. Write PPC code to guest memory **before** the JIT compiles it (pre-execution injection)
 2. Override a function and **fully implement** it in the handler (no forwarding to same address)
 3. Override a function and forward to a **different** address
 4. Operate entirely on the host side (direct memory writes, no guest code involvement)
+
+### Key discovery: /FORCE linker duplicate symbols (Session 37)
+The `/FORCE` linker flag creates duplicate symbol entries. The MAP file may show a symbol at one address (e.g., gHashTable at `0x83AED0FC` in .bss) while compiled code actually references a different address (`0x83AE01C4` in .data). **Always verify global addresses via PPC disassembly when using /FORCE-linked binaries.**
 
 ---
 
@@ -155,90 +156,48 @@ Doc drift note: if another doc mentions `--dc3_gdb_rsp_prelaunch_sleep_ms`, trea
 
 ---
 
-## Phase 1: Fix gStringTable Initialization (BLOCKING)
+## Phase 1: Fix gStringTable Initialization — COMPLETE (Session 37)
 
-### Objective
-Get `Symbol::PreInit` to successfully allocate and initialize `gStringTable` so CRT `__xc` constructor iteration can complete.
+### Resolution
+**HYPOTHESIS A confirmed**: `MemAlloc` fails because the heap isn't ready during `__xc`. `MemInit` runs from `main()`, not from `__xc`. `MemAlloc(20)` returns its size argument (`0x14`) unchanged when the heap is uninitialized.
 
-### Problem tree
-```
-gStringTable = 0x14 (garbage, should be valid heap pointer)
-  <- Symbol::PreInit(560000, 80000) called from PPC trampoline at __xc[0]
-     <- PreInit allocates StringTable via new/MemAlloc
-        <- HYPOTHESIS A: MemAlloc fails (heap not ready during early __xc)
-        <- HYPOTHESIS B: PreInit args wrong (560000, 80000 may not match retail)
-        <- HYPOTHESIS C: PreInit calls other functions that aren't ready yet
-        <- HYPOTHESIS D: 0x14 is a partial/corrupted write (PreInit crashed mid-execution)
-```
+**Fix applied**: Host-side construction (Step 5 from original plan):
+- `SystemHeapAlloc` for StringTable (20 bytes) + Buf (8 bytes) + 560KB char buffer
+- `SystemHeapAlloc` for gHashTable entries (92681 × 4 bytes)
+- Symbol::PreInit override blocks original from calling MemAlloc
+- Both globals written before `_cinit` runs
 
-### Investigation steps (ordered)
-
-**Step 1: Determine what PreInit actually does at 0x82556E70**
-- **dc3-decomp source is available** (`src/system/utl/Symbol.cpp`):
-  ```cpp
-  void Symbol::PreInit(int stringSize, int hashSize) {
-      gStringTable = new StringTable(stringSize);
-      gHashTable.Resize(hashSize, nullptr);
-      TheDebug.AddExitCallback(Symbol::Terminate);
-  }
-  ```
-- PreInit allocates a `StringTable` via `operator new` (which chains to `MemAlloc`) and resizes gHashTable
-- Key question: is the heap (`MemAlloc`) ready during early `__xc`? (`new StringTable` requires it)
-- Verify PPC disassembly matches decomp source — use `dc3_guest_disasm.py` or `powerpc-none-eabi-objdump`
-- The `0x14` garbage result could be: partial `new` return, corrupted write, or a failed allocation sentinel
-
-**Step 2: Trace PreInit's internal calls**
-- From decomp source, PreInit calls: `operator new` (→ `MemAlloc`), `StringTable::StringTable()`, `gHashTable.Resize()`, `TheDebug.AddExitCallback()`
-- If these calls use `bl`, they CAN be overridden with guest function overrides (unlike `bctrl`)
-- Add a temporary override on PreInit's allocator call (`operator new` / `MemAlloc`) to log args + return value
-- This tells us if allocation fails, succeeds with garbage, or never happens
-
-**Step 3: Check if the heap is initialized before __xc iteration**
-- The `__xi` loop runs BEFORE `__xc`, but `__xi` only runs C initializers (e.g., `_ioinit` for I/O).
-- `MemInit` is likely a C++ constructor registered via `#pragma init_seg` — meaning it's an `__xc` entry, NOT `__xi`.
-- If `MemInit` is an `__xc` entry, its position relative to our trampoline at `__xc[0]` matters: if `MemInit`'s entry is AFTER `__xc[0]`, the heap is genuinely not ready when PreInit runs.
-- Test: read the heap state (e.g., `MemInit` globals) from the override handler, or dump `__xc` entries to find `MemInit`'s slot.
-
-**Step 4: Try alternative PreInit timing**
-If the heap isn't ready during early `__xc`, consider:
-- Move PreInit call to AFTER `__xc` completes but BEFORE `main()` (patch `_cinit` epilogue PPC)
-- Or: override `Symbol::Symbol` (called via `bl`) to lazy-init on first use, implementing the override **entirely in the handler** (no forwarding — per JIT constraint)
-
-**Step 5: Consider host-side StringTable construction**
-If PreInit fundamentally can't work during `__xc`:
-- Allocate guest memory from the host (`memory->SystemHeapAlloc` or similar)
-- Construct a minimal valid `StringTable` object in guest memory
-- Write the pointer to `0x83AE0190`
-- This bypasses the guest allocator entirely
-
-### Decision rules
-- If PreInit's allocator calls succeed but the result is still garbage → investigate PreInit logic / args
-- If PreInit's allocator calls fail → the heap isn't ready, need different timing or host-side construction
-- If PreInit never reaches its allocator calls → it crashes before allocation, investigate early failure
-
-### Acceptance criteria
-- `gStringTable` at `0x83AE0190` contains a valid heap pointer after `__xc` iteration
-- Zero "Wasted string table" messages in runtime log
-- CRT `_cinit` completes and reaches `main()`
+### Results
+- `gStringTable` at `0x83AE01C0` = valid host-allocated pointer (`0x00037000`)
+- Zero "Wasted string table" messages
+- Zero `mOwnEntries` assert failures
+- `_cinit` completes, `main()` reached
 
 ---
 
-## Phase 2: Advance Past main() Entry (after Phase 1)
+## Phase 2: Advance Past main() Entry — ACTIVE (post-Phase 1)
 
 ### Objective
-Once CRT init completes, reach `App::Init()` and the main game loop.
+Fix object factory registration and reach `App::Init()` and the main game loop.
 
-### Expected blockers (from prior sessions)
-These were seen in Sessions 31-32 when CRT init was bypassed differently:
-1. **SetupFont literal corruption** — `SystemConfig("rnd","font")` second key is binary garbage in some decomp builds. Temporary workaround: `--dc3_debug_findarray_override_mode=setupfont_fix`
-2. **Mat/MetaMaterial instantiation failure** — `Couldn't instantiate class Mat`. Factory map IS populated, cached symbols ARE sane. Root cause unclear.
-3. **Heap exhaustion** — pool bucket 5 (96-byte) exhausted, `MemAlloc` returns garbage. `MemOrPoolAlloc` probe sanitizes. Root cause: heap too small or config issue.
-4. **StringTable::UsedSize tight loop** — downstream of heap exhaustion, iterates unmapped/corrupted data
+### RESOLVED: File system (Session 37 cont.)
+- gUsingCD=1 set via CheckForArchive override + direct write
+- FileIsLocal assert bypass updated to current address
+- gen/ symlinked for archive access
+- Archive loads, config reads, MemInit runs (16MB heap allocated)
+
+### Current blockers (Session 37 cont., post-file-system fix)
+1. **Object factory instantiation failure** — `Couldn't instantiate class Mat` / `MetaMaterial` / `Cam`. sFactories appears populated but lookup fails. Same issue as Sessions 29-32.
+2. **`Data is not Array` cascades** — DataNode::Array() on non-array data. From config parsing during SystemInit. Could be DTB schema mismatch or missing config sections.
+
+### Previously expected blockers
+3. **SetupFont literal corruption** — may still appear, not yet re-tested with clean init
+4. **Heap exhaustion** — MemInit now runs with 16MB, but pool buckets may still exhaust
 
 ### Strategy
-1. Run with Phase 1 fix and NO progression bypasses to establish clean baseline
-2. Add bypasses incrementally to measure each blocker independently
-3. Investigate heap sizing first (MemInit config values from `SystemConfig("mem")`)
+1. Investigate object factory registration — when do factories register, what's missing
+2. Check DTB config parsing — are all expected config sections present?
+3. Address SetupFont/heap issues if they appear after factory fix
 
 ### Acceptance criteria
 - Game reaches `App::Run` / main game loop
@@ -304,35 +263,37 @@ Classify `Couldn't instantiate class Mat` / `Unknown class MetaMaterial` as prim
 
 ---
 
-## Key Addresses (from 2026-02-25 MAP)
+## Key Addresses (from 2026-02-25 MAP, post-XEX-rebuild)
+
+**WARNING**: With `/FORCE` linker, MAP addresses for data globals may be wrong. Always verify via PPC disassembly.
 
 ### gStringTable / Symbol system
 | Symbol | Address | Notes |
 |--------|---------|-------|
-| Symbol::PreInit | 0x82556E70 | Allocates gStringTable + gHashTable |
+| Symbol::PreInit | 0x82556A78 | Host override blocks original |
 | Symbol::Init | 0x82557A18 | |
 | Symbol::Symbol(const char*) | 0x825575A0 | Calls StringTable::Add |
-| StringTable::Add | 0x82924848 | Crashes when gStringTable invalid |
-| gStringTable | 0x83AE0190 | .bss, should be valid StringTable* |
-| gHashTable | 0x83AED4FC | .bss (MAP symbol; note: Session 30 found active instance used by `Symbol::Symbol` at `0x83AE01CC`) |
+| StringTable::Add | 0x82924FF0 | Host override (full implementation) |
+| gStringTable | 0x83AE01C0 | .data — host-constructed before _cinit |
+| gHashTable | 0x83AE01C4 | .data, right after gStringTable (MAP says 0x83AED0FC in .bss — /FORCE artifact) |
 
 ### CRT
 | Symbol | Address | Notes |
 |--------|---------|-------|
-| _cinit | 0x8311A6D4 | Fully disassembled Session 36 |
-| kXcA (__xc_a) | 0x83ADED60 | C++ constructor table start |
-| kXcZ (__xc_z) | 0x83ADF378 | C++ constructor table end |
-| kXiA (__xi_a) | 0x83ADF37C | C initializer table start |
-| kXiZ (__xi_z) | 0x83ADF388 | C initializer table end |
-| _ioinit | 0x8361ADDC | Injected into __xi_a |
+| _cinit | 0x8311B4B8 | Fully disassembled |
+| kXcA (__xc_a) | 0x83ADED98 | C++ constructor table start |
+| kXcZ (__xc_z) | 0x83ADF3B0 | C++ constructor table end |
+| kXiA (__xi_a) | 0x83ADF3B4 | C initializer table start |
+| kXiZ (__xi_z) | 0x83ADF3C0 | C initializer table end |
+| _ioinit | 0x8361EDBC | Injected into __xi_a |
 
 ### Debug / runtime
 | Symbol | Address | Notes |
 |--------|---------|-------|
-| Debug::Fail | 0x83547ABC | Has re-entrancy guard override |
-| Debug::DoCrucible | 0x83546F00 | Has re-entrancy guard override |
-| TextStream::op<<(const char*) | 0x829A7240 | Has NULL safety override |
-| ProtocolDebugString | 0x831EFA44 | Used as PPC trampoline location |
+| Debug::Fail | 0x8354ACD0 | Has re-entrancy guard override |
+| Debug::DoCrucible | 0x8354A114 | Has re-entrancy guard override |
+| TextStream::op<<(const char*) | 0x829A7D38 | Has NULL safety override |
+| ProtocolDebugString | 0x831F0838 | Used as PPC trampoline location |
 | CODE section | 0x82320000-0x83A70000 | JIT compilation boundary |
 
 ---
@@ -394,8 +355,7 @@ python3 ~/code/milohax/xenia/tools/dc3_guest_disasm.py \
 
 ## Immediate Next Steps (Ordered)
 
-1. **Verify `Symbol::PreInit` PPC matches decomp source** — decomp shows `new StringTable(stringSize)` + `gHashTable.Resize()` + `AddExitCallback()`. Disassemble at `0x82556E70` to confirm and identify exact `bl` targets.
-2. **Determine why PreInit produces `gStringTable=0x14`** — trace `operator new` / `MemAlloc` calls (is heap ready at `__xc[0]`?)
-3. **Fix gStringTable initialization** using the approach indicated by investigation (timing fix, host-side construction, or PreInit arg fix)
-4. **Run clean baseline through `_cinit` completion** — verify `main()` is reached
-5. **Then** return to Phase 2 (post-main progression), Phase 3 (SetupFont), Phase 4 (Mat/MetaMaterial)
+1. **Investigate File_Win.cpp / File.cpp assertions** — disassemble the failing code paths, read dc3-decomp source for `File_Win.cpp` and `File.cpp`, understand what `iRoot` is and how file drive letters work
+2. **Implement file system path mapping or init override** — likely need to stub or override file system initialization to handle Xenia's virtual filesystem
+3. **Re-check SetupFont / Mat / MetaMaterial** — these were seen in earlier sessions; check if they still appear after clean CRT progression
+4. **Automate Dc3Addresses from manifest** (tech debt) — extend `generate_xenia_dc3_patch_manifest.py` to cover all hack pack addresses

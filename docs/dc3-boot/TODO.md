@@ -1,57 +1,73 @@
 # TODO: DC3 Boot Progression
 
-*Last updated: 2026-02-25 (Sessions 33-36 blocker shift: CRT `__xc` / `gStringTable` / `Symbol::PreInit`)*
+*Last updated: 2026-02-25 (Session 37 — CRT gStringTable/gHashTable fix COMPLETE, now at post-main file system blockers)*
 
 Items are ordered by priority. Check off as completed. Add new items each iteration.
 
 ---
 
-## Current Priority (Iteration 4): Fix CRT `__xc` / `gStringTable` Initialization — ACTIVE
+## Completed: CRT `__xc` / `gStringTable` Initialization (Session 37)
 
-Current blocker summary:
-- Boot is blocked before `main()` in `_cinit` C++ constructor iteration (`__xc` loop).
-- `Symbol::PreInit` is being called from the injected PPC trampoline at `__xc[0]`, but it produces `gStringTable=0x14` (garbage), not a valid heap pointer.
-- Work on VdSwap/Present is **deferred** until CRT init completes again.
+- [x] **Disassemble and characterize `Symbol::PreInit`** [analysis]
+  - Confirmed: `new StringTable(560000)` → `MemAlloc(20)` → returns 0x14 (heap not ready)
+- [x] **Trace `PreInit` internal allocator behavior** [xenia + analysis]
+  - `MemAlloc` returns its size arg when heap uninitialized; `MemInit` runs from `main()`, not `__xc`
+- [x] **Fix `gStringTable` initialization path** [xenia]
+  - Host-side StringTable + gHashTable construction via `SystemHeapAlloc`
+  - Symbol::PreInit override blocks original (prevents MemAlloc on uninitialized heap)
+- [x] **Revalidate CRT completion to `main()`** [test]
+  - Zero "Wasted string table" spam, zero mOwnEntries asserts, `_cinit` completes, `main()` reached
+
+---
+
+## Current Priority (Iteration 5): Post-main Game Init — ACTIVE
+
+Boot now reaches game initialization but hits file system assertions.
 
 Primary execution docs (read first):
-- `docs/dc3-boot/CONTINUATION_PLAN.md`
 - `docs/dc3-boot/STATUS.md`
+- `docs/dc3-boot/CONTINUATION_PLAN.md`
 - `docs/dc3-boot/DEBUGGING_TIPS.md`
-- `docs/dc3-boot/ARCHIVED.md` (if prior iterations/history is needed)
 
-### Tier 0: Blocker diagnosis (must complete before post-`main()` work)
+### Completed: File system assertions (Session 37 cont.)
 
-- [ ] **Disassemble and characterize `Symbol::PreInit` (`0x82556E70`)** [analysis]
-  - Identify allocator calls / internal `bl` targets / early-fail paths
-  - Confirm expected argument semantics for `(560000, 80000)` against decomp source + disasm
-  - Use `dc3_guest_disasm.py` and/or `powerpc-none-eabi-objdump` / `powerpc-none-eabi-gdb`
+- [x] **Fix File_Win.cpp drive assertion** [xenia]
+  - Set gUsingCD=1 (direct write + CheckForArchive runtime override)
+  - FileIsLocal assert bypass updated to current address (0x82B17980)
+- [x] **Fix File.cpp iRoot assertion** [xenia]
+  - Root cause: gUsingCD=0 caused HolmesFileShare() NULL fallback
+  - Fixed by setting gUsingCD=1 and symlinking gen/ assets into build dir
 
-- [ ] **Trace `PreInit` internal allocator behavior** [xenia + analysis]
-  - Add temporary logging overrides to functions `PreInit` calls via `bl` (allocator/new helpers)
-  - Capture args + return values + heap readiness indicators
-  - Determine whether `gStringTable=0x14` is allocation failure, bad args, or partial write/corruption
+### Tier 0: Current blockers
 
-- [ ] **Fix `gStringTable` initialization path** [xenia]
-  - Choose approach based on evidence:
-    - timing fix for `PreInit`,
-    - host-side `StringTable` construction,
-    - or alternate lazy init implemented fully in host override (no same-address forwarding)
-  - Respect JIT override constraint: no "override then clear and forward to same addr" strategy
+- [ ] **Fix object factory instantiation** [xenia + analysis]
+  - `Couldn't instantiate class Mat` / `MetaMaterial` / `Cam`
+  - sFactories map appears populated but lookup fails
+  - Also seen in Sessions 29-32 — may have same root cause
+  - Investigate factory registration / init order
 
-- [ ] **Revalidate CRT completion to `main()`** [test]
-  - Confirm no "Wasted string table" spam
-  - Confirm `_cinit` finishes and `main()` is reached
+- [ ] **Fix `Data is not Array` cascades** [analysis]
+  - Multiple DataNode::Array() calls on non-array data
+  - Likely from config parsing — DTB structure may not match expected schema
+  - Could be downstream of missing config sections
 
-### Tier 1: Resume post-CRT blockers (only after Tier 0 passes)
+### Tier 1: Resume prior post-CRT blockers (after Tier 0)
 
 - [ ] **Re-check SetupFont literal corruption path (`setupfont_fix`)** [dc3-decomp + xenia]
   - Verify whether decomp build freshness/literal issue is still present after CRT fix
 
 - [ ] **Re-check `Mat` / `MetaMaterial` instantiation failures** [analysis]
-  - Continue allocator/factory return-path investigation only after clean CRT progression
+  - Continue allocator/factory return-path investigation only after clean file system progression
 
 - [ ] **Re-check heap exhaustion / `MemInit` configuration** [analysis]
   - Reproduce without conflating with the earlier CRT/string-table blocker
+
+### Tier 2: Infrastructure / tech debt
+
+- [ ] **Automate Dc3Addresses from manifest** [xenia + dc3-decomp]
+  - Add missing symbols (globals, CRT, allocators) to `HACK_PACK_STUBS` in `generate_xenia_dc3_patch_manifest.py`
+  - Make `Dc3Addresses` non-constexpr, populate from manifest at runtime
+  - Currently ~50 hardcoded addresses require manual MAP refresh on each XEX rebuild
 
 ---
 

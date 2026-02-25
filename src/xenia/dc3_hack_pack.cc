@@ -54,48 +54,48 @@ namespace {
 // STALE(date) = not verified against current MAP.
 struct Dc3Addresses {
   // CRT sentinels
-  uint32_t xc_a = 0x83ADED60;
-  uint32_t xc_z = 0x83ADF378;
-  uint32_t xi_a = 0x83ADF37C;
-  uint32_t xi_z = 0x83ADF388;
+  uint32_t xc_a = 0x83ADED98;
+  uint32_t xc_z = 0x83ADF3B0;
+  uint32_t xi_a = 0x83ADF3B4;
+  uint32_t xi_z = 0x83ADF3C0;
   // CRT functions
-  uint32_t ioinit = 0x8361ADDC;
-  uint32_t cinit = 0x8311A6D4;
-  uint32_t errno_fn = 0x83611760;
-  uint32_t invalid_parameter_noinfo = 0x8361817C;
-  uint32_t call_reportfault = 0x836181B0;
-  uint32_t amsg_exit = 0x8360DA24;
-  uint32_t report_gsfailure = 0x8361AFD4;
+  uint32_t ioinit = 0x8361EDBC;
+  uint32_t cinit = 0x8311B4B8;
+  uint32_t errno_fn = 0x83615620;
+  uint32_t invalid_parameter_noinfo = 0x8361C15C;
+  uint32_t call_reportfault = 0x8361C190;
+  uint32_t amsg_exit = 0x836118E4;
+  uint32_t report_gsfailure = 0x8361EFB4;
   // CRT formatter
-  uint32_t output_l = 0x836192F0;
-  uint32_t woutput_l = 0x8361EE64;
+  uint32_t output_l = 0x8361D2D0;
+  uint32_t woutput_l = 0x83622E44;
   uint32_t hx_snprintf_vsnprintf_call = 0x83477FBC;  // STALE
   // Debug subsystem
-  uint32_t debug_print = 0x835466D4;
-  uint32_t debug_fail = 0x83547ABC;
-  uint32_t debug_do_crucible = 0x83546F00;
-  uint32_t datanode_print = 0x825522F0;
+  uint32_t debug_print = 0x835498E8;
+  uint32_t debug_fail = 0x8354ACD0;
+  uint32_t debug_do_crucible = 0x8354A114;
+  uint32_t datanode_print = 0x82551EF8;
   // Import/thunk
-  uint32_t xapi_call_thread_notify = 0x8311A828;
+  uint32_t xapi_call_thread_notify = 0x8311B60C;
   uint32_t text_start = 0x82320000;
-  uint32_t text_size = 0x017336D4;
+  uint32_t text_size = 0x0173604C;
   uint32_t idata_start = 0x8230D800;
   uint32_t idata_end = 0x8230DE34;
   uint32_t thunk_area_start = 0x83A52000;
   uint32_t thunk_area_end = 0x83A54000;
   // Locale
-  uint32_t get_system_language = 0x827F808C;
-  uint32_t get_system_locale = 0x827F8774;
-  uint32_t xget_locale = 0x8393AE6C;
-  uint32_t xtl_get_language = 0x8393B074;
-  uint32_t debug_break = 0x8393B114;
+  uint32_t get_system_language = 0x834099C8;
+  uint32_t get_system_locale = 0x83409E88;
+  uint32_t xget_locale = 0x8393ECAC;
+  uint32_t xtl_get_language = 0x8393B074;              // STALE
+  uint32_t debug_break = 0x8393EF54;
   // ReadCacheStream probes
-  uint32_t rcs_read_cache_stream = 0x83115974;
-  uint32_t rcs_bufstream_read_impl = 0x82BC2E90;
-  uint32_t rcs_bufstream_seek_impl = 0x82BC2F90;
+  uint32_t rcs_read_cache_stream = 0x83116700;
+  uint32_t rcs_bufstream_read_impl = 0x82BC3A38;
+  uint32_t rcs_bufstream_seek_impl = 0x82BC3B38;
   // SystemConfig / FindArray / SetupFont
-  uint32_t system_config_2 = 0x8351340C;
-  uint32_t find_array = 0x83540134;
+  uint32_t system_config_2 = 0x835165F4;
+  uint32_t find_array = 0x83543348;
   uint32_t setup_font_syscfg_return_lr = 0x8317FF14;       // STALE
   uint32_t setup_font_ctor1_literal = 0x82027684;          // STALE
   uint32_t setup_font_ctor2_literal = 0x82053BF8;          // STALE
@@ -103,39 +103,46 @@ struct Dc3Addresses {
   uint32_t setup_font_node_source_lr = 0x8317FF40;
   uint32_t setup_font_node_dest_lr = 0x8318001C;
   // Object / factory globals
-  uint32_t object_factories_map = 0x83AE1E00;
-  uint32_t rndmat_static_name_sym = 0x83AEAF2C;
-  uint32_t metamaterial_static_name_sym = 0x83AEC3A8;
-  uint32_t g_system_config = 0x83C7B2E0;
-  uint32_t g_string_table_global = 0x83AE0190;
-  uint32_t g_hash_table = 0x83AED4FC;
+  uint32_t object_factories_map = 0x83AE1AB8;
+  uint32_t rndmat_static_name_sym = 0x83AEAB2C;
+  uint32_t metamaterial_static_name_sym = 0x83AEBFA8;
+  uint32_t g_system_config = 0x83C7BAE8;
+  uint32_t g_string_table_global = 0x83AE01C0;
+  // NOTE: MAP says 0x83AED0FC (.bss) but code references 0x83AE01C4 (.data,
+  // right after gStringTable at 0x83AE01C0). /FORCE linker artifact.
+  uint32_t g_hash_table = 0x83AE01C4;
   // Memory / allocator probes
-  uint32_t mem_or_pool_alloc = 0x82877950;
-  uint32_t mem_alloc = 0x82878158;
-  uint32_t pool_alloc = 0x835E61D4;
-  uint32_t string_reserve = 0x82A5B1D0;
+  uint32_t mem_or_pool_alloc = 0x83447100;
+  uint32_t mem_alloc = 0x834466C8;
+  uint32_t pool_alloc = 0x835E9454;
+  uint32_t string_reserve = 0x82A5BED0;
   uint32_t string_reserve_memalloc_ret_lr = 0x82A5BC00;    // STALE
-  uint32_t g_chunk_alloc = 0x83CB8500;
+  uint32_t g_chunk_alloc = 0x83CB8D08;
   // DataArray / DataNode
-  uint32_t merged_dataarray_node = 0x8353EEB4;
-  uint32_t string_table_add = 0x82924848;
-  uint32_t symbol_preinit = 0x82556E70;
+  uint32_t merged_dataarray_node = 0x835420C8;
+  uint32_t string_table_add = 0x82924FF0;
+  uint32_t symbol_preinit = 0x82556A78;
   // TextStream
-  uint32_t textstream_op_const_char = 0x829A7240;
+  uint32_t textstream_op_const_char = 0x829A7D38;
   // String ops
-  uint32_t string_op_plus_eq = 0x82A5B268;
+  uint32_t string_op_plus_eq = 0x82A5BF68;
   // XMP
-  uint32_t xmp_override_bg_music = 0x83658ECC;
-  uint32_t xmp_restore_bg_music = 0x83658FA4;
+  uint32_t xmp_override_bg_music = 0x8365CDE0;
+  uint32_t xmp_restore_bg_music = 0x8365CEB8;
   // Write bridges
-  uint32_t write_nolock = 0x83614508;
-  uint32_t write_fn = 0x83614748;
+  uint32_t write_nolock = 0x83618444;
+  uint32_t write_fn = 0x83618684;
   // FileIsLocal
-  uint32_t file_is_local_assert_branch = 0x82B176F0;       // STALE
+  uint32_t file_is_local = 0x82B17958;
+  uint32_t file_is_local_assert_branch = 0x82B17980;
+  // File system globals
+  uint32_t g_using_cd = 0x83C7BAF0;
+  uint32_t check_for_archive = 0x83516A68;
+  uint32_t file_init = 0x83413CDC;
   // gConditional sentinel
   uint32_t g_conditional = 0x83C7D354;                     // STALE
   // Holmes trampoline target (reused as PPC code cave)
-  uint32_t protocol_debug_string = 0x831EFA44;
+  uint32_t protocol_debug_string = 0x831F0838;
   // MemMgr assert addresses (STALE)
   uint32_t meminit_assert = 0x83447AF4;                    // STALE
   uint32_t memalloc_assert = 0x83446A24;                   // STALE
@@ -1452,47 +1459,47 @@ const DebugStubEntry kDebugStubTable[] = {
     {kAddr.debug_break, "DebugBreak", 0},
     {kAddr.datanode_print, "DataNode::Print", 0},
     // Holmes network/file/poll stubs (not needed for current bring-up).
-    {0x831F1678, "HolmesClientInit", 0},
-    {0x831F1948, "HolmesClientReInit", 0},
-    {0x831F19C8, "HolmesClientPoll", 0},
-    {0x831F1248, "HolmesClientPollInternal", 0},
-    {0x831F1360, "HolmesClientInitOpcode", 0},
-    {0x831F0804, "HolmesClientTerminate", 0},
-    {0x831EFB74, "CanUseHolmes", 0},
-    {0x831EFBE8, "UsingHolmes", 0},
+    {0x831F246C, "HolmesClientInit", 0},
+    {0x831F273C, "HolmesClientReInit", 0},
+    {0x831F27BC, "HolmesClientPoll", 0},
+    {0x831F203C, "HolmesClientPollInternal", 0},
+    {0x831F2154, "HolmesClientInitOpcode", 0},
+    {0x831F15F8, "HolmesClientTerminate", 0},
+    {0x831F0968, "CanUseHolmes", 0},
+    {0x831F09DC, "UsingHolmes", 0},
     {kAddr.protocol_debug_string, "ProtocolDebugString", 0},
-    {0x831EFC04, "HolmesSetFileShare", 0},
-    {0x831EFC5C, "HolmesFileHostName", 0},
-    {0x831EFC68, "HolmesFileShare", 0},
-    {0x831EFC74, "HolmesResolveIP", 0},
-    {0x831F00D0, "BeginCmd", 0},
-    {0x831F0120, "CheckForResponse", 0},
-    {0x831F0324, "WaitForAnyResponse", 0},
-    {0x831F0F54, "EndCmd", 0},
-    {0x831F105C, "CheckReads", 0},
-    {0x831F1140, "CheckInput", 0},
-    {0x831F11E0, "WaitForResponse", 0},
-    {0x831F2A2C, "WaitForReads", 0},
-    {0x831F12A8, "HolmesClientPollKeyboard", 0},
-    {0x831F1300, "HolmesClientPollJoypad", 0},
-    {0x831F1E2C, "HolmesClientOpen", 0},
-    {0x831F2314, "HolmesClientRead", 0},
-    {0x831F244C, "HolmesClientReadDone", 0},
-    {0x831F2068, "HolmesClientWrite", 0},
-    {0x831F21D8, "HolmesClientTruncate", 0},
-    {0x831F2AC8, "HolmesClientClose", 0},
-    {0x831F1B34, "HolmesClientGetStat", 0},
-    {0x831F1A40, "HolmesClientSysExec", 0},
-    {0x831F1C4C, "HolmesClientMkDir", 0},
-    {0x831F1D3C, "HolmesClientDelete", 0},
-    {0x831F2C50, "HolmesClientEnumerate", 0},
-    {0x831F2504, "HolmesClientCacheFile", 0},
-    {0x831F26D4, "HolmesClientCacheResource", 0},
-    {0x831F04B0, "HolmesToLocal", 0},
-    {0x831F05A0, "HolmesFlushStreamBuffer", 0},
-    {0x831F0634, "DumpHolmesLog", 0},
-    {0x831F2808, "HolmesClientStackTrace", 0},
-    {0x831F2938, "HolmesClientSendMessage", 0},
+    {0x831F09F8, "HolmesSetFileShare", 0},
+    {0x831F0A50, "HolmesFileHostName", 0},
+    {0x831F0A5C, "HolmesFileShare", 0},
+    {0x831F0A68, "HolmesResolveIP", 0},
+    {0x831F0EC4, "BeginCmd", 0},
+    {0x831F0F14, "CheckForResponse", 0},
+    {0x831F1118, "WaitForAnyResponse", 0},
+    {0x831F1D48, "EndCmd", 0},
+    {0x831F1E50, "CheckReads", 0},
+    {0x831F1F34, "CheckInput", 0},
+    {0x831F1FD4, "WaitForResponse", 0},
+    {0x831F3820, "WaitForReads", 0},
+    {0x831F209C, "HolmesClientPollKeyboard", 0},
+    {0x831F20F4, "HolmesClientPollJoypad", 0},
+    {0x831F2C20, "HolmesClientOpen", 0},
+    {0x831F3108, "HolmesClientRead", 0},
+    {0x831F3240, "HolmesClientReadDone", 0},
+    {0x831F2E5C, "HolmesClientWrite", 0},
+    {0x831F2FCC, "HolmesClientTruncate", 0},
+    {0x831F38BC, "HolmesClientClose", 0},
+    {0x831F2928, "HolmesClientGetStat", 0},
+    {0x831F2834, "HolmesClientSysExec", 0},
+    {0x831F2A40, "HolmesClientMkDir", 0},
+    {0x831F2B30, "HolmesClientDelete", 0},
+    {0x831F3A44, "HolmesClientEnumerate", 0},
+    {0x831F32F8, "HolmesClientCacheFile", 0},
+    {0x831F34C8, "HolmesClientCacheResource", 0},
+    {0x831F12A4, "HolmesToLocal", 0},
+    {0x831F1394, "HolmesFlushStreamBuffer", 0},
+    {0x831F1428, "DumpHolmesLog", 0},
+    {0x831F35FC, "HolmesClientStackTrace", 0},
+    {0x831F372C, "HolmesClientSendMessage", 0},
 };
 
 // ============================================================================
@@ -1705,6 +1712,31 @@ void ApplyDebugStubs(const Dc3HackContext& ctx,
         if (r4 && r4 < 0xF0000000) {
           if (auto* msg = memory->TranslateVirtual<const char*>(r4)) {
             XELOGE("DC3: Debug::Fail message: {}", msg);
+            // Dump gHashTable state when mOwnEntries assertion fires.
+            if (std::strstr(msg, "mOwnEntries")) {
+              constexpr uint32_t kGHT = 0x83AE01C4;
+              auto* ht = memory->TranslateVirtual<uint8_t*>(kGHT);
+              if (ht) {
+                uint32_t e = xe::load_and_swap<uint32_t>(ht + 0x00);
+                uint32_t s = xe::load_and_swap<uint32_t>(ht + 0x04);
+                uint32_t n = xe::load_and_swap<uint32_t>(ht + 0x0C);
+                XELOGE("DC3: gHashTable @{:08X}: mEntries={:08X} mSize={} "
+                       "mOwnEntries_byte={:02X} mNumEntries={} "
+                       "raw[0..23]={:02X}{:02X}{:02X}{:02X} "
+                       "{:02X}{:02X}{:02X}{:02X} "
+                       "{:02X}{:02X}{:02X}{:02X} "
+                       "{:02X}{:02X}{:02X}{:02X} "
+                       "{:02X}{:02X}{:02X}{:02X} "
+                       "{:02X}{:02X}{:02X}{:02X}",
+                       kGHT, e, s, ht[0x08], n,
+                       ht[0], ht[1], ht[2], ht[3],
+                       ht[4], ht[5], ht[6], ht[7],
+                       ht[8], ht[9], ht[10], ht[11],
+                       ht[12], ht[13], ht[14], ht[15],
+                       ht[16], ht[17], ht[18], ht[19],
+                       ht[20], ht[21], ht[22], ht[23]);
+              }
+            }
             if (std::strncmp(msg, "Unknown class ", 14) == 0 ||
                 std::strncmp(msg, "Couldn't instantiate class ", 26) == 0) {
               static uint32_t factory_dump_count = 0;
@@ -2114,66 +2146,214 @@ void ApplyCrtPatches(const Dc3HackContext& ctx,
                      Dc3HackApplyResult& result) {
   Memory* memory = ctx.memory;
 
-  // Lazy Symbol::PreInit via StringTable::Add override.
+  // Host-side StringTable::Add override (Session 37).
+  // The guest heap (MemInit/MemAlloc) isn't initialized during __xc, so
+  // StringTable::Add's internal AddBuf() fails when it needs to allocate.
+  // Rather than forwarding to PPC code (impossible due to JIT embedding of
+  // extern_handler_), we implement Add entirely on the host side.  Strings
+  // are written into the pre-allocated guest char buffer so guest code can
+  // read the const char* pointers that Symbol stores.
   if (ctx.processor && ctx.is_decomp_layout) {
     const uint32_t kStringTableAdd = kAddr.string_table_add;
     auto st_add_handler = [](cpu::ppc::PPCContext* ppc_context,
                              kernel::KernelState* kernel_state) {
-      static bool s_preinit_done = false;
       auto* memory = kernel_state ? kernel_state->memory() : nullptr;
-      auto* processor = ppc_context->processor;
-      auto* thread_state = ppc_context->thread_state;
-
-      if (!s_preinit_done && memory) {
-        auto* gst_ptr = memory->TranslateVirtual<uint8_t*>(kAddr.g_string_table_global);
-        uint32_t gst_val = gst_ptr ? xe::load_and_swap<uint32_t>(gst_ptr) : 0;
-        uint32_t lr = static_cast<uint32_t>(ppc_context->lr);
-        uint32_t this_arg = static_cast<uint32_t>(ppc_context->r[3]);
-        uint32_t str_arg = static_cast<uint32_t>(ppc_context->r[4]);
-        XELOGI("DC3: StringTable::Add first call: gStringTable={:08X} "
-               "this={:08X} str={:08X} LR={:08X}",
-               gst_val, this_arg, str_arg, lr);
-        if (gst_val == 0) {
-          XELOGI("DC3: gStringTable=NULL, calling Symbol::PreInit(560000, 80000)");
-          uint64_t preinit_args[] = {560000, 80000};
-          processor->Execute(thread_state, kAddr.symbol_preinit, preinit_args, 2);
-          gst_val = gst_ptr ? xe::load_and_swap<uint32_t>(gst_ptr) : 0;
-          XELOGI("DC3: After PreInit: gStringTable={:08X}", gst_val);
-        }
-        s_preinit_done = true;
-
-        auto* fn = processor->LookupFunction(kAddr.string_table_add);
-        if (fn && fn->is_guest()) {
-          auto* gfn = static_cast<cpu::GuestFunction*>(fn);
-          XELOGI("DC3: StringTable::Add fn={} behavior={} has_extern={}",
-                 (void*)gfn, (int)gfn->behavior(),
-                 gfn->extern_handler() != nullptr);
-          gfn->SetupExtern(nullptr, nullptr);
-          XELOGI("DC3: After SetupExtern(nullptr): behavior={} has_extern={} "
-                 "status={} is_guest={}",
-                 (int)gfn->behavior(),
-                 gfn->extern_handler() != nullptr,
-                 (int)gfn->status(),
-                 gfn->is_guest());
-        }
+      if (!memory) {
+        ppc_context->r[3] = 0;
+        return;
       }
-
       uint32_t this_ptr = static_cast<uint32_t>(ppc_context->r[3]);
-      uint32_t str_ptr = static_cast<uint32_t>(ppc_context->r[4]);
-      static int fwd_count = 0;
-      if (++fwd_count <= 5) {
-        XELOGI("DC3: StringTable::Add forwarding[{}]: this={:08X} str={:08X}",
-               fwd_count, this_ptr, str_ptr);
+      uint32_t str_guest = static_cast<uint32_t>(ppc_context->r[4]);
+      if (!this_ptr || !str_guest) {
+        ppc_context->r[3] = 0;
+        return;
       }
-      uint64_t args[] = {this_ptr, str_ptr};
-      processor->Execute(thread_state, kAddr.string_table_add, args, 2);
-      ppc_context->r[3] = thread_state->context()->r[3];
+      auto* str = memory->TranslateVirtual<const char*>(str_guest);
+      if (!str) {
+        ppc_context->r[3] = 0;
+        return;
+      }
+      size_t len = std::strlen(str) + 1;
+
+      // Read StringTable fields from guest memory.
+      auto* st = memory->TranslateVirtual<uint8_t*>(this_ptr);
+      if (!st) {
+        ppc_context->r[3] = 0;
+        return;
+      }
+      uint32_t m_start = xe::load_and_swap<uint32_t>(st + 0x00);
+      int32_t cur_buf = static_cast<int32_t>(
+          xe::load_and_swap<uint32_t>(st + 0x10));
+      uint32_t cur_char = xe::load_and_swap<uint32_t>(st + 0x0C);
+
+      if (cur_buf < 0 || !m_start) {
+        // No buffer exists — can't add without MemAlloc.
+        static int s_nobuf_count = 0;
+        if (++s_nobuf_count <= 5)
+          XELOGW("DC3: StringTable::Add: no buffer (this={:08X} mCurBuf={} "
+                  "m_start={:08X})",
+                  this_ptr, cur_buf, m_start);
+        ppc_context->r[3] = str_guest;  // return original string
+        return;
+      }
+
+      // Read current Buf: mBuffers[mCurBuf]
+      auto* bufs = memory->TranslateVirtual<uint8_t*>(m_start);
+      if (!bufs) {
+        ppc_context->r[3] = str_guest;
+        return;
+      }
+      uint8_t* cur_buf_ptr = bufs + cur_buf * 8;
+      uint32_t buf_size = xe::load_and_swap<uint32_t>(cur_buf_ptr + 0);
+      uint32_t buf_chars = xe::load_and_swap<uint32_t>(cur_buf_ptr + 4);
+
+      // Check if string fits in current buffer.
+      uint32_t used = cur_char - buf_chars;
+      if (used + len > buf_size) {
+        // Buffer full. Can't allocate new one (heap may not be ready).
+        // Return original string pointer — caller will use it as-is.
+        static int s_full_count = 0;
+        if (++s_full_count <= 5)
+          XELOGW("DC3: StringTable::Add: buffer full (this={:08X} used={} "
+                  "len={} size={} buf_chars={:08X} str={})",
+                  this_ptr, used, len, buf_size, buf_chars, str);
+        ppc_context->r[3] = str_guest;
+        return;
+      }
+
+      // Copy string into guest buffer at mCurChar.
+      auto* dst = memory->TranslateVirtual<char*>(cur_char);
+      if (!dst) {
+        ppc_context->r[3] = str_guest;
+        return;
+      }
+      std::memcpy(dst, str, len);
+      uint32_t result_addr = cur_char;
+
+      // Advance mCurChar.
+      xe::store_and_swap<uint32_t>(st + 0x0C, cur_char + static_cast<uint32_t>(len));
+
+      static int s_add_count = 0;
+      if (++s_add_count <= 10 || (s_add_count % 1000) == 0) {
+        XELOGI("DC3: StringTable::Add[{}]: this={:08X} '{}' -> {:08X} "
+               "(used={}/{} m_start={:08X} buf_chars={:08X})",
+               s_add_count, this_ptr, str, result_addr, used + len,
+               buf_size, m_start, buf_chars);
+      }
+      ppc_context->r[3] = result_addr;
     };
     ctx.processor->RegisterGuestFunctionOverride(
         kStringTableAdd, st_add_handler,
-        "DC3:StringTable::Add(lazy-PreInit)");
-    XELOGI("DC3: Registered StringTable::Add lazy-PreInit override at {:08X}",
+        "DC3:StringTable::Add(host-impl)");
+    XELOGI("DC3: Registered host-side StringTable::Add override at {:08X}",
            kStringTableAdd);
+
+    // Override Symbol::PreInit to prevent it from overwriting our host-
+    // constructed gStringTable.  PreInit normally calls MemAlloc(20) which
+    // returns 0x14 (the size arg) because the heap isn't initialized yet,
+    // then stores that to gStringTable.  We skip the entire function body
+    // and just return — gStringTable is already set up.
+    // Override Symbol::PreInit to:
+    //   1. Skip StringTable allocation (host-constructed above)
+    //   2. Construct gHashTable on the host side (Resize needs MemAlloc)
+    //   3. Skip AddExitCallback (non-critical)
+    //
+    // gHashTable is KeylessHash<const char*, const char*> at 0x83AE01C4.
+    // Layout (24 bytes big-endian):
+    //   +0x00  T2*  mEntries
+    //   +0x04  int  mSize
+    //   +0x08  bool mOwnEntries (padded to 4 bytes)
+    //   +0x0C  int  mNumEntries
+    //   +0x10  T2   mEmpty    = NULL
+    //   +0x14  T2   mRemoved  = 0xFFFFFFFF
+    //
+    // PreInit calls gHashTable.Resize(80000, nullptr):
+    //   NextHashPrime(80000) = 92681 = 0x16A09
+    //   Allocates 92681 * 4 = 370724 bytes, fills with mEmpty=0.
+    const uint32_t kPreInit = kAddr.symbol_preinit;
+    auto preinit_handler = [](cpu::ppc::PPCContext* ppc_context,
+                              kernel::KernelState* kernel_state) {
+      constexpr uint32_t kGST = 0x83AE01C0;
+      constexpr uint32_t kGHT = 0x83AE01C4;
+      constexpr uint32_t kHashSize = 92681;  // NextHashPrime(80000)
+      constexpr uint32_t kEntrySize = 4;     // sizeof(const char*)
+      auto* memory = kernel_state ? kernel_state->memory() : nullptr;
+      if (!memory) return;
+
+      // Check gStringTable — should be our host construction.
+      auto* gst = memory->TranslateVirtual<uint8_t*>(kGST);
+      uint32_t gst_val = gst ? xe::load_and_swap<uint32_t>(gst) : 0;
+
+      // Construct gHashTable entries.
+      uint32_t entries_alloc = kHashSize * kEntrySize;
+      uint32_t entries_addr = memory->SystemHeapAlloc(entries_alloc, 0x10);
+      if (entries_addr) {
+        // Fill entries with mEmpty = 0 (NULL).
+        auto* entries = memory->TranslateVirtual<uint8_t*>(entries_addr);
+        if (entries) std::memset(entries, 0, entries_alloc);
+
+        // Write gHashTable fields.
+        auto* ht = memory->TranslateVirtual<uint8_t*>(kGHT);
+        if (ht) {
+          xe::store_and_swap<uint32_t>(ht + 0x00, entries_addr);  // mEntries
+          xe::store_and_swap<uint32_t>(ht + 0x04, kHashSize);     // mSize
+          // mOwnEntries = true (1, stored as big-endian bool at +0x08)
+          // Clear the full 4-byte padding slot then set the bool byte.
+          xe::store_and_swap<uint32_t>(ht + 0x08, 0);
+          ht[0x08] = 1;  // big-endian: first byte of the 4-byte slot
+          xe::store_and_swap<uint32_t>(ht + 0x0C, 0);           // mNumEntries
+          xe::store_and_swap<uint32_t>(ht + 0x10, 0);           // mEmpty = NULL
+          xe::store_and_swap<uint32_t>(ht + 0x14, 0xFFFFFFFF);  // mRemoved = -1
+        }
+
+        // Verify readback.
+        uint32_t v_entries = xe::load_and_swap<uint32_t>(ht + 0x00);
+        uint32_t v_size = xe::load_and_swap<uint32_t>(ht + 0x04);
+        uint8_t  v_own = ht[0x08];
+        uint32_t v_num = xe::load_and_swap<uint32_t>(ht + 0x0C);
+        uint32_t v_empty = xe::load_and_swap<uint32_t>(ht + 0x10);
+        uint32_t v_removed = xe::load_and_swap<uint32_t>(ht + 0x14);
+        XELOGW("DC3: Symbol::PreInit intercepted — gStringTable={:08X}, "
+                "gHashTable at {:08X}: entries={:08X} size={} own={} "
+                "num={} empty={:08X} removed={:08X} "
+                "(raw +08: {:02X}{:02X}{:02X}{:02X}) "
+                "(caller LR={:08X})",
+                gst_val, kGHT, v_entries, v_size, v_own,
+                v_num, v_empty, v_removed,
+                ht[0x08], ht[0x09], ht[0x0A], ht[0x0B],
+                static_cast<uint32_t>(ppc_context->lr));
+      } else {
+        XELOGW("DC3: Symbol::PreInit intercepted — gStringTable={:08X}, "
+                "FAILED to allocate gHashTable entries ({} bytes) "
+                "(caller LR={:08X})",
+                gst_val, entries_alloc,
+                static_cast<uint32_t>(ppc_context->lr));
+      }
+    };
+    ctx.processor->RegisterGuestFunctionOverride(kPreInit, preinit_handler,
+        "DC3:Symbol::PreInit(host-impl)");
+    XELOGI("DC3: Registered PreInit host-impl at {:08X}", kPreInit);
+
+    // Override CheckForArchive to set gUsingCD=1 (disc mode).
+    // The original function does: gUsingCD=true; gUsingCD &= FileGetStat(...);
+    // It's also PatchStub8'd (li r3,0; blr) which prevents the body from
+    // running.  This explicit override ensures gUsingCD is set at runtime
+    // even if the PPC stub runs or something else resets it.
+    const uint32_t kCheckForArchive = kAddr.check_for_archive;
+    auto cfa_handler = [](cpu::ppc::PPCContext* ppc_context,
+                          kernel::KernelState* kernel_state) {
+      constexpr uint32_t kUCD = 0x83C7BAF0;  // gUsingCD address
+      auto* memory = kernel_state ? kernel_state->memory() : nullptr;
+      if (!memory) return;
+      auto* ucd = memory->TranslateVirtual<uint8_t*>(kUCD);
+      if (ucd) {
+        xe::store_and_swap<uint32_t>(ucd, 1);
+        XELOGI("DC3: CheckForArchive override — set gUsingCD=1 at {:08X}", kUCD);
+      }
+    };
+    ctx.processor->RegisterGuestFunctionOverride(kCheckForArchive, cfa_handler,
+        "DC3:CheckForArchive(gUsingCD=1)");
+    XELOGI("DC3: Registered CheckForArchive override at {:08X}", kCheckForArchive);
   }
 
   // CRT sanitizer + injection.
@@ -2311,55 +2491,129 @@ void ApplyCrtPatches(const Dc3HackContext& ctx,
       }
     }
 
-    // Inject Symbol::PreInit into __xc[0].
-    if (ctx.processor) {
-      auto* xc_first = memory->TranslateVirtual<uint8_t*>(kXcA);
-      uint32_t first_entry = xc_first ? xe::load_and_swap<uint32_t>(xc_first) : 1;
-      if (first_entry == 0) {
-        const uint32_t kTrampAddr = kAddr.protocol_debug_string;  // CODE section
-        auto* heap = memory->LookupHeap(kTrampAddr);
-        auto* t = memory->TranslateVirtual<uint8_t*>(kTrampAddr);
-        if (heap && t) {
-          heap->Protect(kTrampAddr, 80, kMemoryProtectRead | kMemoryProtectWrite);
-          uint32_t code[] = {
-            0x7C0802A6,  // mflr r0
-            0x90010004,  // stw r0, 4(r1)
-            0x9421FFF0,  // stwu r1, -16(r1)
-            0x3C6083AE,  // lis r3, 0x83AE
-            0x80630190,  // lwz r3, 0x0190(r3)
-            0x2C030000,  // cmpwi r3, 0
-            0x40820024,  // bne +36
-            0x3C600008,  // lis r3, 0x0008
-            0x60638B80,  // ori r3, r3, 0x8B80
-            0x3C800001,  // lis r4, 0x0001
-            0x60843880,  // ori r4, r4, 0x3880
-            0x3D808255,  // lis r12, 0x8255
-            0x618C6E70,  // ori r12, r12, 0x6E70
-            0x7D8903A6,  // mtctr r12
-            0x4E800421,  // bctrl
-            0x38600000,  // li r3, 0
-            0x38210010,  // addi r1, r1, 16
-            0x80010004,  // lwz r0, 4(r1)
-            0x7C0803A6,  // mtlr r0
-            0x4E800020,  // blr
-          };
-          for (size_t i = 0; i < sizeof(code) / sizeof(code[0]); ++i) {
-            xe::store_and_swap<uint32_t>(t + i * 4, code[i]);
+    // Host-side StringTable construction (Session 37).
+    // Symbol::PreInit normally allocates gStringTable during __xc via
+    // #pragma init_seg(lib), but /FORCE linker placed its pointer outside
+    // __xc_a..__xc_z.  The previous PPC trampoline at __xc[0] called PreInit
+    // but MemAlloc returned sizeof(StringTable)=0x14 unchanged because the
+    // guest heap (MemInit) isn't initialized until main().
+    //
+    // Instead, construct a valid StringTable in host-managed guest memory
+    // (SystemHeapAlloc).  This gives __xc constructors a working StringTable
+    // for Symbol::Symbol calls.  Symbol::Init() has a fallback
+    // `if (!gStringTable) PreInit(...)` but since we set it here, that path
+    // is skipped.  gHashTable is default-constructed at __xc[156] and grows
+    // lazily.
+    //
+    // StringTable layout (20 bytes, big-endian PPC):
+    //   +0x00  vector<Buf>._M_start     (ptr to Buf array)
+    //   +0x04  vector<Buf>._M_finish    (one past last Buf)
+    //   +0x08  vector<Buf>._M_end_of_storage._M_data
+    //   +0x0C  mCurChar                 (write cursor into char buffer)
+    //   +0x10  mCurBuf                  (current buffer index, 0-based)
+    // Buf layout (8 bytes):
+    //   +0x00  size   (buffer capacity)
+    //   +0x04  chars  (pointer to char data)
+    {
+      constexpr uint32_t kStringBufSize = 560000;  // matches PreInit(560000, 80000)
+      constexpr uint32_t kStringTableObjSize = 20; // sizeof(StringTable) = 0x14
+      constexpr uint32_t kBufStructSize = 8;       // sizeof(StringTable::Buf)
+      constexpr uint32_t kTotalAlloc =
+          kStringTableObjSize + kBufStructSize + kStringBufSize;
+      uint32_t base = memory->SystemHeapAlloc(kTotalAlloc, 0x10);
+      if (base) {
+        uint32_t st_addr = base;
+        uint32_t buf_addr = base + kStringTableObjSize;
+        uint32_t chars_addr = base + kStringTableObjSize + kBufStructSize;
+        auto* st = memory->TranslateVirtual<uint8_t*>(st_addr);
+        auto* buf = memory->TranslateVirtual<uint8_t*>(buf_addr);
+        auto* chars = memory->TranslateVirtual<uint8_t*>(chars_addr);
+        if (st && buf && chars) {
+          std::memset(chars, 0, kStringBufSize);
+          // Write Buf[0]: {size=560000, chars=chars_addr}
+          xe::store_and_swap<uint32_t>(buf + 0, kStringBufSize);
+          xe::store_and_swap<uint32_t>(buf + 4, chars_addr);
+          // Write StringTable object.
+          xe::store_and_swap<uint32_t>(st + 0x00, buf_addr);                  // _M_start
+          xe::store_and_swap<uint32_t>(st + 0x04, buf_addr + kBufStructSize); // _M_finish
+          xe::store_and_swap<uint32_t>(st + 0x08, buf_addr + kBufStructSize); // _M_end_of_storage
+          xe::store_and_swap<uint32_t>(st + 0x0C, chars_addr);               // mCurChar
+          xe::store_and_swap<uint32_t>(st + 0x10, 0);                        // mCurBuf = 0
+          // Write gStringTable pointer.
+          auto* gst = memory->TranslateVirtual<uint8_t*>(kAddr.g_string_table_global);
+          if (gst) {
+            xe::store_and_swap<uint32_t>(gst, st_addr);
           }
-          xe::store_and_swap<uint32_t>(xc_first, kTrampAddr);
-          XELOGI("DC3: Wrote Symbol::PreInit PPC trampoline ({} insns) "
-                 "at {:08X} (CODE section), injected into __xc[0] ({:08X})",
-                 sizeof(code) / sizeof(code[0]), kTrampAddr, kXcA);
-          uint32_t xc0_readback = xe::load_and_swap<uint32_t>(xc_first);
-          uint32_t tramp_w0 = xe::load_and_swap<uint32_t>(t);
-          uint32_t tramp_w1 = xe::load_and_swap<uint32_t>(t + 4);
-          XELOGI("DC3: Verify: __xc[0]={:08X} tramp[0]={:08X} tramp[1]={:08X}",
-                 xc0_readback, tramp_w0, tramp_w1);
+          XELOGI("DC3: Host-constructed StringTable at {:08X} "
+                 "(Buf={:08X} chars={:08X} size={}) -> gStringTable={:08X}",
+                 st_addr, buf_addr, chars_addr, kStringBufSize,
+                 kAddr.g_string_table_global);
+          // Verify readback: dump the StringTable fields as guest code sees them.
+          uint32_t v_start = xe::load_and_swap<uint32_t>(st + 0x00);
+          uint32_t v_finish = xe::load_and_swap<uint32_t>(st + 0x04);
+          uint32_t v_eos = xe::load_and_swap<uint32_t>(st + 0x08);
+          uint32_t v_curchar = xe::load_and_swap<uint32_t>(st + 0x0C);
+          uint32_t v_curbuf = xe::load_and_swap<uint32_t>(st + 0x10);
+          uint32_t v_buf_size = xe::load_and_swap<uint32_t>(buf + 0);
+          uint32_t v_buf_chars = xe::load_and_swap<uint32_t>(buf + 4);
+          uint32_t v_gst = gst ? xe::load_and_swap<uint32_t>(gst) : 0;
+          XELOGI("DC3: StringTable verify: gStringTable*={:08X} "
+                 "_M_start={:08X} _M_finish={:08X} _M_eos={:08X} "
+                 "mCurChar={:08X} mCurBuf={} "
+                 "Buf[0].size={} Buf[0].chars={:08X}",
+                 v_gst, v_start, v_finish, v_eos,
+                 v_curchar, static_cast<int32_t>(v_curbuf),
+                 v_buf_size, v_buf_chars);
           result.applied++;
         }
       } else {
-        XELOGW("DC3: __xc[0] not null ({:08X}), cannot inject PreInit trampoline",
-               first_entry);
+        XELOGW("DC3: Failed to allocate {} bytes for host StringTable",
+               kTotalAlloc);
+      }
+    }
+
+    // Host-side gHashTable construction (Session 37).
+    // gHashTable is KeylessHash<const char*, const char*> at kAddr.g_hash_table.
+    // Must be initialized before __xc because Symbol::Symbol (called during __xc)
+    // accesses gHashTable. The __xc constructor for gHashTable may not have run
+    // yet, leaving BSS-zero memory where mOwnEntries=0 causes assertions.
+    // PreInit handler also writes this, but we need it even earlier.
+    {
+      constexpr uint32_t kHashSize = 92681;  // NextHashPrime(80000)
+      constexpr uint32_t kEntrySize = 4;     // sizeof(const char*)
+      uint32_t entries_alloc = kHashSize * kEntrySize;
+      uint32_t entries_addr = memory->SystemHeapAlloc(entries_alloc, 0x10);
+      if (entries_addr) {
+        auto* entries = memory->TranslateVirtual<uint8_t*>(entries_addr);
+        if (entries) std::memset(entries, 0, entries_alloc);
+        auto* ht = memory->TranslateVirtual<uint8_t*>(kAddr.g_hash_table);
+        if (ht) {
+          xe::store_and_swap<uint32_t>(ht + 0x00, entries_addr);  // mEntries
+          xe::store_and_swap<uint32_t>(ht + 0x04, kHashSize);     // mSize
+          xe::store_and_swap<uint32_t>(ht + 0x08, 0);
+          ht[0x08] = 1;                                           // mOwnEntries
+          xe::store_and_swap<uint32_t>(ht + 0x0C, 0);             // mNumEntries
+          xe::store_and_swap<uint32_t>(ht + 0x10, 0);             // mEmpty=NULL
+          xe::store_and_swap<uint32_t>(ht + 0x14, 0xFFFFFFFF);    // mRemoved=-1
+          XELOGI("DC3: Host-constructed gHashTable at {:08X} "
+                 "(entries={:08X} size={})",
+                 kAddr.g_hash_table, entries_addr, kHashSize);
+          result.applied++;
+        }
+      }
+    }
+
+    // Set gUsingCD=1 (Session 37): the game runs from disc in Xenia.
+    // CheckForArchive normally sets this by checking for gen/main_*.hdr,
+    // but it's stubbed (returns 0).  Without UsingCD=true, the file system
+    // falls through to HolmesFileShare() which returns NULL → iRoot assert.
+    {
+      auto* ucd = memory->TranslateVirtual<uint8_t*>(kAddr.g_using_cd);
+      if (ucd) {
+        xe::store_and_swap<uint32_t>(ucd, 1);
+        XELOGI("DC3: Set gUsingCD=1 at {:08X} (disc mode for Xenia)",
+               kAddr.g_using_cd);
+        result.applied++;
       }
     }
 

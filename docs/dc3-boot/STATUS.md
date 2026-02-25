@@ -1,6 +1,99 @@
 # Status: OODA Loop Iteration 5
 
-*Last updated: 2026-02-25 (Sessions 33-36 — gStringTable NULL / "Wasted string table" infinite loop; critical JIT architecture discoveries)*
+*Last updated: 2026-02-25 (Session 37 — file system + archive loading WORKING, boot into deep game init)*
+
+## 2026-02-25 Update (Session 37, continued): File System Fixed — Archive Loading, MemInit, Object Factory Reached
+
+### File system fixes
+- **gUsingCD=1**: Set in guest memory (direct write + CheckForArchive runtime override) — game now runs in disc mode
+- **FileIsLocal assert bypass**: Updated stale address to `0x82B17980`
+- **gen/ symlink**: `build/373307D9/gen` → `../../orig-assets/gen` so Xenia's VFS finds the `.hdr`/`.ark` files
+
+### Boot progression after fix
+```
+SystemPreInit:
+  -> InitMakeString, Symbol::PreInit    ✓ (host-constructed)
+  -> CheckForArchive                    ✓ (override sets gUsingCD=1)
+  -> FileInit                           ✓
+  -> ArchiveInit                        ✓ "Reading the archive"
+  -> DataInit, PreInitSystem            ✓ "reading system config file ham_preinit_keep.dta took 141ms"
+  -> LanguageInit                       ✓ (console firmware version check reached)
+  -> MemInit                            ✓ "Allocated 83F60000-84F60000 (16 MB) for heap growth"
+SystemInit:
+  -> Symbol::Init                       ✓
+  -> Object factory init                ✗ "Couldn't instantiate class Mat/MetaMaterial/Cam"
+  -> DxRnd::PreInit                     reached but NOT COMPILED
+```
+
+### New blocker: Object factory instantiation
+- `Couldn't instantiate class Mat` / `MetaMaterial` / `Cam` — same issue as Sessions 29-32
+- `Data is not Array` cascades from config parsing (DTB data structure issues)
+- sFactories map header shows `00 00 00 00 40 25 81 30 ...` — appears populated but factory lookup fails
+- This is now the primary blocker for reaching the main game loop
+
+## 2026-02-25 Update (Session 37): CRT _cinit Blocker RESOLVED — Boot Reaches Post-main Game Init
+
+### Summary
+`gStringTable=0x14` root cause identified and fixed. Boot now progresses through `_cinit`, past `main()`, into game initialization (file system / config loading).
+
+### Root cause: MemAlloc returns sizeof(StringTable) when heap not ready
+- `Symbol::PreInit` calls `new StringTable(560000)` which chains to `MemAlloc(20)` (sizeof(StringTable)=20=0x14)
+- During `__xc` iteration, the guest heap (`MemInit`) hasn't run yet — `MemInit` runs from `main()`, not from `__xc`
+- `MemAlloc` with uninitialized heap returns its size argument unchanged: `0x14`
+- This is why `gStringTable=0x14` — it's the size of StringTable, not a valid pointer
+
+### Fix: Host-side construction of StringTable + gHashTable
+Instead of trying to make the guest allocator work during CRT init, we now construct both objects entirely on the host side:
+
+1. **StringTable** (at `ApplyCrtPatches` time, before `_cinit`):
+   - `SystemHeapAlloc` for StringTable object (20 bytes), Buf struct (8 bytes), and 560KB char buffer
+   - Write valid StringTable fields to guest memory (mCurBuf=buf_addr, mCurChar=buf_addr+8)
+   - Write pointer to `gStringTable` global at `0x83AE01C0`
+
+2. **gHashTable** (at `ApplyCrtPatches` time, before `_cinit`):
+   - `SystemHeapAlloc` for 92681 entries (NextHashPrime(80000)) × 4 bytes
+   - Zero-fill entries, set mSize=92681, mOwnEntries=1, mEmpty=0, mRemoved=0xFFFFFFFF
+   - Write directly to `0x83AE01C4` (see /FORCE linker note below)
+
+3. **Symbol::PreInit override** (blocks original, constructs gHashTable again as safety):
+   - Prevents PreInit from calling MemAlloc on uninitialized heap
+   - Logs confirmation of both globals' state
+
+### Critical discovery: /FORCE linker creates duplicate symbol addresses
+- MAP file shows `gHashTable` at `0x83AED0FC` (.bss section)
+- But compiled PPC code references `0x83AE01C4` (.data section, immediately after gStringTable at `0x83AE01C0`)
+- Root cause: `/FORCE` linker flag allows duplicate symbols → MAP picks one, code uses the other
+- **Lesson**: Always verify data global addresses via PPC disassembly, don't trust MAP alone for `/FORCE`-linked binaries
+- This was found by disassembling `Symbol::Symbol(const char*)` and tracing the `gHashTable` load instructions
+
+### XEX rebuild during session
+- dc3-decomp XEX was rebuilt mid-session, shifting ~40+ addresses
+- All `Dc3Addresses` hardcoded values were updated from the new MAP file
+- Exposed the need for manifest-based auto-resolution of ALL hack pack addresses (currently only ~60 functions auto-resolve; globals like gStringTable/gHashTable are hardcoded)
+
+### Current boot state (post-fix)
+```
+mainCRTStartup
+  -> _cinit
+       -> __xi loop             ✓ works
+       -> __xc loop             ✓ FIXED (gStringTable + gHashTable host-constructed)
+  -> main()                     ✓ reached
+  -> game init                  ✗ NEW BLOCKER: file system assertions
+```
+
+New errors at current crash point:
+- `File_Win.cpp Line: 36 Error: !strieq(drive, "game")` — file path drive letter validation
+- `File.cpp Line: 768 Error: iRoot` — file root not initialized
+
+### Runtime log excerpt
+```
+DC3: Host-constructed StringTable at 00037000
+DC3: Host-constructed gHashTable at 83AE01C4
+DC3: Symbol::PreInit intercepted — gStringTable=00037000, gHashTable: entries=0012C000 size=92681 own=1
+DC3: StringTable::Add[1-10]: working correctly with this=00037000
+...
+DC3: Debug::Fail: File: src/system/os/File_Win.cpp Line: 36 Error: !strieq(drive, "game")
+```
 
 ## 2026-02-25 Update (Sessions 33-36): gStringTable NULL — "Wasted string table" Infinite Loop
 
