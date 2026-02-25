@@ -1,6 +1,129 @@
-# Status: OODA Loop Iteration 4
+# Status: OODA Loop Iteration 5
 
-*Last updated: 2026-02-25 (Session 32 — `String::reserve` crash root-caused to heap exhaustion via MemOrPoolAlloc probe; new blocker: `StringTable::UsedSize` tight loop)*
+*Last updated: 2026-02-25 (Sessions 33-36 — gStringTable NULL / "Wasted string table" infinite loop; critical JIT architecture discoveries)*
+
+## 2026-02-25 Update (Sessions 33-36): gStringTable NULL — "Wasted string table" Infinite Loop
+
+### Root cause
+`gStringTable` is a `StringTable*` at `0x83AE0190`, initialized to NULL in `.bss`. With the zero page mapped as readable zeros in Xenia, dereferencing a NULL `gStringTable` reads `mCurBuf=0` instead of crashing. `StringTable::Add` then computes `mBuffers.size()-1` as an unsigned underflow (`0xFFFFFFFF`), entering an infinite loop that spams "Wasted string table" 700K+ times.
+
+### Why gStringTable is NULL
+`Symbol::PreInit(560000, 80000)` is the function that allocates `gStringTable`. It's normally called as a C++ `#pragma init_seg(lib)` initializer via `__xc` (the CRT C++ constructor table iterated by `_cinit`). However, the decomp build's `/FORCE` linker places `PreInit`'s init function pointer **outside** the `__xc_a...__xc_z` sentinel range (similar to the `_ioinit` problem we solved earlier). So `_cinit` never calls it.
+
+### _cinit CRT structure (fully disassembled)
+1. Calls `__savegprlr` (`0x82C1ADCC`) for register save
+2. Optionally calls callback from `0x821E14A8`
+3. **__xi loop**: iterates `kXiA` (`0x83ADF37C`) to `kXiZ` (`0x83ADF388`), calls non-NULL entries via `bctrl`, exits early on non-zero return
+4. **__xc loop**: iterates `kXcA` (`0x83ADED60`) to `kXcZ` (`0x83ADF378`), skips entries that are `NULL (0)` or `-1 (0xFFFFFFFF)`, calls all others via `bctrl`
+
+Key __xc loop disassembly:
+```
+8311A768: lis r10, 0x83AE        # kXcA high
+8311A770: addi r10, r10, -0x12A0 # r10 = 0x83ADED60 = kXcA
+8311A774: addi r30, r11, -0x0C88 # r30 = 0x83ADF378 = kXcZ
+8311A778: or r31, r10, r10       # iterator = kXcA
+8311A784: lwz r11, 0(r31)        # Load entry
+8311A788: cmpwi cr6, r11, 0      # Skip if NULL
+8311A790: cmpwi cr6, r11, -1     # Skip if -1
+8311A798: mtctr r11              # CTR = entry
+8311A79C: bctrl                  # Call entry
+8311A7A0: addi r31, r31, 4       # Next
+```
+
+### Six failed approaches to inject Symbol::PreInit
+
+1. **Guest function override at PreInit address** — `RegisterGuestFunctionOverride` only fires for direct `bl` calls. `_cinit` calls `__xc` entries via `bctrl` (indirect), so overrides DON'T fire.
+
+2. **PPC trampoline in heap extension (`0x84F5FF00`)** — Outside XEX module range (`0x82320000-0x83A70000`). JIT doesn't know about this memory, so the trampoline code is never compiled.
+
+3. **PPC trampoline inside HolmesClientInit body (`0x831F1680`)** — The JIT had already seen/compiled this function's original code. Overwriting mid-function after JIT compilation has no effect since the JIT doesn't re-read guest memory.
+
+4. **Guest override at CanUseHolmes (`0x831EFB74`)** — Same `bctrl` problem as #1. Indirect calls don't trigger guest function overrides.
+
+5. **PPC trampoline in RODATA section (`0x83F5FF00`)** — RODATA (`0x83D30000-0x83F60000`) is outside the CODE section. JIT only compiles code within CODE section boundaries.
+
+6. **PPC trampoline in CODE section at ProtocolDebugString (`0x831EFA44`)** — This is the current approach. The trampoline is verified written correctly (readback confirmed: `__xc[0]=831EFA44`, `tramp[0]=7C0802A6`). _cinit's __xc loop starts from `kXcA`. But "Wasted string table" spam still occurs. Stack traces confirm __xc entries ARE being called (call chain: `_cinit → __xc entry → Symbol::Symbol → StringTable::Add → infinite loop`). **MYSTERY: the trampoline appears correct but gStringTable remains NULL.**
+
+### Diagnostic evidence
+- Log confirms: "Wrote Symbol::PreInit PPC trampoline (20 insns) at 831EFA44 (CODE section), injected into __xc[0] (83ADED60)"
+- Verify readback: `__xc[0]=831EFA44 tramp[0]=7C0802A6 tramp[1]=90010004` ✓
+- Stack frame [12] shows `LR=0x8311A7A0` which is the instruction AFTER `bctrl` in the __xc loop, confirming __xc entries execute
+- 702,794 "Wasted string table" messages still appear
+
+### Key remaining questions
+1. Does the trampoline at `0x831EFA44` actually execute? (Need diagnostic inside trampoline or in Debug::Fail handler)
+2. If it executes, does `Symbol::PreInit` succeed? (gStringTable may still be NULL after call)
+3. Is the execution ORDER correct? (Does the trampoline run BEFORE other __xc entries that create Symbols?)
+4. Does the JIT respect our written PPC code at `0x831EFA44`, or does it have a stale cached compilation from the original ProtocolDebugString function?
+
+### Attempt 7: StringTable::Add guest override with lazy PreInit (Session 36, PARTIALLY WORKED)
+
+Registered a guest function override on `StringTable::Add` (`0x82924848`) since it's called via `bl` (direct call from `Symbol::Symbol`), and guest overrides DO fire for `bl` calls.
+
+**Results:**
+- Override DID fire — confirmed by log: "StringTable::Add first call"
+- **Zero "Wasted string table" messages** (down from 700K+) — the PPC trampoline at `__xc[0]` IS executing and setting `gStringTable=0x14` (non-zero but likely garbage/partial init)
+- `this=0x14` passed to StringTable::Add (this IS gStringTable's value — meaning PreInit ran but produced garbage result `0x14`)
+- `LR=0x82557600` (inside `Symbol::Symbol` — confirms call chain)
+
+**Forwarding problem:** After calling PreInit and clearing the override, the handler tried to forward to the real StringTable::Add PPC code via `processor->Execute()`. This caused **infinite recursion** because:
+
+### CRITICAL JIT ARCHITECTURE DISCOVERY (Session 36)
+
+**The JIT embeds `extern_handler_` as a hardcoded x86 immediate, NOT a dynamic lookup.**
+
+When the JIT compiles a `bl` instruction targeting a function with `behavior=kExtern`, it generates x86 code like:
+```x86
+mov rcx, <literal extern_handler_ pointer>  ; EMBEDDED AT JIT TIME
+call guest_to_host_thunk
+```
+
+This means:
+1. **Clearing `extern_handler_` at runtime has NO EFFECT on already-JIT-compiled call sites** — the old handler pointer is baked into the x86 machine code
+2. **`SetupExtern(nullptr)` only affects the function object**, not the JIT-compiled callers
+3. **`GuestFunction::Call()` is NOT used by JIT-compiled code** — only by `Processor::Execute()` (host-initiated calls)
+4. **Once a `bl` is JIT-compiled with an extern handler, it's permanent** for all JIT-compiled callers
+
+Source: `x64_emitter.cc` line 746:
+```cpp
+mov(rcx, reinterpret_cast<uint64_t>(extern_function->extern_handler()));
+```
+
+**Implication for override forwarding:** You CANNOT override a function, then clear the override to forward to the "real" PPC code via the same address. The JIT-compiled callers will forever call your handler. The only way to "forward" would be to call a DIFFERENT function address or use `Processor::Execute()` which goes through `GuestFunction::Call()` — but that also hits the handler if `extern_handler_` was embedded.
+
+Wait — `Processor::Execute()` goes through `GuestFunction::Call()`, which DOES check `extern_handler_` dynamically. But our tests showed it still recursed. Investigation revealed `CallImpl()` (the JIT path from `GuestFunction::Call()`) returned false because `machine_code_` was null for the extern function. So `Execute` silently failed, and the PPC caller retried.
+
+### PPC trampoline IS partially working
+
+The test with the StringTable::Add override revealed that `gStringTable=0x14` (not NULL). This means the PPC trampoline at `__xc[0]` (`0x831EFA44`) IS executing and `Symbol::PreInit` IS being called. But PreInit produces a garbage result (`0x14`) instead of a valid StringTable pointer. This could be:
+- PreInit crashing mid-execution (allocation failure?)
+- PreInit's arguments wrong
+- PreInit's internal calls failing silently
+- `0x14` is an offset within the zero page (gStringTable read as 0x14 from partially-written memory)
+
+### Current state of approaches
+| # | Approach | Status | Failure reason |
+|---|----------|--------|----------------|
+| 1 | Guest override at PreInit | Failed | bctrl doesn't trigger overrides |
+| 2 | PPC trampoline in heap ext | Failed | Outside XEX module range |
+| 3 | PPC trampoline in HolmesClientInit | Failed | JIT stale cache |
+| 4 | Guest override at CanUseHolmes | Failed | bctrl doesn't trigger |
+| 5 | PPC trampoline in RODATA | Failed | Outside CODE section |
+| 6 | PPC trampoline in CODE section | **Partial** | Trampoline runs, PreInit called, but gStringTable=0x14 (garbage) |
+| 7 | StringTable::Add override | **Partial** | Override fires, but can't forward due to JIT embedding |
+
+### Recommended next approaches
+- **Investigate why PreInit produces gStringTable=0x14** — add host-side `Symbol::PreInit` override (it's called via `bctrl` from the trampoline, but maybe via `bl` internally?), or add PPC diagnostic instructions to the trampoline to log the return value
+- **Override a function that PreInit calls via `bl`** (e.g., `MemAlloc`) — to diagnose whether allocation fails inside PreInit
+- **Implement StringTable::Add entirely in the host handler** — skip forwarding, implement the string table logic in C++ on the host side
+- **Patch StringTable::Add PPC prologue** — overwrite the first instructions to add a null-guard that calls PreInit, relocating the original prologue to a trampoline
+- **Direct host-side gStringTable allocation** — allocate guest memory, construct a minimal StringTable object, write pointer to `0x83AE0190`
+
+### Other fixes applied in Sessions 33-36
+- **Debug::Fail re-entrancy guard**: Prevents infinite recursion when `Debug::Fail` → `DoCrucible` → `Symbol` → `StringTable::Add` → assert → `Debug::Fail`
+- **TextStream::operator<<(const char*) NULL assert loop**: Guest override with vtable Print dispatch
+- **PE protection extended**: Full XEX image coverage
+- **All hack pack addresses refreshed** from latest MAP file
 
 ## 2026-02-25 Update (Session 32): `String::reserve` Crash Root-Caused — Heap Exhaustion via Nop'd `MemAlloc` Assert; New Blocker: `StringTable::UsedSize` Tight Loop
 

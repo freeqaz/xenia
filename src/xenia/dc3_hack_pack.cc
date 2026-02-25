@@ -48,24 +48,18 @@ namespace {
 constexpr uint32_t kPpcLiR3_0 = 0x38600000;
 constexpr uint32_t kPpcBlr = 0x4E800020;
 static uint32_t g_dc3_errno_guest_ptr = 0;
-// Addresses from build/373307D9/default.map (relink with MemInit heap loop fix).
-constexpr uint32_t kDc3RcsReadCacheStreamAddr = 0x83115954;
-constexpr uint32_t kDc3RcsBufStreamReadImplAddr = 0x82BC2E70;
-constexpr uint32_t kDc3RcsBufStreamSeekImplAddr = 0x82BC2F70;
-constexpr uint32_t kDc3OutputLAddr = 0x836192D0;
-constexpr uint32_t kDc3WOutputLAddr = 0x8361EE44;
-constexpr uint32_t kDc3SystemConfig2Addr = 0x835133EC;
-// TODO: Recompute SetupFont LR from disassembly after relink. This is the
-// return address from the SystemConfig(Symbol,Symbol) call inside SetupFont.
-// Old value was 0x8317FF14; new SetupFont entry is 0x8317F038.
+// Addresses from build/373307D9/default.map (fresh relink 2026-02-25).
+constexpr uint32_t kDc3RcsReadCacheStreamAddr = 0x83115974;
+constexpr uint32_t kDc3RcsBufStreamReadImplAddr = 0x82BC2E90;
+constexpr uint32_t kDc3RcsBufStreamSeekImplAddr = 0x82BC2F90;
+constexpr uint32_t kDc3OutputLAddr = 0x836192F0;
+constexpr uint32_t kDc3WOutputLAddr = 0x8361EE64;
+constexpr uint32_t kDc3SystemConfig2Addr = 0x8351340C;
+// TODO: Recompute SetupFont LR from disassembly. This is the return address
+// from the SystemConfig(Symbol,Symbol) call inside SetupFont.
 constexpr uint32_t kDc3SetupFontSystemConfigReturnLR = 0x8317FF14;  // STALE
-// SetupFont constructs Symbol temporaries in one order and passes them to
-// SystemConfig(Symbol, Symbol) in the opposite register order.
-// At LR=0x8317FF14 (return from SystemConfig call):
-//   r3/s1 comes from the second ctor literal (0x82053BF8, expected "rnd")
-//   r4/s2 comes from the first  ctor literal (0x82027684, expected "font")
 // TODO: SetupFont ctor literals are anonymous string constants; resolve from
-// disassembly of SetupFont at 0x8317F020 after relink.
+// disassembly of SetupFont after relink.
 constexpr uint32_t kDc3SetupFontCtor1LiteralAddr = 0x82027684;  // expected "font" STALE
 constexpr uint32_t kDc3SetupFontCtor2LiteralAddr = 0x82053BF8;  // expected "rnd" STALE
 constexpr uint32_t kDc3PooledFontStringAddr = 0x82017684;  // STALE
@@ -74,17 +68,12 @@ constexpr uint32_t kDc3RndMatStaticNameSymAddr = 0x83AEAF2C;
 constexpr uint32_t kDc3MetaMaterialStaticNameSymAddr = 0x83AEC3A8;
 constexpr uint32_t kDc3GSystemConfigAddr = 0x83C7B2E0;
 constexpr uint32_t kDc3GStringTableGlobalAddr = 0x83AE0190;
-// Use the gHashTable instance referenced by Symbol::Symbol (verified from
-// 0x825572E4 disassembly: lis 0x83AE; addi +0x01CC), not the duplicate map
-// symbol instance at 0x83AED0FC.
 constexpr uint32_t kDc3GHashTableAddr = 0x83AED4FC;
-// MemOrPoolAlloc probe addresses (from default.map, relinked)
-constexpr uint32_t kDc3MemOrPoolAllocAddr = 0x828779A0;
-// MemAlloc is not a separate function in the decomp binary; MemOrPoolAlloc
-// calls it inline. Use _MemAllocTemp as the dispatch target instead.
-constexpr uint32_t kDc3MemAllocAddr = 0x828781A8;  // _MemAllocTemp
-constexpr uint32_t kDc3PoolAllocAddr = 0x835E61B4;
-constexpr uint32_t kDc3StringReserveAddr = 0x82A5B200;
+// MemOrPoolAlloc probe addresses (from default.exe.MAP)
+constexpr uint32_t kDc3MemOrPoolAllocAddr = 0x82877950;
+constexpr uint32_t kDc3MemAllocAddr = 0x82878158;  // _MemAllocTemp
+constexpr uint32_t kDc3PoolAllocAddr = 0x835E61D4;
+constexpr uint32_t kDc3StringReserveAddr = 0x82A5B1D0;
 // TODO: Recompute String::reserve MemOrPoolAlloc call return LR from disasm.
 constexpr uint32_t kDc3StringReserveMemAllocRetLR = 0x82A5BC00;  // STALE
 // gChunkAlloc: global ChunkAllocator* used by PoolAlloc
@@ -697,8 +686,8 @@ void RegisterDc3WriteBridges(const Dc3HackContext& ctx, Dc3HackApplyResult& debu
     const char* name;
   };
   const WriteBridge bridges[] = {
-      {0x83617E1C, "_write_nolock"},
-      {0x8361805C, "_write"},
+      {0x83614508, "_write_nolock"},
+      {0x83614748, "_write"},
   };
   for (const auto& bridge : bridges) {
     auto handler = [](cpu::ppc::PPCContext* ppc_context,
@@ -739,8 +728,8 @@ void RegisterDc3LocaleBootstrapBridges(const Dc3HackContext& ctx,
     const char* name;
   };
   const Bridge bridges[] = {
-      {0x83409AA8, "GetSystemLanguage"},
-      {0x83409F68, "GetSystemLocale"},
+      {0x827F808C, "GetSystemLanguage"},
+      {0x827F8774, "GetSystemLocale"},
   };
   auto handler = [](cpu::ppc::PPCContext* ppc_context,
                     kernel::KernelState* kernel_state) {
@@ -1022,7 +1011,7 @@ void RegisterDc3FindArrayOverride(const Dc3HackContext& ctx,
   }
 
   static uint32_t s_find_array_stub = 0;
-  constexpr uint32_t kFindArrayAddr = 0x83543424;
+  constexpr uint32_t kFindArrayAddr = 0x83540134;
   auto find_array_handler = [](cpu::ppc::PPCContext* ppc_context,
                                kernel::KernelState* kernel_state) {
     if (!ppc_context || !kernel_state) return;
@@ -1130,7 +1119,7 @@ void RegisterDc3DataArraySafetyOverrides(const Dc3HackContext& ctx,
     return;
   }
 
-  constexpr uint32_t kMergedDataArrayNodeAddr = 0x835421A4;
+  constexpr uint32_t kMergedDataArrayNodeAddr = 0x8353EEB4;
   auto merged_dataarray_node_handler = [](cpu::ppc::PPCContext* ppc_context,
                                           kernel::KernelState* kernel_state) {
     if (!ppc_context || !kernel_state) return;
@@ -1403,7 +1392,7 @@ void ApplyDc3ImportAndRuntimeStopgaps(const Dc3HackContext& ctx,
   }
 
   // Stub XapiCallThreadNotifyRoutines and XRegisterThreadNotifyRoutine.
-  const uint32_t kNotifyFuncs[] = {0x8302CEE0};
+  const uint32_t kNotifyFuncs[] = {0x8311A828};
   for (uint32_t addr : kNotifyFuncs) {
     auto* heap = memory->LookupHeap(addr);
     if (heap) {
@@ -1431,33 +1420,38 @@ void ApplyDc3ImportAndRuntimeStopgaps(const Dc3HackContext& ctx,
   }
 
   // Make the full PE image + heap region writable.
-  // The decomp XEX has global DataNode/DataArray objects in .data sections
-  // (e.g. 0x834880E0) that the game writes to at runtime.  The linker marks
-  // these sections read-only because they contain initialized data, but the
-  // game expects them writable.  PE sections end at ~0x83E5E6D0 but the
-  // MemMgr heaps (configured from system_info.dta) grow into memory past
-  // the PE image.  Split into two Protect calls to avoid spanning regions.
+  // The decomp XEX has global DataNode/DataArray objects in .data/.bss sections
+  // that the game writes to at runtime.  The linker marks initialized-data
+  // sections read-only, but the game expects them writable.
+  // PE image extends to 0x83F60000 (SizeOfImage=0x1F53000, rounded to pages).
   {
     auto* heap1 = memory->LookupHeap(0x82000000);
     if (heap1) {
-      heap1->Protect(0x82000000, 0x1ED0000,
+      heap1->Protect(0x82000000, 0x1F60000,
                      kMemoryProtectRead | kMemoryProtectWrite);
-      XELOGI("DC3: Made PE image 0x82000000-0x83ED0000 writable");
+      XELOGI("DC3: Made PE image 0x82000000-0x83F60000 writable");
     }
-    // Extend writable region past PE image for MemMgr heap growth.
-    // The PE region boundary is at 0x83ED0000; try extending into the next
-    // region one 64KB block at a time.
-    for (uint32_t ext = 0x83ED0000; ext < 0x84000000; ext += 0x10000) {
-      auto* ext_heap = memory->LookupHeap(ext);
-      if (ext_heap) {
-        if (ext_heap->Protect(ext, 0x10000,
-                              kMemoryProtectRead | kMemoryProtectWrite)) {
-          continue;
-        }
+    // Allocate + commit memory past PE image for MemMgr heap growth.
+    // The PE image ends at ~0x83F60000 but MemMgr heaps (via malloc ->
+    // NtAllocateVirtualMemory) grow into this region.  Protect() alone fails
+    // because pages past the image aren't committed.  Use AllocFixed() to
+    // reserve + commit the region, same pattern as xex_module.cc patching.
+    constexpr uint32_t kHeapExtStart = 0x83F60000;
+    constexpr uint32_t kHeapExtSize = 0x1000000;  // 16MB for heap growth
+    auto* ext_heap = memory->LookupHeap(kHeapExtStart);
+    if (ext_heap) {
+      bool ext_ok = ext_heap->AllocFixed(
+          kHeapExtStart, kHeapExtSize, 4096,
+          kMemoryAllocationReserve | kMemoryAllocationCommit,
+          kMemoryProtectRead | kMemoryProtectWrite);
+      if (ext_ok) {
+        XELOGI("DC3: Allocated {:08X}-{:08X} ({} MB) for heap growth",
+               kHeapExtStart, kHeapExtStart + kHeapExtSize,
+               kHeapExtSize / (1024 * 1024));
+      } else {
+        XELOGW("DC3: Failed to allocate heap extension at {:08X}",
+               kHeapExtStart);
       }
-      XELOGI("DC3: Extended writable to {:08X} ({} pages past PE)",
-             ext, (ext - 0x83ED0000) / 0x10000);
-      break;
     }
     stopgap_result.applied++;
 
@@ -1470,9 +1464,9 @@ void ApplyDc3ImportAndRuntimeStopgaps(const Dc3HackContext& ctx,
           uint32_t expected_word;
           const char* name;
         };
-        // TODO: These assert-nop addresses are STALE after the MemInit relink.
+        // TODO: These assert-nop addresses are STALE after the relink.
         // With the heap iteration fix, these asserts may not fire. Recompute
-        // from disassembly if needed: MemInit=0x82878580, _MemAllocTemp=0x828781A8.
+        // from disassembly if needed: MemInit=0x82878530, _MemAllocTemp=0x82878158.
         const MemPatch mem_patches[] = {
             {0x83447AF4, 0x481032B9, "MemInit line 690: Debug::Fail call (STALE)"},
             {0x83446A24, 0x48104389, "MemAlloc line 961: Debug::Fail call (STALE)"},
@@ -1507,7 +1501,7 @@ void ApplyDc3ImportAndRuntimeStopgaps(const Dc3HackContext& ctx,
   // Redirect DECOMP Debug::Print to XELOG so MILO_LOG output remains visible
   // without stubbing the CRT formatter path.
   if (ctx.processor) {
-    constexpr uint32_t kDebugPrint = 0x835466B4;
+    constexpr uint32_t kDebugPrint = 0x835466D4;
     auto debug_print_handler = [](cpu::ppc::PPCContext* ppc_context,
                                   kernel::KernelState* kernel_state) {
       if (!ppc_context || !kernel_state) return;
@@ -1531,10 +1525,18 @@ void ApplyDc3ImportAndRuntimeStopgaps(const Dc3HackContext& ctx,
 
   // Restore Debug::Fail visibility while keeping the runtime moving.
   if (ctx.processor) {
-    constexpr uint32_t kDebugFail = 0x83547A9C;
+    constexpr uint32_t kDebugFail = 0x83547ABC;
     auto fail_handler = [](cpu::ppc::PPCContext* ppc_context,
                            kernel::KernelState* kernel_state) {
       if (!ppc_context || !kernel_state) return;
+      // Re-entrancy guard: Fail formatting can trigger MILO_ASSERT → Fail recursion
+      // (e.g. TextStream::operator<<(NULL) → assert → Fail → format → ...).
+      static bool s_in_fail = false;
+      if (s_in_fail) {
+        ppc_context->r[3] = 0;
+        return;
+      }
+      s_in_fail = true;
       auto* memory = kernel_state->memory();
       uint32_t lr = static_cast<uint32_t>(ppc_context->lr);
       uint32_t r3 = static_cast<uint32_t>(ppc_context->r[3]);  // Debug*
@@ -1601,19 +1603,196 @@ void ApplyDc3ImportAndRuntimeStopgaps(const Dc3HackContext& ctx,
           }
         }
       }
-      if (fail_count <= 200) {
+      if (fail_count <= 5 || (fail_count % 5000) == 0) {
         XELOGW("DC3: Debug::Fail returning to caller (count={})", fail_count);
-      } else if (fail_count == 201) {
-        XELOGE("DC3: Debug::Fail called >200 times, spinning forever");
-        while (true) {
-        }
       }
+      s_in_fail = false;
       ppc_context->r[3] = 0;
     };
     ctx.processor->RegisterGuestFunctionOverride(
         kDebugFail, fail_handler, "DC3:Debug::Fail(log)");
     XELOGI("DC3: Registered Debug::Fail handler at {:08X} (logs LR + hangs)",
            kDebugFail);
+  }
+
+  // Break recursive crash in Debug::DoCrucible.
+  // When an assertion fires (e.g. StringTable not yet initialized), DoCrucible
+  // formats error text which creates Symbol objects.  Symbol::Symbol calls
+  // StringTable::Add, which asserts again → DoCrucible → Symbol → ... until
+  // the guest stack overflows.  Add a re-entrancy guard that returns
+  // immediately on recursive calls, breaking the infinite loop.
+  if (ctx.processor) {
+    constexpr uint32_t kDebugDoCrucible = 0x83546F00;
+    auto crucible_handler = [](cpu::ppc::PPCContext* ppc_context,
+                               kernel::KernelState* kernel_state) {
+      static bool s_in_crucible = false;
+      static int s_crucible_count = 0;
+      s_crucible_count++;
+      if (s_in_crucible) {
+        // Recursive entry — break the loop silently.
+        ppc_context->r[3] = 0;
+        return;
+      }
+      s_in_crucible = true;
+      if (s_crucible_count <= 5 || (s_crucible_count % 5000) == 0) {
+        uint32_t lr = static_cast<uint32_t>(ppc_context->lr);
+        uint32_t r4 = static_cast<uint32_t>(ppc_context->r[4]);  // msg
+        auto* memory = kernel_state ? kernel_state->memory() : nullptr;
+        if (memory && r4 && r4 < 0xF0000000) {
+          if (auto* msg = memory->TranslateVirtual<const char*>(r4)) {
+            XELOGW("DC3: DoCrucible[{}] LR={:08X} msg={}", s_crucible_count,
+                   lr, msg);
+          }
+        } else {
+          XELOGW("DC3: DoCrucible[{}] LR={:08X} r4={:08X}", s_crucible_count,
+                 lr, r4);
+        }
+      }
+      s_in_crucible = false;
+      ppc_context->r[3] = 0;
+    };
+    ctx.processor->RegisterGuestFunctionOverride(
+        kDebugDoCrucible, crucible_handler, "DC3:Debug::DoCrucible(guard)");
+    XELOGI("DC3: Registered DoCrucible re-entrancy guard at {:08X}",
+           kDebugDoCrucible);
+  }
+
+  // TextStream::operator<<(const char*) NULL safety.
+  // The decomp's MILO_ASSERT(c, 0x52) fires Debug::Fail when passed NULL,
+  // and since our Fail handler returns, the code falls through to Print(NULL)
+  // which the caller re-enters in a tight loop.  Override the function to
+  // silently skip NULL and dispatch Print(c) for non-NULL via the vtable.
+  if (ctx.processor && ctx.is_decomp_layout) {
+    constexpr uint32_t kTextStreamOpConstChar = 0x829A7240;
+    auto ts_handler = [](cpu::ppc::PPCContext* ppc_context,
+                         kernel::KernelState* kernel_state) {
+      uint32_t this_ptr = static_cast<uint32_t>(ppc_context->r[3]);
+      uint32_t c_ptr = static_cast<uint32_t>(ppc_context->r[4]);
+      if (!c_ptr) {
+        static int null_count = 0;
+        if (++null_count <= 5 || (null_count % 10000) == 0) {
+          uint32_t lr = static_cast<uint32_t>(ppc_context->lr);
+          XELOGW("DC3: TextStream::operator<<(const char*) NULL skip "
+                 "(count={} LR={:08X})",
+                 null_count, lr);
+        }
+        ppc_context->r[3] = this_ptr;
+        return;
+      }
+      // Non-NULL: dispatch Print(c) through the vtable (slot 1).
+      auto* memory = kernel_state ? kernel_state->memory() : nullptr;
+      if (!memory) {
+        ppc_context->r[3] = this_ptr;
+        return;
+      }
+      auto* obj = memory->TranslateVirtual<uint8_t*>(this_ptr);
+      if (!obj) {
+        ppc_context->r[3] = this_ptr;
+        return;
+      }
+      uint32_t vtbl_addr = xe::load_and_swap<uint32_t>(obj + 0x00);
+      auto* vtbl = memory->TranslateVirtual<uint8_t*>(vtbl_addr);
+      if (!vtbl) {
+        ppc_context->r[3] = this_ptr;
+        return;
+      }
+      uint32_t print_addr = xe::load_and_swap<uint32_t>(vtbl + 0x04);
+      auto* processor = ppc_context->processor;
+      auto* thread_state = ppc_context->thread_state;
+      uint64_t args[] = {this_ptr, c_ptr};
+      processor->Execute(thread_state, print_addr, args, 2);
+      ppc_context->r[3] = this_ptr;
+    };
+    ctx.processor->RegisterGuestFunctionOverride(
+        kTextStreamOpConstChar, ts_handler,
+        "DC3:TextStream::operator<<(const char*)(null-safe)");
+    XELOGI("DC3: Registered TextStream::operator<<(const char*) NULL safety "
+           "at {:08X}",
+           kTextStreamOpConstChar);
+  }
+
+  // Lazy Symbol::PreInit via StringTable::Add override.
+  // gStringTable is NULL because Symbol::PreInit's init_seg(lib) function
+  // pointer was placed outside __xc_a..__xc_z by /FORCE linker.  Previous
+  // attempts to inject a PPC trampoline into __xc[0] failed (JIT stale cache,
+  // guest overrides not firing for bctrl, etc).
+  //
+  // StringTable::Add IS called via bl (direct call from Symbol::Symbol),
+  // so guest function overrides DO fire here.  We intercept the first call,
+  // call Symbol::PreInit to initialize gStringTable, then clear our override
+  // so subsequent calls go to the real PPC implementation.
+  //
+  // Forwarding strategy: after calling PreInit, we clear the extern_handler_
+  // on the GuestFunction object (via SetupExtern(nullptr)).  This makes
+  // the Call() path fall through to CallImpl() which invokes the JIT-compiled
+  // PPC code (DemandFunction compiles even extern-behavior functions).
+  // We then re-Execute at the same address, which now hits the JIT path.
+  if (ctx.processor && ctx.is_decomp_layout) {
+    constexpr uint32_t kStringTableAdd = 0x82924848;
+    auto st_add_handler = [](cpu::ppc::PPCContext* ppc_context,
+                             kernel::KernelState* kernel_state) {
+      static bool s_preinit_done = false;
+      auto* memory = kernel_state ? kernel_state->memory() : nullptr;
+      auto* processor = ppc_context->processor;
+      auto* thread_state = ppc_context->thread_state;
+
+      if (!s_preinit_done && memory) {
+        auto* gst_ptr = memory->TranslateVirtual<uint8_t*>(0x83AE0190);
+        uint32_t gst_val = gst_ptr ? xe::load_and_swap<uint32_t>(gst_ptr) : 0;
+        uint32_t lr = static_cast<uint32_t>(ppc_context->lr);
+        uint32_t this_arg = static_cast<uint32_t>(ppc_context->r[3]);
+        uint32_t str_arg = static_cast<uint32_t>(ppc_context->r[4]);
+        XELOGI("DC3: StringTable::Add first call: gStringTable={:08X} "
+               "this={:08X} str={:08X} LR={:08X}",
+               gst_val, this_arg, str_arg, lr);
+        if (gst_val == 0) {
+          XELOGI("DC3: gStringTable=NULL, calling Symbol::PreInit(560000, 80000)");
+          uint64_t preinit_args[] = {560000, 80000};
+          processor->Execute(thread_state, 0x82556E70, preinit_args, 2);
+          gst_val = gst_ptr ? xe::load_and_swap<uint32_t>(gst_ptr) : 0;
+          XELOGI("DC3: After PreInit: gStringTable={:08X}", gst_val);
+        }
+        s_preinit_done = true;
+
+        // Clear our override so future calls go directly to PPC code.
+        // SetupExtern(nullptr) sets extern_handler_=nullptr; the Call() path
+        // then falls through to CallImpl() which runs JIT-compiled PPC code.
+        // DemandFunction already compiled the PPC code even though we set
+        // behavior to kExtern.
+        auto* fn = processor->LookupFunction(0x82924848);
+        if (fn && fn->is_guest()) {
+          auto* gfn = static_cast<cpu::GuestFunction*>(fn);
+          XELOGI("DC3: StringTable::Add fn={} behavior={} has_extern={}",
+                 (void*)gfn, (int)gfn->behavior(),
+                 gfn->extern_handler() != nullptr);
+          gfn->SetupExtern(nullptr, nullptr);
+          XELOGI("DC3: After SetupExtern(nullptr): behavior={} has_extern={} "
+                 "status={} is_guest={}",
+                 (int)gfn->behavior(),
+                 gfn->extern_handler() != nullptr,
+                 (int)gfn->status(),
+                 gfn->is_guest());
+        }
+      }
+
+      // Forward this call to the real PPC implementation.
+      // Since we just cleared extern_handler_, Execute will use CallImpl.
+      uint32_t this_ptr = static_cast<uint32_t>(ppc_context->r[3]);
+      uint32_t str_ptr = static_cast<uint32_t>(ppc_context->r[4]);
+      static int fwd_count = 0;
+      if (++fwd_count <= 5) {
+        XELOGI("DC3: StringTable::Add forwarding[{}]: this={:08X} str={:08X}",
+               fwd_count, this_ptr, str_ptr);
+      }
+      uint64_t args[] = {this_ptr, str_ptr};
+      processor->Execute(thread_state, 0x82924848, args, 2);
+      ppc_context->r[3] = thread_state->context()->r[3];
+    };
+    ctx.processor->RegisterGuestFunctionOverride(
+        kStringTableAdd, st_add_handler,
+        "DC3:StringTable::Add(lazy-PreInit)");
+    XELOGI("DC3: Registered StringTable::Add lazy-PreInit override at {:08X}",
+           kStringTableAdd);
   }
 
   // Map guard/overflow pages as readable zeros.
@@ -1648,7 +1827,7 @@ void ApplyDc3ImportAndRuntimeStopgaps(const Dc3HackContext& ctx,
   // game/content devices, and returning from Debug::Fail causes a deep assert
   // storm that can overflow the guest stack before boot progresses.
   if (ctx.is_decomp_layout) {
-    const uint32_t kFileIsLocalAssertBranch = 0x82B176F0;
+    const uint32_t kFileIsLocalAssertBranch = 0x82B176F0;  // STALE - needs disasm of FileIsLocal@0x82B16AD8
     const uint32_t kExpected = 0x40820040;      // conditional branch to skip assert
     const uint32_t kUnconditional = 0x48000040; // always skip assert block
     if (PatchCheckedWord(memory, kFileIsLocalAssertBranch, kExpected,
@@ -1669,8 +1848,8 @@ void ApplyDc3ImportAndRuntimeStopgaps(const Dc3HackContext& ctx,
       const char* name;
     };
     OutputFunc output_funcs[] = {
-        {0x835FAA8C, "XMPOverrideBackgroundMusic"},
-        {0x835FAB64, "XMPRestoreBackgroundMusic"},
+        {0x83658ECC, "XMPOverrideBackgroundMusic"},
+        {0x83658FA4, "XMPRestoreBackgroundMusic"},
     };
     for (const auto& func : output_funcs) {
       if (PatchStub8Resolved(memory, ctx.hack_pack_stubs, func.address, 0,
@@ -1697,60 +1876,51 @@ void ApplyDc3ImportAndRuntimeStopgaps(const Dc3HackContext& ctx,
       uint32_t return_value;
     };
     DebugFunc debug_funcs[] = {
-        {0x8393E7B0, "XGetLocale", 0},
-        {0x8393E9B8, "XTLGetLanguage", 1},
-        {0x838DF0DC, "DebugBreak", 0},
-        // Keep the game-side locale mapping helpers live; only the XTL/XGet
-        // platform queries need stubbing. Stubbing these caused downstream
-        // null-locale config paths and stack-corrupting failure cascades.
-        // {0x83409AA8, "GetSystemLanguage", 0},
-        // {0x83409F68, "GetSystemLocale", 0},
-        {0x830EDFF4, "DataNode::Print", 0},
-        // Keep meta-material creation live. Stubbing this causes downstream
-        // "Couldn't instantiate class Mat" failures and DataArray assert
-        // cascades during renderer bootstrap.
-        // {0x83140608, "RndMat::CreateMetaMaterial", 0},
-        {0x8310CD88, "HolmesClientInit", 0},
-        {0x8310D058, "HolmesClientReInit", 0},
-        {0x8310D0D8, "HolmesClientPoll", 0},
-        {0x8310C958, "HolmesClientPollInternal", 0},
-        {0x8310CA70, "HolmesClientInitOpcode", 0},
-        {0x8310BF14, "HolmesClientTerminate", 0},
-        {0x8310B284, "CanUseHolmes", 0},
-        {0x8310B2F8, "UsingHolmes", 0},
-        {0x8310B154, "ProtocolDebugString", 0},
-        {0x8310B314, "HolmesSetFileShare", 0},
-        {0x8310B36C, "HolmesFileHostName", 0},
-        {0x8310B378, "HolmesFileShare", 0},
-        {0x8310B384, "HolmesResolveIP", 0},
-        {0x8310B7E0, "BeginCmd", 0},
-        {0x8310B830, "CheckForResponse", 0},
-        {0x8310BA34, "WaitForAnyResponse", 0},
-        {0x8310C664, "EndCmd", 0},
-        {0x8310C76C, "CheckReads", 0},
-        {0x8310C850, "CheckInput", 0},
-        {0x8310C8F0, "WaitForResponse", 0},
-        {0x8310E13C, "WaitForReads", 0},
-        {0x8310C9B8, "HolmesClientPollKeyboard", 0},
-        {0x8310CA10, "HolmesClientPollJoypad", 0},
-        {0x8310D53C, "HolmesClientOpen", 0},
-        {0x8310DA24, "HolmesClientRead", 0},
-        {0x8310DB5C, "HolmesClientReadDone", 0},
-        {0x8310D778, "HolmesClientWrite", 0},
-        {0x8310D8E8, "HolmesClientTruncate", 0},
-        {0x8310E1D8, "HolmesClientClose", 0},
-        {0x8310D244, "HolmesClientGetStat", 0},
-        {0x8310D150, "HolmesClientSysExec", 0},
-        {0x8310D35C, "HolmesClientMkDir", 0},
-        {0x8310D44C, "HolmesClientDelete", 0},
-        {0x8310E360, "HolmesClientEnumerate", 0},
-        {0x8310DC14, "HolmesClientCacheFile", 0},
-        {0x8310DDE4, "HolmesClientCacheResource", 0},
-        {0x8310BBC0, "HolmesToLocal", 0},
-        {0x8310BCB0, "HolmesFlushStreamBuffer", 0},
-        {0x8310BD44, "DumpHolmesLog", 0},
-        {0x8310DF18, "HolmesClientStackTrace", 0},
-        {0x8310E048, "HolmesClientSendMessage", 0},
+        {0x8393AE6C, "XGetLocale", 0},
+        {0x8393B074, "XTLGetLanguage", 1},
+        {0x8393B114, "DebugBreak", 0},
+        {0x825522F0, "DataNode::Print", 0},
+        {0x831F1678, "HolmesClientInit", 0},
+        {0x831F1948, "HolmesClientReInit", 0},
+        {0x831F19C8, "HolmesClientPoll", 0},
+        {0x831F1248, "HolmesClientPollInternal", 0},
+        {0x831F1360, "HolmesClientInitOpcode", 0},
+        {0x831F0804, "HolmesClientTerminate", 0},
+        {0x831EFB74, "CanUseHolmes", 0},
+        {0x831EFBE8, "UsingHolmes", 0},
+        {0x831EFA44, "ProtocolDebugString", 0},
+        {0x831EFC04, "HolmesSetFileShare", 0},
+        {0x831EFC5C, "HolmesFileHostName", 0},
+        {0x831EFC68, "HolmesFileShare", 0},
+        {0x831EFC74, "HolmesResolveIP", 0},
+        {0x831F00D0, "BeginCmd", 0},
+        {0x831F0120, "CheckForResponse", 0},
+        {0x831F0324, "WaitForAnyResponse", 0},
+        {0x831F0F54, "EndCmd", 0},
+        {0x831F105C, "CheckReads", 0},
+        {0x831F1140, "CheckInput", 0},
+        {0x831F11E0, "WaitForResponse", 0},
+        {0x831F2A2C, "WaitForReads", 0},
+        {0x831F12A8, "HolmesClientPollKeyboard", 0},
+        {0x831F1300, "HolmesClientPollJoypad", 0},
+        {0x831F1E2C, "HolmesClientOpen", 0},
+        {0x831F2314, "HolmesClientRead", 0},
+        {0x831F244C, "HolmesClientReadDone", 0},
+        {0x831F2068, "HolmesClientWrite", 0},
+        {0x831F21D8, "HolmesClientTruncate", 0},
+        {0x831F2AC8, "HolmesClientClose", 0},
+        {0x831F1B34, "HolmesClientGetStat", 0},
+        {0x831F1A40, "HolmesClientSysExec", 0},
+        {0x831F1C4C, "HolmesClientMkDir", 0},
+        {0x831F1D3C, "HolmesClientDelete", 0},
+        {0x831F2C50, "HolmesClientEnumerate", 0},
+        {0x831F2504, "HolmesClientCacheFile", 0},
+        {0x831F26D4, "HolmesClientCacheResource", 0},
+        {0x831F04B0, "HolmesToLocal", 0},
+        {0x831F05A0, "HolmesFlushStreamBuffer", 0},
+        {0x831F0634, "DumpHolmesLog", 0},
+        {0x831F2808, "HolmesClientStackTrace", 0},
+        {0x831F2938, "HolmesClientSendMessage", 0},
     };
     for (const auto& func : debug_funcs) {
       if (PatchStub8Resolved(memory, ctx.hack_pack_stubs, func.address,
@@ -1764,7 +1934,7 @@ void ApplyDc3ImportAndRuntimeStopgaps(const Dc3HackContext& ctx,
 
   // Stub String::operator+=(const char*).
   {
-    const uint32_t kStringOpPlusEq = 0x834BE118;
+    const uint32_t kStringOpPlusEq = 0x82A5B268;
     auto* heap = memory->LookupHeap(kStringOpPlusEq);
     if (heap) {
       auto* mem = memory->TranslateVirtual<uint8_t*>(kStringOpPlusEq);
@@ -1800,7 +1970,7 @@ void ApplyDc3ImportAndRuntimeStopgaps(const Dc3HackContext& ctx,
   // feeds `_vsnprintf_l` invalid-parameter loops. Provide a stable guest int*
   // backing store via a guest extern override.
   if (ctx.is_decomp_layout && ctx.processor) {
-    const uint32_t kErrnoAddr = 0x835B2D68;
+    const uint32_t kErrnoAddr = 0x83611760;
     auto* p_errno_fn = memory->TranslateVirtual<uint8_t*>(kErrnoAddr);
     if (p_errno_fn && xe::load_and_swap<uint32_t>(p_errno_fn) != 0x00000000) {
       uint32_t errno_ptr = g_dc3_errno_guest_ptr;
@@ -1829,26 +1999,26 @@ void ApplyDc3ImportAndRuntimeStopgaps(const Dc3HackContext& ctx,
   }
 
   // Decomp-only CRT stopgap: _invalid_parameter_noinfo (invarg.obj) checks
-  // __pInvalidArgHandler function pointer (at 0x83C75734 in this build).
+  // __pInvalidArgHandler function pointer (at 0x83CB912C in this build).
   // When it's NULL (CRT not fully initialized), it traps with tw 0x16
   // (EINVAL) which crashes the JIT host. Stub it to just return.
   if (ctx.is_decomp_layout) {
-    if (PatchStub8(memory, 0x8361815C, 0,
+    if (PatchStub8(memory, 0x8361817C, 0,
                    "_invalid_parameter_noinfo (CRT trap stopgap)")) {
       stopgap_result.applied++;
     } else {
       stopgap_result.skipped++;
     }
     // Also stub other CRT error paths that contain trap instructions.
-    if (PatchStub8(memory, 0x83618190, 0,
+    if (PatchStub8(memory, 0x836181B0, 0,
                    "_call_reportfault (CRT trap stopgap)")) {
       stopgap_result.applied++;
     }
-    if (PatchStub8(memory, 0x8360DA04, 0,
+    if (PatchStub8(memory, 0x8360DA24, 0,
                    "_amsg_exit (CRT trap stopgap)")) {
       stopgap_result.applied++;
     }
-    if (PatchStub8(memory, 0x8361AFB4, 0,
+    if (PatchStub8(memory, 0x8361AFD4, 0,
                    "__report_gsfailure (CRT trap stopgap)")) {
       stopgap_result.applied++;
     }
@@ -1860,7 +2030,7 @@ void ApplyDc3ImportAndRuntimeStopgaps(const Dc3HackContext& ctx,
   // Hx_snprintf's own error path still runs (it null-terminates and returns
   // -1) instead of bypassing local cleanup at the higher-level callsite.
   if (ctx.is_decomp_layout) {
-    const uint32_t kHxSnprintfVsnprintfCall = 0x83477FBC;
+    const uint32_t kHxSnprintfVsnprintfCall = 0x83477FBC;  // STALE - needs disasm of Hx_snprintf@0x83513264
     auto* heap = memory->LookupHeap(kHxSnprintfVsnprintfCall);
     auto* p = memory->TranslateVirtual<uint8_t*>(kHxSnprintfVsnprintfCall);
     if (heap && p) {
@@ -1893,12 +2063,12 @@ void ApplyDc3ImportAndRuntimeStopgaps(const Dc3HackContext& ctx,
 
   // Stub unresolved import entries (PE thunks + XEX markers).
   {
-    const uint32_t kTextStart = 0x822E0000;
-    const uint32_t kTextSize = 0x171A414;
-    const uint32_t kIdataStart = 0x822D8400;
-    const uint32_t kIdataEnd = 0x822D8A34;
-    const uint32_t kThunkAreaStart = 0x8395B000;
-    const uint32_t kThunkAreaEnd = 0x8395D000;
+    const uint32_t kTextStart = 0x82320000;
+    const uint32_t kTextSize = 0x017336D4;   // .text through .xidata end
+    const uint32_t kIdataStart = 0x8230D800;
+    const uint32_t kIdataEnd = 0x8230DE34;
+    const uint32_t kThunkAreaStart = 0x83A52000;  // .xidata region within .text
+    const uint32_t kThunkAreaEnd = 0x83A54000;    // past .xidata end
 
     int pe_thunks_stubbed = 0;
     int xex_markers_stubbed = 0;
@@ -2127,7 +2297,7 @@ void ApplyDc3ImportAndRuntimeStopgaps(const Dc3HackContext& ctx,
     // This causes _output_l (CRT printf core) to infinite-loop when it tries
     // to lock via __pioinfo[].
     {
-      constexpr uint32_t kIoinitAddr = 0x8361ADBC;
+      constexpr uint32_t kIoinitAddr = 0x8361ADDC;
       auto* xi_slot = memory->TranslateVirtual<uint8_t*>(kXiA);
       if (xi_slot) {
         xe::store_and_swap<uint32_t>(xi_slot, kIoinitAddr);
@@ -2136,16 +2306,97 @@ void ApplyDc3ImportAndRuntimeStopgaps(const Dc3HackContext& ctx,
         crt_result.applied++;
       }
     }
+
+    // Inject Symbol::PreInit into __xc[0] so gStringTable is initialized
+    // before any C++ global constructors that create Symbol objects.
+    // Without this, Symbol::Symbol dereferences gStringTable (NULL) which
+    // reads from the zero-page (mapped as zeros) giving mCurBuf=0 instead
+    // of -1, causing StringTable::Add to loop in "Wasted string table" spam.
+    if (ctx.processor) {
+      auto* xc_first = memory->TranslateVirtual<uint8_t*>(kXcA);
+      uint32_t first_entry = xc_first ? xe::load_and_swap<uint32_t>(xc_first) : 1;
+      if (first_entry == 0) {
+        // Place PPC trampoline inside the CODE section by overwriting
+        // ProtocolDebugString (already PatchStub8'd, 304 bytes available).
+        // Guest function overrides do NOT fire for indirect calls (bctrl
+        // from _cinit), so we must write real PPC code.  The JIT compiles
+        // lazily, so overwriting guest memory before any guest code
+        // executes ensures our trampoline is what gets compiled.
+        constexpr uint32_t kTrampAddr = 0x831EFA44;  // ProtocolDebugString (CODE section)
+        auto* heap = memory->LookupHeap(kTrampAddr);
+        auto* t = memory->TranslateVirtual<uint8_t*>(kTrampAddr);
+        if (heap && t) {
+          heap->Protect(kTrampAddr, 80, kMemoryProtectRead | kMemoryProtectWrite);
+          // Symbol::PreInit = 0x82556E70
+          uint32_t code[] = {
+            // Prologue
+            0x7C0802A6,  // mflr r0
+            0x90010004,  // stw r0, 4(r1)
+            0x9421FFF0,  // stwu r1, -16(r1)
+            // Check gStringTable at 0x83AE0190
+            0x3C6083AE,  // lis r3, 0x83AE
+            0x80630190,  // lwz r3, 0x0190(r3)
+            0x2C030000,  // cmpwi r3, 0
+            0x40820024,  // bne +36 (skip to epilogue at li r3,0)
+            // Call Symbol::PreInit(560000=0x88B80, 80000=0x13880)
+            0x3C600008,  // lis r3, 0x0008
+            0x60638B80,  // ori r3, r3, 0x8B80
+            0x3C800001,  // lis r4, 0x0001
+            0x60843880,  // ori r4, r4, 0x3880
+            0x3D808255,  // lis r12, 0x8255
+            0x618C6E70,  // ori r12, r12, 0x6E70
+            0x7D8903A6,  // mtctr r12
+            0x4E800421,  // bctrl
+            // Epilogue (bne lands here)
+            0x38600000,  // li r3, 0 (safe return value)
+            0x38210010,  // addi r1, r1, 16
+            0x80010004,  // lwz r0, 4(r1)
+            0x7C0803A6,  // mtlr r0
+            0x4E800020,  // blr
+          };
+          for (size_t i = 0; i < sizeof(code) / sizeof(code[0]); ++i) {
+            xe::store_and_swap<uint32_t>(t + i * 4, code[i]);
+          }
+          xe::store_and_swap<uint32_t>(xc_first, kTrampAddr);
+          XELOGI("DC3: Wrote Symbol::PreInit PPC trampoline ({} insns) "
+                 "at {:08X} (CODE section), injected into __xc[0] ({:08X})",
+                 sizeof(code) / sizeof(code[0]), kTrampAddr, kXcA);
+          // Verify: read back __xc[0] and first trampoline instruction
+          uint32_t xc0_readback = xe::load_and_swap<uint32_t>(xc_first);
+          uint32_t tramp_w0 = xe::load_and_swap<uint32_t>(t);
+          uint32_t tramp_w1 = xe::load_and_swap<uint32_t>(t + 4);
+          XELOGI("DC3: Verify: __xc[0]={:08X} tramp[0]={:08X} tramp[1]={:08X}",
+                 xc0_readback, tramp_w0, tramp_w1);
+          crt_result.applied++;
+        }
+      } else {
+        XELOGW("DC3: __xc[0] not null ({:08X}), cannot inject PreInit trampoline",
+               first_entry);
+      }
+    }
+
+    // Diagnostic: dump first 16 instructions of _cinit to understand
+    // how it iterates __xc and __xi tables.
+    {
+      constexpr uint32_t kCinit = 0x8311A6D4;
+      auto* ci = memory->TranslateVirtual<uint8_t*>(kCinit);
+      if (ci) {
+        XELOGI("DC3: _cinit PPC instructions at {:08X}:", kCinit);
+        for (int i = 0; i < 60; ++i) {
+          uint32_t insn = xe::load_and_swap<uint32_t>(ci + i * 4);
+          XELOGI("DC3:   {:08X}: {:08X}", kCinit + i * 4, insn);
+        }
+      }
+    }
   }
 
   // Diagnostics: check JIT indirection table state for import thunk area.
   {
     auto* code_cache = reinterpret_cast<uint8_t*>(0x80000000);
     uint32_t check_addrs[] = {
-        0x8395C668,
-        0x8395C000,
-        0x8395B000,
-        0x822E0000,
+        0x82EEB600,  // BINK start (past .text)
+        0x82EE7160,  // .text end
+        0x82330000,  // .text start
     };
     for (auto addr : check_addrs) {
       uint32_t* slot =
