@@ -130,8 +130,13 @@ Items are ordered by priority. Check off as completed. Add new items each iterat
   - Restore patch-manifest CRT sentinel freshness/validation so the CRT sanitizer can trust manifest values again (current recovery path uses map-synced constants when manifest is stale)
   - Replace duplicate-name-only hack-pack stub manifest resolution with a duplicate-safe identity scheme (current resolver now retries fallback on invalid remap, but collisions still occur for names like `XTLGetLanguage` / `XGetLocale`)
   - Replace temporary hardcoded MemMgr assert bypass addresses with manifest/symbol-backed resolution if the bypass remains needed for debugging
-  - Add a true call-through `FindArray` logging path (current `log_only` mode intentionally leaves original behavior active without per-call logs)
+  - `FindArray` `log_only` now exists as an emulated probe mode (logs caller LR + symbol + hit/miss); keep improving it for symbol-corruption forensics (for example, decode/dump candidate symbol-table entries when `sym=<bin:...>`)
   - Keep CRT formatter bridges (`_output_l` / `_woutput_l`) pinned to verified map-synced addresses unless the manifest gains a duplicate-safe symbol identity scheme (generic name remaps can target unrelated implementations)
+  - Investigate `Symbol` corruption in `Rnd::SetupFont`:
+    - `SystemConfig("rnd","font")` second key captured as binary symbol at `LR=0x83516738` (`sym=<bin:83 0A FA 80 ...>`)
+    - determine whether the bug is in `Symbol::Symbol(const char*)`, string-table/hash state, or upstream memory corruption after MemMgr init
+  - Investigate `Mat` / `MetaMaterial` instantiation failures (`Couldn't instantiate class Mat`, `MetaMaterial`) after the `SetupFont` crash fix:
+    - confirm whether factory registration (`RndMat::Init` / `REGISTER_OBJ_FACTORY`) is failing due the same symbol corruption vs a separate init-order/registration issue
 
 ### Tier 2: Reduce unresolved symbols (high leverage)
 

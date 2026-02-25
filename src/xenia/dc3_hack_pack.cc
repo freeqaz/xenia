@@ -57,6 +57,10 @@ constexpr uint32_t kDc3TempNarrowBufSize = 4096;
 constexpr uint32_t kDc3TempWideBufChars = 2048;
 static uint32_t g_dc3_output_l_scratch_narrow = 0;
 static uint32_t g_dc3_output_l_scratch_wide = 0;
+static uint32_t g_dc3_safe_null_datanode = 0;
+static uint32_t g_dc3_safe_lvalue_datanode = 0;
+static uint32_t g_dc3_safe_empty_array_datanode = 0;
+static uint32_t g_dc3_safe_empty_dataarray = 0;
 
 std::string Dc3FmtBytePreview(const uint8_t* data, size_t len) {
   if (!data || !len) return "";
@@ -314,6 +318,35 @@ bool PatchCheckedNop(Memory* memory, uint32_t address, uint32_t expected_word,
   return true;
 }
 
+bool PatchCheckedWord(Memory* memory, uint32_t address, uint32_t expected_word,
+                      uint32_t replacement_word, const char* name,
+                      const char* success_label) {
+  auto* heap = memory->LookupHeap(address);
+  if (!heap) {
+    XELOGW("DC3: {} skipped at {:08X} (no heap)", name, address);
+    return false;
+  }
+  auto* mem = memory->TranslateVirtual<uint8_t*>(address);
+  if (!mem) {
+    XELOGW("DC3: {} skipped at {:08X} (translate failed)", name, address);
+    return false;
+  }
+  uint32_t current = xe::load_and_swap<uint32_t>(mem);
+  if (current != expected_word && current != replacement_word) {
+    XELOGW(
+        "DC3: {} skipped at {:08X} (expected {:08X}, found {:08X}; layout "
+        "drift or code changed)",
+        name, address, expected_word, current);
+    return false;
+  }
+  heap->Protect(address, 4, kMemoryProtectRead | kMemoryProtectWrite);
+  if (current != replacement_word) {
+    xe::store_and_swap<uint32_t>(mem, replacement_word);
+  }
+  XELOGI("DC3: {} at {:08X}", success_label ? success_label : name, address);
+  return true;
+}
+
 uint32_t Dc3EnsureScratchBuffer(kernel::KernelState* kernel_state,
                                 uint32_t* guest_ptr, uint32_t size,
                                 const char* label) {
@@ -537,6 +570,55 @@ void RegisterDc3WriteBridges(const Dc3HackContext& ctx, Dc3HackApplyResult& debu
   }
 }
 
+void RegisterDc3LocaleBootstrapBridges(const Dc3HackContext& ctx,
+                                       Dc3HackApplyResult& debug_result) {
+  if (!ctx.processor || !ctx.is_decomp_layout) {
+    debug_result.skipped++;
+    return;
+  }
+  struct Bridge {
+    uint32_t addr;
+    const char* name;
+  };
+  const Bridge bridges[] = {
+      {0x83409AA8, "GetSystemLanguage"},
+      {0x83409F68, "GetSystemLocale"},
+  };
+  auto handler = [](cpu::ppc::PPCContext* ppc_context,
+                    kernel::KernelState* kernel_state) {
+    (void)kernel_state;
+    if (!ppc_context) return;
+    static uint32_t call_count = 0;
+    ++call_count;
+    if (call_count <= 32 || (call_count % 256) == 0) {
+      uint32_t sym_ptr = static_cast<uint32_t>(ppc_context->r[3]);
+      uint32_t lr = static_cast<uint32_t>(ppc_context->lr);
+      const char* sym_s = nullptr;
+      if (kernel_state && kernel_state->memory() && sym_ptr && sym_ptr < 0xF0000000) {
+        sym_s = kernel_state->memory()->TranslateVirtual<const char*>(sym_ptr);
+      }
+      if (sym_s) {
+        XELOGI("DC3: Locale bootstrap bridge (identity) LR={:08X} sym='{}' ({:08X})",
+               lr, sym_s, sym_ptr);
+      } else {
+        XELOGI("DC3: Locale bootstrap bridge (identity) LR={:08X} sym={:08X}", lr,
+               sym_ptr);
+      }
+    }
+    // Symbol is a 32-bit pointer wrapper in this build; return the input
+    // symbol unchanged to preserve caller defaults (e.g. eng/usa) and avoid
+    // recursive config/locale lookups during early boot.
+    ppc_context->r[3] = static_cast<uint32_t>(ppc_context->r[3]);
+  };
+  for (const auto& bridge : bridges) {
+    ctx.processor->RegisterGuestFunctionOverride(bridge.addr, handler,
+                                                 bridge.name);
+    XELOGI("DC3: Registered {} bootstrap identity bridge at {:08X}", bridge.name,
+           bridge.addr);
+    debug_result.applied++;
+  }
+}
+
 void RegisterDc3OutputFormatterBridges(const Dc3HackContext& ctx,
                                        Dc3HackApplyResult& debug_result) {
   if (!ctx.processor) {
@@ -588,13 +670,7 @@ void RegisterDc3FindArrayOverride(const Dc3HackContext& ctx,
     debug_result.skipped++;
     return;
   }
-  if (mode == "log_only") {
-    XELOGI("DC3: FindArray log_only requested; call-through logging is not "
-           "implemented with current override API, leaving original behavior active");
-    debug_result.skipped++;
-    return;
-  }
-  if (mode != "stub_on_fail" && mode != "null_on_fail") {
+  if (mode != "log_only" && mode != "stub_on_fail" && mode != "null_on_fail") {
     XELOGW("DC3: Unknown FindArray override mode '{}'; expected off|log_only|"
            "stub_on_fail|null_on_fail. Leaving original behavior active.",
            mode);
@@ -611,9 +687,10 @@ void RegisterDc3FindArrayOverride(const Dc3HackContext& ctx,
     if (!memory) return;
 
     const std::string mode_local = cvars::dc3_debug_findarray_override_mode;
+    const bool probe_only = (mode_local == "log_only");
     const bool use_stub_on_fail = (mode_local == "stub_on_fail");
     const bool force_null_on_fail = (mode_local == "null_on_fail");
-    if (!use_stub_on_fail && !force_null_on_fail) {
+    if (!probe_only && !use_stub_on_fail && !force_null_on_fail) {
       return;
     }
 
@@ -638,9 +715,27 @@ void RegisterDc3FindArrayOverride(const Dc3HackContext& ctx,
     uint32_t fail_flag = static_cast<uint32_t>(ppc_context->r[5]);
 
     char sym_str[64] = {};
+    std::string sym_repr = "<null>";
     if (sym_addr && sym_addr < 0xF0000000) {
       if (auto* s = memory->TranslateVirtual<const char*>(sym_addr)) {
         std::strncpy(sym_str, s, sizeof(sym_str) - 1);
+        bool printable = true;
+        for (size_t i = 0; i < sizeof(sym_str) && sym_str[i]; ++i) {
+          const unsigned char c = static_cast<unsigned char>(sym_str[i]);
+          if (c < 0x20 || c > 0x7E) {
+            printable = false;
+            break;
+          }
+        }
+        if (printable && sym_str[0]) {
+          sym_repr = sym_str;
+        } else {
+          sym_repr = std::string("<bin:") +
+                     Dc3FmtBytePreview(reinterpret_cast<const uint8_t*>(s), 16) +
+                     ">";
+        }
+      } else {
+        sym_repr = "<unmapped>";
       }
     }
 
@@ -688,7 +783,7 @@ void RegisterDc3FindArrayOverride(const Dc3HackContext& ctx,
     } else if (use_stub_on_fail && fail_flag && s_find_array_stub) {
       result = s_find_array_stub;
       result_kind = "stub";
-    } else if (force_null_on_fail) {
+    } else if (probe_only || force_null_on_fail) {
       result = 0;
       result_kind = "null";
     } else {
@@ -699,11 +794,15 @@ void RegisterDc3FindArrayOverride(const Dc3HackContext& ctx,
 
     static uint32_t log_count = 0;
     ++log_count;
-    if (log_count <= 200 || (log_count % 1000) == 0) {
+    bool interesting_miss = (fail_flag != 0 && found_addr == 0);
+    bool interesting_bin = sym_repr.rfind("<bin:", 0) == 0;
+    if (interesting_miss || interesting_bin || log_count <= 200 ||
+        (log_count % 1000) == 0) {
       XELOGI(
-          "DC3: FindArray mode={} da={:08X} sym='{}' fail={} found={:08X} -> {} "
+          "DC3: FindArray mode={} LR={:08X} da={:08X} sym={} fail={} found={:08X} -> {} "
           "{:08X}",
-          mode_local, da_addr, sym_str[0] ? sym_str : "<null>", fail_flag,
+          mode_local, static_cast<uint32_t>(ppc_context->lr), da_addr, sym_repr,
+          fail_flag,
           found_addr, result_kind, result);
     }
   };
@@ -734,6 +833,132 @@ void RegisterDc3ReadCacheStreamProbe(const Dc3HackContext& ctx,
          kDc3RcsBufStreamReadImplAddr, kDc3RcsBufStreamSeekImplAddr,
          kDc3RcsReadCacheStreamAddr);
   debug_result.applied += 2;
+}
+
+void RegisterDc3DataArraySafetyOverrides(const Dc3HackContext& ctx,
+                                         Dc3HackApplyResult& debug_result) {
+  if (!ctx.processor || !ctx.is_decomp_layout) {
+    debug_result.skipped++;
+    return;
+  }
+
+  constexpr uint32_t kMergedDataArrayNodeAddr = 0x835421A4;
+  auto merged_dataarray_node_handler = [](cpu::ppc::PPCContext* ppc_context,
+                                          kernel::KernelState* kernel_state) {
+    if (!ppc_context || !kernel_state) return;
+    auto* memory = kernel_state->memory();
+    if (!memory) return;
+
+    uint32_t da_addr = static_cast<uint32_t>(ppc_context->r[3]);
+    int32_t index = static_cast<int32_t>(ppc_context->r[4]);
+    uint32_t lr = static_cast<uint32_t>(ppc_context->lr);
+
+    uint32_t result = 0;
+    uint32_t nodes_ptr = 0;
+    int16_t size = 0;
+    bool oob = true;
+
+    if (da_addr && da_addr < 0xF0000000) {
+      if (auto* da = memory->TranslateVirtual<uint8_t*>(da_addr)) {
+        nodes_ptr = xe::load_and_swap<uint32_t>(da + 0x0);
+        size = xe::load_and_swap<int16_t>(da + 0x8);
+        int size_i = static_cast<int>(size);
+        if (nodes_ptr && nodes_ptr < 0xF0000000 && size_i >= 0 &&
+            size_i < 0x4000 && index >= 0 && index < size_i) {
+          result = nodes_ptr + static_cast<uint32_t>(index) * 8;
+          oob = false;
+        }
+      }
+    }
+
+    if (oob) {
+      // Targeted handling for Rnd::SetupFont() when SystemConfig("rnd","font")
+      // is missing and the function blindly indexes a null DataArray.
+      constexpr uint32_t kSetupFontNodeSourceLR = 0x8317FF40;
+      constexpr uint32_t kSetupFontNodeDestLR = 0x8318001C;
+      bool use_setupfont_empty_array_node = (lr == kSetupFontNodeSourceLR);
+      bool use_setupfont_lvalue_node = (lr == kSetupFontNodeDestLR);
+
+      uint32_t safe = 0;
+      if (use_setupfont_empty_array_node) {
+        uint32_t empty_arr =
+            Dc3EnsureScratchBuffer(kernel_state, &g_dc3_safe_empty_dataarray, 0x20,
+                                   "safe_empty_dataarray");
+        uint32_t empty_node = Dc3EnsureScratchBuffer(
+            kernel_state, &g_dc3_safe_empty_array_datanode, 8,
+            "safe_empty_array_datanode");
+        if (empty_arr) {
+          if (auto* da = memory->TranslateVirtual<uint8_t*>(empty_arr)) {
+            std::memset(da, 0, 0x20);
+            xe::store_and_swap<uint32_t>(da + 0x0, 0);    // nodes
+            xe::store_and_swap<int16_t>(da + 0x8, 0);     // size
+            xe::store_and_swap<int16_t>(da + 0xA, 0);     // line
+            xe::store_and_swap<int16_t>(da + 0xC, 0);     // deprecated
+            xe::store_and_swap<int16_t>(da + 0xE, 0x7FFF); // refs (sticky)
+          }
+        }
+        if (empty_node) {
+          if (auto* n = memory->TranslateVirtual<uint8_t*>(empty_node)) {
+            // DataNode {value=<empty array>, type=kDataArray(16)}
+            xe::store_and_swap<uint32_t>(n + 0x0, empty_arr);
+            xe::store_and_swap<uint32_t>(n + 0x4, 16);
+          }
+          safe = empty_node;
+        }
+      } else if (use_setupfont_lvalue_node) {
+        safe = Dc3EnsureScratchBuffer(kernel_state, &g_dc3_safe_lvalue_datanode, 8,
+                                      "safe_lvalue_datanode");
+        if (safe) {
+          if (auto* n = memory->TranslateVirtual<uint8_t*>(safe)) {
+            // Assignment sink for mFont->Node(i+98) when mFont is null.
+            xe::store_and_swap<uint32_t>(n + 0x0, 0);
+            xe::store_and_swap<uint32_t>(n + 0x4, 0);
+          }
+        }
+      } else {
+        safe = Dc3EnsureScratchBuffer(kernel_state, &g_dc3_safe_null_datanode, 8,
+                                      "safe_null_datanode");
+        if (safe) {
+          if (auto* n = memory->TranslateVirtual<uint8_t*>(safe)) {
+            // DataNode {value=0, type=0}; preserves "Data 0 is not Array"
+            // diagnostics while avoiding OOB DataNode* returns.
+            xe::store_and_swap<uint32_t>(n + 0x0, 0);
+            xe::store_and_swap<uint32_t>(n + 0x4, 0);
+          }
+        }
+      }
+      result = safe;
+
+      static uint32_t oob_log_count = 0;
+      ++oob_log_count;
+      if (oob_log_count <= 200 || (oob_log_count % 1000) == 0) {
+        XELOGW(
+            "DC3: merged_DataArrayNode OOB intercepted LR={:08X} da={:08X} "
+            "idx={} size={} nodes={:08X} -> safe={:08X}{}",
+            lr, da_addr, index, static_cast<int>(size), nodes_ptr, result,
+            use_setupfont_empty_array_node
+                ? " [SetupFont empty-array source]"
+                : (use_setupfont_lvalue_node ? " [SetupFont lvalue sink]" : ""));
+      }
+
+      static bool logged_setupfont_null = false;
+      if ((use_setupfont_empty_array_node || use_setupfont_lvalue_node) &&
+          da_addr == 0 && !logged_setupfont_null) {
+        logged_setupfont_null = true;
+        XELOGW("DC3: Rnd::SetupFont missing SystemConfig(\"rnd\",\"font\"); "
+               "using safety sentinels to skip font table synthesis");
+      }
+    }
+
+    ppc_context->r[3] = result;
+  };
+
+  ctx.processor->RegisterGuestFunctionOverride(kMergedDataArrayNodeAddr,
+                                               merged_dataarray_node_handler,
+                                               "DC3:merged_DataArrayNode(safe)");
+  XELOGI("DC3: Registered merged_DataArrayNode safety override at {:08X}",
+         kMergedDataArrayNodeAddr);
+  debug_result.applied++;
 }
 
 void ApplyDc3ImportAndRuntimeStopgaps(const Dc3HackContext& ctx,
@@ -945,6 +1170,22 @@ void ApplyDc3ImportAndRuntimeStopgaps(const Dc3HackContext& ctx,
   }
 #endif
 
+  // Skip the Win32 FileIsLocal assert spam on "game:" drive. Xenia paths use
+  // game/content devices, and returning from Debug::Fail causes a deep assert
+  // storm that can overflow the guest stack before boot progresses.
+  if (ctx.is_decomp_layout) {
+    const uint32_t kFileIsLocalAssertBranch = 0x82B176F0;
+    const uint32_t kExpected = 0x40820040;      // conditional branch to skip assert
+    const uint32_t kUnconditional = 0x48000040; // always skip assert block
+    if (PatchCheckedWord(memory, kFileIsLocalAssertBranch, kExpected,
+                         kUnconditional, "FileIsLocal(game:) assert bypass",
+                         "DC3: FileIsLocal game-drive assert bypass active")) {
+      stopgap_result.applied++;
+    } else {
+      stopgap_result.skipped++;
+    }
+  }
+
   // Stub XMP overrides.
   // Do NOT stub _output_l/_woutput_l here: they are core CRT formatters used
   // by printf/sprintf/MakeString and stubbing them breaks string formatting.
@@ -968,7 +1209,9 @@ void ApplyDc3ImportAndRuntimeStopgaps(const Dc3HackContext& ctx,
   }
 
   RegisterDc3WriteBridges(ctx, debug_result);
+  RegisterDc3LocaleBootstrapBridges(ctx, debug_result);
   RegisterDc3OutputFormatterBridges(ctx, debug_result);
+  RegisterDc3DataArraySafetyOverrides(ctx, debug_result);
 
   // Debug/Holmes/String-related stubs and deadlock breakers.
   {
@@ -981,10 +1224,16 @@ void ApplyDc3ImportAndRuntimeStopgaps(const Dc3HackContext& ctx,
         {0x8393E7B0, "XGetLocale", 0},
         {0x8393E9B8, "XTLGetLanguage", 1},
         {0x838DF0DC, "DebugBreak", 0},
-        {0x83409AA8, "GetSystemLanguage", 0},
-        {0x83409F68, "GetSystemLocale", 0},
+        // Keep the game-side locale mapping helpers live; only the XTL/XGet
+        // platform queries need stubbing. Stubbing these caused downstream
+        // null-locale config paths and stack-corrupting failure cascades.
+        // {0x83409AA8, "GetSystemLanguage", 0},
+        // {0x83409F68, "GetSystemLocale", 0},
         {0x830EDFF4, "DataNode::Print", 0},
-        {0x83140608, "RndMat::CreateMetaMaterial", 0},
+        // Keep meta-material creation live. Stubbing this causes downstream
+        // "Couldn't instantiate class Mat" failures and DataArray assert
+        // cascades during renderer bootstrap.
+        // {0x83140608, "RndMat::CreateMetaMaterial", 0},
         {0x8310CD88, "HolmesClientInit", 0},
         {0x8310D058, "HolmesClientReInit", 0},
         {0x8310D0D8, "HolmesClientPoll", 0},
