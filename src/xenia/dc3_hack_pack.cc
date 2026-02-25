@@ -2513,7 +2513,31 @@ void ApplyRuntimeStopgaps(const Dc3HackContext& ctx,
     // The decomp build's DTB files don't match original checksums, triggering
     // dirty disc errors and XamLoaderLaunchTitle (exit to dashboard).
     PatchStub8(memory, 0x82924218, 0, "HasFileChecksumData");
-    result.applied += 7;
+    // VoiceInputPanel::LoadVoiceContexts reads kinect/speech/voice_contexts
+    // config and calls Sym() on each entry.  Without Kinect/speech recognition,
+    // this spins forever on "Data is not Symbol" errors during UIManager::Init.
+    PatchStub8(memory, 0x8354D8D4, 0, "VoiceInputPanel::LoadVoiceContexts");
+    // Fader::UpdateValue iterates mClients (std::set<FaderGroup*>) which has
+    // corrupt tree nodes when SynthInit was skipped. Infinite loop in set
+    // traversal during CampaignSongSelectPanel construction.
+    PatchStub8(memory, 0x8326DE2C, 0, "Fader::UpdateValue");
+    // ShellInput::Init depends on Kinect/gesture subsystems (SpeechMgr,
+    // GestureMgr, SkeletonUpdate, DepthBuffer).  TheSpeechMgr->AddSink()
+    // hits corrupt MsgSinks lists because SpeechMgr was never initialized.
+    PatchStub8(memory, 0x8339CC08, 0, "ShellInput::Init");
+    // UIScreen::HasPanel iterates mPanelList (std::list) which has corrupt
+    // nodes for screens whose .milo data hasn't fully loaded.  Infinite loop
+    // in HamUI::Init validation loop that only prints warnings.
+    PatchStub8(memory, 0x835DC3C4, 0, "UIScreen::HasPanel");
+    // MoveMgr::Init loads choreography/move category data from config.
+    // LoadCategoryData("genres") crashes (SP corruption) because config
+    // data for move categories is missing or corrupt in decomp build.
+    PatchStub8(memory, 0x831634A4, 0, "MoveMgr::Init");
+    // ObjRef::ReplaceList iterates a linked list of ObjRef nodes calling
+    // Replace() on each.  With corrupt lists (from .milo load failures),
+    // it enters an infinite loop → MILO_FAIL returns → loops again.
+    PatchStub8(memory, 0x829ABC18, 0, "ObjRef::ReplaceList");
+    result.applied += 13;
   }
 
   // Map guard/overflow pages as readable zeros.
