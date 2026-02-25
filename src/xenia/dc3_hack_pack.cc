@@ -28,6 +28,7 @@ DECLARE_string(dc3_crt_skip_indices);
 DECLARE_bool(dc3_crt_skip_nui);
 DECLARE_bool(dc3_debug_read_cache_stream_step_override);
 DECLARE_bool(dc3_debug_memmgr_assert_nop_bypass);
+DECLARE_bool(dc3_debug_mempool_alloc_probe);
 DECLARE_string(dc3_debug_findarray_override_mode);
 DECLARE_bool(fake_kinect_data);
 
@@ -52,6 +53,43 @@ constexpr uint32_t kDc3RcsBufStreamReadImplAddr = 0x82BC3AC8;
 constexpr uint32_t kDc3RcsBufStreamSeekImplAddr = 0x82BC3BC8;
 constexpr uint32_t kDc3OutputLAddr = 0x8361CBE0;
 constexpr uint32_t kDc3WOutputLAddr = 0x83622778;
+constexpr uint32_t kDc3SystemConfig2Addr = 0x835166FC;
+constexpr uint32_t kDc3SetupFontSystemConfigReturnLR = 0x8317FF14;
+// SetupFont constructs Symbol temporaries in one order and passes them to
+// SystemConfig(Symbol, Symbol) in the opposite register order.
+// At LR=0x8317FF14 (return from SystemConfig call):
+//   r3/s1 comes from the second ctor literal (0x82053BF8, expected "rnd")
+//   r4/s2 comes from the first  ctor literal (0x82027684, expected "font")
+constexpr uint32_t kDc3SetupFontCtor1LiteralAddr = 0x82027684;  // expected "font"
+constexpr uint32_t kDc3SetupFontCtor2LiteralAddr = 0x82053BF8;  // expected "rnd"
+constexpr uint32_t kDc3PooledFontStringAddr = 0x82017684;
+constexpr uint32_t kDc3ObjectFactoriesMapAddr = 0x83AE1AC0;
+constexpr uint32_t kDc3RndMatStaticNameSymAddr = 0x83AEAB2C;
+constexpr uint32_t kDc3MetaMaterialStaticNameSymAddr = 0x83AEBFA8;
+constexpr uint32_t kDc3GSystemConfigAddr = 0x83C7BAE8;
+constexpr uint32_t kDc3GStringTableGlobalAddr = 0x83AE01C8;
+// Use the gHashTable instance referenced by Symbol::Symbol (verified from
+// 0x825572E4 disassembly: lis 0x83AE; addi +0x01CC), not the duplicate map
+// symbol instance at 0x83AED0FC.
+constexpr uint32_t kDc3GHashTableAddr = 0x83AE01CC;
+// MemOrPoolAlloc probe addresses (from default.map)
+constexpr uint32_t kDc3MemOrPoolAllocAddr = 0x834471E0;
+constexpr uint32_t kDc3MemAllocAddr = 0x834467A8;
+constexpr uint32_t kDc3PoolAllocAddr = 0x835E949C;
+constexpr uint32_t kDc3StringReserveAddr = 0x82A5BBC0;
+// String::reserve calls MemOrPoolAlloc with LR pointing after the bl at 0x82A5BBFC,
+// which is 0x82A5BC00.
+constexpr uint32_t kDc3StringReserveMemAllocRetLR = 0x82A5BC00;
+// gChunkAlloc: global ChunkAllocator* used by PoolAlloc
+constexpr uint32_t kDc3GChunkAllocAddr = 0x83CB8D08;
+// FixedSizeAlloc layout offsets
+constexpr uint32_t kFsaOffVtable = 0x00;
+constexpr uint32_t kFsaOffAllocSizeWords = 0x04;
+constexpr uint32_t kFsaOffNumAllocs = 0x08;
+constexpr uint32_t kFsaOffMaxAllocs = 0x0C;
+constexpr uint32_t kFsaOffNumChunks = 0x10;
+constexpr uint32_t kFsaOffFreeList = 0x14;
+constexpr uint32_t kFsaOffNodesPerChunk = 0x18;
 constexpr uint32_t kDc3IoStrgFlag = 0x0040;
 constexpr uint32_t kDc3TempNarrowBufSize = 4096;
 constexpr uint32_t kDc3TempWideBufChars = 2048;
@@ -73,6 +111,119 @@ std::string Dc3FmtBytePreview(const uint8_t* data, size_t len) {
     os << tmp;
   }
   return os.str();
+}
+
+uint32_t Dc3FindArrayLinearBySymbol(Memory* memory, uint32_t da_addr,
+                                    uint32_t sym_addr) {
+  if (!memory || !da_addr || !sym_addr || da_addr >= 0xF0000000 ||
+      sym_addr >= 0xF0000000) {
+    return 0;
+  }
+  auto* sym_s = memory->TranslateVirtual<const char*>(sym_addr);
+  if (!sym_s) return 0;
+  auto* da = memory->TranslateVirtual<uint8_t*>(da_addr);
+  if (!da) return 0;
+  uint32_t nodes_ptr = xe::load_and_swap<uint32_t>(da + 0x0);
+  int16_t da_size = xe::load_and_swap<int16_t>(da + 0x8);
+  if (!nodes_ptr || nodes_ptr >= 0xF0000000 || da_size <= 0 || da_size >= 0x2000) {
+    return 0;
+  }
+  auto* nodes = memory->TranslateVirtual<uint8_t*>(nodes_ptr);
+  if (!nodes) return 0;
+  for (int i = 0; i < da_size; ++i) {
+    uint8_t* n = nodes + i * 8;
+    uint32_t val = xe::load_and_swap<uint32_t>(n + 0);
+    uint32_t type = xe::load_and_swap<uint32_t>(n + 4);
+    if (type != 16 || !val || val >= 0xF0000000) continue;
+    auto* sub = memory->TranslateVirtual<uint8_t*>(val);
+    if (!sub) continue;
+    uint32_t sub_nodes = xe::load_and_swap<uint32_t>(sub + 0x0);
+    int16_t sub_size = xe::load_and_swap<int16_t>(sub + 0x8);
+    if (!sub_nodes || sub_nodes >= 0xF0000000 || sub_size <= 0 || sub_size >= 0x2000) {
+      continue;
+    }
+    auto* sn = memory->TranslateVirtual<uint8_t*>(sub_nodes);
+    if (!sn) continue;
+    uint32_t sn_val = xe::load_and_swap<uint32_t>(sn + 0);
+    uint32_t sn_type = xe::load_and_swap<uint32_t>(sn + 4);
+    if (sn_type != 5 || !sn_val || sn_val >= 0xF0000000) continue;
+    auto* sn_str = memory->TranslateVirtual<const char*>(sn_val);
+    if (sn_str && std::strcmp(sn_str, sym_s) == 0) {
+      return val;
+    }
+  }
+  return 0;
+}
+
+std::string Dc3DescribeGuestSymbol(Memory* memory, uint32_t sym_addr,
+                                   char* sym_str_out, size_t sym_str_out_len,
+                                   bool* out_binary) {
+  if (out_binary) *out_binary = false;
+  if (sym_str_out && sym_str_out_len) sym_str_out[0] = '\0';
+  if (!memory || !sym_addr || sym_addr >= 0xF0000000) return "<null>";
+  auto* s = memory->TranslateVirtual<const char*>(sym_addr);
+  if (!s) return "<unmapped>";
+  if (sym_str_out && sym_str_out_len) {
+    std::strncpy(sym_str_out, s, sym_str_out_len - 1);
+    sym_str_out[sym_str_out_len - 1] = '\0';
+  }
+  bool printable = true;
+  for (size_t i = 0; i < 64 && s[i]; ++i) {
+    unsigned char c = static_cast<unsigned char>(s[i]);
+    if (c < 0x20 || c > 0x7E) {
+      printable = false;
+      break;
+    }
+  }
+  if (printable) {
+    if (sym_str_out && sym_str_out[0]) return sym_str_out;
+    return "";
+  }
+  if (out_binary) *out_binary = true;
+  return std::string("<bin:") +
+         Dc3FmtBytePreview(reinterpret_cast<const uint8_t*>(s), 16) + ">";
+}
+
+void Dc3LogSetupFontLiteralSanity(Memory* memory) {
+  static bool logged = false;
+  if (logged || !memory) return;
+  logged = true;
+
+  auto* l1 = memory->TranslateVirtual<const char*>(kDc3SetupFontCtor1LiteralAddr);
+  auto* l2 = memory->TranslateVirtual<const char*>(kDc3SetupFontCtor2LiteralAddr);
+  if (!l1 || !l2) {
+    XELOGW("DC3: SetupFont literal sanity check could not map literals "
+           "ctor1@{:08X}={} ctor2@{:08X}={}",
+           kDc3SetupFontCtor1LiteralAddr, static_cast<const void*>(l1),
+           kDc3SetupFontCtor2LiteralAddr, static_cast<const void*>(l2));
+    return;
+  }
+
+  bool l1_bin = false;
+  bool l2_bin = false;
+  char tmp1[32] = {};
+  char tmp2[32] = {};
+  std::string l1_desc =
+      Dc3DescribeGuestSymbol(memory, kDc3SetupFontCtor1LiteralAddr, tmp1, sizeof(tmp1),
+                             &l1_bin);
+  std::string l2_desc =
+      Dc3DescribeGuestSymbol(memory, kDc3SetupFontCtor2LiteralAddr, tmp2, sizeof(tmp2),
+                             &l2_bin);
+
+  XELOGI(
+      "DC3: SetupFont literal sanity ctor1/arg2@{:08X}={} ctor2/arg1@{:08X}={}",
+      kDc3SetupFontCtor1LiteralAddr, l1_desc, kDc3SetupFontCtor2LiteralAddr, l2_desc);
+
+  const bool l2_is_rnd = (!l2_bin && l2_desc == "rnd");
+  const bool l1_is_font = (!l1_bin && l1_desc == "font");
+  if (l2_is_rnd && !l1_is_font) {
+    XELOGW(
+        "DC3: SetupFont arg2 literal mismatch (expected 'font', saw {}). "
+        "Current decomp build shows ctor1 literal as non-string data while "
+        "ctor2/arg1 remains 'rnd'; investigate decomp object/relink freshness "
+        "and PPC hi/ha relocation correctness for string literals.",
+        l1_desc);
+  }
 }
 
 void Dc3RcsBufStreamReadImplProbe(cpu::ppc::PPCContext* ppc_context,
@@ -658,6 +809,184 @@ void RegisterDc3OutputFormatterBridges(const Dc3HackContext& ctx,
   debug_result.applied++;
 }
 
+void RegisterDc3MemOrPoolAllocProbe(const Dc3HackContext& ctx,
+                                    Dc3HackApplyResult& debug_result) {
+  if (!ctx.processor || !ctx.is_decomp_layout) {
+    debug_result.skipped++;
+    return;
+  }
+  if (!cvars::dc3_debug_mempool_alloc_probe) {
+    XELOGI("DC3: MemOrPoolAlloc probe disabled (default)");
+    debug_result.skipped++;
+    return;
+  }
+
+  auto handler = [](cpu::ppc::PPCContext* ppc_context,
+                    kernel::KernelState* kernel_state) {
+    if (!ppc_context || !kernel_state) return;
+    auto* memory = kernel_state->memory();
+    auto* processor = kernel_state->processor();
+    if (!memory || !processor) return;
+
+    uint32_t size = static_cast<uint32_t>(ppc_context->r[3]);
+    uint32_t file_ptr = static_cast<uint32_t>(ppc_context->r[4]);
+    uint32_t line = static_cast<uint32_t>(ppc_context->r[5]);
+    uint32_t name_ptr = static_cast<uint32_t>(ppc_context->r[6]);
+    uint32_t caller_lr = static_cast<uint32_t>(ppc_context->lr);
+
+    // Reimplement MemOrPoolAlloc dispatch logic:
+    //   size == 0 -> return null
+    //   size > 0x80 -> MemAlloc(size, file, line, name, 0)
+    //   else -> PoolAlloc(size, size, file, line, name)
+    uint64_t result = 0;
+    if (size == 0) {
+      result = 0;
+    } else {
+      auto* thread_state = ppc_context->thread_state;
+      if (static_cast<int32_t>(size) > 0x80) {
+        // MemAlloc(int size, const char* file, int line, const char* name,
+        //          int heap = 0)
+        uint64_t args[5] = {size, file_ptr, line, name_ptr, 0};
+        result = processor->Execute(thread_state, kDc3MemAllocAddr, args, 5);
+      } else {
+        // PoolAlloc(int size, int pool_size, const char* file, int line,
+        //           const char* name)
+        uint64_t args[5] = {size, size, file_ptr, line, name_ptr};
+        result = processor->Execute(thread_state, kDc3PoolAllocAddr, args, 5);
+      }
+    }
+
+    uint32_t result32 = static_cast<uint32_t>(result);
+
+    // Check for Execute dispatch failure (0xDEADBABE means function not found).
+    if (result == 0xDEADBABE) {
+      XELOGW("DC3: MemOrPoolAlloc dispatch FAILED (Execute returned DEADBABE) "
+             "LR={:08X} size={} path={}",
+             caller_lr, static_cast<int32_t>(size),
+             (static_cast<int32_t>(size) > 0x80) ? "MemAlloc" : "PoolAlloc");
+    }
+
+    // Sanitize invalid allocator returns. When the MemMgr assert nop bypass is
+    // active, MemAlloc can continue past a failed assertion with uninitialized
+    // stack data (e.g. 0xFFFFFFFF) instead of halting. Convert these to null
+    // so callers that do null-check (or crash cleanly on null) don't dereference
+    // garbage pointers in wrapping-address territory.
+    if (result32 >= 0xF0000000 && result32 != 0) {
+      XELOGW(
+          "DC3: MemOrPoolAlloc result sanitized {:08X} -> 0 (suspected garbage "
+          "from nop'd assert) LR={:08X} size={}",
+          result32, caller_lr, static_cast<int32_t>(size));
+      result32 = 0;
+    }
+
+    ppc_context->r[3] = result32;
+
+    // Determine if this is interesting enough to log.
+    bool is_failure = (result32 == 0xFFFFFFFF || result32 == 0);
+    bool is_string_reserve_caller = (caller_lr == kDc3StringReserveMemAllocRetLR);
+
+    static uint32_t total_calls = 0;
+    static uint32_t failure_count = 0;
+    ++total_calls;
+    if (is_failure && result32 != 0) ++failure_count;
+
+    // Log on: any failure, String::reserve caller, or first few calls, or
+    // periodic sampling.
+    if (is_failure || is_string_reserve_caller || total_calls <= 20 ||
+        (total_calls % 5000) == 0) {
+      const char* file_str = "<null>";
+      const char* name_str = "<null>";
+      if (file_ptr && file_ptr < 0xF0000000) {
+        auto* f = memory->TranslateVirtual<const char*>(file_ptr);
+        if (f) file_str = f;
+      }
+      if (name_ptr && name_ptr < 0xF0000000) {
+        auto* n = memory->TranslateVirtual<const char*>(name_ptr);
+        if (n) name_str = n;
+      }
+      if (is_failure && result32 == 0xFFFFFFFF) {
+        XELOGW(
+            "DC3: MemOrPoolAlloc FAILURE! LR={:08X} size={} (0x{:X}) "
+            "file={} line={} name={} -> {:08X} (raw64={:016X}) path={} "
+            "(total={} failures={})",
+            caller_lr, static_cast<int32_t>(size), size, file_str, line,
+            name_str, result32, result,
+            (static_cast<int32_t>(size) > 0x80) ? "MemAlloc" : "PoolAlloc",
+            total_calls, failure_count);
+        // Dump pool allocator state for PoolAlloc-path failures.
+        if (static_cast<int32_t>(size) <= 0x80) {
+          int fsa_idx = (static_cast<int>(size) - 1) >> 4;
+          uint32_t g_chunk = 0;
+          if (auto* gcp = memory->TranslateVirtual<uint8_t*>(kDc3GChunkAllocAddr)) {
+            g_chunk = xe::load_and_swap<uint32_t>(gcp);
+          }
+          XELOGW("DC3: Pool diag: gChunkAlloc={:08X} fsa_idx={}", g_chunk, fsa_idx);
+          if (g_chunk && g_chunk < 0xF0000000) {
+            // ChunkAllocator::mAllocs is at offset 0, array of 64 pointers
+            uint32_t fsa_ptr_addr = g_chunk + fsa_idx * 4;
+            uint32_t fsa_ptr = 0;
+            if (auto* p = memory->TranslateVirtual<uint8_t*>(fsa_ptr_addr)) {
+              fsa_ptr = xe::load_and_swap<uint32_t>(p);
+            }
+            XELOGW("DC3: Pool diag: FixedSizeAlloc[{}]={:08X}", fsa_idx, fsa_ptr);
+            if (fsa_ptr && fsa_ptr < 0xF0000000) {
+              auto* fsa = memory->TranslateVirtual<uint8_t*>(fsa_ptr);
+              if (fsa) {
+                uint32_t alloc_words = xe::load_and_swap<uint32_t>(fsa + kFsaOffAllocSizeWords);
+                uint32_t num_allocs = xe::load_and_swap<uint32_t>(fsa + kFsaOffNumAllocs);
+                uint32_t max_allocs = xe::load_and_swap<uint32_t>(fsa + kFsaOffMaxAllocs);
+                uint32_t num_chunks = xe::load_and_swap<uint32_t>(fsa + kFsaOffNumChunks);
+                uint32_t free_list = xe::load_and_swap<uint32_t>(fsa + kFsaOffFreeList);
+                uint32_t nodes_per = xe::load_and_swap<uint32_t>(fsa + kFsaOffNodesPerChunk);
+                XELOGW(
+                    "DC3: Pool diag: allocWords={} numAllocs={} maxAllocs={} "
+                    "chunks={} freeList={:08X} nodesPerChunk={}",
+                    alloc_words, num_allocs, max_allocs, num_chunks, free_list,
+                    nodes_per);
+                // Dump first few free list entries
+                uint32_t fl = free_list;
+                for (int i = 0; i < 5 && fl && fl < 0xF0000000; ++i) {
+                  auto* fp = memory->TranslateVirtual<uint8_t*>(fl);
+                  if (!fp) break;
+                  uint32_t next = xe::load_and_swap<uint32_t>(fp);
+                  XELOGW("DC3: Pool diag: freeList[{}]={:08X} -> next={:08X}",
+                         i, fl, next);
+                  fl = next;
+                }
+                if (fl >= 0xF0000000 && fl != 0) {
+                  XELOGW("DC3: Pool diag: freeList entry {:08X} is INVALID "
+                         "(possible corruption)",
+                         fl);
+                }
+              }
+            }
+          }
+        }
+      } else if (is_failure && result32 == 0) {
+        // size==0 returns null, that's normal
+        if (size != 0) {
+          XELOGW(
+              "DC3: MemOrPoolAlloc returned NULL! LR={:08X} size={} (0x{:X}) "
+              "file={} line={} name={} -> 0 (total={} failures={})",
+              caller_lr, static_cast<int32_t>(size), size, file_str, line,
+              name_str, total_calls, failure_count);
+        }
+      } else {
+        XELOGI(
+            "DC3: MemOrPoolAlloc LR={:08X} size={} (0x{:X}) file={} line={} "
+            "name={} -> {:08X} (total={})",
+            caller_lr, static_cast<int32_t>(size), size, file_str, line,
+            name_str, result32, total_calls);
+      }
+    }
+  };
+
+  ctx.processor->RegisterGuestFunctionOverride(kDc3MemOrPoolAllocAddr, handler,
+                                               "DC3:MemOrPoolAlloc(probe)");
+  XELOGI("DC3: Registered MemOrPoolAlloc probe at {:08X}", kDc3MemOrPoolAllocAddr);
+  debug_result.applied++;
+}
+
 void RegisterDc3FindArrayOverride(const Dc3HackContext& ctx,
                                   Dc3HackApplyResult& debug_result) {
   if (!ctx.is_decomp_layout || !ctx.processor) {
@@ -670,10 +999,17 @@ void RegisterDc3FindArrayOverride(const Dc3HackContext& ctx,
     debug_result.skipped++;
     return;
   }
-  if (mode != "log_only" && mode != "stub_on_fail" && mode != "null_on_fail") {
+  if (mode != "log_only" && mode != "stub_on_fail" && mode != "null_on_fail" &&
+      mode != "setupfont_fix") {
     XELOGW("DC3: Unknown FindArray override mode '{}'; expected off|log_only|"
-           "stub_on_fail|null_on_fail. Leaving original behavior active.",
+           "stub_on_fail|null_on_fail|setupfont_fix. Leaving original behavior active.",
            mode);
+    debug_result.skipped++;
+    return;
+  }
+  if (mode == "setupfont_fix") {
+    XELOGI("DC3: FindArray override behavior left original (mode=setupfont_fix); "
+           "SetupFont repair is handled in SystemConfig2 probe override");
     debug_result.skipped++;
     return;
   }
@@ -715,65 +1051,10 @@ void RegisterDc3FindArrayOverride(const Dc3HackContext& ctx,
     uint32_t fail_flag = static_cast<uint32_t>(ppc_context->r[5]);
 
     char sym_str[64] = {};
-    std::string sym_repr = "<null>";
-    if (sym_addr && sym_addr < 0xF0000000) {
-      if (auto* s = memory->TranslateVirtual<const char*>(sym_addr)) {
-        std::strncpy(sym_str, s, sizeof(sym_str) - 1);
-        bool printable = true;
-        for (size_t i = 0; i < sizeof(sym_str) && sym_str[i]; ++i) {
-          const unsigned char c = static_cast<unsigned char>(sym_str[i]);
-          if (c < 0x20 || c > 0x7E) {
-            printable = false;
-            break;
-          }
-        }
-        if (printable && sym_str[0]) {
-          sym_repr = sym_str;
-        } else {
-          sym_repr = std::string("<bin:") +
-                     Dc3FmtBytePreview(reinterpret_cast<const uint8_t*>(s), 16) +
-                     ">";
-        }
-      } else {
-        sym_repr = "<unmapped>";
-      }
-    }
-
-    uint32_t found_addr = 0;
-    if (da_addr && da_addr < 0xF0000000) {
-      if (auto* da = memory->TranslateVirtual<uint8_t*>(da_addr)) {
-        uint32_t nodes_ptr = xe::load_and_swap<uint32_t>(da + 0x0);
-        int16_t da_size = xe::load_and_swap<int16_t>(da + 0x8);
-        if (nodes_ptr && nodes_ptr < 0xF0000000 && da_size > 0 && da_size < 0x2000) {
-          if (auto* nodes = memory->TranslateVirtual<uint8_t*>(nodes_ptr)) {
-            for (int i = 0; i < da_size; ++i) {
-              uint8_t* n = nodes + i * 8;
-              uint32_t val = xe::load_and_swap<uint32_t>(n + 0);
-              uint32_t type = xe::load_and_swap<uint32_t>(n + 4);
-              if (type != 16 || !val || val >= 0xF0000000) continue;
-              auto* sub = memory->TranslateVirtual<uint8_t*>(val);
-              if (!sub) continue;
-              uint32_t sub_nodes = xe::load_and_swap<uint32_t>(sub + 0x0);
-              int16_t sub_size = xe::load_and_swap<int16_t>(sub + 0x8);
-              if (!sub_nodes || sub_nodes >= 0xF0000000 || sub_size <= 0 ||
-                  sub_size >= 0x2000) {
-                continue;
-              }
-              auto* sn = memory->TranslateVirtual<uint8_t*>(sub_nodes);
-              if (!sn) continue;
-              uint32_t sn_val = xe::load_and_swap<uint32_t>(sn + 0);
-              uint32_t sn_type = xe::load_and_swap<uint32_t>(sn + 4);
-              if (sn_type != 5 || !sn_val || sn_val >= 0xF0000000) continue;
-              auto* sn_str = memory->TranslateVirtual<const char*>(sn_val);
-              if (sn_str && std::strcmp(sn_str, sym_str) == 0) {
-                found_addr = val;
-                break;
-              }
-            }
-          }
-        }
-      }
-    }
+    bool sym_bin = false;
+    std::string sym_repr =
+        Dc3DescribeGuestSymbol(memory, sym_addr, sym_str, sizeof(sym_str), &sym_bin);
+    uint32_t found_addr = Dc3FindArrayLinearBySymbol(memory, da_addr, sym_addr);
 
     uint32_t result = 0;
     const char* result_kind = "null";
@@ -795,7 +1076,7 @@ void RegisterDc3FindArrayOverride(const Dc3HackContext& ctx,
     static uint32_t log_count = 0;
     ++log_count;
     bool interesting_miss = (fail_flag != 0 && found_addr == 0);
-    bool interesting_bin = sym_repr.rfind("<bin:", 0) == 0;
+    bool interesting_bin = sym_bin;
     if (interesting_miss || interesting_bin || log_count <= 200 ||
         (log_count % 1000) == 0) {
       XELOGI(
@@ -961,6 +1242,135 @@ void RegisterDc3DataArraySafetyOverrides(const Dc3HackContext& ctx,
   debug_result.applied++;
 }
 
+void RegisterDc3SystemConfigProbe(const Dc3HackContext& ctx,
+                                  Dc3HackApplyResult& debug_result) {
+  if (!ctx.processor || !ctx.is_decomp_layout) {
+    debug_result.skipped++;
+    return;
+  }
+  const std::string mode = cvars::dc3_debug_findarray_override_mode;
+  if (mode != "log_only" && mode != "setupfont_fix") {
+    debug_result.skipped++;
+    return;
+  }
+
+  auto handler = [](cpu::ppc::PPCContext* ppc_context,
+                    kernel::KernelState* kernel_state) {
+    if (!ppc_context || !kernel_state) return;
+    auto* memory = kernel_state->memory();
+    if (!memory) return;
+
+    uint32_t s1 = static_cast<uint32_t>(ppc_context->r[3]);
+    uint32_t s2 = static_cast<uint32_t>(ppc_context->r[4]);
+    uint32_t caller_lr = static_cast<uint32_t>(ppc_context->lr);
+
+    uint32_t g_system_config = 0;
+    if (auto* p = memory->TranslateVirtual<uint8_t*>(kDc3GSystemConfigAddr)) {
+      g_system_config = xe::load_and_swap<uint32_t>(p + 0x0);
+    }
+    uint32_t arr1 = Dc3FindArrayLinearBySymbol(memory, g_system_config, s1);
+    uint32_t arr2 = Dc3FindArrayLinearBySymbol(memory, arr1, s2);
+
+    char s1_buf[64] = {};
+    char s2_buf[64] = {};
+    bool s1_bin = false;
+    bool s2_bin = false;
+    std::string s1_repr =
+        Dc3DescribeGuestSymbol(memory, s1, s1_buf, sizeof(s1_buf), &s1_bin);
+    std::string s2_repr =
+        Dc3DescribeGuestSymbol(memory, s2, s2_buf, sizeof(s2_buf), &s2_bin);
+    const std::string mode_local = cvars::dc3_debug_findarray_override_mode;
+
+    static uint32_t log_count = 0;
+    ++log_count;
+    bool interesting = (arr2 == 0) || s1_bin || s2_bin;
+    if (interesting || log_count <= 100 || (log_count % 1000) == 0) {
+      XELOGI(
+          "DC3: SystemConfig2 probe mode={} LR={:08X} gSystemConfig={:08X} s1={:08X} "
+          "({}) s2={:08X} ({}) -> a1={:08X} a2={:08X}",
+          mode_local, caller_lr, g_system_config, s1, s1_repr, s2, s2_repr, arr1,
+          arr2);
+    }
+
+    if (caller_lr == kDc3SetupFontSystemConfigReturnLR) {
+      Dc3LogSetupFontLiteralSanity(memory);
+    }
+
+    if (mode_local == "setupfont_fix" &&
+        caller_lr == kDc3SetupFontSystemConfigReturnLR && arr1 != 0 && arr2 == 0 &&
+        !s1_bin && s1_repr == "rnd" && s2_bin) {
+      uint32_t repaired =
+          Dc3FindArrayLinearBySymbol(memory, arr1, kDc3PooledFontStringAddr);
+      if (repaired) {
+        XELOGW(
+            "DC3: SetupFont SystemConfig repair applied: substituted arg2 "
+            "'font' via pooled literal {:08X} (bad arg2 was {}) -> {:08X}",
+            kDc3PooledFontStringAddr, s2_repr, repaired);
+        arr2 = repaired;
+      } else {
+        XELOGW("DC3: SetupFont SystemConfig repair attempted but pooled 'font' "
+               "lookup failed (arr1={:08X})",
+               arr1);
+      }
+    }
+
+    if (s2_bin) {
+      static uint32_t bin_dump_count = 0;
+      ++bin_dump_count;
+      if (bin_dump_count <= 32 || (bin_dump_count % 256) == 0) {
+        uint32_t g_string_table = 0;
+        if (auto* p = memory->TranslateVirtual<uint8_t*>(kDc3GStringTableGlobalAddr)) {
+          g_string_table = xe::load_and_swap<uint32_t>(p + 0x0);
+        }
+
+        uint32_t ht_entries = 0;
+        uint32_t ht_size = 0;
+        uint32_t ht_num_entries = 0;
+        uint32_t ht_empty = 0;
+        uint32_t ht_removed = 0;
+        uint8_t ht_own = 0;
+        if (auto* h = memory->TranslateVirtual<uint8_t*>(kDc3GHashTableAddr)) {
+          ht_entries = xe::load_and_swap<uint32_t>(h + 0x0);
+          ht_size = xe::load_and_swap<uint32_t>(h + 0x4);
+          ht_own = *(h + 0x8);
+          ht_num_entries = xe::load_and_swap<uint32_t>(h + 0xC);
+          ht_empty = xe::load_and_swap<uint32_t>(h + 0x10);
+          ht_removed = xe::load_and_swap<uint32_t>(h + 0x14);
+        }
+        XELOGW(
+            "DC3: Symbol globals on binary SystemConfig key: gStringTable*={:08X} "
+            "gHashTable(entries={:08X} size={} own={} used={} empty={:08X} "
+            "removed={:08X})",
+            g_string_table, ht_entries, ht_size, ht_own, ht_num_entries, ht_empty,
+            ht_removed);
+
+        if (g_string_table && g_string_table < 0xF0000000) {
+          if (auto* st = memory->TranslateVirtual<uint8_t*>(g_string_table)) {
+            uint32_t v_begin = xe::load_and_swap<uint32_t>(st + 0x0);
+            uint32_t v_end = xe::load_and_swap<uint32_t>(st + 0x4);
+            uint32_t v_cap = xe::load_and_swap<uint32_t>(st + 0x8);
+            uint32_t cur_char = xe::load_and_swap<uint32_t>(st + 0xC);
+            int32_t cur_buf = xe::load_and_swap<int32_t>(st + 0x10);
+            XELOGW(
+                "DC3: StringTable state begin={:08X} end={:08X} cap={:08X} "
+                "mCurChar={:08X} mCurBuf={}",
+                v_begin, v_end, v_cap, cur_char, cur_buf);
+          }
+        }
+      }
+    }
+
+    ppc_context->r[3] = arr2;
+  };
+
+  ctx.processor->RegisterGuestFunctionOverride(kDc3SystemConfig2Addr, handler,
+                                               "DC3:SystemConfig2(log)");
+  XELOGI("DC3: Registered SystemConfig(Symbol,Symbol) probe at {:08X} "
+         "(active in FindArray mode={})",
+         kDc3SystemConfig2Addr, mode);
+  debug_result.applied++;
+}
+
 void ApplyDc3ImportAndRuntimeStopgaps(const Dc3HackContext& ctx,
                                       Dc3HackPackSummary& summary) {
   auto& import_result = GetResult(summary, Dc3HackCategory::kImports);
@@ -1108,6 +1518,36 @@ void ApplyDc3ImportAndRuntimeStopgaps(const Dc3HackContext& ctx,
       XELOGE("DC3: Debug::Fail called! LR={:08X} r3={:08X} r4={:08X}", lr, r3, r4);
       if (memory) {
         static bool logged_debug_obj = false;
+        auto dump_factory_state = [&](const char* reason) {
+          uint8_t hdr[0x20] = {};
+          if (auto* map_mem =
+                  memory->TranslateVirtual<uint8_t*>(kDc3ObjectFactoriesMapAddr)) {
+            std::memcpy(hdr, map_mem, sizeof(hdr));
+            XELOGW("DC3: Hmx::Object::sFactories [{}] @{:08X} hdr={}",
+                   reason, kDc3ObjectFactoriesMapAddr,
+                   Dc3FmtBytePreview(hdr, sizeof(hdr)));
+          } else {
+            XELOGW("DC3: Hmx::Object::sFactories [{}] @{:08X} <unmapped>", reason,
+                   kDc3ObjectFactoriesMapAddr);
+          }
+          auto dump_static_symbol = [&](const char* label, uint32_t sym_slot_addr) {
+            if (auto* p = memory->TranslateVirtual<uint8_t*>(sym_slot_addr)) {
+              uint32_t sym_ptr = xe::load_and_swap<uint32_t>(p + 0x0);
+              bool sym_bin = false;
+              char tmp[64] = {};
+              std::string desc = Dc3DescribeGuestSymbol(memory, sym_ptr, tmp, sizeof(tmp),
+                                                        &sym_bin);
+              XELOGW("DC3: {} static Symbol slot @{:08X} -> {:08X} ({})", label,
+                     sym_slot_addr, sym_ptr, desc);
+            } else {
+              XELOGW("DC3: {} static Symbol slot @{:08X} <unmapped>", label,
+                     sym_slot_addr);
+            }
+          };
+          dump_static_symbol("RndMat::StaticClassName", kDc3RndMatStaticNameSymAddr);
+          dump_static_symbol("MetaMaterial::StaticClassName",
+                             kDc3MetaMaterialStaticNameSymAddr);
+        };
         if (!logged_debug_obj) {
           logged_debug_obj = true;
           if (auto* dbg = memory->TranslateVirtual<uint8_t*>(r3)) {
@@ -1124,6 +1564,14 @@ void ApplyDc3ImportAndRuntimeStopgaps(const Dc3HackContext& ctx,
         if (r4 && r4 < 0xF0000000) {
           if (auto* msg = memory->TranslateVirtual<const char*>(r4)) {
             XELOGE("DC3: Debug::Fail message: {}", msg);
+            if (std::strncmp(msg, "Unknown class ", 14) == 0 ||
+                std::strncmp(msg, "Couldn't instantiate class ", 26) == 0) {
+              static uint32_t factory_dump_count = 0;
+              if (factory_dump_count < 16) {
+                ++factory_dump_count;
+                dump_factory_state(msg);
+              }
+            }
           }
         }
       }
@@ -1212,6 +1660,8 @@ void ApplyDc3ImportAndRuntimeStopgaps(const Dc3HackContext& ctx,
   RegisterDc3LocaleBootstrapBridges(ctx, debug_result);
   RegisterDc3OutputFormatterBridges(ctx, debug_result);
   RegisterDc3DataArraySafetyOverrides(ctx, debug_result);
+  RegisterDc3SystemConfigProbe(ctx, debug_result);
+  RegisterDc3MemOrPoolAllocProbe(ctx, debug_result);
 
   // Debug/Holmes/String-related stubs and deadlock breakers.
   {

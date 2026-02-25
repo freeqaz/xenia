@@ -121,11 +121,18 @@ DEFINE_bool(dc3_debug_memmgr_assert_nop_bypass, false,
             "(replaces assert calls with nop). Temporary progression tool only; "
             "can mask data/config corruption.",
             "DC3");
+DEFINE_bool(dc3_debug_mempool_alloc_probe, false,
+            "DC3: log-only probe for MemOrPoolAlloc. Captures caller LR, "
+            "requested size, file/line/name args, and return value. "
+            "Detailed logs only on failure or from known crash-path callers.",
+            "DC3");
 DEFINE_string(
     dc3_debug_findarray_override_mode, "off",
     "DC3: debug mode for DataArray::FindArray(Symbol,bool) override "
-    "(off|log_only|stub_on_fail|null_on_fail). Use only for DC3 decomp runtime "
-    "forensics/progression.",
+    "(off|log_only|stub_on_fail|null_on_fail|setupfont_fix). "
+    "'setupfont_fix' enables an emulated SystemConfig(Symbol,Symbol) probe path "
+    "that repairs the known Rnd::SetupFont bad 'font' key literal in some "
+    "decomp builds. Use only for DC3 decomp runtime forensics/progression.",
     "DC3");
 DEFINE_string(dc3_nui_patch_layout, "auto",
               "DC3: NUI/XBC patch address layout selector "

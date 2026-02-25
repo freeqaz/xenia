@@ -1,6 +1,66 @@
 # Status: OODA Loop Iteration 4
 
-*Last updated: 2026-02-25 (Session 29 — `ThreadMemStack` crash symptom fixed, `FindArray` probe upgraded, `Symbol` corruption isolated)*
+*Last updated: 2026-02-25 (Session 31 — `setupfont_fix` validated, factory map looks sane, new `String::reserve` allocator-failure crash isolated)*
+
+## 2026-02-25 Update (Session 31): Targeted `SetupFont` Repair Validated; `Mat/MetaMaterial` Failures Are Not a Factory-Map Symbol Corruption (New Crash: `String::reserve` / alloc fail)
+
+- Added a targeted debug progression mode to `dc3_debug_findarray_override_mode`:
+  - `setupfont_fix`
+  - implementation uses the existing emulated `SystemConfig(Symbol,Symbol)` override path to repair **only** the `Rnd::SetupFont` callsite (`LR=0x8317FF14`) when arg2 is the known bad binary literal
+  - repair substitutes pooled `"font"` literal `0x82017684` for the broken arg2 key
+- Validation (`setupfont_fix`):
+  - `SystemConfig2` probe still logs the bad `SetupFont` arg2 binary symbol and literal-sanity warning
+  - targeted repair successfully returns a valid `rnd/font` config array (`-> 0x40343500` in the validation run)
+  - this confirms the `SetupFont` key failure is bypassable without touching global symbol/hash state
+- Factory-registration investigation (new evidence):
+  - breakpoint hit matrix confirms all relevant factory path functions execute in the current run:
+    - `MetaMaterial::StaticClassName`
+    - `RndMat::Init`
+    - `Hmx::Object::RegisterFactory`
+    - `Hmx::Object::NewObject(Symbol)`
+  - `Debug::Fail`-time factory dump (on `Couldn't instantiate class Mat`) shows:
+    - `Hmx::Object::sFactories` map header is populated (non-empty)
+    - `RndMat::StaticClassName` cached symbol slot resolves to `Mat`
+    - `MetaMaterial::StaticClassName` cached symbol slot resolves to `MetaMaterial`
+  - conclusion (current confidence): the `Mat/MetaMaterial` failures are **not** explained by missing registration path execution or obviously corrupted cached class symbols
+- New downstream blocker (after `setupfont_fix`):
+  - crash moves to `String::reserve` (`PC=0x82A5BC48`)
+  - register state shows `r29=0x0000000100000003`, which matches `MemOrPoolAlloc` returning `0xFFFFFFFF` (failure sentinel), then `String::reserve` doing `ptr+4` and writing through it
+  - immediate context:
+    - `MemOrPoolAlloc` call at `0x82A5BBFC`
+    - crash shortly after first `Couldn't instantiate class Mat`
+  - this suggests a **real allocator failure path** (not just factory-symbol lookup), and likely explains the follow-on instability in error-string construction
+- Additional note:
+  - `ResolveFunction(0x8217AF6C)` no-op stub warnings still appear before the new crash, but current evidence points to `String::reserve` allocation failure as the direct crash cause
+
+
+## 2026-02-25 Update (Session 30): `Rnd::SetupFont` `"font"` Key Failure Likely Caused by Stale `Rnd.obj` (Decomp Build Artifact), Not Hash-Table Corruption
+
+- Added a `SystemConfig(Symbol,Symbol)` probe (enabled under `dc3_debug_findarray_override_mode=log_only`) to log both symbol arguments at the `Rnd::SetupFont` callsite (`LR=0x8317FF14`) and correlate them with `gSystemConfig` lookups.
+- Corrected a probe-address pitfall:
+  - the active `gHashTable` used by `Symbol::Symbol(const char*)` is the instance referenced in code (`0x83AE01CC`), not the duplicate-looking map symbol at `0x83AED0FC`
+  - after correcting the probe to `0x83AE01CC`, the hash table appears healthy/populated during the bad `SetupFont` symbol event (`used ~= 6700`, valid entries pointer, `gStringTable` non-null)
+- Strong new evidence from runtime + disassembly:
+  - `SystemConfig2` probe at `LR=0x8317FF14` shows `s1=(rnd)` and `s2=(<bin:...>)`
+  - `Rnd::SetupFont` constructs two `Symbol` temporaries and passes them to `SystemConfig` in the opposite register order:
+    - ctor2 literal (`0x82053BF8`) feeds `SystemConfig` arg1 / `s1` and contains `"rnd\\0"` (this is consistent with the probe)
+    - ctor1 literal (`0x82027684`) feeds `SystemConfig` arg2 / `s2` and is **non-string data** (`83 0A FA 80 ...`)
+  - the pooled `"font"` string exists elsewhere in linked `.rdata` (`0x82017684`)
+  - the bad `SetupFont` arg2 literal being `0x82027684` instead of a valid string pointer is the current primary issue (looks like decomp build/link artifact; the `+0x10000` delta versus `0x82017684` is suspicious)
+- Build/link evidence (high confidence):
+  - linker response files (`link_with_stubs.rsp`, `link_no_stubs.rsp`, `link_test.rsp`) all link `build/373307D9/obj/system/rndobj/Rnd.obj`
+  - that object is older than `src/system/rndobj/Rnd.cpp` (stale object candidate)
+  - conclusion: the `SetupFont` `"font"` failure is currently more likely a **stale decomp object / partial relink mismatch** than a runtime hash-table corruption bug in Xenia
+- Important separation (also proven):
+  - `SystemConfig("objects","Mat")` and `SystemConfig("objects","MetaMaterial")` lookups succeed in the same probe runs
+  - so `Mat` / `MetaMaterial` factory-instantiation failures are likely a **separate issue** (registration/init order or another runtime problem), not just the `SetupFont` key mismatch
+- Xenia-side diagnostics added:
+  - `dc3_hack_pack` now logs a one-time `SetupFont` literal sanity check during the `SystemConfig2` probe path and warns if ctor1/arg2 literal is not `"font"` (current known mismatch: non-string data at `0x82027684`)
+- Next debugging focus (re-prioritized):
+  1. Rebuild/relink the decomp `Rnd.obj` path (or otherwise refresh `default.exe`) and re-validate `SetupFont` literal `0x82053BF8`
+  2. Only continue `Symbol` hash/string-table corruption investigation if the linked `SetupFont` literals are confirmed sane
+  3. Investigate `Mat` / `MetaMaterial` factory registration failures as a separate track
+
 
 ## 2026-02-25 Update (Session 29): `ThreadMemStack` Invalid-SP Crash Fixed (Symptom) + `SystemConfig("rnd","font")` Symbol Corruption Isolated
 

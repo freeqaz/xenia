@@ -134,9 +134,15 @@ Items are ordered by priority. Check off as completed. Add new items each iterat
   - Keep CRT formatter bridges (`_output_l` / `_woutput_l`) pinned to verified map-synced addresses unless the manifest gains a duplicate-safe symbol identity scheme (generic name remaps can target unrelated implementations)
   - Investigate `Symbol` corruption in `Rnd::SetupFont`:
     - `SystemConfig("rnd","font")` second key captured as binary symbol at `LR=0x83516738` (`sym=<bin:83 0A FA 80 ...>`)
-    - determine whether the bug is in `Symbol::Symbol(const char*)`, string-table/hash state, or upstream memory corruption after MemMgr init
+    - first verify decomp build freshness / literal sanity (current evidence points at stale `build/373307D9/obj/system/rndobj/Rnd.obj`; `SetupFont` ctor2/arg1 literal `0x82053BF8` is `"rnd"` as expected, but ctor1/arg2 literal `0x82027684` is non-string data instead of `"font"`)
+    - only continue `Symbol::Symbol(const char*)` / string-table/hash corruption debugging if the linked `SetupFont` literals are confirmed sane after rebuild/relink
   - Investigate `Mat` / `MetaMaterial` instantiation failures (`Couldn't instantiate class Mat`, `MetaMaterial`) after the `SetupFont` crash fix:
-    - confirm whether factory registration (`RndMat::Init` / `REGISTER_OBJ_FACTORY`) is failing due the same symbol corruption vs a separate init-order/registration issue
+    - `SystemConfig("objects","Mat")` and `("objects","MetaMaterial")` now probe as successful in `log_only` runs, so treat factory registration/init as a likely separate issue unless new evidence says otherwise
+    - `setupfont_fix` runs also show `sFactories` map header populated and cached `RndMat`/`MetaMaterial` class symbols sane at fail time; continue by investigating factory function return paths / allocator failures, not just registration presence
+  - Investigate `String::reserve` crash after `setupfont_fix`:
+    - `PC=0x82A5BC48` (`String::reserve`)
+    - `MemOrPoolAlloc` call at `0x82A5BBFC` appears to return `0xFFFFFFFF` (failure sentinel), then `reserve` writes through `ptr+4`
+    - determine why allocator failure occurs immediately after `Couldn't instantiate class Mat` and whether this is the next real blocker (vs secondary error-path crash)
 
 ### Tier 2: Reduce unresolved symbols (high leverage)
 
