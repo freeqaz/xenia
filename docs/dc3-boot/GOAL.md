@@ -37,22 +37,36 @@ ACT      →  Implement the fix, rebuild, test again
 7. Update `TODO.md` — check off completed items, add new ones
 8. Repeat from step 1
 
-## Current Architecture Baseline (2026-02-23)
+## Historical Architecture Baseline (2026-02-23)
 
-### Current boot blocker (post NUI/XBC cutover)
+Historical snapshot note:
+- This section captures the 2026-02-23 baseline and is useful for context.
+- For the **current active blocker**, use `STATUS.md` + `CONTINUATION_PLAN.md` first.
+- Recommended working set:
+  - `docs/dc3-boot/CONTINUATION_PLAN.md`
+  - `docs/dc3-boot/STATUS.md`
+  - `docs/dc3-boot/DEBUGGING_TIPS.md`
+  - `docs/dc3-boot/ARCHIVED.md` (historical context only)
 
-- NUI/XBC resolver + guest overrides are no longer the limiting factor for decomp boot.
-- The current decomp-only blocker has progressed beyond the first data-as-code crash:
-  - the harmful `except_data_82910450` (`0x82910448`) stopgap was removed after proving it created a `NavListSortMgr` loop
-  - the stable blocker is now a repeated debugbreak trap loop anchored at `LR=0x835B3D5C` inside `_vsnprintf_l` invalid-parameter handling
-  - `0x835B2D68` was identified as `_errno` (`dosmap.obj`) and was returning a bogus handle-like pointer (`0x400006A8`) on the decomp build
-  - a decomp-only `_errno` guest override now returns a valid guest-backed errno pointer (`0x00036000`), and the trap payload changed accordingly
-  - the trap loop still persists after fixing `_errno`, which narrows the remaining problem to `_vsnprintf_l` invalid-parameter recursion / upstream invalid state
-- Active work should prioritize:
-  1. stabilizing a fix for the `_vsnprintf_l` invalid-parameter recursion path (without early startup crashes),
-  2. identifying the upstream invalid arguments/state feeding that path,
-  3. parity/telemetry comparison on matched decomp artifacts while iterating,
-  4. narrow decomp-only stopgaps only when they clearly move the blocker and remain stable.
+## Current Active Blocker (2026-02-25)
+
+- The decomp boot is currently blocked in CRT C++ constructor iteration (`_cinit` `__xc` loop), before `main()`.
+- `Symbol::PreInit` is injected via a PPC trampoline at `__xc[0]` and does execute, but it produces `gStringTable=0x14` (garbage) instead of a valid `StringTable*`.
+- This causes subsequent `Symbol::Symbol` calls to pass an invalid `this` into `StringTable::Add`, leading to crash/loop behavior.
+- The highest-leverage next work is therefore:
+  1. disassemble and trace `Symbol::PreInit`,
+  2. identify allocator/internal call failure (or argument/timing issue),
+  3. fix `gStringTable` initialization so CRT `__xc` completes and `main()` is reached.
+
+Critical debugging constraint (must respect):
+- Guest override "intercept then delegate to same address" is not reliable once JIT call sites are compiled, because the x64 JIT bakes the extern handler pointer into generated host code.
+- Prefer:
+  - pre-JIT PPC injection,
+  - full host implementation override,
+  - forwarding to a different address,
+  - or host-side guest memory construction.
+
+Historical 2026-02-23 blocker details were moved to `docs/dc3-boot/ARCHIVED.md`.
 
 ### DC3 NUI/XBC path is now cut over
 
@@ -156,6 +170,7 @@ Related debugging helpers:
 Runbook note:
 - `docs/dc3-boot/DEBUGGING_TIPS.md` now includes a "Tooling Runbook (Post-Debugging Leverage Loop)" section documenting the recommended escalation order:
   parity gate -> crash disasm/triage -> trace-on-break -> RSP (snapshot/live).
+- `docs/dc3-boot/CONTINUATION_PLAN.md` contains the current blocker-focused execution plan (CRT / `gStringTable` / `Symbol::PreInit`) and verified tool commands/cvars.
 - DTB/config parsing investigations should start non-invasively; the `ReadCacheStream` step probe is now opt-in via `--dc3_debug_read_cache_stream_step_override=true` because it can perturb checksum/parser behavior.
 
 ### 3. Promote manifest as the canonical Xenia input from `dc3-decomp`
