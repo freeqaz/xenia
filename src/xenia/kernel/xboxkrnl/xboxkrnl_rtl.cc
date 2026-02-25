@@ -536,6 +536,14 @@ void RtlEnterCriticalSection_entry(pointer_t<X_RTL_CRITICAL_SECTION> cs) {
     }
   }
 
+  // Unconditional auto-init: if the CS was never initialized (type != 1),
+  // initialize it now.  This handles the DC3 decomp's /FORCE-linked unresolved
+  // extern pointers (e.g. gMemLock) and CRT static-init ordering issues where
+  // CritSecTracker calls Enter() before MemInit runs.
+  if (cs->header.type != 1) {
+    xeRtlInitializeCriticalSection(cs, cs.guest_address());
+  }
+
   if (cs->owning_thread == cur_thread) {
     // We already own the lock.
     xe::atomic_inc(&cs->lock_count);
