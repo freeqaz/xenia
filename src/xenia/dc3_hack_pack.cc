@@ -1889,6 +1889,7 @@ void ApplyDebugStubs(const Dc3HackContext& ctx,
         if (r4 && r4 < 0xF0000000) {
           if (auto* msg = memory->TranslateVirtual<const char*>(r4)) {
             XELOGE("DC3: Debug::Fail message: {}", msg);
+            // One-time backtrace for "is not Symbol" to find the per-frame caller
             // Dump gHashTable state when mOwnEntries assertion fires.
             if (std::strstr(msg, "mOwnEntries")) {
               constexpr uint32_t kGHT = 0x83AE01C4;
@@ -2565,6 +2566,9 @@ void ApplyRuntimeStopgaps(const Dc3HackContext& ctx,
     // The sort loop in _S_sort (0x8300FBA0) infinite-loops on corrupt
     // list sentinels.  Stub SaveObjects to skip the sort entirely.
     PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x830100F0, 0, "DirLoader::SaveObjects");
+    // SkeletonUpdate::InstanceHandle creates a handle wrapper but asserts
+    // sInstance != null each frame.  Return null handle (r3=0) to skip.
+    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x830F1984, 0, "SkeletonUpdate::InstanceHandle");
     // SkeletonUpdate::PostUpdate is called from the main loop via
     // SkeletonUpdateHandle.  It calls Update → UpdateCallbacks which
     // iterate Kinect skeleton data that was never initialized, causing
@@ -2576,11 +2580,15 @@ void ApplyRuntimeStopgaps(const Dc3HackContext& ctx,
     // GestureMgr::Poll reads Kinect skeleton data with bounds-check asserts
     // that fire on uninitialized data.  Kinect not available in headless mode.
     PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x833ACA6C, 0, "GestureMgr::Poll");
+    // GestureMgr::GetSkeleton and UpdateTrackedSkeletons are called from
+    // non-Poll paths (UI character updates) causing per-frame asserts.
+    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x833ACEE0, 0, "GestureMgr::GetSkeleton");
+    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x833AD2E0, 0, "GestureMgr::UpdateTrackedSkeletons");
     // App::DrawRegular tries to render via DxRnd::Present → VdSwap.
     // Without GPU initialization (headless mode), VdSwap crashes on
     // invalid frontbuffer physical address.  Stub to skip rendering.
     PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x8300ABE0, 0, "App::DrawRegular");
-    result.applied += 22;
+    result.applied += 25;
   }
 
   // Map guard/overflow pages as readable zeros.
