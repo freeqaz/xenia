@@ -1430,18 +1430,36 @@ void ApplyDc3ImportAndRuntimeStopgaps(const Dc3HackContext& ctx,
     stopgap_result.skipped++;
   }
 
-  // Make the full PE image writable (0x82000000-0x83ED0000).
+  // Make the full PE image + heap region writable.
   // The decomp XEX has global DataNode/DataArray objects in .data sections
   // (e.g. 0x834880E0) that the game writes to at runtime.  The linker marks
   // these sections read-only because they contain initialized data, but the
-  // game expects them writable.  Also covers RODATA/BSS workaround.
+  // game expects them writable.  PE sections end at ~0x83E5E6D0 but the
+  // MemMgr heaps (configured from system_info.dta) grow into memory past
+  // the PE image.  Split into two Protect calls to avoid spanning regions.
   {
-    auto* heap = memory->LookupHeap(0x82000000);
-    if (heap) {
-      heap->Protect(0x82000000, 0x1ED0000,
-                    kMemoryProtectRead | kMemoryProtectWrite);
-      XELOGI("DC3: Made full image 0x82000000-0x83ED0000 writable");
-      stopgap_result.applied++;
+    auto* heap1 = memory->LookupHeap(0x82000000);
+    if (heap1) {
+      heap1->Protect(0x82000000, 0x1ED0000,
+                     kMemoryProtectRead | kMemoryProtectWrite);
+      XELOGI("DC3: Made PE image 0x82000000-0x83ED0000 writable");
+    }
+    // Extend writable region past PE image for MemMgr heap growth.
+    // The PE region boundary is at 0x83ED0000; try extending into the next
+    // region one 64KB block at a time.
+    for (uint32_t ext = 0x83ED0000; ext < 0x84000000; ext += 0x10000) {
+      auto* ext_heap = memory->LookupHeap(ext);
+      if (ext_heap) {
+        if (ext_heap->Protect(ext, 0x10000,
+                              kMemoryProtectRead | kMemoryProtectWrite)) {
+          continue;
+        }
+      }
+      XELOGI("DC3: Extended writable to {:08X} ({} pages past PE)",
+             ext, (ext - 0x83ED0000) / 0x10000);
+      break;
+    }
+    stopgap_result.applied++;
 
       // Temporary debug-only progression tool. These assertions trip after
       // known config/data corruption and should not be left enabled by default.
@@ -1483,10 +1501,6 @@ void ApplyDc3ImportAndRuntimeStopgaps(const Dc3HackContext& ctx,
         XELOGI("DC3: Initialized gConditional sentinel at {:08X}", kGConditionalAddr);
         stopgap_result.applied++;
       }
-    }
-
-    } else {
-      stopgap_result.skipped++;
     }
   }
 
