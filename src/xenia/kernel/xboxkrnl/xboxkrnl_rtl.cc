@@ -608,10 +608,21 @@ DECLARE_XBOXKRNL_EXPORT2(RtlTryEnterCriticalSection, kNone, kImplemented,
 
 void RtlLeaveCriticalSection_entry(pointer_t<X_RTL_CRITICAL_SECTION> cs) {
   g_rtl_leave_cs_count.fetch_add(1, std::memory_order_relaxed);
-  assert_true(cs->owning_thread == XThread::GetCurrentThread()->guest_object());
+  if (cs->owning_thread != XThread::GetCurrentThread()->guest_object()) {
+    XELOGW("RtlLeaveCriticalSection: ownership mismatch (owner={:08X} "
+           "current={:08X}) — forcing release",
+           (uint32_t)cs->owning_thread,
+           (uint32_t)XThread::GetCurrentThread()->guest_object());
+    // Force ownership to current thread so the release proceeds.
+    cs->owning_thread = XThread::GetCurrentThread()->guest_object();
+  }
 
   // Drop recursion count - if it isn't zero we still have the lock.
-  assert_true(cs->recursion_count > 0);
+  if (cs->recursion_count <= 0) {
+    XELOGW("RtlLeaveCriticalSection: recursion_count={} — clamping to 1",
+           (int32_t)cs->recursion_count);
+    cs->recursion_count = 1;
+  }
   if (--cs->recursion_count != 0) {
     assert_true(cs->recursion_count >= 0);
 

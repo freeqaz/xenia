@@ -182,6 +182,10 @@ struct Dc3Addresses {
   // Bink video (decomp MAP)
   uint32_t bink_start_async_thread = 0x839BF4AC;  // BinkStartAsyncThread (Bink SDK)
   uint32_t bink_platform_init = 0x8394F368;        // BinkMovieSys::PlatformInit()
+  // CRT RTTI
+  uint32_t rt_dynamic_cast = 0x83610900;  // __RTDynamicCast
+  // String constants
+  uint32_t g_null_str = 0x83A95DD4;       // gNullStr (pointer to "")
 };
 Dc3Addresses kAddr;
 
@@ -2089,7 +2093,7 @@ void ApplyDebugStubs(const Dc3HackContext& ctx,
     // PPC ABI: r3=inptr, r4=VfDelta, r5=SrcType, r6=TargetType, r7=isReference
     // Returns: adjusted pointer or NULL.
     // On Xbox 360 (MSVC PPC), type_info has a mangled name at offset +0x08.
-    const uint32_t kRTDynamicCast = 0x83610900;  // __RTDynamicCast
+    const uint32_t kRTDynamicCast = kAddr.rt_dynamic_cast;
     auto rtdc_handler = [](cpu::ppc::PPCContext* ppc_context,
                            kernel::KernelState* kernel_state) {
       uint32_t inptr = static_cast<uint32_t>(ppc_context->r[3]);
@@ -2185,8 +2189,8 @@ void ApplyDebugStubs(const Dc3HackContext& ctx,
     auto at_handler = [](cpu::ppc::PPCContext* ppc_context,
                          kernel::KernelState* kernel_state) {
       // Return pointer to the "main" string already in guest memory.
-      // gNullStr at 0x83A95DD4 points to "" which is safe enough.
-      ppc_context->r[3] = 0x83A95DD4;
+      // gNullStr points to "" which is safe enough.
+      ppc_context->r[3] = kAddr.g_null_str;
     };
     ctx.processor->RegisterGuestFunctionOverride(
         kAllocType, at_handler, "DC3:AllocType(fixed)");
@@ -2495,49 +2499,88 @@ void ApplyRuntimeStopgaps(const Dc3HackContext& ctx,
   // false (no screens) so the splash system is inert.
   {
     // PrepareNext returns bool — 0 = no screens available
-    PatchStub8(memory, 0x834E2050, 0, "Splash::PrepareNext");
+    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x834E2050, 0, "Splash::PrepareNext");
     // BeginSplasher creates a render thread and waits for state; skip it
-    PatchStub8(memory, 0x834E2DEC, 0, "Splash::BeginSplasher");
+    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x834E2DEC, 0, "Splash::BeginSplasher");
     // Suspend/Resume wait for splash thread state changes, but the thread
     // was never created (BeginSplasher stubbed).  mThreaded=1 in ctor causes
     // Suspend to call WaitForState(kSuspended) → deadlock.
-    PatchStub8(memory, 0x834E190C, 0, "Splash::Suspend");
-    PatchStub8(memory, 0x834E1A94, 0, "Splash::Resume");
+    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x834E190C, 0, "Splash::Suspend");
+    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x834E1A94, 0, "Splash::Resume");
     // LiveCameraInput::PreInit calls `new LiveCameraInput()` whose ctor
     // calls NuiInitialize/NuiAudioCreate/NuiSkeletonTrackingEnable/
     // NuiImageStreamOpen — all block without Kinect hardware.
-    PatchStub8(memory, 0x832AAAFC, 0, "LiveCameraInput::PreInit");
+    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x832AAAFC, 0, "LiveCameraInput::PreInit");
     // LiveCameraInput::Init also blocks on NUI/Kinect hardware
-    PatchStub8(memory, 0x832AABE4, 0, "LiveCameraInput::Init");
+    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x832AABE4, 0, "LiveCameraInput::Init");
     // HasFileChecksumData() — return false to skip DTB checksum validation.
     // The decomp build's DTB files don't match original checksums, triggering
     // dirty disc errors and XamLoaderLaunchTitle (exit to dashboard).
-    PatchStub8(memory, 0x82924218, 0, "HasFileChecksumData");
+    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x82924218, 0, "HasFileChecksumData");
     // VoiceInputPanel::LoadVoiceContexts reads kinect/speech/voice_contexts
     // config and calls Sym() on each entry.  Without Kinect/speech recognition,
     // this spins forever on "Data is not Symbol" errors during UIManager::Init.
-    PatchStub8(memory, 0x8354D8D4, 0, "VoiceInputPanel::LoadVoiceContexts");
+    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x8354D8D4, 0, "VoiceInputPanel::LoadVoiceContexts");
     // Fader::UpdateValue iterates mClients (std::set<FaderGroup*>) which has
     // corrupt tree nodes when SynthInit was skipped. Infinite loop in set
     // traversal during CampaignSongSelectPanel construction.
-    PatchStub8(memory, 0x8326DE2C, 0, "Fader::UpdateValue");
+    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x8326DE2C, 0, "Fader::UpdateValue");
     // ShellInput::Init depends on Kinect/gesture subsystems (SpeechMgr,
     // GestureMgr, SkeletonUpdate, DepthBuffer).  TheSpeechMgr->AddSink()
     // hits corrupt MsgSinks lists because SpeechMgr was never initialized.
-    PatchStub8(memory, 0x8339CC08, 0, "ShellInput::Init");
+    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x8339CC08, 0, "ShellInput::Init");
     // UIScreen::HasPanel iterates mPanelList (std::list) which has corrupt
     // nodes for screens whose .milo data hasn't fully loaded.  Infinite loop
     // in HamUI::Init validation loop that only prints warnings.
-    PatchStub8(memory, 0x835DC3C4, 0, "UIScreen::HasPanel");
+    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x835DC3C4, 0, "UIScreen::HasPanel");
     // MoveMgr::Init loads choreography/move category data from config.
     // LoadCategoryData("genres") crashes (SP corruption) because config
     // data for move categories is missing or corrupt in decomp build.
-    PatchStub8(memory, 0x831634A4, 0, "MoveMgr::Init");
+    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x831634A4, 0, "MoveMgr::Init");
     // ObjRef::ReplaceList iterates a linked list of ObjRef nodes calling
     // Replace() on each.  With corrupt lists (from .milo load failures),
     // it enters an infinite loop → MILO_FAIL returns → loops again.
-    PatchStub8(memory, 0x829ABC18, 0, "ObjRef::ReplaceList");
-    result.applied += 13;
+    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x829ABC18, 0, "ObjRef::ReplaceList");
+    // _List_base<ObjectDir*>::clear — corrupt linked list from ObjDirItr
+    // causes infinite iteration in main loop Poll() calls.  Stub to leak
+    // memory instead of looping forever.
+    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x823D29A0, 0, "list<ObjectDir*>::clear");
+    // UIManager::GotoFirstScreen triggers screen transitions that require
+    // .milo files loaded as PanelDir.  Without the Rnd subsystem, panels
+    // load as plain ObjectDir → cascading failures + infinite loops in
+    // DataArray::FindArray with corrupt vtable dispatch to stack addresses.
+    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x83429904, 0, "UIManager::GotoFirstScreen");
+    // DirLoader::ClassAndNameSort::ClassIndex calls SystemConfig("system",
+    // "dir_sort") which triggers DataArray::FindArray on a corrupt config
+    // array → infinite loop with bctrl to stack garbage (0x7054F3D8).
+    // Return 0 so all objects get the same sort order (no reordering).
+    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x8300E008, 0, "ClassAndNameSort::ClassIndex");
+    // DirLoader::ClassAndNameSort::operator() does virtual calls on Object
+    // (ClassName, Name) — with corrupt objects from failed .milo loads,
+    // vtable dispatch goes to stack addresses (0x7054F3D8).  Return false
+    // (no reorder) to skip the sort comparison entirely.
+    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x8300F054, 0, "ClassAndNameSort::operator()");
+    // DirLoader::SaveObjects sorts objects using ClassAndNameSort, which
+    // iterates corrupt STL list nodes even with a stubbed comparator.
+    // The sort loop in _S_sort (0x8300FBA0) infinite-loops on corrupt
+    // list sentinels.  Stub SaveObjects to skip the sort entirely.
+    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x830100F0, 0, "DirLoader::SaveObjects");
+    // SkeletonUpdate::PostUpdate is called from the main loop via
+    // SkeletonUpdateHandle.  It calls Update → UpdateCallbacks which
+    // iterate Kinect skeleton data that was never initialized, causing
+    // corrupt vtable dispatch and DirLoader::SaveObjects infinite sort.
+    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x830F2C24, 0, "SkeletonUpdate::PostUpdate");
+    // SkeletonHistoryArchive::AddToHistory dispatches to garbage addresses
+    // (string data interpreted as pointers) from corrupt Skeleton objects.
+    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x834AA9C4, 0, "SkeletonHistoryArchive::AddToHistory");
+    // GestureMgr::Poll reads Kinect skeleton data with bounds-check asserts
+    // that fire on uninitialized data.  Kinect not available in headless mode.
+    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x833ACA6C, 0, "GestureMgr::Poll");
+    // App::DrawRegular tries to render via DxRnd::Present → VdSwap.
+    // Without GPU initialization (headless mode), VdSwap crashes on
+    // invalid frontbuffer physical address.  Stub to skip rendering.
+    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x8300ABE0, 0, "App::DrawRegular");
+    result.applied += 22;
   }
 
   // Map guard/overflow pages as readable zeros.
@@ -3432,6 +3475,12 @@ void Dc3PopulateAddressesFromCatalog(
   // Bink video
   get("bink_start_async_thread", kAddr.bink_start_async_thread);
   get("bink_platform_init", kAddr.bink_platform_init);
+
+  // CRT RTTI
+  get("rt_dynamic_cast", kAddr.rt_dynamic_cast);
+
+  // String constants
+  get("g_null_str", kAddr.g_null_str);
 
   XELOGI("DC3: Populated {} address catalog entries from manifest", updated);
 }

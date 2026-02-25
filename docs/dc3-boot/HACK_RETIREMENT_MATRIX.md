@@ -32,8 +32,52 @@ Rules:
 | `dc3_fake_kinect_skeleton_injection` | Skeleton | `src/xenia/emulator.cc` | guest stub injection + byte patches | original (dev workflow) | experimental | xenia | Synthetic skeleton data for non-sensor bring-up/testing | Replace with extracted hack-pack helper or host-side semantic hook if still needed | Original build smoke with `--fake_kinect_data=true`; verify skeleton thread progresses | Extraction attempt was deferred after phase-2 refactor surfaced semantic-drift regressions elsewhere |
 | `dc3_noop_stub_unresolved_call_fallback` | CPU Runtime | `src/xenia/cpu/backend/x64/x64_emitter.cc` | runtime no-op stub fallback | both (more visible on decomp) | required | xenia | Prevent crashes on null/out-of-range/unresolvable indirect calls during bring-up | Candidate for narrowing (not full removal) once runtime parity and callsite analysis show safe stricter behavior | Telemetry unresolved-call counters + hot-loop PCs; real-title smokes | This is broader than DC3 but currently documented here due DC3 bring-up use |
 
+| `dc3_manifest_address_automation` | Infrastructure | `dc3_hack_pack.cc` + `emulator.cc` + manifest generator | `address_catalog` JSON → `Dc3PopulateAddressesFromCatalog()` | decomp | required | multi | Decomp XEX rebuilds shift all addresses; manual refresh is error-prone | N/A — this IS the fix for stale addresses. Becomes unnecessary only if decomp produces bit-identical XEX | Rebuild decomp XEX → regenerate manifest → boot in xenia → verify "Populated N address catalog entries" log | 73 entries auto-resolved (81% of kAddr); 13 instruction-level fields remain hardcoded |
+| `dc3_hack_pack_stub_resolved` | DecompRuntimeStopgap | `dc3_hack_pack.cc` | `PatchStub8Resolved` via manifest `hack_pack_stubs` | decomp | required | multi | 14 PatchStub8 calls used raw hex addresses that went stale on XEX rebuild | N/A — these now use manifest-resolved addresses with hardcoded fallbacks | Boot decomp XEX → verify all 14 stubs resolve from manifest (check "resolved from manifest" logs) | Covers: Splash (4), LiveCameraInput (2), HasFileChecksumData, VoiceInputPanel, Fader, ShellInput, UIScreen, MoveMgr, ObjRef, list clear |
+
+## Stub Tier Classification (Session 38 Audit)
+
+### Tier 1: Permanent for headless mode (~130 stubs) — NO ACTION NEEDED
+
+| Category | Count | Why permanent |
+|---|---|---|
+| NUI/Kinect SDK | ~70 | No Kinect hardware in xenia |
+| Holmes debug network | ~40 | Dev network doesn't exist |
+| XBC/SmartGlass | 3 | No SmartGlass in xenia |
+| GPU init (null GPU) | ~11 | No GPU in `--gpu=null` mode |
+| XMP music | 2 | No media player |
+| Bink video | 2 | Video codec needs GPU thread |
+
+### Tier 2: Decomp build artifacts (~25 stubs) — FIXABLE VIA DECOMP/LINKER WORK
+
+| Stub | Root cause | Fix path |
+|---|---|---|
+| CreateDefaults bl-patches (2) | /FORCE duplicates → RndCam dtor crash | Resolve LNK4006 duplicates |
+| Object factory overrides (3) | Heap unavailable during CRT `__xc` init | Fix CRT init ordering |
+| StringTable::Add override | Heap not ready during `__xc` | Same |
+| gConditional sentinel write | /FORCE reorders STLport sentinel | Resolve LNK4006 |
+| Fader::UpdateValue | Corrupt std::set (SynthInit skipped) | Fix XAudio2 deadlock (Tier 3) |
+| UIScreen::HasPanel | Corrupt std::list from .milo load fail | Fix .milo loading |
+| ObjRef::ReplaceList | Corrupt linked list from .milo fail | Same |
+| list\<ObjectDir*\>::clear | Corrupt linked list from ObjDirItr | Same |
+| MoveMgr::Init | Config data missing/corrupt | Fix DTB/config loading |
+| ShellInput::Init | SpeechMgr never initialized | Fix NUI subsystem init ordering |
+| VoiceInputPanel | Speech config parsing fails | Same |
+
+### Tier 3: XAudio2/Synth cascade (~8 stubs) — FIXABLE VIA XENIA APU WORK
+
+| Stub | Root cause | Fix path |
+|---|---|---|
+| Synth360::PreInit | XAudio2 CS deadlock under nop APU | Fix xenia nop APU CS init |
+| SynthInit | Same | Same |
+| Fader::UpdateValue | Corrupt std::set because Synth skipped | Unstubbing Synth fixes this |
+| Splash (4) | DirLoader blocks on file I/O | Investigate VFS completion |
+
 ## Next Matrix Work (Planned)
 
 1. Add `last_validated` timestamps for high-risk entries (CRT sanitizer, import cleanup, zero-page).
 2. Split `dc3_assert_locale_runtime_stub_block` further if specific stubs prove independently removable.
 3. Re-attempt extracting `dc3_fake_kinect_skeleton_injection` after preserving exact inline semantics (or replace with a host-level hook).
+4. **Highest-leverage fix**: XAudio2 CS deadlock in nop APU — one xenia fix eliminates 3 stubs (Synth360::PreInit, SynthInit, Fader::UpdateValue).
+5. **Second-highest**: .milo file I/O completion — fixing VFS or content directory issues unstubs ~6 functions.
+6. Investigate staged Tier 2 stub removal as decomp LNK4006/LNK2001 errors are resolved.

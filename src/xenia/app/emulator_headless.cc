@@ -1389,6 +1389,7 @@ void EmulatorHeadless::RunWithTimeout(int32_t timeout_ms) {
                 {0x82931e38, "MidiParser::Init"},
                 {0x8342e428, "UIManager::Init"},
                 {0x8342bea8, "UIManager ctor"},
+                {0x83429904, "UIManager::GotoFirstScreen"},
                 // App main loop
                 {0x8300db7c, "App::Run()"},
                 {0x8300c1a4, "RunWithoutDbg"},

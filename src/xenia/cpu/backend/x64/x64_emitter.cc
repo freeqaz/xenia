@@ -509,9 +509,9 @@ uint64_t ResolveFunction(void* raw_context, uint64_t target_address) {
     int n = nofn_count.fetch_add(1, std::memory_order_relaxed);
     if (n < 5 || (n < 100 && (n % 10) == 0) || (n % 1000) == 0) {
       XELOGE(
-          "ResolveFunction({:08X}): no function found — using no-op stub "
-          "(count={})",
-          static_cast<uint32_t>(target_address), n + 1);
+          "ResolveFunction({:08X}) from {:08X}: no function found — using "
+          "no-op stub (count={})",
+          static_cast<uint32_t>(target_address), callsite_pc, n + 1);
     }
     xe::Dc3RuntimeTelemetryRecordUnresolvedCallStubHit(
         "resolve_failed", static_cast<uint32_t>(target_address), callsite_pc);

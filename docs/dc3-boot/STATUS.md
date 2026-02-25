@@ -1,6 +1,49 @@
-# Status: OODA Loop Iteration 5
+# Status: OODA Loop Iteration 6
 
-*Last updated: 2026-02-25 (Session 37 — file system + archive loading WORKING, boot into deep game init)*
+*Last updated: 2026-02-25 (Session 38 — manifest address automation COMPLETE, stub audit done)*
+
+## 2026-02-25 Update (Session 38): Manifest Address Automation + Stub Audit
+
+### Manifest address automation — COMPLETE
+
+All `Dc3Addresses` struct fields are now populated from the JSON manifest at runtime,
+eliminating the need to manually update hardcoded addresses after decomp XEX rebuilds.
+
+**Changes across 2 repos:**
+- `dc3-decomp`: Added `ADDRESS_CATALOG` (66 MAP symbol entries) + `parse_pe_section_info()` to manifest generator
+- `xenia`: Added `address_catalog` to manifest struct/parser, `Dc3PopulateAddressesFromCatalog()`, wired into `emulator.cc`
+- 73 address_catalog entries auto-resolved from MAP + PE + computed fields
+- 14 `PatchStub8` calls converted to `PatchStub8Resolved` (manifest-resolved with hardcoded fallback)
+- `__RTDynamicCast` and `gNullStr` moved into `kAddr` + catalog
+- 13 fields remain as hardcoded fallbacks (instruction-level addresses, LR values, string literals)
+
+**Coverage**: 54/67 kAddr fields auto-resolved (81%). Remaining 13 are instruction-level
+addresses used only in diagnostic code.
+
+### Comprehensive stub audit — ~200 patches categorized
+
+Audited all ~200 guest-code patches in the hack pack and classified into three tiers:
+
+| Tier | Count | Description | Action |
+|---|---|---|---|
+| 1: Permanent | ~130 | NUI/Kinect (~70), Holmes (~40), GPU null (~11), XBC (3), XMP (2), Bink (2) | None — cost of headless mode |
+| 2: Decomp artifacts | ~25 | /FORCE linker corruption, CRT init ordering, missing symbols | Fix via decomp/linker work |
+| 3: XAudio2 cascade | ~8 | Synth CS deadlock, Splash file I/O | Fix via xenia APU work |
+
+**Highest-leverage fixes identified:**
+1. XAudio2 CriticalSection deadlock in nop APU → unstubs Synth360::PreInit, SynthInit, Fader::UpdateValue (3 stubs from 1 fix)
+2. .milo file I/O completion → unstubs Splash (4), UIScreen::HasPanel, ObjRef::ReplaceList (~6 stubs)
+3. Resolving 275 LNK4006 + 666 LNK2001/2019 → eliminates most Tier 2 stubs (essentially "finish the decomp")
+
+### 14 new HACK_PACK_STUBS entries (manifest-resolved)
+```
+Splash::PrepareNext, Splash::BeginSplasher, Splash::Suspend, Splash::Resume,
+LiveCameraInput::PreInit, LiveCameraInput::Init, HasFileChecksumData,
+VoiceInputPanel::LoadVoiceContexts, ShellInput::Init, Fader::UpdateValue,
+UIScreen::HasPanel, MoveMgr::Init, ObjRef::ReplaceList, list<ObjectDir*>::clear
+```
+
+Total hack_pack_stubs: 89. Total address_catalog entries: 73.
 
 ## 2026-02-25 Update (Session 37, continued): File System Fixed — Archive Loading, MemInit, Object Factory Reached
 

@@ -73,6 +73,9 @@ struct Dc3NuiPatchManifest {
     uint32_t end;
   };
   std::vector<CodeRange> xdk_code_ranges;
+  // Runtime address catalog for populating Dc3Addresses (kAddr) from manifest
+  // instead of relying on hardcoded fallbacks.
+  std::unordered_map<std::string, uint32_t> address_catalog;
 };
 
 struct Dc3FingerprintCache {
