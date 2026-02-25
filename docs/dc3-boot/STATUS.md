@@ -1,6 +1,59 @@
-# Status: OODA Loop Iteration 6
+# Status: OODA Loop Iteration 7
 
-*Last updated: 2026-02-25 (Session 38 — manifest address automation COMPLETE, stub audit done)*
+*Last updated: 2026-02-25 (Session 39 — main event loop stable, 60s+ runtime achieved)*
+
+## 2026-02-25 Update (Session 39): Main Event Loop Running Stably
+
+### MILESTONE: RunWithoutDebugging main loop iterating at ~67 fps
+
+The DC3 decomp build now boots through full initialization and runs the main event loop
+continuously for 60+ seconds with no crash. This is the first time the decomp XEX has
+achieved stable runtime iteration.
+
+**Boot progression (complete):**
+```
+mainCRTStartup → _cinit → main() → App::App() → [full init] →
+App::Run() → RunWithoutDebugging → main loop (STABLE, ~67 fps)
+```
+
+### Blockers resolved this session
+
+| Blocker | Root cause | Fix |
+|---|---|---|
+| MsgSinks::RemoveSink stall | ShellInput::Init → TheSpeechMgr->AddSink() with corrupt MsgSinks (Kinect never init) | Stub ShellInput::Init (0x8339CC08) |
+| UIScreen::HasPanel infinite loop | Corrupt mPanelList from failed .milo loads → ObjDirItr loop | Stub UIScreen::HasPanel (0x835DC3C4) |
+| MmFreePhysicalMemory assert crash | Misaligned base_address from decomp allocator | Changed assert to XELOGW + return |
+| MoveMgr::Init SP corruption | LoadCategoryData("genres") missing config → stack corruption | Stub MoveMgr::Init (0x831634A4) |
+| ObjRef::ReplaceList infinite loop | MILO_FAIL returns but while loop continues on corrupt list | Stub ObjRef::ReplaceList (0x829ABC18) |
+| list\<ObjectDir*\>::clear infinite loop | Corrupt STLport list from ObjDirItr | Stub list clear (0x823D29A0) |
+| ResolveFunction(7054F3D8) infinite dispatch | ClassAndNameSort::operator() vtable dispatch to stack addr | Stub operator() + SaveObjects + PostUpdate |
+| VdSwap frontbuffer assert crash | DrawRegular → DxRnd::Present with no GPU init | Stub App::DrawRegular (0x8300ABE0) |
+| Kinect per-frame assert spam | SkeletonUpdate::InstanceHandle + GestureMgr::GetSkeleton | Stub InstanceHandle, GetSkeleton, UpdateTrackedSkeletons |
+
+### Key diagnostic improvement
+
+Added `callsite_pc` to `ResolveFunction` log in `x64_emitter.cc` — now shows the guest
+address of the caller that triggered corrupt dispatch (was critical for identifying
+`ClassAndNameSort::operator()` as the source of the 0x7054F3D8 stall).
+
+### Remaining per-frame noise (non-fatal)
+
+| Error | Count/frame | Source | Status |
+|---|---|---|---|
+| "Data is not Symbol" | ~7 | config/campaign.dta parsing | Noise — DataNode type mismatch in campaign config |
+| "Data is not Array" | init-only | Config parsing | One-time init errors |
+| SynthFader/MoggClip instantiation | init-only | Factory not registered | Missing Synth/audio factories |
+
+### Total stubs: ~25 runtime stopgaps (in addition to ~130 permanent headless stubs)
+
+New stubs added this session (11):
+- ShellInput::Init, UIScreen::HasPanel, MoveMgr::Init, ObjRef::ReplaceList
+- list\<ObjectDir*\>::clear, UIManager::GotoFirstScreen
+- ClassAndNameSort::ClassIndex, ClassAndNameSort::operator(), DirLoader::SaveObjects
+- SkeletonUpdate::InstanceHandle, SkeletonUpdate::PostUpdate
+- SkeletonHistoryArchive::AddToHistory
+- GestureMgr::Poll, GestureMgr::GetSkeleton, GestureMgr::UpdateTrackedSkeletons
+- App::DrawRegular
 
 ## 2026-02-25 Update (Session 38): Manifest Address Automation + Stub Audit
 

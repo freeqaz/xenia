@@ -33,9 +33,10 @@ Rules:
 | `dc3_noop_stub_unresolved_call_fallback` | CPU Runtime | `src/xenia/cpu/backend/x64/x64_emitter.cc` | runtime no-op stub fallback | both (more visible on decomp) | required | xenia | Prevent crashes on null/out-of-range/unresolvable indirect calls during bring-up | Candidate for narrowing (not full removal) once runtime parity and callsite analysis show safe stricter behavior | Telemetry unresolved-call counters + hot-loop PCs; real-title smokes | This is broader than DC3 but currently documented here due DC3 bring-up use |
 
 | `dc3_manifest_address_automation` | Infrastructure | `dc3_hack_pack.cc` + `emulator.cc` + manifest generator | `address_catalog` JSON → `Dc3PopulateAddressesFromCatalog()` | decomp | required | multi | Decomp XEX rebuilds shift all addresses; manual refresh is error-prone | N/A — this IS the fix for stale addresses. Becomes unnecessary only if decomp produces bit-identical XEX | Rebuild decomp XEX → regenerate manifest → boot in xenia → verify "Populated N address catalog entries" log | 73 entries auto-resolved (81% of kAddr); 13 instruction-level fields remain hardcoded |
-| `dc3_hack_pack_stub_resolved` | DecompRuntimeStopgap | `dc3_hack_pack.cc` | `PatchStub8Resolved` via manifest `hack_pack_stubs` | decomp | required | multi | 14 PatchStub8 calls used raw hex addresses that went stale on XEX rebuild | N/A — these now use manifest-resolved addresses with hardcoded fallbacks | Boot decomp XEX → verify all 14 stubs resolve from manifest (check "resolved from manifest" logs) | Covers: Splash (4), LiveCameraInput (2), HasFileChecksumData, VoiceInputPanel, Fader, ShellInput, UIScreen, MoveMgr, ObjRef, list clear |
+| `dc3_hack_pack_stub_resolved` | DecompRuntimeStopgap | `dc3_hack_pack.cc` | `PatchStub8Resolved` via manifest `hack_pack_stubs` | decomp | required | multi | 25 PatchStub8 calls used raw hex addresses that went stale on XEX rebuild | N/A — these now use manifest-resolved addresses with hardcoded fallbacks | Boot decomp XEX → verify all 25 stubs resolve from manifest (check "resolved from manifest" logs) | Covers: Splash (4), LiveCameraInput (2), HasFileChecksumData, VoiceInputPanel, Fader, ShellInput, UIScreen, MoveMgr, ObjRef, list clear, GotoFirstScreen, ClassAndNameSort (2), DirLoader::SaveObjects, SkeletonUpdate (2), SkeletonHistoryArchive, GestureMgr (3), DrawRegular |
+| `dc3_main_loop_stubs` | DecompRuntimeStopgap | `dc3_hack_pack.cc` | `PatchStub8Resolved` | decomp | required | multi | Main loop poll functions hit corrupt data/vtables from uninitialized subsystems | Fix underlying subsystem init (Kinect, Synth, .milo loading) | Decomp boot 60s smoke with stubs removed one-by-one | Session 39: 11 new stubs for main loop stability (SkeletonUpdate, GestureMgr, DirLoader, DrawRegular) |
 
-## Stub Tier Classification (Session 38 Audit)
+## Stub Tier Classification (Session 39 Audit — updated)
 
 ### Tier 1: Permanent for headless mode (~130 stubs) — NO ACTION NEEDED
 
@@ -48,7 +49,7 @@ Rules:
 | XMP music | 2 | No media player |
 | Bink video | 2 | Video codec needs GPU thread |
 
-### Tier 2: Decomp build artifacts (~25 stubs) — FIXABLE VIA DECOMP/LINKER WORK
+### Tier 2: Decomp build artifacts (~36 stubs) — FIXABLE VIA DECOMP/LINKER WORK
 
 | Stub | Root cause | Fix path |
 |---|---|---|
@@ -63,6 +64,15 @@ Rules:
 | MoveMgr::Init | Config data missing/corrupt | Fix DTB/config loading |
 | ShellInput::Init | SpeechMgr never initialized | Fix NUI subsystem init ordering |
 | VoiceInputPanel | Speech config parsing fails | Same |
+| UIManager::GotoFirstScreen | Panel loading fails (.milo → ObjectDir, not PanelDir) | Fix .milo/Rnd loading |
+| ClassAndNameSort::ClassIndex | SystemConfig("system","dir_sort") corrupt | Fix config parsing |
+| ClassAndNameSort::operator() | Corrupt object vtables from .milo fail | Fix .milo loading |
+| DirLoader::SaveObjects | Corrupt STL list sort from .milo fail | Fix .milo loading |
+| SkeletonUpdate::InstanceHandle | sInstance null (Kinect not init) | Fix Kinect subsystem init |
+| SkeletonUpdate::PostUpdate | Kinect data never initialized | Same |
+| SkeletonHistoryArchive::AddToHistory | Corrupt Skeleton objects | Same |
+| GestureMgr::Poll/GetSkeleton/UpdateTracked (3) | Kinect not available | Same |
+| App::DrawRegular | No GPU init in headless | Headless-permanent OR fix GPU init |
 
 ### Tier 3: XAudio2/Synth cascade (~8 stubs) — FIXABLE VIA XENIA APU WORK
 
@@ -79,5 +89,7 @@ Rules:
 2. Split `dc3_assert_locale_runtime_stub_block` further if specific stubs prove independently removable.
 3. Re-attempt extracting `dc3_fake_kinect_skeleton_injection` after preserving exact inline semantics (or replace with a host-level hook).
 4. **Highest-leverage fix**: XAudio2 CS deadlock in nop APU — one xenia fix eliminates 3 stubs (Synth360::PreInit, SynthInit, Fader::UpdateValue).
-5. **Second-highest**: .milo file I/O completion — fixing VFS or content directory issues unstubs ~6 functions.
-6. Investigate staged Tier 2 stub removal as decomp LNK4006/LNK2001 errors are resolved.
+5. **Second-highest**: .milo file I/O completion — fixing VFS or content directory issues unstubs ~10 functions (UIScreen, ObjRef, list clear, ClassAndNameSort, SaveObjects, GotoFirstScreen, Splash).
+6. **Third-highest**: Kinect subsystem init — proper SkeletonUpdate/GestureMgr initialization eliminates ~6 stubs.
+7. Investigate staged Tier 2 stub removal as decomp LNK4006/LNK2001 errors are resolved.
+8. Investigate "Data is not Symbol" per-frame noise from campaign.dta config parsing (7 per frame, non-fatal).
