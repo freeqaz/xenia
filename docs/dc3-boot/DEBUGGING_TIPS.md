@@ -320,6 +320,14 @@ If thunk memory is all zeros, the import was not properly resolved.
 
 ## 9. Tooling Runbook (Post-Debugging Leverage Loop)
 
+Current-priority note (2026-02-25):
+- The active blocker is CRT `__xc` / `Symbol::PreInit` / `gStringTable` initialization before `main()`.
+- For the current execution plan and verified commands/cvars, read:
+  - `docs/dc3-boot/CONTINUATION_PLAN.md`
+  - `docs/dc3-boot/STATUS.md`
+  - `docs/dc3-boot/ARCHIVED.md` (historical context / prior milestones)
+- Use this runbook as the tool-selection guide (parity/disasm/triage/trace/RSP escalation order).
+
 This is the preferred workflow now that the DC3 tooling stack exists. Use the
 lowest-friction tool first, and only escalate to interactive debugging when the
 artifacts stop being informative.
@@ -560,11 +568,15 @@ CRT constructor table caveat (relinks / stale manifests):
      --target=../dc3-decomp/build/373307D9/default.xex \
      --store_all_context_values=true \
      --dc3_gdb_rsp_stub=true \
+     --dc3_gdb_rsp_host=127.0.0.1 \
      --dc3_gdb_rsp_port=9001 \
-     --dc3_gdb_rsp_prelaunch_sleep_ms=5000 \
+     --dc3_gdb_rsp_break_on_connect=true \
      --headless_timeout_ms=30000
    ```
-   - `--dc3_gdb_rsp_prelaunch_sleep_ms` creates a deterministic attach window
+   - `--dc3_gdb_rsp_host`, `--dc3_gdb_rsp_port`, `--dc3_gdb_rsp_break_on_connect`
+     are the current live-stub controls in `xenia-headless`
+   - If another doc/script mentions `--dc3_gdb_rsp_prelaunch_sleep_ms`, treat it
+     as stale unless the cvar is reintroduced.
    - Current status:
      - live in-process attach + register snapshot fallback + guest memory reads + detach validated
      - if the headless build lacks a stack walker, live pause/step/software breakpoints are disabled (fallback mode keeps the stub stable instead of crashing)
