@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <mutex>
 #include <sstream>
 #include <set>
 #include <string>
@@ -52,6 +53,14 @@ namespace {
 // Guest addresses from build/373307D9/default.map.
 // Last refreshed: 2026-02-25.
 // STALE(date) = not verified against current MAP.
+//
+// These defaults are overridden at runtime by the manifest's address_catalog
+// (see Dc3PopulateAddressesFromCatalog below). When adding a new field:
+//   1. Add the field + hardcoded default here
+//   2. Add the MAP symbol to ADDRESS_CATALOG in dc3-decomp's
+//      scripts/build/generate_xenia_dc3_patch_manifest.py
+//   3. Add a get() call in Dc3PopulateAddressesFromCatalog() at the bottom
+//      of this file
 struct Dc3Addresses {
   // CRT sentinels
   uint32_t xc_a = 0x83ADED98;
@@ -104,6 +113,8 @@ struct Dc3Addresses {
   uint32_t setup_font_node_dest_lr = 0x8318001C;
   // Object / factory globals
   uint32_t object_factories_map = 0x83AE1AB8;
+  uint32_t register_factory = 0x829B12A0;  // Hmx::Object::RegisterFactory(Symbol, ObjectFunc*)
+  uint32_t new_object = 0x829B1138;        // Hmx::Object::NewObject(Symbol) — static factory lookup
   uint32_t rndmat_static_name_sym = 0x83AEAB2C;
   uint32_t metamaterial_static_name_sym = 0x83AEBFA8;
   uint32_t g_system_config = 0x83C7BAE8;
@@ -146,8 +157,33 @@ struct Dc3Addresses {
   // MemMgr assert addresses (STALE)
   uint32_t meminit_assert = 0x83447AF4;                    // STALE
   uint32_t memalloc_assert = 0x83446A24;                   // STALE
+  // RndTransformable
+  uint32_t set_dirty_force = 0x83494498;  // RndTransformable::SetDirty_Force
+  // Memory_Xbox
+  uint32_t alloc_type = 0x8311909C;  // AllocType (debug string from XMemAlloc flags)
+  // Rnd
+  uint32_t rnd_create_defaults = 0x83181DE4;  // Rnd::CreateDefaults()
+  // MetaMaterial
+  uint32_t create_and_set_meta_mat = 0x83193304;  // CreateAndSetMetaMat(RndMat*)
+  uint32_t s_meta_materials = 0x83AF0F60;          // RndMat::sMetaMaterials
+  // Post-processing / GPU init (decomp MAP, NOT original — /FORCE reorders)
+  uint32_t ng_postproc_rebuild_tex = 0x834F3724;   // NgPostProc::RebuildTex()
+  uint32_t ng_dofproc_init = 0x833F0BA4;           // NgDOFProc::Init()
+  uint32_t rnd_shadowmap_init = 0x83214B28;        // RndShadowMap::Init()
+  uint32_t dxrnd_suspend = 0x833A1E20;             // DxRnd::Suspend()
+  uint32_t occlusion_query_mgr_ctor = 0x8339F9F8;  // DxRndOcclusionQueryMgr::DxRndOcclusionQueryMgr()
+  uint32_t d3d_device_suspend = 0x837D92D8;         // D3DDevice_Suspend
+  uint32_t d3d_device_resume = 0x837D9378;          // D3DDevice_Resume
+  uint32_t dxrnd_init_buffers = 0x833A2D78;         // DxRnd::InitBuffers()
+  uint32_t dxrnd_create_post_textures = 0x833A3568; // DxRnd::CreatePostTextures()
+  // Audio / Synth (decomp MAP)
+  uint32_t synth360_preinit = 0x831DD284;  // Synth360::PreInit() — creates XAudio2 engine
+  uint32_t synth_init = 0x832F6B34;        // SynthInit() — calls Synth360::Init()
+  // Bink video (decomp MAP)
+  uint32_t bink_start_async_thread = 0x839BF4AC;  // BinkStartAsyncThread (Bink SDK)
+  uint32_t bink_platform_init = 0x8394F368;        // BinkMovieSys::PlatformInit()
 };
-constexpr Dc3Addresses kAddr;
+Dc3Addresses kAddr;
 
 // FixedSizeAlloc layout offsets (stable across builds).
 constexpr uint32_t kFsaOffAllocSizeWords = 0x04;
@@ -182,6 +218,57 @@ std::string Dc3FmtBytePreview(const uint8_t* data, size_t len) {
     os << tmp;
   }
   return os.str();
+}
+
+// Host-side SetDirty_Force with cycle detection.
+// Mirrors RndTransformable::SetDirty_Force but breaks on circular mChildren.
+void HostSetDirtyForce(Memory* memory, uint32_t this_ptr, int depth) {
+  if (depth > 100) {
+    XELOGW("DC3: SetDirty_Force recursion depth > 100 on {:08X}", this_ptr);
+    return;
+  }
+  if (!this_ptr || this_ptr >= 0xF0000000) return;
+  auto* obj = memory->TranslateVirtual<uint8_t*>(this_ptr);
+  if (!obj) return;
+
+  // Set mDirty = true (offset 0xBD)
+  obj[0xBD] = 1;
+
+  // mChildren sentinel at offset 0x9C (std::list: next at +0, prev at +4)
+  uint32_t sentinel_addr = this_ptr + 0x9C;
+  uint32_t node_addr = xe::load_and_swap<uint32_t>(obj + 0x9C);
+
+  if (node_addr == sentinel_addr) return;  // empty list
+
+  // Walk with cycle detection
+  std::set<uint32_t> visited;
+  int count = 0;
+  while (node_addr != sentinel_addr) {
+    if (!visited.insert(node_addr).second) {
+      XELOGW(
+          "DC3: SetDirty_Force CYCLE at node {:08X} on obj {:08X} after {} nodes",
+          node_addr, this_ptr, count);
+      break;
+    }
+    if (++count > 10000) {
+      XELOGW("DC3: SetDirty_Force >10000 children on obj {:08X}", this_ptr);
+      break;
+    }
+    if (!node_addr || node_addr >= 0xF0000000) {
+      XELOGW("DC3: SetDirty_Force bad node {:08X} on obj {:08X}", node_addr,
+             this_ptr);
+      break;
+    }
+    auto* node = memory->TranslateVirtual<uint8_t*>(node_addr);
+    uint32_t child_ptr = xe::load_and_swap<uint32_t>(node + 0x08);
+    if (child_ptr && child_ptr < 0xF0000000) {
+      auto* child = memory->TranslateVirtual<uint8_t*>(child_ptr);
+      if (child && child[0xBD] == 0) {
+        HostSetDirtyForce(memory, child_ptr, depth + 1);
+      }
+    }
+    node_addr = xe::load_and_swap<uint32_t>(node + 0x00);
+  }
 }
 
 uint32_t Dc3FindArrayLinearBySymbol(Memory* memory, uint32_t da_addr,
@@ -1366,21 +1453,36 @@ void RegisterDc3SystemConfigProbe(const Dc3HackContext& ctx,
       Dc3LogSetupFontLiteralSanity(memory);
     }
 
-    if (mode_local == "setupfont_fix" &&
-        caller_lr == kAddr.setup_font_syscfg_return_lr && arr1 != 0 && arr2 == 0 &&
-        !s1_bin && s1_repr == "rnd" && s2_bin) {
-      uint32_t repaired =
-          Dc3FindArrayLinearBySymbol(memory, arr1, kAddr.pooled_font_string);
+    // SetupFont literal corruption repair (robust: match on content, not
+    // caller LR).  When SystemConfig("rnd", <binary-garbage>) is called, the
+    // second argument is a corrupted font name Symbol.  We substitute the
+    // correct "font" sub-array from the "rnd" config section.
+    if (arr1 != 0 && arr2 == 0 && !s1_bin && s1_repr == "rnd" && s2_bin) {
+      // Allocate a tiny guest buffer with "font\0" for the linear scan.
+      static uint32_t s_font_str_addr = 0;
+      if (!s_font_str_addr) {
+        s_font_str_addr = memory->SystemHeapAlloc(8, 4);
+        if (s_font_str_addr) {
+          auto* dst = memory->TranslateVirtual<char*>(s_font_str_addr);
+          if (dst) {
+            std::memcpy(dst, "font", 5);  // "font\0"
+          }
+        }
+      }
+      uint32_t repaired = 0;
+      if (s_font_str_addr) {
+        repaired = Dc3FindArrayLinearBySymbol(memory, arr1, s_font_str_addr);
+      }
       if (repaired) {
         XELOGW(
-            "DC3: SetupFont SystemConfig repair applied: substituted arg2 "
-            "'font' via pooled literal {:08X} (bad arg2 was {}) -> {:08X}",
-            kAddr.pooled_font_string, s2_repr, repaired);
+            "DC3: SetupFont SystemConfig repair applied: substituted "
+            "'font' for binary arg2 {} LR={:08X} -> {:08X}",
+            s2_repr, caller_lr, repaired);
         arr2 = repaired;
       } else {
-        XELOGW("DC3: SetupFont SystemConfig repair attempted but pooled 'font' "
-               "lookup failed (arr1={:08X})",
-               arr1);
+        XELOGW("DC3: SetupFont SystemConfig repair: 'font' not found in 'rnd' "
+               "section (arr1={:08X} LR={:08X})",
+               arr1, caller_lr);
       }
     }
 
@@ -1695,6 +1797,77 @@ void ApplyDebugStubs(const Dc3HackContext& ctx,
           dump_static_symbol("RndMat::StaticClassName", kAddr.rndmat_static_name_sym);
           dump_static_symbol("MetaMaterial::StaticClassName",
                              kAddr.metamaterial_static_name_sym);
+          // Dump BOTH gHashTable copies (dual /FORCE artifact hypothesis).
+          auto dump_ht = [&](const char* label, uint32_t addr) {
+            if (auto* h = memory->TranslateVirtual<uint8_t*>(addr)) {
+              uint32_t entries = xe::load_and_swap<uint32_t>(h + 0x0);
+              uint32_t size = xe::load_and_swap<uint32_t>(h + 0x4);
+              uint8_t own = h[0x8];
+              uint32_t num = xe::load_and_swap<uint32_t>(h + 0xC);
+              XELOGW("DC3: {} @{:08X}: entries={:08X} size={} own={} used={}",
+                     label, addr, entries, size, own, num);
+            }
+          };
+          dump_ht("gHashTable(.data)", kAddr.g_hash_table);     // 0x83AE01C4
+          dump_ht("gHashTable(.bss)", 0x83AED0FC);              // BSS copy
+          // Walk the sFactories red-black tree and dump all entries.
+          // STLPort _Rb_tree node layout (PPC big-endian, 24 bytes per node):
+          //   +0x00: _M_color  (uint32_t, 0=red, 1=black)
+          //   +0x04: _M_parent (uint32_t, ptr to parent node)
+          //   +0x08: _M_left   (uint32_t, ptr to left child)
+          //   +0x0C: _M_right  (uint32_t, ptr to right child)
+          //   +0x10: _M_value  (pair<const Symbol, ObjectFunc*>)
+          //     +0x10: Symbol.mStr (uint32_t, ptr to interned string)
+          //     +0x14: ObjectFunc* (uint32_t, factory function ptr)
+          // Map header (embedded sentinel node + count):
+          //   @map+0x00: sentinel._M_color
+          //   @map+0x04: sentinel._M_parent = root node
+          //   @map+0x08: sentinel._M_left   = leftmost (begin)
+          //   @map+0x0C: sentinel._M_right  = rightmost
+          //   @map+0x10: _M_node_count
+          static bool s_tree_dumped = false;
+          if (!s_tree_dumped) {
+            s_tree_dumped = true;
+            uint32_t sentinel_addr = kAddr.object_factories_map;
+            uint32_t root_addr = xe::load_and_swap<uint32_t>(
+                memory->TranslateVirtual<uint8_t*>(sentinel_addr) + 0x04);
+            uint32_t count = xe::load_and_swap<uint32_t>(
+                memory->TranslateVirtual<uint8_t*>(sentinel_addr) + 0x10);
+            XELOGW("DC3: sFactories tree walk: root={:08X} count={}", root_addr, count);
+            // In-order traversal via stack (iterative).
+            std::vector<uint32_t> stack;
+            uint32_t cur = root_addr;
+            int visited = 0;
+            while ((cur && cur != sentinel_addr) || !stack.empty()) {
+              while (cur && cur != sentinel_addr) {
+                stack.push_back(cur);
+                auto* n = memory->TranslateVirtual<uint8_t*>(cur);
+                cur = n ? xe::load_and_swap<uint32_t>(n + 0x08) : 0; // left
+              }
+              if (stack.empty()) break;
+              cur = stack.back();
+              stack.pop_back();
+              auto* n = memory->TranslateVirtual<uint8_t*>(cur);
+              if (n) {
+                uint32_t sym_ptr = xe::load_and_swap<uint32_t>(n + 0x10);
+                uint32_t factory = xe::load_and_swap<uint32_t>(n + 0x14);
+                char tmp[64] = {};
+                bool sym_bin = false;
+                std::string desc = Dc3DescribeGuestSymbol(memory, sym_ptr, tmp,
+                                                           sizeof(tmp), &sym_bin);
+                if (visited < 60) {
+                  XELOGW("DC3: sFactories[{:02d}] node={:08X} sym={:08X}({}) factory={:08X}",
+                         visited, cur, sym_ptr, desc, factory);
+                }
+                cur = xe::load_and_swap<uint32_t>(n + 0x0C); // right
+              } else {
+                break;
+              }
+              visited++;
+              if (visited > 200) break; // safety
+            }
+            XELOGW("DC3: sFactories tree walk complete: visited {}/{}", visited, count);
+          }
         };
         if (!logged_debug_obj) {
           logged_debug_obj = true;
@@ -1794,6 +1967,267 @@ void ApplyDebugStubs(const Dc3HackContext& ctx,
         kDebugDoCrucible, crucible_handler, "DC3:Debug::DoCrucible(guard)");
     XELOGI("DC3: Registered DoCrucible re-entrancy guard at {:08X}",
            kDebugDoCrucible);
+  }
+
+  // =========================================================================
+  // Host-side factory system (bypass corrupted guest std::map tree).
+  // =========================================================================
+  // The guest sFactories map (std::map<Symbol, ObjectFunc*>) becomes corrupted
+  // during Rnd::PreInit init calls, causing find() to fail for many classes.
+  // We intercept RegisterFactory to capture all registrations in a host-side
+  // map keyed by string name, then intercept NewObject to use the host map
+  // for lookup and call the factory function via the JIT.
+  if (ctx.processor && ctx.is_decomp_layout) {
+    // Shared host-side factory map: class name string → guest factory address.
+    static std::unordered_map<std::string, uint32_t> s_host_factories;
+    static std::mutex s_factory_mutex;
+
+    // Override Hmx::Object::RegisterFactory(Symbol sym, ObjectFunc* func).
+    // PPC ABI: r3 = Symbol (struct with single member const char* mStr,
+    //          passed by value in r3 as the mStr pointer).
+    //          r4 = ObjectFunc* (function pointer).
+    // Returns: void.
+    const uint32_t kRegisterFactory = kAddr.register_factory;
+    auto rf_handler = [](cpu::ppc::PPCContext* ppc_context,
+                         kernel::KernelState* kernel_state) {
+      uint32_t sym_ptr = static_cast<uint32_t>(ppc_context->r[3]);
+      uint32_t factory_fn = static_cast<uint32_t>(ppc_context->r[4]);
+      auto* memory = kernel_state ? kernel_state->memory() : nullptr;
+      std::string name;
+      if (memory && sym_ptr && sym_ptr < 0xF0000000) {
+        if (auto* s = memory->TranslateVirtual<const char*>(sym_ptr)) {
+          name = s;
+        }
+      }
+      {
+        std::lock_guard<std::mutex> lock(s_factory_mutex);
+        bool replaced = s_host_factories.count(name) > 0;
+        s_host_factories[name] = factory_fn;
+        static int rf_count = 0;
+        if (++rf_count <= 80 || (rf_count % 100) == 0) {
+          XELOGW("DC3: RegisterFactory[{}] '{}' -> {:08X}{}",
+                 rf_count, name, factory_fn, replaced ? " (replaced)" : "");
+        }
+      }
+      // Don't forward — the guest map is corrupt and useless.
+    };
+    ctx.processor->RegisterGuestFunctionOverride(
+        kRegisterFactory, rf_handler, "DC3:RegisterFactory(host)");
+    XELOGI("DC3: Registered host-side RegisterFactory override at {:08X}",
+           kRegisterFactory);
+
+    // Override Hmx::Object::NewObject(Symbol name).
+    // PPC ABI: r3 = Symbol (mStr pointer). Returns: Hmx::Object* in r3.
+    const uint32_t kNewObject = kAddr.new_object;
+    auto no_handler = [](cpu::ppc::PPCContext* ppc_context,
+                         kernel::KernelState* kernel_state) {
+      uint32_t sym_ptr = static_cast<uint32_t>(ppc_context->r[3]);
+      auto* memory = kernel_state ? kernel_state->memory() : nullptr;
+      std::string name;
+      if (memory && sym_ptr && sym_ptr < 0xF0000000) {
+        if (auto* s = memory->TranslateVirtual<const char*>(sym_ptr)) {
+          name = s;
+        }
+      }
+      uint32_t factory_fn = 0;
+      {
+        std::lock_guard<std::mutex> lock(s_factory_mutex);
+        auto it = s_host_factories.find(name);
+        if (it != s_host_factories.end()) {
+          factory_fn = it->second;
+        }
+      }
+      if (!factory_fn) {
+        static int miss_count = 0;
+        if (++miss_count <= 20 || (miss_count % 100) == 0) {
+          uint32_t lr = static_cast<uint32_t>(ppc_context->lr);
+          XELOGW("DC3: NewObject('{}') MISS — no factory registered LR={:08X}",
+                 name, lr);
+        }
+        ppc_context->r[3] = 0;
+        return;
+      }
+      // Call the factory function via the JIT.
+      // Factory signature: Hmx::Object* NewObject(void) — no args, returns ptr.
+      auto* processor = kernel_state->processor();
+      auto* fn = processor->QueryFunction(factory_fn);
+      if (!fn) {
+        fn = processor->ResolveFunction(factory_fn);
+      }
+      if (fn) {
+        // Save/restore volatile registers that NewObject's caller expects.
+        uint64_t saved_lr = ppc_context->lr;
+        auto* thread_state = ppc_context->thread_state;
+        // Call the factory. It will set r3 to the new object pointer.
+        fn->Call(thread_state, static_cast<uint32_t>(saved_lr));
+        // r3 now has the return value (new Object*). Restore LR.
+        ppc_context->lr = saved_lr;
+        static int ok_count = 0;
+        if (++ok_count <= 20 || (ok_count % 500) == 0) {
+          uint32_t result = static_cast<uint32_t>(ppc_context->r[3]);
+          auto* memory = kernel_state ? kernel_state->memory() : nullptr;
+          uint32_t vtbl = 0;
+          if (memory && result && result < 0xF0000000) {
+            if (auto* obj = memory->TranslateVirtual<uint8_t*>(result)) {
+              vtbl = xe::load_and_swap<uint32_t>(obj + 0x00);
+            }
+          }
+          XELOGW("DC3: NewObject('{}') -> {:08X} vtbl={:08X} via factory {:08X} [{}]",
+                 name, result, vtbl, factory_fn, ok_count);
+        }
+      } else {
+        XELOGW("DC3: NewObject('{}') factory {:08X} could not be resolved!",
+               name, factory_fn);
+        ppc_context->r[3] = 0;
+      }
+    };
+    ctx.processor->RegisterGuestFunctionOverride(
+        kNewObject, no_handler, "DC3:NewObject(host)");
+    XELOGI("DC3: Registered host-side NewObject override at {:08X}", kNewObject);
+
+    // Override __RTDynamicCast to diagnose + fix RTTI failures.
+    // PPC ABI: r3=inptr, r4=VfDelta, r5=SrcType, r6=TargetType, r7=isReference
+    // Returns: adjusted pointer or NULL.
+    // On Xbox 360 (MSVC PPC), type_info has a mangled name at offset +0x08.
+    const uint32_t kRTDynamicCast = 0x83610900;  // __RTDynamicCast
+    auto rtdc_handler = [](cpu::ppc::PPCContext* ppc_context,
+                           kernel::KernelState* kernel_state) {
+      uint32_t inptr = static_cast<uint32_t>(ppc_context->r[3]);
+      uint32_t src_type = static_cast<uint32_t>(ppc_context->r[5]);
+      uint32_t tgt_type = static_cast<uint32_t>(ppc_context->r[6]);
+      uint32_t is_ref = static_cast<uint32_t>(ppc_context->r[7]);
+      auto* memory = kernel_state ? kernel_state->memory() : nullptr;
+
+      // Read MSVC type_info mangled names (offset +0x08 on PPC Xbox 360).
+      auto read_type_name = [&](uint32_t type_info_addr) -> std::string {
+        if (!memory || !type_info_addr || type_info_addr >= 0xF0000000)
+          return "<null>";
+        // type_info layout: +0x00 vtable, +0x04 spare, +0x08 name (char[])
+        if (auto* ti = memory->TranslateVirtual<const char*>(type_info_addr + 0x08))
+          return ti;
+        return "<unreadable>";
+      };
+      std::string src_name = read_type_name(src_type);
+      std::string tgt_name = read_type_name(tgt_type);
+
+      // If inptr is null, dynamic_cast<T*>(nullptr) = nullptr.
+      if (!inptr) {
+        ppc_context->r[3] = 0;
+        return;
+      }
+
+      // For pointer casts in the Milo class hierarchy, just return inptr.
+      // Milo uses single inheritance for all factory classes, so no base
+      // offset adjustment is needed.  The vtable is already correct.
+      // This bypasses broken RTTI from /FORCE linker duplicate type_info.
+      if (!is_ref) {
+        static int rtdc_count = 0;
+        if (++rtdc_count <= 30 || (rtdc_count % 2000) == 0) {
+          XELOGW("DC3: __RTDynamicCast[{}] {:08X} src={} tgt={} -> pass-through",
+                 rtdc_count, inptr, src_name, tgt_name);
+        }
+        ppc_context->r[3] = inptr;
+        return;
+      }
+
+      // For reference casts, also pass through (bad_cast on fail, but we
+      // trust the factory system).
+      ppc_context->r[3] = inptr;
+    };
+    ctx.processor->RegisterGuestFunctionOverride(
+        kRTDynamicCast, rtdc_handler, "DC3:__RTDynamicCast(passthrough)");
+    XELOGI("DC3: Registered __RTDynamicCast pass-through at {:08X}", kRTDynamicCast);
+  }
+
+  // Host-side SetDirty_Force: prevents infinite loops from corrupted
+  // std::list mChildren (same /FORCE linker corruption as sFactories).
+  if (ctx.processor && ctx.is_decomp_layout) {
+    const uint32_t kSetDirtyForce = kAddr.set_dirty_force;
+    auto sdf_handler = [](cpu::ppc::PPCContext* ppc_context,
+                          kernel::KernelState* kernel_state) {
+      auto* memory = kernel_state ? kernel_state->memory() : nullptr;
+      if (!memory) return;
+      uint32_t this_ptr = static_cast<uint32_t>(ppc_context->r[3]);
+      HostSetDirtyForce(memory, this_ptr, 0);
+    };
+    ctx.processor->RegisterGuestFunctionOverride(
+        kSetDirtyForce, sdf_handler, "DC3:SetDirty_Force(cycle-safe)");
+    XELOGI("DC3: Registered SetDirty_Force cycle-safe override at {:08X}",
+           kSetDirtyForce);
+  }
+
+  // CreateAndSetMetaMat no-op: sMetaMaterials is NULL because
+  // LoadMetaMaterials() can't load metamaterials.milo without proper
+  // file system / config. Skip MetaMaterial setup entirely.
+  if (ctx.processor && ctx.is_decomp_layout) {
+    const uint32_t kCreateAndSetMetaMat = kAddr.create_and_set_meta_mat;
+    auto casemm_handler = [](cpu::ppc::PPCContext* ppc_context,
+                             kernel::KernelState* kernel_state) {
+      static int skip_count = 0;
+      if (++skip_count <= 10) {
+        XELOGW("DC3: CreateAndSetMetaMat skip #{} (sMetaMaterials=NULL)",
+               skip_count);
+      }
+      // no-op: just return without creating MetaMaterial
+    };
+    ctx.processor->RegisterGuestFunctionOverride(
+        kCreateAndSetMetaMat, casemm_handler,
+        "DC3:CreateAndSetMetaMat(noop)");
+    XELOGI("DC3: Registered CreateAndSetMetaMat no-op at {:08X}",
+           kCreateAndSetMetaMat);
+  }
+
+  // AllocType: switch table corrupted by /FORCE linker, causing infinite loop
+  // on case 0 (table byte = 0 → jumps back to function start). Override to
+  // return a pointer to "main" string which is already in guest .data.
+  if (ctx.processor && ctx.is_decomp_layout) {
+    const uint32_t kAllocType = kAddr.alloc_type;
+    auto at_handler = [](cpu::ppc::PPCContext* ppc_context,
+                         kernel::KernelState* kernel_state) {
+      // Return pointer to the "main" string already in guest memory.
+      // gNullStr at 0x83A95DD4 points to "" which is safe enough.
+      ppc_context->r[3] = 0x83A95DD4;
+    };
+    ctx.processor->RegisterGuestFunctionOverride(
+        kAllocType, at_handler, "DC3:AllocType(fixed)");
+    XELOGI("DC3: Registered AllocType fixed override at {:08X}", kAllocType);
+  }
+
+  // NgPostProc::RebuildTex: allocates GPU textures for post-processing
+  // (velocity buffer, bloom). Blocks on null GPU. Skip entirely.
+  if (ctx.processor && ctx.is_decomp_layout) {
+    auto ngpp_handler = [](cpu::ppc::PPCContext* ppc_context,
+                           kernel::KernelState* kernel_state) {
+      XELOGW("DC3: NgPostProc::RebuildTex() skipped (no GPU)");
+    };
+    ctx.processor->RegisterGuestFunctionOverride(
+        kAddr.ng_postproc_rebuild_tex, ngpp_handler,
+        "DC3:NgPostProc::RebuildTex(noop)");
+    XELOGI("DC3: Stubbed NgPostProc::RebuildTex at {:08X}",
+           kAddr.ng_postproc_rebuild_tex);
+  }
+
+  // NgDOFProc::Init: depth-of-field post-processor, needs GPU textures.
+  if (ctx.processor && ctx.is_decomp_layout) {
+    auto ngdof_handler = [](cpu::ppc::PPCContext* ppc_context,
+                            kernel::KernelState* kernel_state) {
+      XELOGW("DC3: NgDOFProc::Init() skipped (no GPU)");
+    };
+    ctx.processor->RegisterGuestFunctionOverride(
+        kAddr.ng_dofproc_init, ngdof_handler, "DC3:NgDOFProc::Init(noop)");
+    XELOGI("DC3: Stubbed NgDOFProc::Init at {:08X}", kAddr.ng_dofproc_init);
+  }
+
+  // DxRnd::Suspend: suspends rendering thread. Can deadlock with null GPU
+  // when subsequent init code tries to allocate GPU resources.
+  if (ctx.processor && ctx.is_decomp_layout) {
+    auto suspend_handler = [](cpu::ppc::PPCContext* ppc_context,
+                              kernel::KernelState* kernel_state) {
+      XELOGW("DC3: DxRnd::Suspend() skipped (no GPU)");
+    };
+    ctx.processor->RegisterGuestFunctionOverride(
+        kAddr.dxrnd_suspend, suspend_handler, "DC3:DxRnd::Suspend(noop)");
+    XELOGI("DC3: Stubbed DxRnd::Suspend at {:08X}", kAddr.dxrnd_suspend);
   }
 
   // TextStream::operator<<(const char*) NULL safety.
@@ -1982,6 +2416,104 @@ void ApplyRuntimeStopgaps(const Dc3HackContext& ctx,
         result.applied++;
       }
     }
+
+    // NOP out 2nd and 3rd CreateDefaults calls.
+    // Rnd::PreInit calls CreateDefaults once (base factories). Then
+    // NgRnd::PreInit and DxRnd::PreInit each call it again to recreate
+    // with NG/Dx factories. The RELEASE of first-pass objects crashes
+    // in RndCam dtor (likely corrupted ref list from /FORCE linker).
+    // Keep only the first call — base objects suffice for boot.
+    struct CdPatch {
+      uint32_t addr;
+      uint32_t expected;
+      const char* name;
+    };
+    const CdPatch cd_patches[] = {
+        {0x833391A4, 0x4BE48C41, "NgRnd::PreInit: 2nd CreateDefaults"},
+        {0x833A3E68, 0x4BDDDF7D, "DxRnd::PreInit: 3rd CreateDefaults"},
+    };
+    for (const auto& p : cd_patches) {
+      if (PatchCheckedNop(memory, p.addr, p.expected, p.name)) {
+        result.applied++;
+      } else {
+        XELOGW("DC3: Failed to NOP {} at {:08X}", p.name, p.addr);
+        result.failed++;
+      }
+    }
+
+    // Patch GPU-dependent init functions to immediately return (blr).
+    // These allocate GPU textures/surfaces that block on null GPU.
+    // NgPostProc::Init calls RebuildTex which allocates velocity/bloom
+    // textures; NgDOFProc::Init allocates DOF textures; RndShadowMap::Init
+    // creates shadow camera + texture with SetBitmap.
+    // We keep NgPostProc::Init because it registers the PostProc factory,
+    // but patch RebuildTex to blr so the factory registration still fires.
+    constexpr uint32_t kPpcBlr = 0x4E800020;
+    struct BlrPatch {
+      uint32_t addr;
+      const char* name;
+    };
+    const BlrPatch blr_patches[] = {
+        {kAddr.ng_postproc_rebuild_tex, "NgPostProc::RebuildTex"},
+        {kAddr.ng_dofproc_init, "NgDOFProc::Init"},
+        {kAddr.rnd_shadowmap_init, "RndShadowMap::Init"},
+        {kAddr.occlusion_query_mgr_ctor, "DxRndOcclusionQueryMgr::ctor"},
+        {kAddr.dxrnd_init_buffers, "DxRnd::InitBuffers"},
+        {kAddr.dxrnd_create_post_textures, "DxRnd::CreatePostTextures"},
+        // Audio: XAudio2 engine creation deadlocks on uninitialized CS
+        // because the nop audio backend returns a dummy driver handle and
+        // the XAudio2 library's CCriticalSectionLock::Enter bypasses the
+        // kernel import (IAT entry is zero), so our auto-init never fires.
+        {kAddr.synth360_preinit, "Synth360::PreInit"},
+        {kAddr.synth_init, "SynthInit"},
+        // Bink: BinkStartAsyncThread blocks waiting for thread readiness
+        // on nop GPU; PlatformInit may also block on D3D device.
+        {kAddr.bink_start_async_thread, "BinkStartAsyncThread"},
+        {kAddr.bink_platform_init, "BinkMovieSys::PlatformInit"},
+        // NOTE: Do NOT stub D3DDevice_Suspend/Resume — they pair
+        // critical section enter/leave. Stubbing breaks CS ownership.
+    };
+    for (const auto& bp : blr_patches) {
+      auto* heap = memory->LookupHeap(bp.addr);
+      auto* mem = memory->TranslateVirtual<uint8_t*>(bp.addr);
+      if (heap && mem) {
+        uint32_t orig = xe::load_and_swap<uint32_t>(mem);
+        heap->Protect(bp.addr, 4, kMemoryProtectRead | kMemoryProtectWrite);
+        xe::store_and_swap<uint32_t>(mem, kPpcBlr);
+        XELOGI("DC3: Patched {} at {:08X} to blr (was {:08X})",
+               bp.name, bp.addr, orig);
+        result.applied++;
+      } else {
+        XELOGW("DC3: Failed to patch {} at {:08X}", bp.name, bp.addr);
+        result.failed++;
+      }
+    }
+  }
+
+  // Splash screen stubs: DirLoader::LoadObjects blocks waiting for milo
+  // file I/O that never completes on headless.  Stub PrepareNext to return
+  // false (no screens) so the splash system is inert.
+  {
+    // PrepareNext returns bool — 0 = no screens available
+    PatchStub8(memory, 0x834E2050, 0, "Splash::PrepareNext");
+    // BeginSplasher creates a render thread and waits for state; skip it
+    PatchStub8(memory, 0x834E2DEC, 0, "Splash::BeginSplasher");
+    // Suspend/Resume wait for splash thread state changes, but the thread
+    // was never created (BeginSplasher stubbed).  mThreaded=1 in ctor causes
+    // Suspend to call WaitForState(kSuspended) → deadlock.
+    PatchStub8(memory, 0x834E190C, 0, "Splash::Suspend");
+    PatchStub8(memory, 0x834E1A94, 0, "Splash::Resume");
+    // LiveCameraInput::PreInit calls `new LiveCameraInput()` whose ctor
+    // calls NuiInitialize/NuiAudioCreate/NuiSkeletonTrackingEnable/
+    // NuiImageStreamOpen — all block without Kinect hardware.
+    PatchStub8(memory, 0x832AAAFC, 0, "LiveCameraInput::PreInit");
+    // LiveCameraInput::Init also blocks on NUI/Kinect hardware
+    PatchStub8(memory, 0x832AABE4, 0, "LiveCameraInput::Init");
+    // HasFileChecksumData() — return false to skip DTB checksum validation.
+    // The decomp build's DTB files don't match original checksums, triggering
+    // dirty disc errors and XamLoaderLaunchTitle (exit to dashboard).
+    PatchStub8(memory, 0x82924218, 0, "HasFileChecksumData");
+    result.applied += 7;
   }
 
   // Map guard/overflow pages as readable zeros.
@@ -2207,8 +2739,35 @@ void ApplyCrtPatches(const Dc3HackContext& ctx,
       uint32_t buf_size = xe::load_and_swap<uint32_t>(cur_buf_ptr + 0);
       uint32_t buf_chars = xe::load_and_swap<uint32_t>(cur_buf_ptr + 4);
 
-      // Check if string fits in current buffer.
+      // Deduplicate: scan existing buffer for this string before appending.
+      // This ensures each unique string has exactly one address, so that
+      // Symbol pointer comparison (operator==, operator<) works correctly.
       uint32_t used = cur_char - buf_chars;
+      {
+        auto* buf_host = memory->TranslateVirtual<const char*>(buf_chars);
+        if (buf_host && used > 0) {
+          const char* scan = buf_host;
+          const char* scan_end = buf_host + used;
+          while (scan < scan_end) {
+            if (std::strcmp(scan, str) == 0) {
+              // Found existing copy — return its guest address.
+              uint32_t existing_addr = buf_chars +
+                  static_cast<uint32_t>(scan - buf_host);
+              static int s_dedup_count = 0;
+              if (++s_dedup_count <= 5 || (s_dedup_count % 5000) == 0) {
+                XELOGW("DC3: StringTable::Add dedup[{}]: '{}' already at "
+                       "{:08X} (skipping append)",
+                       s_dedup_count, str, existing_addr);
+              }
+              ppc_context->r[3] = existing_addr;
+              return;
+            }
+            // Advance past this string + null terminator.
+            scan += std::strlen(scan) + 1;
+          }
+        }
+      }
+
       if (used + len > buf_size) {
         // Buffer full. Can't allocate new one (heap may not be ready).
         // Return original string pointer — caller will use it as-is.
@@ -2703,6 +3262,154 @@ Dc3HackPackSummary ApplyDc3HackPack(const Dc3HackContext& ctx) {
 
   ApplyDc3ImportAndRuntimeStopgaps(ctx, summary);
   return summary;
+}
+
+void Dc3PopulateAddressesFromCatalog(
+    const std::unordered_map<std::string, uint32_t>& catalog,
+    const std::unordered_map<std::string, uint32_t>& crt_sentinels) {
+  int updated = 0;
+  auto get = [&](const char* key, uint32_t& field) {
+    auto it = catalog.find(key);
+    if (it != catalog.end() && it->second != field) {
+      field = it->second;
+      ++updated;
+    }
+  };
+  auto get_crt = [&](const char* key, uint32_t& field) {
+    auto it = crt_sentinels.find(key);
+    if (it != crt_sentinels.end() && it->second != field) {
+      field = it->second;
+      ++updated;
+    }
+  };
+
+  // CRT sentinels (from crt_sentinels section)
+  get_crt("__xc_a", kAddr.xc_a);
+  get_crt("__xc_z", kAddr.xc_z);
+  get_crt("__xi_a", kAddr.xi_a);
+  get_crt("__xi_z", kAddr.xi_z);
+
+  // CRT functions
+  get("ioinit", kAddr.ioinit);
+  get("cinit", kAddr.cinit);
+  get("errno_fn", kAddr.errno_fn);
+  get("invalid_parameter_noinfo", kAddr.invalid_parameter_noinfo);
+  get("call_reportfault", kAddr.call_reportfault);
+  get("amsg_exit", kAddr.amsg_exit);
+  get("report_gsfailure", kAddr.report_gsfailure);
+
+  // CRT formatter
+  get("output_l", kAddr.output_l);
+  get("woutput_l", kAddr.woutput_l);
+
+  // Debug subsystem
+  get("debug_print", kAddr.debug_print);
+  get("debug_fail", kAddr.debug_fail);
+  get("debug_do_crucible", kAddr.debug_do_crucible);
+  get("datanode_print", kAddr.datanode_print);
+
+  // Import/thunk
+  get("xapi_call_thread_notify", kAddr.xapi_call_thread_notify);
+  get("text_start", kAddr.text_start);
+  get("text_size", kAddr.text_size);
+  get("idata_start", kAddr.idata_start);
+  get("idata_end", kAddr.idata_end);
+  get("thunk_area_start", kAddr.thunk_area_start);
+  get("thunk_area_end", kAddr.thunk_area_end);
+
+  // Locale
+  get("get_system_language", kAddr.get_system_language);
+  get("get_system_locale", kAddr.get_system_locale);
+  get("xget_locale", kAddr.xget_locale);
+  get("xtl_get_language", kAddr.xtl_get_language);
+  get("debug_break", kAddr.debug_break);
+
+  // ReadCacheStream probes
+  get("rcs_read_cache_stream", kAddr.rcs_read_cache_stream);
+  get("rcs_bufstream_read_impl", kAddr.rcs_bufstream_read_impl);
+  get("rcs_bufstream_seek_impl", kAddr.rcs_bufstream_seek_impl);
+
+  // SystemConfig / FindArray
+  get("system_config_2", kAddr.system_config_2);
+  get("find_array", kAddr.find_array);
+
+  // Object / factory globals
+  get("object_factories_map", kAddr.object_factories_map);
+  get("register_factory", kAddr.register_factory);
+  get("new_object", kAddr.new_object);
+  get("rndmat_static_name_sym", kAddr.rndmat_static_name_sym);
+  get("metamaterial_static_name_sym", kAddr.metamaterial_static_name_sym);
+  get("g_system_config", kAddr.g_system_config);
+  get("g_string_table_global", kAddr.g_string_table_global);
+  get("g_hash_table", kAddr.g_hash_table);
+
+  // Memory / allocator
+  get("mem_or_pool_alloc", kAddr.mem_or_pool_alloc);
+  get("mem_alloc", kAddr.mem_alloc);
+  get("pool_alloc", kAddr.pool_alloc);
+  get("string_reserve", kAddr.string_reserve);
+  get("g_chunk_alloc", kAddr.g_chunk_alloc);
+
+  // DataArray / DataNode / Symbol
+  get("string_table_add", kAddr.string_table_add);
+  get("symbol_preinit", kAddr.symbol_preinit);
+
+  // TextStream / String ops
+  get("textstream_op_const_char", kAddr.textstream_op_const_char);
+  get("string_op_plus_eq", kAddr.string_op_plus_eq);
+
+  // XMP
+  get("xmp_override_bg_music", kAddr.xmp_override_bg_music);
+  get("xmp_restore_bg_music", kAddr.xmp_restore_bg_music);
+
+  // Write bridges
+  get("write_nolock", kAddr.write_nolock);
+  get("write_fn", kAddr.write_fn);
+
+  // FileIsLocal
+  get("file_is_local", kAddr.file_is_local);
+
+  // File system globals
+  get("g_using_cd", kAddr.g_using_cd);
+  get("check_for_archive", kAddr.check_for_archive);
+  get("file_init", kAddr.file_init);
+
+  // Holmes
+  get("protocol_debug_string", kAddr.protocol_debug_string);
+
+  // RndTransformable
+  get("set_dirty_force", kAddr.set_dirty_force);
+
+  // Memory_Xbox
+  get("alloc_type", kAddr.alloc_type);
+
+  // Rnd
+  get("rnd_create_defaults", kAddr.rnd_create_defaults);
+
+  // MetaMaterial
+  get("create_and_set_meta_mat", kAddr.create_and_set_meta_mat);
+  get("s_meta_materials", kAddr.s_meta_materials);
+
+  // Post-processing / GPU init
+  get("ng_postproc_rebuild_tex", kAddr.ng_postproc_rebuild_tex);
+  get("ng_dofproc_init", kAddr.ng_dofproc_init);
+  get("rnd_shadowmap_init", kAddr.rnd_shadowmap_init);
+  get("dxrnd_suspend", kAddr.dxrnd_suspend);
+  get("occlusion_query_mgr_ctor", kAddr.occlusion_query_mgr_ctor);
+  get("d3d_device_suspend", kAddr.d3d_device_suspend);
+  get("d3d_device_resume", kAddr.d3d_device_resume);
+  get("dxrnd_init_buffers", kAddr.dxrnd_init_buffers);
+  get("dxrnd_create_post_textures", kAddr.dxrnd_create_post_textures);
+
+  // Audio / Synth
+  get("synth360_preinit", kAddr.synth360_preinit);
+  get("synth_init", kAddr.synth_init);
+
+  // Bink video
+  get("bink_start_async_thread", kAddr.bink_start_async_thread);
+  get("bink_platform_init", kAddr.bink_platform_init);
+
+  XELOGI("DC3: Populated {} address catalog entries from manifest", updated);
 }
 
 }  // namespace xe

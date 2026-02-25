@@ -521,9 +521,8 @@ DECLARE_XAM_EXPORT1(XamShowDeviceSelectorUI, kUI, kImplemented);
 
 void XamShowDirtyDiscErrorUI_entry(dword_t user_index) {
 #ifdef XE_HEADLESS_BUILD
-  XELOGE("XamShowDirtyDiscErrorUI: Dirty disc error in headless mode");
-  assert_always();
-  exit(1);
+  XELOGE("XamShowDirtyDiscErrorUI: Dirty disc error in headless mode (ignored)");
+  return;
 #else
   if (cvars::headless) {
     assert_always();
