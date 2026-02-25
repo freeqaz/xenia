@@ -2075,6 +2075,12 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
                dc3_patch_manifest->xdk_code_ranges.size());
       }
     }
+    // Populate kAddr from manifest address catalog (before hack pack applies).
+    if (dc3_patch_manifest.has_value() &&
+        !dc3_patch_manifest->address_catalog.empty()) {
+      Dc3PopulateAddressesFromCatalog(dc3_patch_manifest->address_catalog,
+                                      dc3_patch_manifest->crt_sentinels);
+    }
 #ifdef XE_HEADLESS_BUILD
     dc3_hack_ctx.is_headless = true;
 #else

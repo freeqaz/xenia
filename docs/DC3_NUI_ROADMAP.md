@@ -209,17 +209,44 @@ WaitForSingleObject → NtWaitForSingleObjectEx → ObReferenceObjectByHandle
 
 DC3 is a debug build that calls `DmGetSystemInfo`. Added stub that zeroes 0x24 bytes and returns success.
 
-## Current Status
+## Current Status (Session 38 — 2026-02-25)
 
-- Game loads all ark files, spawns 16+ threads
-- DecompressionThread properly blocks on events (no longer spinning)
-- VdSwap runs at ~26fps with varying framebuffer addresses
-- No rendering yet (black frames, zero IssueDraw calls)
+### Boot progression
+```
+mainCRTStartup
+  -> _cinit                         ✓ (gStringTable + gHashTable host-constructed)
+  -> main()                         ✓
+  -> SystemPreInit                  ✓ (archive loading, config parsing, MemInit)
+  -> SystemInit                     ✓ (Symbol::Init, object factories)
+  -> Game initialization            ✗ CURRENT BLOCKER: factory instantiation + DTB issues
+```
+
+### What works
+- Full CRT initialization (host-constructed StringTable/gHashTable bypass)
+- File system: disc mode (`gUsingCD=1`), archive loading (`.hdr`/`.ark` files)
+- Config parsing: `ham_preinit_keep.dta` loads successfully
+- Memory: MemInit allocates 16MB heap growth region
+- 16+ guest threads spawned, DecompressionThread properly blocks
+- VdSwap running at ~26fps
+- Fake Kinect skeleton injection (`--fake_kinect_data=true`) working
+- **Manifest address automation**: 73/67 kAddr fields auto-resolved, 89 hack_pack_stubs
+
+### Current blockers
+1. **Object factory instantiation**: `Couldn't instantiate class Mat/MetaMaterial/Cam` — sFactories appears populated but lookup fails
+2. **`Data is not Array` cascades**: DTB config structure issues during game init
+3. **~200 guest-code patches**: ~130 permanent (headless), ~25 fixable (decomp), ~8 fixable (APU)
+
+### Hack pack summary (~200 patches)
+| Tier | Count | Category | Status |
+|---|---|---|---|
+| 1: Permanent | ~130 | NUI/Kinect, Holmes, GPU null, XBC, XMP, Bink | Required for headless — no action needed |
+| 2: Decomp artifacts | ~25 | /FORCE linker corruption, CRT ordering | Fixable by resolving 275 LNK4006 + 666 LNK2001 |
+| 3: XAudio2 cascade | ~8 | Synth CS deadlock, Splash I/O | Fixable by xenia nop APU CS init fix |
 
 ## Next Steps
 
-1. Investigate why no draw commands are issued despite VdSwap running
-2. Check if Kinect init path is blocking the game loop from reaching render
-3. Look for new undefined extern calls or assertion failures in logs
-4. Implement real Timer/Mutant support if needed
-5. Implement LDI decompression if asset loading fails
+1. **Fix object factory instantiation** — investigate sFactories lookup failure and /FORCE duplicate addresses
+2. **Fix `Data is not Array` cascades** — DTB schema validation / config parsing issues
+3. **XAudio2 CS deadlock** — highest-leverage fix: one xenia APU change eliminates 3 stubs
+4. **.milo file I/O completion** — second-highest leverage: fixes ~6 stubs (Splash, UIScreen, ObjRef)
+5. **Decomp linker cleanup** — resolving LNK4006/LNK2001 eliminates most Tier 2 stubs

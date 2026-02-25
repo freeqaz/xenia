@@ -2659,6 +2659,10 @@ std::optional<Dc3NuiPatchManifest> Dc3LoadNuiPatchManifest(
       }
     }
   }
+  if (auto cat_it = doc.FindMember("address_catalog");
+      cat_it != doc.MemberEnd()) {
+    parse_target_table(cat_it->value, &manifest.address_catalog);
+  }
   if (manifest.targets.empty()) {
     XELOGW("DC3: Patch manifest '{}' contains no targets; ignoring manifest",
            xe::path_to_utf8(path));

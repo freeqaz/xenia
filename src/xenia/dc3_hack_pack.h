@@ -62,6 +62,9 @@ struct Dc3HackPackSummary {
 };
 
 void Dc3MaybeCleanStaleContentCache(const std::filesystem::path& content_root);
+void Dc3PopulateAddressesFromCatalog(
+    const std::unordered_map<std::string, uint32_t>& catalog,
+    const std::unordered_map<std::string, uint32_t>& crt_sentinels);
 Dc3HackPackSummary ApplyDc3HackPack(const Dc3HackContext& ctx);
 Dc3HackApplyResult ApplyDc3SkeletonHackPack(const Dc3HackContext& ctx);
 
