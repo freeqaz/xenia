@@ -48,40 +48,47 @@ namespace {
 constexpr uint32_t kPpcLiR3_0 = 0x38600000;
 constexpr uint32_t kPpcBlr = 0x4E800020;
 static uint32_t g_dc3_errno_guest_ptr = 0;
-constexpr uint32_t kDc3RcsReadCacheStreamAddr = 0x83116664;
-constexpr uint32_t kDc3RcsBufStreamReadImplAddr = 0x82BC3AC8;
-constexpr uint32_t kDc3RcsBufStreamSeekImplAddr = 0x82BC3BC8;
-constexpr uint32_t kDc3OutputLAddr = 0x8361CBE0;
-constexpr uint32_t kDc3WOutputLAddr = 0x83622778;
-constexpr uint32_t kDc3SystemConfig2Addr = 0x835166FC;
-constexpr uint32_t kDc3SetupFontSystemConfigReturnLR = 0x8317FF14;
+// Addresses from build/373307D9/default.map (relink with MemInit heap loop fix).
+constexpr uint32_t kDc3RcsReadCacheStreamAddr = 0x83115954;
+constexpr uint32_t kDc3RcsBufStreamReadImplAddr = 0x82BC2E70;
+constexpr uint32_t kDc3RcsBufStreamSeekImplAddr = 0x82BC2F70;
+constexpr uint32_t kDc3OutputLAddr = 0x836192D0;
+constexpr uint32_t kDc3WOutputLAddr = 0x8361EE44;
+constexpr uint32_t kDc3SystemConfig2Addr = 0x835133EC;
+// TODO: Recompute SetupFont LR from disassembly after relink. This is the
+// return address from the SystemConfig(Symbol,Symbol) call inside SetupFont.
+// Old value was 0x8317FF14; new SetupFont entry is 0x8317F038.
+constexpr uint32_t kDc3SetupFontSystemConfigReturnLR = 0x8317FF14;  // STALE
 // SetupFont constructs Symbol temporaries in one order and passes them to
 // SystemConfig(Symbol, Symbol) in the opposite register order.
 // At LR=0x8317FF14 (return from SystemConfig call):
 //   r3/s1 comes from the second ctor literal (0x82053BF8, expected "rnd")
 //   r4/s2 comes from the first  ctor literal (0x82027684, expected "font")
-constexpr uint32_t kDc3SetupFontCtor1LiteralAddr = 0x82027684;  // expected "font"
-constexpr uint32_t kDc3SetupFontCtor2LiteralAddr = 0x82053BF8;  // expected "rnd"
-constexpr uint32_t kDc3PooledFontStringAddr = 0x82017684;
-constexpr uint32_t kDc3ObjectFactoriesMapAddr = 0x83AE1AC0;
-constexpr uint32_t kDc3RndMatStaticNameSymAddr = 0x83AEAB2C;
-constexpr uint32_t kDc3MetaMaterialStaticNameSymAddr = 0x83AEBFA8;
-constexpr uint32_t kDc3GSystemConfigAddr = 0x83C7BAE8;
-constexpr uint32_t kDc3GStringTableGlobalAddr = 0x83AE01C8;
+// TODO: SetupFont ctor literals are anonymous string constants; resolve from
+// disassembly of SetupFont at 0x8317F020 after relink.
+constexpr uint32_t kDc3SetupFontCtor1LiteralAddr = 0x82027684;  // expected "font" STALE
+constexpr uint32_t kDc3SetupFontCtor2LiteralAddr = 0x82053BF8;  // expected "rnd" STALE
+constexpr uint32_t kDc3PooledFontStringAddr = 0x82017684;  // STALE
+constexpr uint32_t kDc3ObjectFactoriesMapAddr = 0x83AE1E00;
+constexpr uint32_t kDc3RndMatStaticNameSymAddr = 0x83AEAF2C;
+constexpr uint32_t kDc3MetaMaterialStaticNameSymAddr = 0x83AEC3A8;
+constexpr uint32_t kDc3GSystemConfigAddr = 0x83C7B2E0;
+constexpr uint32_t kDc3GStringTableGlobalAddr = 0x83AE0190;
 // Use the gHashTable instance referenced by Symbol::Symbol (verified from
 // 0x825572E4 disassembly: lis 0x83AE; addi +0x01CC), not the duplicate map
 // symbol instance at 0x83AED0FC.
-constexpr uint32_t kDc3GHashTableAddr = 0x83AE01CC;
-// MemOrPoolAlloc probe addresses (from default.map)
-constexpr uint32_t kDc3MemOrPoolAllocAddr = 0x834471E0;
-constexpr uint32_t kDc3MemAllocAddr = 0x834467A8;
-constexpr uint32_t kDc3PoolAllocAddr = 0x835E949C;
-constexpr uint32_t kDc3StringReserveAddr = 0x82A5BBC0;
-// String::reserve calls MemOrPoolAlloc with LR pointing after the bl at 0x82A5BBFC,
-// which is 0x82A5BC00.
-constexpr uint32_t kDc3StringReserveMemAllocRetLR = 0x82A5BC00;
+constexpr uint32_t kDc3GHashTableAddr = 0x83AED4FC;
+// MemOrPoolAlloc probe addresses (from default.map, relinked)
+constexpr uint32_t kDc3MemOrPoolAllocAddr = 0x828779A0;
+// MemAlloc is not a separate function in the decomp binary; MemOrPoolAlloc
+// calls it inline. Use _MemAllocTemp as the dispatch target instead.
+constexpr uint32_t kDc3MemAllocAddr = 0x828781A8;  // _MemAllocTemp
+constexpr uint32_t kDc3PoolAllocAddr = 0x835E61B4;
+constexpr uint32_t kDc3StringReserveAddr = 0x82A5B200;
+// TODO: Recompute String::reserve MemOrPoolAlloc call return LR from disasm.
+constexpr uint32_t kDc3StringReserveMemAllocRetLR = 0x82A5BC00;  // STALE
 // gChunkAlloc: global ChunkAllocator* used by PoolAlloc
-constexpr uint32_t kDc3GChunkAllocAddr = 0x83CB8D08;
+constexpr uint32_t kDc3GChunkAllocAddr = 0x83CB8500;
 // FixedSizeAlloc layout offsets
 constexpr uint32_t kFsaOffVtable = 0x00;
 constexpr uint32_t kFsaOffAllocSizeWords = 0x04;
@@ -1445,9 +1452,12 @@ void ApplyDc3ImportAndRuntimeStopgaps(const Dc3HackContext& ctx,
           uint32_t expected_word;
           const char* name;
         };
+        // TODO: These assert-nop addresses are STALE after the MemInit relink.
+        // With the heap iteration fix, these asserts may not fire. Recompute
+        // from disassembly if needed: MemInit=0x82878580, _MemAllocTemp=0x828781A8.
         const MemPatch mem_patches[] = {
-            {0x83447AF4, 0x481032B9, "MemInit line 690: Debug::Fail call"},
-            {0x83446A24, 0x48104389, "MemAlloc line 961: Debug::Fail call"},
+            {0x83447AF4, 0x481032B9, "MemInit line 690: Debug::Fail call (STALE)"},
+            {0x83446A24, 0x48104389, "MemAlloc line 961: Debug::Fail call (STALE)"},
         };
         for (const auto& p : mem_patches) {
           if (PatchCheckedNop(memory, p.addr, p.expected_word, p.name)) {
@@ -1461,9 +1471,11 @@ void ApplyDc3ImportAndRuntimeStopgaps(const Dc3HackContext& ctx,
         stopgap_result.skipped++;
       }
 
-    // Initialize STLport std::list<bool> gConditional sentinel (0x83C7D354).
+    // Initialize STLport std::list<bool> gConditional sentinel.
+    // TODO: gConditional address is STALE after relink. The std::list<bool>
+    // static initializer should handle this if CRT init runs correctly.
     {
-      constexpr uint32_t kGConditionalAddr = 0x83C7D354;
+      constexpr uint32_t kGConditionalAddr = 0x83C7D354;  // STALE
       auto* pcond = memory->TranslateVirtual<uint8_t*>(kGConditionalAddr);
       if (pcond) {
         xe::store_and_swap<uint32_t>(pcond + 0, kGConditionalAddr); // _M_next
@@ -1481,7 +1493,7 @@ void ApplyDc3ImportAndRuntimeStopgaps(const Dc3HackContext& ctx,
   // Redirect DECOMP Debug::Print to XELOG so MILO_LOG output remains visible
   // without stubbing the CRT formatter path.
   if (ctx.processor) {
-    constexpr uint32_t kDebugPrint = 0x835499C4;
+    constexpr uint32_t kDebugPrint = 0x835466B4;
     auto debug_print_handler = [](cpu::ppc::PPCContext* ppc_context,
                                   kernel::KernelState* kernel_state) {
       if (!ppc_context || !kernel_state) return;
@@ -1505,7 +1517,7 @@ void ApplyDc3ImportAndRuntimeStopgaps(const Dc3HackContext& ctx,
 
   // Restore Debug::Fail visibility while keeping the runtime moving.
   if (ctx.processor) {
-    constexpr uint32_t kDebugFail = 0x8354ADAC;
+    constexpr uint32_t kDebugFail = 0x83547A9C;
     auto fail_handler = [](cpu::ppc::PPCContext* ppc_context,
                            kernel::KernelState* kernel_state) {
       if (!ppc_context || !kernel_state) return;
@@ -1807,11 +1819,24 @@ void ApplyDc3ImportAndRuntimeStopgaps(const Dc3HackContext& ctx,
   // When it's NULL (CRT not fully initialized), it traps with tw 0x16
   // (EINVAL) which crashes the JIT host. Stub it to just return.
   if (ctx.is_decomp_layout) {
-    if (PatchStub8(memory, 0x835D428C, 0,
+    if (PatchStub8(memory, 0x8361815C, 0,
                    "_invalid_parameter_noinfo (CRT trap stopgap)")) {
       stopgap_result.applied++;
     } else {
       stopgap_result.skipped++;
+    }
+    // Also stub other CRT error paths that contain trap instructions.
+    if (PatchStub8(memory, 0x83618190, 0,
+                   "_call_reportfault (CRT trap stopgap)")) {
+      stopgap_result.applied++;
+    }
+    if (PatchStub8(memory, 0x8360DA04, 0,
+                   "_amsg_exit (CRT trap stopgap)")) {
+      stopgap_result.applied++;
+    }
+    if (PatchStub8(memory, 0x8361AFB4, 0,
+                   "__report_gsfailure (CRT trap stopgap)")) {
+      stopgap_result.applied++;
     }
   }
 
@@ -1966,10 +1991,10 @@ void ApplyDc3ImportAndRuntimeStopgaps(const Dc3HackContext& ctx,
     };
     // Source-of-truth is the current decomp MAP. Some manifests/symbols files
     // can lag relinks and point at stale constructor tables.
-    constexpr uint32_t kXcA = 0x83ADED98;
-    constexpr uint32_t kXcZ = 0x83ADF3B0;
-    constexpr uint32_t kXiA = 0x83ADF3B4;
-    constexpr uint32_t kXiZ = 0x83ADF3C0;
+    constexpr uint32_t kXcA = 0x83ADED60;
+    constexpr uint32_t kXcZ = 0x83ADF378;
+    constexpr uint32_t kXiA = 0x83ADF37C;
+    constexpr uint32_t kXiZ = 0x83ADF388;
     if (ctx.crt_sentinels) {
       uint32_t m_xc_a = LookupStubAddr(ctx.crt_sentinels, "__xc_a", kXcA);
       uint32_t m_xc_z = LookupStubAddr(ctx.crt_sentinels, "__xc_z", kXcZ);
@@ -2079,6 +2104,23 @@ void ApplyDc3ImportAndRuntimeStopgaps(const Dc3HackContext& ctx,
              table.name, total, already_null, valid_count, nullified_oob,
              nullified_bisect, nullified_skip);
       crt_result.applied++;
+    }
+
+    // Inject _ioinit into the __xi_a slot.  With /FORCE linking, the _ioinit
+    // function pointer ended up at VA 0x83ADED58 — outside __xi_a..__xi_z
+    // (0x83ADF37C..0x83ADF388).  _cinit iterates only the sentinel-bounded
+    // range, so it never calls _ioinit, leaving __pioinfo uninitialized.
+    // This causes _output_l (CRT printf core) to infinite-loop when it tries
+    // to lock via __pioinfo[].
+    {
+      constexpr uint32_t kIoinitAddr = 0x8361ADBC;
+      auto* xi_slot = memory->TranslateVirtual<uint8_t*>(kXiA);
+      if (xi_slot) {
+        xe::store_and_swap<uint32_t>(xi_slot, kIoinitAddr);
+        XELOGI("DC3: Injected _ioinit ({:08X}) into __xi_a slot at {:08X}",
+               kIoinitAddr, kXiA);
+        crt_result.applied++;
+      }
     }
   }
 
