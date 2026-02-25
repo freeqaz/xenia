@@ -477,11 +477,23 @@ MemMgr assert `nop` bypass (default off):
 - `--dc3_debug_findarray_override_mode=off|log_only|stub_on_fail|null_on_fail`
 - Recommended sequence:
   1. `off` (baseline correctness)
-  2. `stub_on_fail` (progression when null-deref cascades block later systems)
-  3. `null_on_fail` (A/B behavior check versus stub returns)
-- `log_only` note: call-through logging is not implemented in the current
-  override API path, so `log_only` leaves original behavior active and only logs
-  a startup note.
+  2. `log_only` (emulated probe mode; logs caller LR + symbol + hit/miss)
+  3. `stub_on_fail` (progression when null-deref cascades block later systems)
+  4. `null_on_fail` (A/B behavior check versus stub returns)
+- `log_only` behavior:
+  - this is an emulated `FindArray` path (not true call-through)
+  - it returns `found` or `NULL`, logs caller `LR`, and hex-dumps non-printable
+    symbol keys (useful for `Symbol` corruption forensics)
+  - use it to isolate bad config lookups before enabling behavior-changing modes
+- If you see a `FindArray` required miss with `sym=<bin:...>` in a
+  `SystemConfig(Symbol,Symbol)` callsite (for example `LR=0x83516738`), treat
+  it as a strong indicator that the `Symbol` argument itself is corrupt (bad
+  `mStr` pointer), not merely a missing config entry.
+- `Rnd::SetupFont` specific note:
+  - current hack-pack includes a caller-aware `DataArray::Node` safety override
+    to survive the `mFont == NULL` crash path and log the condition
+  - this is a progression aid while investigating the upstream `Symbol("font")`
+    corruption; it is not a correctness fix for renderer config setup.
 
 CRT constructor table caveat (relinks / stale manifests):
 - If CRT sanitizer logs a mismatch between patch-manifest sentinels and map

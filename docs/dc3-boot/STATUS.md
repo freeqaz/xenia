@@ -1,6 +1,44 @@
 # Status: OODA Loop Iteration 4
 
-*Last updated: 2026-02-24 (Session 28 — manifest duplicate-name fallback hardening + XTL crash bypass)*
+*Last updated: 2026-02-25 (Session 29 — `ThreadMemStack` crash symptom fixed, `FindArray` probe upgraded, `Symbol` corruption isolated)*
+
+## 2026-02-25 Update (Session 29): `ThreadMemStack` Invalid-SP Crash Fixed (Symptom) + `SystemConfig("rnd","font")` Symbol Corruption Isolated
+
+- Fixed the recurrent invalid guest stack-pointer crash:
+  - previous failure: `PC=0x82C1BA44` (`__savegprlr_23`) with `SP=0x40`, fault write to `0xFFFFFFF0`, `LR=0x83445EE8` (`ThreadMemStack+0x8`)
+  - root cause of the crash symptom was **not** `ThreadMemStack`; it was upstream `DataArray::Node` out-of-bounds returns continuing after `Debug::Fail`, which then corrupted later execution paths
+- Added a targeted safety override for `merged_DataArrayNode` (`DataArray::Node` helper, `0x835421A4`):
+  - normal in-range behavior is preserved
+  - out-of-bounds/null-array accesses now return safe sentinel `DataNode*` values instead of invalid pointers
+  - this prevents the `ThreadMemStack` invalid-SP crash while keeping the failing caller chain visible in logs
+- Added caller-aware handling for `Rnd::SetupFont()` null-font path:
+  - when `mFont == nullptr`, `Rnd::SetupFont` was indexing `mFont->Node(66..123)` and then cloning/assigning results
+  - the safety override now detects the two `SetupFont` callsites and returns:
+    - an empty-array source sentinel for the clone path (`LR=0x8317FF40`)
+    - an assignment sink sentinel for the `mFont->Node(i+98)` write path (`LR=0x8318001C`)
+  - this turns the `Rnd::SetupFont` null-font case into a logged progression skip instead of a crash
+- Runtime outcome after the above fix:
+  - `ThreadMemStack` invalid-SP crash is gone
+  - runtime now progresses to a deterministic `Debug::Fail >200` spin in material/property setup (`BaseMaterial` / `Mat` path), which is a much cleaner next blocker
+- Deep root-cause finding (new):
+  - upgraded `FindArray` probe (`dc3_debug_findarray_override_mode=log_only`) captured a required `SystemConfig` miss with a **binary/non-printable symbol**:
+    - `LR=0x83516738` (`SystemConfig(Symbol, Symbol)` second `FindArray` call)
+    - `da=400E7E00`
+    - `sym=<bin:83 0A FA 80 ...>`
+    - `fail=1`, `found=0`
+  - this is in the `Rnd::SetupFont` path and indicates the second key (`"font"`) arrives as a bogus symbol pointer rather than a valid C-string symbol
+  - conclusion: the `rnd/font` failure is not just “missing config”; it is likely a **`Symbol` construction/interning corruption issue** (or related memory corruption) affecting `Symbol("font")`
+- Additional corroborating symptom:
+  - runtime reports `Couldn't instantiate class Mat` and `Couldn't instantiate class MetaMaterial`, followed by `BaseMaterial::PropValDifferent(...)` asserts (`base` / `node`)
+  - this is consistent with the renderer/material init path operating with broken symbol/object setup after the upstream symbol corruption
+- Tooling/debug improvements added during this session:
+  - `FindArray` `log_only` now works as an emulated probe mode (no longer “startup note only”)
+  - `FindArray` logs caller `LR`, sanitizes printable symbols, and hex-dumps binary/non-printable keys
+  - “interesting” `FindArray` misses (`fail=1 && found=0`) now log even after the normal log cap
+- Next debugging focus (highest value):
+  - investigate why `Symbol("font")` produces a bogus pointer in `Rnd::SetupFont`
+  - inspect `Symbol::Symbol(const char*)` / string-table/hash behavior and memory integrity in the period after config load / MemMgr init
+  - validate whether `Mat` / `MetaMaterial` factory registration failures are downstream of the same symbol corruption or a separate init-order issue
 
 ## 2026-02-24 Update (Session 28): Manifest Duplicate-Name Stub Collision Hardening + Crash Moved Past `XTLGetLanguage`
 
