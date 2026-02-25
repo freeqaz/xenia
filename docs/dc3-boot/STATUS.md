@@ -1,6 +1,30 @@
 # Status: OODA Loop Iteration 4
 
-*Last updated: 2026-02-25 (Session 31 — `setupfont_fix` validated, factory map looks sane, new `String::reserve` allocator-failure crash isolated)*
+*Last updated: 2026-02-25 (Session 32 — `String::reserve` crash root-caused to heap exhaustion via MemOrPoolAlloc probe; new blocker: `StringTable::UsedSize` tight loop)*
+
+## 2026-02-25 Update (Session 32): `String::reserve` Crash Root-Caused — Heap Exhaustion via Nop'd `MemAlloc` Assert; New Blocker: `StringTable::UsedSize` Tight Loop
+
+- Added `--dc3_debug_mempool_alloc_probe` cvar-gated probe for `MemOrPoolAlloc`:
+  - overrides `MemOrPoolAlloc` (`0x834471E0`) with a host re-dispatch that logs args/return, then delegates to real guest `MemAlloc`/`PoolAlloc` via `processor->Execute()`
+  - captures caller LR, requested size, file/line/name, return value
+  - detailed logs on failure or from `String::reserve` caller; periodic sampling otherwise
+- Root cause of `String::reserve` crash (`PC=0x82A5BC48`):
+  - the crash was **not** pool free-list corruption
+  - pool bucket 5 (96-byte slots, handles allocs 81-96 bytes) was genuinely **exhausted**: 241/241 nodes in use, 12 chunks, `freeList=0x00000000`
+  - `FixedSizeAlloc::Refill()` → `RawAlloc()` → `_MemAllocTemp()` → `MemAlloc()` tried to allocate a new 51KB pool chunk from the main heap
+  - `MemAlloc` hit its assertion at `0x83446A24` (the one nop'd by `--dc3_debug_memmgr_assert_nop_bypass`)
+  - with the assert nop'd, `MemAlloc` continued past the failure with uninitialized `FreeBlockInfo` stack data, returning `0xFFFFFFFF` (stack garbage)
+  - `String::reserve` treated `0xFFFFFFFF` as a valid pointer: `strmem = 0xFFFFFFFF + 4 = 0x3`, then `stw r28, -4(r29)` wrote to guest `0xFFFFFFFF` → crash
+- Added sanitization in the probe: allocator returns `>= 0xF0000000` are converted to null (`0`) to prevent garbage pointer dereference
+- Progression with sanitization:
+  - `String::reserve` crash is eliminated
+  - runtime now progresses to `Debug::Fail` "File: Mat.cpp Line: 153 Error: dir" (count=2)
+  - then enters a tight SIGSEGV loop at `PC=0x82924998` (`StringTable::UsedSize`)
+  - fault addresses (`0x1700FE0EA`, `0x17097FFFA`) suggest iteration over unmapped/corrupted StringTable data
+  - 64K-326K SIGSEGVs accumulate during the timeout period
+- Key implication: the **main heap is exhausted** (or corrupted) at the point where `Mat`/`MetaMaterial` instantiation fails
+  - this likely means either `MemInit` configured the heap too small (bad/missing `SystemConfig("mem")` values), or the heap was never properly initialized due to the nop'd `MemInit` assert at `0x83447AF4`
+  - next: investigate `MemInit` heap configuration and whether the `MemInit line 690` assert nop is causing underinitialized heap state
 
 ## 2026-02-25 Update (Session 31): Targeted `SetupFont` Repair Validated; `Mat/MetaMaterial` Failures Are Not a Factory-Map Symbol Corruption (New Crash: `String::reserve` / alloc fail)
 

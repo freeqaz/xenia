@@ -139,10 +139,16 @@ Items are ordered by priority. Check off as completed. Add new items each iterat
   - Investigate `Mat` / `MetaMaterial` instantiation failures (`Couldn't instantiate class Mat`, `MetaMaterial`) after the `SetupFont` crash fix:
     - `SystemConfig("objects","Mat")` and `("objects","MetaMaterial")` now probe as successful in `log_only` runs, so treat factory registration/init as a likely separate issue unless new evidence says otherwise
     - `setupfont_fix` runs also show `sFactories` map header populated and cached `RndMat`/`MetaMaterial` class symbols sane at fail time; continue by investigating factory function return paths / allocator failures, not just registration presence
-  - Investigate `String::reserve` crash after `setupfont_fix`:
-    - `PC=0x82A5BC48` (`String::reserve`)
-    - `MemOrPoolAlloc` call at `0x82A5BBFC` appears to return `0xFFFFFFFF` (failure sentinel), then `reserve` writes through `ptr+4`
-    - determine why allocator failure occurs immediately after `Couldn't instantiate class Mat` and whether this is the next real blocker (vs secondary error-path crash)
+  - ~~Investigate `String::reserve` crash after `setupfont_fix`~~ **ROOT-CAUSED (Session 32)**:
+    - `PC=0x82A5BC48` (`String::reserve`) crash was caused by `MemAlloc` returning stack garbage (`0xFFFFFFFF`) when heap is exhausted and the `memmgr_assert_nop_bypass` lets `MemAlloc` continue past its assertion with uninitialized `FreeBlockInfo`
+    - pool bucket 5 (96-byte slots) was genuinely exhausted: 241/241 nodes, 12 chunks, `freeList=0x0`
+    - `MemOrPoolAlloc` probe (`--dc3_debug_mempool_alloc_probe`) captures and sanitizes invalid returns
+    - **new blocker**: after sanitization, runtime enters tight SIGSEGV loop at `0x82924998` (`StringTable::UsedSize`) — likely downstream of heap exhaustion / `Mat.cpp:153` assert about `dir`
+  - **Investigate heap exhaustion / `MemInit` configuration** [xenia]:
+    - `MemAlloc` assert at `0x83446A24` fires because the main heap cannot allocate a 51KB pool chunk
+    - either `MemInit` was configured with too-small heap (bad `SystemConfig("mem")` values), or the `MemInit line 690` nop is causing underinitialized heap state
+    - check whether disabling the `MemInit` assert bypass fixes the heap or just moves the crash earlier
+    - if heap is properly sized but exhausted, investigate allocation leak patterns
 
 ### Tier 2: Reduce unresolved symbols (high leverage)
 

@@ -472,6 +472,27 @@ MemMgr assert `nop` bypass (default off):
   `nop`; if addresses drift, it logs a warning and skips patching.
 - Caveat: this can mask real data/config corruption. Use it to progress, then
   return to a non-bypass run for correctness checks.
+- **Known issue (Session 32)**: the nop'd `MemAlloc` assert at `0x83446A24` causes
+  `MemAlloc` to return uninitialized stack garbage (e.g. `0xFFFFFFFF`) when the
+  heap is exhausted, because the code continues past the assertion with an
+  uninitialized `FreeBlockInfo`. The `MemOrPoolAlloc` probe sanitizes these
+  returns to null when active. Without the probe, this garbage propagates to
+  callers like `String::reserve` and causes crashes at `PC=0x82A5BC48`.
+
+`MemOrPoolAlloc` probe (default off):
+- `--dc3_debug_mempool_alloc_probe=true`
+- Purpose: log-only probe for `MemOrPoolAlloc` (`0x834471E0`). Captures caller
+  LR, requested size, file/line/name args, and return value.
+- Implementation: overrides `MemOrPoolAlloc` with host re-dispatch that calls
+  real guest `MemAlloc`/`PoolAlloc` via `processor->Execute()`.
+- Log policy: detailed logs on failure, `String::reserve` caller, first 20 calls,
+  and periodic sampling (every 5000). On `PoolAlloc`-path failures, dumps pool
+  bucket state (free list head, alloc counts, chunk count).
+- Sanitization: allocator returns `>= 0xF0000000` are converted to null to
+  prevent garbage pointer dereference (progression aid when used with the
+  `memmgr_assert_nop_bypass`).
+- Use with: `--dc3_debug_memmgr_assert_nop_bypass=true` and
+  `--dc3_debug_findarray_override_mode=setupfont_fix` for maximum progression.
 
 `DataArray::FindArray(Symbol,bool)` debug override (default off):
 - `--dc3_debug_findarray_override_mode=off|log_only|stub_on_fail|null_on_fail|setupfont_fix`
