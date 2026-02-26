@@ -1972,6 +1972,21 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
         override_register_failed++;
         continue;
       }
+      // Safety: when the manifest fingerprint doesn't match the runtime
+      // .text (XEX rebuilt since manifest was generated), catalog-fallback
+      // addresses are from the wrong build and may land inside unrelated
+      // functions (e.g. CRT _mtinit, _mtinitlocknum).  Reject them.
+      if (!use_patch_manifest_targets &&
+          resolved_patch.resolve_method ==
+              Dc3PatchResolveMethod::kCatalogAddress) {
+        XELOGW(
+            "DC3: Guest override registration skipped {:08X}: {} "
+            "(catalog fallback rejected — fingerprint mismatch; address "
+            "likely stale)",
+            patch_addr, patch.name);
+        override_register_failed++;
+        continue;
+      }
       processor_->RegisterGuestFunctionOverride(patch_addr, handler,
                                                 std::string(patch.name));
       XELOGI("DC3: Registered guest extern override {:08X}: {} (resolver={})",

@@ -1646,6 +1646,33 @@ void ApplyImportStopgaps(const Dc3HackContext& ctx,
     }
   }
 
+  // Stub XRegisterThreadNotifyRoutine (guest-linked copy from
+  // xregisterthreadnotifyroutine.obj).  This function registers a thread
+  // notification callback with the XDK runtime.  It acquires XapiProcessLock
+  // via a kernel critical section that deadlocks under Xenia.  _mtinit calls
+  // this during CRT startup, blocking the main thread before _cinit/main().
+  // Stubbing it (return 0) lets _mtinit complete while preserving CRT lock
+  // initialization (_mtinitlocks / _mtinitlocknum).
+  {
+    const uint32_t addr = kAddr.xregister_thread_notify;
+    auto* heap = memory->LookupHeap(addr);
+    if (heap) {
+      auto* p = memory->TranslateVirtual<uint8_t*>(addr);
+      if (p) {
+        uint32_t w0 = xe::load_and_swap<uint32_t>(p);
+        if (w0 != 0x00000000) {
+          heap->Protect(addr, 8, kMemoryProtectRead | kMemoryProtectWrite);
+          xe::store_and_swap<uint32_t>(p + 0, 0x38600000);  // li r3, 0
+          xe::store_and_swap<uint32_t>(p + 4, 0x4E800020);  // blr
+          XELOGI("DC3: Stubbed XRegisterThreadNotifyRoutine at {:08X} "
+                 "(li r3,0; blr) — unblocks _mtinit CRT startup",
+                 addr);
+          result.applied++;
+        }
+      }
+    }
+  }
+
   // Stub unresolved import entries (PE thunks + XEX markers).
   {
     const uint32_t kTextStart = kAddr.text_start;
@@ -3181,8 +3208,8 @@ void ApplyCrtPatches(const Dc3HackContext& ctx,
       }
     };
     if (cvars::dc3_crt_skip_nui && cvars::dc3_crt_skip_indices.empty()) {
-      parse_skip_list("75,98-101,210-328");
-      XELOGI("DC3: Auto-NUI skip enabled (75,98-101,210-328)");
+      parse_skip_list("75,98-101,142-328");
+      XELOGI("DC3: Auto-NUI skip enabled (75,98-101,142-328)");
     }
     if (!cvars::dc3_crt_skip_indices.empty()) {
       parse_skip_list(cvars::dc3_crt_skip_indices);
