@@ -150,6 +150,13 @@ struct Dc3Addresses {
   uint32_t g_using_cd = 0x83C7BAF0;
   uint32_t check_for_archive = 0x83516A68;
   uint32_t file_init = 0x83413CDC;
+  uint32_t archive_init = 0x834A41F8;
+  uint32_t the_archive = 0x83A9036C;
+  uint32_t system_pre_init_1 = 0x834D6D44;  // SystemPreInit(const char*)
+  uint32_t system_pre_init_2 = 0x834D6F94;  // SystemPreInit(const char*, const char*)
+  // CRT functions that block the main thread
+  uint32_t mtinit = 0x835CBB2C;  // _mtinit (tidtable.obj)
+  uint32_t xregister_thread_notify = 0x830DCFEC;  // XRegisterThreadNotifyRoutine
   // gConditional sentinel
   uint32_t g_conditional = 0x83C7D354;                     // STALE
   // Holmes trampoline target (reused as PPC code cave)
@@ -3086,26 +3093,36 @@ void ApplyCrtPatches(const Dc3HackContext& ctx,
         "DC3:Symbol::PreInit(host-impl)");
     XELOGI("DC3: Registered PreInit host-impl at {:08X}", kPreInit);
 
-    // Override CheckForArchive to set gUsingCD=1 (disc mode).
+    // Patch CheckForArchive in guest memory to set gUsingCD=1 and return.
     // The original function does: gUsingCD=true; gUsingCD &= FileGetStat(...);
-    // It's also PatchStub8'd (li r3,0; blr) which prevents the body from
-    // running.  This explicit override ensures gUsingCD is set at runtime
-    // even if the PPC stub runs or something else resets it.
-    const uint32_t kCheckForArchive = kAddr.check_for_archive;
-    auto cfa_handler = [](cpu::ppc::PPCContext* ppc_context,
-                          kernel::KernelState* kernel_state) {
-      const uint32_t kUCD = kAddr.g_using_cd;  // gUsingCD address
-      auto* memory = kernel_state ? kernel_state->memory() : nullptr;
-      if (!memory) return;
-      auto* ucd = memory->TranslateVirtual<uint8_t*>(kUCD);
-      if (ucd) {
-        xe::store_and_swap<uint32_t>(ucd, 1);
-        XELOGI("DC3: CheckForArchive override — set gUsingCD=1 at {:08X}", kUCD);
+    // If FileGetStat fails (Xenia VFS can't stat gen/main_xbox.hdr),
+    // gUsingCD gets reset to 0 and ArchiveInit skips loading .ark files.
+    //
+    // JIT overrides don't fire for this function because the main thread
+    // never reaches _cinit or main() (blocked in _mtinit).  PPC patching
+    // works regardless of how/whether the function is called.
+    {
+      const uint32_t kCheckForArchive = kAddr.check_for_archive;
+      const uint32_t kUCD = kAddr.g_using_cd;
+      auto* heap = memory->LookupHeap(kCheckForArchive);
+      auto* mem = memory->TranslateVirtual<uint8_t*>(kCheckForArchive);
+      if (heap && mem) {
+        uint32_t w0 = xe::load_and_swap<uint32_t>(mem);
+        if (w0 != 0x00000000) {
+          heap->Protect(kCheckForArchive, 20,
+                        kMemoryProtectRead | kMemoryProtectWrite);
+          uint32_t hi = (kUCD >> 16) & 0xFFFF;
+          uint32_t lo = kUCD & 0xFFFF;
+          xe::store_and_swap<uint32_t>(mem + 0,  0x3C600000 | hi);   // lis r3, hi
+          xe::store_and_swap<uint32_t>(mem + 4,  0x60630000 | lo);   // ori r3, r3, lo
+          xe::store_and_swap<uint32_t>(mem + 8,  0x38800001);        // li r4, 1
+          xe::store_and_swap<uint32_t>(mem + 12, 0x90830000);        // stw r4, 0(r3)
+          xe::store_and_swap<uint32_t>(mem + 16, 0x4E800020);        // blr
+          XELOGI("DC3: Patched CheckForArchive at {:08X} to set gUsingCD=1 "
+                 "at {:08X} (5 PPC instructions)", kCheckForArchive, kUCD);
+        }
       }
-    };
-    ctx.processor->RegisterGuestFunctionOverride(kCheckForArchive, cfa_handler,
-        "DC3:CheckForArchive(gUsingCD=1)");
-    XELOGI("DC3: Registered CheckForArchive override at {:08X}", kCheckForArchive);
+    }
   }
 
   // CRT sanitizer + injection.
@@ -3355,10 +3372,10 @@ void ApplyCrtPatches(const Dc3HackContext& ctx,
       }
     }
 
-    // Set gUsingCD=1 (Session 37): the game runs from disc in Xenia.
-    // CheckForArchive normally sets this by checking for gen/main_*.hdr,
-    // but it's stubbed (returns 0).  Without UsingCD=true, the file system
-    // falls through to HolmesFileShare() which returns NULL → iRoot assert.
+    // Set gUsingCD=1 early (Session 37): belt-and-suspenders backup.
+    // CheckForArchive is also patched in PPC (above) to set gUsingCD=1,
+    // but this early write ensures it's set even if CheckForArchive
+    // runs from an unexpected address (e.g. /FORCE-linked duplicate).
     {
       auto* ucd = memory->TranslateVirtual<uint8_t*>(kAddr.g_using_cd);
       if (ucd) {
@@ -3504,6 +3521,8 @@ void Dc3PopulateAddressesFromCatalog(
 
   // Import/thunk
   get("xapi_call_thread_notify", kAddr.xapi_call_thread_notify);
+  get("mtinit", kAddr.mtinit);
+  get("xregister_thread_notify", kAddr.xregister_thread_notify);
   get("text_start", kAddr.text_start);
   get("text_size", kAddr.text_size);
   get("idata_start", kAddr.idata_start);
@@ -3567,6 +3586,10 @@ void Dc3PopulateAddressesFromCatalog(
   get("g_using_cd", kAddr.g_using_cd);
   get("check_for_archive", kAddr.check_for_archive);
   get("file_init", kAddr.file_init);
+  get("archive_init", kAddr.archive_init);
+  get("the_archive", kAddr.the_archive);
+  get("system_pre_init_1", kAddr.system_pre_init_1);
+  get("system_pre_init_2", kAddr.system_pre_init_2);
 
   // Holmes
   get("protocol_debug_string", kAddr.protocol_debug_string);
