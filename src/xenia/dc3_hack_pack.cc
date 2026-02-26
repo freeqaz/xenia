@@ -104,7 +104,7 @@ struct Dc3Addresses {
   uint32_t rcs_bufstream_seek_impl = 0x82BC3B38;
   // SystemConfig / FindArray / SetupFont
   uint32_t system_config_2 = 0x835165F4;
-  uint32_t find_array = 0x83543348;
+  uint32_t find_array = 0x83501AF0;
   uint32_t setup_font_syscfg_return_lr = 0x8317FF14;       // STALE
   uint32_t setup_font_ctor1_literal = 0x82027684;          // STALE
   uint32_t setup_font_ctor2_literal = 0x82053BF8;          // STALE
@@ -123,15 +123,21 @@ struct Dc3Addresses {
   // right after gStringTable at 0x83AE01C0). /FORCE linker artifact.
   uint32_t g_hash_table = 0x83AE01C4;
   // Memory / allocator probes
-  uint32_t mem_or_pool_alloc = 0x83447100;
-  uint32_t mem_alloc = 0x834466C8;
-  uint32_t pool_alloc = 0x835E9454;
+  uint32_t mem_or_pool_alloc = 0x83406350;  // ?MemOrPoolAlloc@@YAPAXIHPBDH1@Z (MemMgr.obj)
+  uint32_t mem_alloc = 0x83405918;          // ?MemAlloc@@YAPAXHPBDH1H@Z (MemMgr.obj)
+  uint32_t pool_alloc = 0x835A445C;         // ?PoolAlloc@@YAPAXIHPBDH1@Z (PoolAlloc.obj)
+  uint32_t mem_free = 0x83404B98;        // ?MemFree@@YAXPAXPBDH1@Z (MemMgr.obj)
+  uint32_t pool_free = 0x835A4224;       // ?PoolFree@@YAXHPAXPBDH1@Z (PoolAlloc.obj)
+  uint32_t mem_or_pool_free = 0x83404F0C; // ?MemOrPoolFree@@YAXHPAXPBDH1@Z (MemMgr.obj)
+  uint32_t operator_new = 0x83406314;    // ??2@YAPAXI@Z (MemMgr.obj)
+  uint32_t operator_delete = 0x833F7DA4; // ??3@YAXPAX@Z (BinkMovieSys.obj)
+  uint32_t g_num_heaps = 0x83A8B380;     // gNumHeaps (MemMgr.obj BSS)
   uint32_t string_reserve = 0x82A5BED0;
   uint32_t string_reserve_memalloc_ret_lr = 0x82A5BC00;    // STALE
   uint32_t g_chunk_alloc = 0x83CB8D08;
   // DataArray / DataNode
   uint32_t merged_dataarray_node = 0x835420C8;
-  uint32_t string_table_add = 0x82924FF0;
+  uint32_t string_table_add = 0x829C1180;
   uint32_t symbol_preinit = 0x82556A78;
   // TextStream
   uint32_t textstream_op_const_char = 0x829A7D38;
@@ -164,6 +170,8 @@ struct Dc3Addresses {
   // MemMgr assert addresses (STALE)
   uint32_t meminit_assert = 0x83447AF4;                    // STALE
   uint32_t memalloc_assert = 0x83446A24;                   // STALE
+  // Wind (DC3-specific; RB3 stubs SetWind)
+  uint32_t set_wind = 0x8325AD38;  // SetWind(int,int,float,float,float)
   // RndTransformable
   uint32_t set_dirty_force = 0x83494498;  // RndTransformable::SetDirty_Force
   // Memory_Xbox
@@ -1161,6 +1169,182 @@ void RegisterDc3MemOrPoolAllocProbe(const Dc3HackContext& ctx,
   debug_result.applied++;
 }
 
+// Host-side memory manager replacement.
+//
+// The game's MemAlloc/PoolAlloc (MemMgr.obj, PoolAlloc.obj) require game heaps
+// initialized via MemInit().  But MemInit reads config via DataReadFile, which
+// allocates DataArray nodes via operator new → MemAlloc — a chicken-and-egg
+// deadlock.
+//
+// Rather than trying to bootstrap and then hand off (impossible with JIT's
+// permanent extern_handler_ embedding), we replace the entire allocator with
+// Xenia's kernel SystemHeapAlloc/SystemHeapFree.  This is perfectly fine for
+// headless mode — allocations go to guest-visible memory with proper alignment.
+//
+// Overridden functions:
+//   MemAlloc(int size, const char* file, int line, const char* name, int heap)
+//   PoolAlloc(int size, int pool_size, const char* file, int line, const char* name)
+//   MemFree(void* ptr, const char* file, int line, const char* name)
+//   PoolFree(int size, void* ptr, const char* file, int line, const char* name)
+//   MemOrPoolFree(int size, void* ptr, const char* file, int line, const char* name)
+//   operator delete(void* ptr)
+void RegisterDc3MemAllocBootstrap(const Dc3HackContext& ctx,
+                                  Dc3HackApplyResult& debug_result) {
+  if (!ctx.processor || !ctx.is_decomp_layout) {
+    debug_result.skipped++;
+    return;
+  }
+
+  // MemAlloc: void* MemAlloc(int size, const char* file, int line,
+  //                          const char* name, int heap)
+  {
+    auto handler = [](cpu::ppc::PPCContext* ppc_context,
+                      kernel::KernelState* kernel_state) {
+      if (!ppc_context || !kernel_state) return;
+      auto* memory = kernel_state->memory();
+      if (!memory) return;
+
+      int32_t size = static_cast<int32_t>(ppc_context->r[3]);
+      uint32_t ptr = 0;
+      if (size > 0) {
+        ptr = memory->SystemHeapAlloc(static_cast<uint32_t>(size), 0x10);
+        if (ptr) {
+          auto* dest = memory->TranslateVirtual<uint8_t*>(ptr);
+          if (dest) std::memset(dest, 0, size);
+        }
+      }
+
+      static uint32_t alloc_count = 0;
+      ++alloc_count;
+      if (alloc_count <= 20 || (alloc_count % 5000) == 0) {
+        XELOGI("DC3: MemAlloc size={} -> {:08X} (#{} via SystemHeap)",
+               size, ptr, alloc_count);
+      }
+
+      ppc_context->r[3] = ptr;
+    };
+    ctx.processor->RegisterGuestFunctionOverride(kAddr.mem_alloc, handler,
+                                                 "DC3:MemAlloc(sysheap)");
+    debug_result.applied++;
+  }
+
+  // PoolAlloc: void* PoolAlloc(int size, int pool_size, const char* file,
+  //                            int line, const char* name)
+  {
+    auto handler = [](cpu::ppc::PPCContext* ppc_context,
+                      kernel::KernelState* kernel_state) {
+      if (!ppc_context || !kernel_state) return;
+      auto* memory = kernel_state->memory();
+      if (!memory) return;
+
+      int32_t size = static_cast<int32_t>(ppc_context->r[3]);
+      uint32_t ptr = 0;
+      if (size > 0) {
+        ptr = memory->SystemHeapAlloc(static_cast<uint32_t>(size), 0x10);
+        if (ptr) {
+          auto* dest = memory->TranslateVirtual<uint8_t*>(ptr);
+          if (dest) std::memset(dest, 0, size);
+        }
+      }
+
+      static uint32_t alloc_count = 0;
+      ++alloc_count;
+      if (alloc_count <= 20 || (alloc_count % 5000) == 0) {
+        XELOGI("DC3: PoolAlloc size={} -> {:08X} (#{} via SystemHeap)",
+               size, ptr, alloc_count);
+      }
+
+      ppc_context->r[3] = ptr;
+    };
+    ctx.processor->RegisterGuestFunctionOverride(kAddr.pool_alloc, handler,
+                                                 "DC3:PoolAlloc(sysheap)");
+    debug_result.applied++;
+  }
+
+  // MemFree: void MemFree(void* ptr, const char* file, int line,
+  //                       const char* name)
+  {
+    auto handler = [](cpu::ppc::PPCContext* ppc_context,
+                      kernel::KernelState* kernel_state) {
+      if (!ppc_context || !kernel_state) return;
+      auto* memory = kernel_state->memory();
+      if (!memory) return;
+
+      uint32_t ptr = static_cast<uint32_t>(ppc_context->r[3]);
+      if (ptr) {
+        memory->SystemHeapFree(ptr);
+      }
+    };
+    ctx.processor->RegisterGuestFunctionOverride(kAddr.mem_free, handler,
+                                                 "DC3:MemFree(sysheap)");
+    debug_result.applied++;
+  }
+
+  // PoolFree: void PoolFree(int size, void* ptr, const char* file,
+  //                         int line, const char* name)
+  {
+    auto handler = [](cpu::ppc::PPCContext* ppc_context,
+                      kernel::KernelState* kernel_state) {
+      if (!ppc_context || !kernel_state) return;
+      auto* memory = kernel_state->memory();
+      if (!memory) return;
+
+      // r4 is ptr (r3 is size)
+      uint32_t ptr = static_cast<uint32_t>(ppc_context->r[4]);
+      if (ptr) {
+        memory->SystemHeapFree(ptr);
+      }
+    };
+    ctx.processor->RegisterGuestFunctionOverride(kAddr.pool_free, handler,
+                                                 "DC3:PoolFree(sysheap)");
+    debug_result.applied++;
+  }
+
+  // MemOrPoolFree: void MemOrPoolFree(int size, void* ptr, const char* file,
+  //                                   int line, const char* name)
+  {
+    auto handler = [](cpu::ppc::PPCContext* ppc_context,
+                      kernel::KernelState* kernel_state) {
+      if (!ppc_context || !kernel_state) return;
+      auto* memory = kernel_state->memory();
+      if (!memory) return;
+
+      // r4 is ptr (r3 is size)
+      uint32_t ptr = static_cast<uint32_t>(ppc_context->r[4]);
+      if (ptr) {
+        memory->SystemHeapFree(ptr);
+      }
+    };
+    ctx.processor->RegisterGuestFunctionOverride(kAddr.mem_or_pool_free, handler,
+                                                 "DC3:MemOrPoolFree(sysheap)");
+    debug_result.applied++;
+  }
+
+  // operator delete: void operator delete(void* ptr)
+  {
+    auto handler = [](cpu::ppc::PPCContext* ppc_context,
+                      kernel::KernelState* kernel_state) {
+      if (!ppc_context || !kernel_state) return;
+      auto* memory = kernel_state->memory();
+      if (!memory) return;
+
+      uint32_t ptr = static_cast<uint32_t>(ppc_context->r[3]);
+      if (ptr) {
+        memory->SystemHeapFree(ptr);
+      }
+    };
+    ctx.processor->RegisterGuestFunctionOverride(kAddr.operator_delete, handler,
+                                                 "DC3:op_delete(sysheap)");
+    debug_result.applied++;
+  }
+
+  XELOGI("DC3: Replaced game memory manager with SystemHeapAlloc/Free "
+         "(MemAlloc={:08X} PoolAlloc={:08X} MemFree={:08X} PoolFree={:08X} "
+         "MemOrPoolFree={:08X} op_delete={:08X})",
+         kAddr.mem_alloc, kAddr.pool_alloc, kAddr.mem_free,
+         kAddr.pool_free, kAddr.mem_or_pool_free, kAddr.operator_delete);
+}
+
 void RegisterDc3FindArrayOverride(const Dc3HackContext& ctx,
                                   Dc3HackApplyResult& debug_result) {
   if (!ctx.is_decomp_layout || !ctx.processor) {
@@ -1666,6 +1850,29 @@ void ApplyImportStopgaps(const Dc3HackContext& ctx,
           xe::store_and_swap<uint32_t>(p + 4, 0x4E800020);  // blr
           XELOGI("DC3: Stubbed XRegisterThreadNotifyRoutine at {:08X} "
                  "(li r3,0; blr) — unblocks _mtinit CRT startup",
+                 addr);
+          result.applied++;
+        }
+      }
+    }
+  }
+
+  // Stub SetWind — DC3 has a real implementation that calls Rand::Gaussian on
+  // a null Rand object (the wind simulation structure at 0x83A25DC8 is
+  // zero-initialized but never constructed).  RB3 stubs SetWind as a no-op.
+  // Called from RndWind::Init → Rnd::PreInit during App::App().
+  {
+    const uint32_t addr = kAddr.set_wind;
+    auto* heap = memory->LookupHeap(addr);
+    if (heap) {
+      auto* p = memory->TranslateVirtual<uint8_t*>(addr);
+      if (p) {
+        uint32_t w0 = xe::load_and_swap<uint32_t>(p);
+        if (w0 != 0x00000000) {
+          heap->Protect(addr, 4, kMemoryProtectRead | kMemoryProtectWrite);
+          xe::store_and_swap<uint32_t>(p + 0, 0x4E800020);  // blr
+          XELOGI("DC3: Stubbed SetWind at {:08X} (blr) — avoids null "
+                 "Rand::Gaussian",
                  addr);
           result.applied++;
         }
@@ -2349,6 +2556,7 @@ void ApplyDebugStubs(const Dc3HackContext& ctx,
   RegisterDc3DataArraySafetyOverrides(ctx, result);
   RegisterDc3SystemConfigProbe(ctx, result);
   RegisterDc3MemOrPoolAllocProbe(ctx, result);
+  RegisterDc3MemAllocBootstrap(ctx, result);
 
   // Apply hoisted debug/Holmes stub table.
   for (const auto& entry : kDebugStubTable) {
@@ -3399,6 +3607,90 @@ void ApplyCrtPatches(const Dc3HackContext& ctx,
       }
     }
 
+    // Host-side STL container initialization (Session 40).
+    // The decomp build's /FORCE:MULTIPLE linker merges link_glue.obj stub
+    // __xc dynamic initializers (all ICF'd to 'blr') over the real .obj
+    // initializers. This leaves global std::list and std::map objects in
+    // BSS-zero state (sentinel nodes not self-referencing), causing infinite
+    // loops when code iterates them.
+    //
+    // Fix: write the empty-container sentinel values from the host.
+    //
+    // std::list layout (STLport, PPC32):
+    //   +0x00: _M_next (ptr) — empty: points to self
+    //   +0x04: _M_prev (ptr) — empty: points to self
+    //
+    // std::map/_Rb_tree layout (STLport, PPC32):
+    //   +0x00: _M_color  (u8) — empty: 1 (red)
+    //   +0x04: _M_parent (ptr) — empty: 0
+    //   +0x08: _M_left   (ptr) — empty: points to self
+    //   +0x0C: _M_right  (ptr) — empty: points to self
+    //   +0x10: _M_node_count — empty: 0
+    {
+      // Lists: write self-referencing sentinel (_M_next = _M_prev = self).
+      // Includes both static globals (BSS) and member lists inside globals
+      // whose constructors were skipped (e.g. TheLoadMgr at 0x83A8A8F0).
+      const uint32_t kTheLoadMgr = 0x83A8A8F0;
+      const uint32_t stl_lists[] = {
+          // Static globals (BSS, __xc initializers ICF'd to blr)
+          0x83B0F1C8,  // AutoTimer::sTimers
+          0x83B0F764,  // RndOverlay::sOverlays
+          0x83B0FAE4,  // SynthPollable::sPollables
+          0x83B0D9BC,  // MidiParser::sParsers
+          0x83B0F998,  // RndMultiMesh::sProxyPool
+          // TheLoadMgr member lists (CRT[155] skipped in 142-328 range)
+          kTheLoadMgr + 0x00,  // mLoaders
+          kTheLoadMgr + 0x10,  // mFactories
+          kTheLoadMgr + 0x20,  // mLoading
+      };
+      // Also set TheLoadMgr.mPlatform = kPlatformXBox (2).
+      // Without this, PlatformSymbol() returns "" and archive paths
+      // become "gen/main_.hdr" instead of "gen/main_xbox.hdr".
+      {
+        auto* lm = memory->TranslateVirtual<uint8_t*>(kTheLoadMgr);
+        if (lm) {
+          xe::store_and_swap<uint32_t>(lm + 0x08, 2);  // mPlatform = kPlatformXBox
+        }
+      }
+      int list_count = 0;
+      for (uint32_t addr : stl_lists) {
+        auto* p = memory->TranslateVirtual<uint8_t*>(addr);
+        if (p) {
+          uint32_t cur_next = xe::load_and_swap<uint32_t>(p + 0);
+          if (cur_next == 0) {
+            xe::store_and_swap<uint32_t>(p + 0, addr);  // _M_next = self
+            xe::store_and_swap<uint32_t>(p + 4, addr);  // _M_prev = self
+            list_count++;
+          }
+        }
+      }
+
+      // Map: Hmx::Object::sFactories (_Rb_tree sentinel).
+      {
+        const uint32_t addr = 0x83B0DEA8;
+        auto* p = memory->TranslateVirtual<uint8_t*>(addr);
+        if (p) {
+          uint32_t cur_parent = xe::load_and_swap<uint32_t>(p + 0x04);
+          if (cur_parent == 0 &&
+              xe::load_and_swap<uint32_t>(p + 0x08) == 0) {
+            p[0x00] = 1;  // _M_color = red (big-endian byte)
+            xe::store_and_swap<uint32_t>(p + 0x04, 0);     // _M_parent = NULL
+            xe::store_and_swap<uint32_t>(p + 0x08, addr);  // _M_left = self
+            xe::store_and_swap<uint32_t>(p + 0x0C, addr);  // _M_right = self
+            xe::store_and_swap<uint32_t>(p + 0x10, 0);     // _M_node_count = 0
+            list_count++;
+          }
+        }
+      }
+
+      if (list_count > 0) {
+        XELOGI("DC3: Host-initialized {} STL containers (lists + maps) "
+               "— fixes ICF-merged nop __xc initializers from link_glue.obj",
+               list_count);
+        result.applied += list_count;
+      }
+    }
+
     // Set gUsingCD=1 early (Session 37): belt-and-suspenders backup.
     // CheckForArchive is also patched in PPC (above) to set gUsingCD=1,
     // but this early write ensures it's set even if CheckForArchive
@@ -3587,6 +3879,12 @@ void Dc3PopulateAddressesFromCatalog(
   get("mem_or_pool_alloc", kAddr.mem_or_pool_alloc);
   get("mem_alloc", kAddr.mem_alloc);
   get("pool_alloc", kAddr.pool_alloc);
+  get("mem_free", kAddr.mem_free);
+  get("pool_free", kAddr.pool_free);
+  get("mem_or_pool_free", kAddr.mem_or_pool_free);
+  get("operator_new", kAddr.operator_new);
+  get("operator_delete", kAddr.operator_delete);
+  get("g_num_heaps", kAddr.g_num_heaps);
   get("string_reserve", kAddr.string_reserve);
   get("g_chunk_alloc", kAddr.g_chunk_alloc);
 
@@ -3620,6 +3918,9 @@ void Dc3PopulateAddressesFromCatalog(
 
   // Holmes
   get("protocol_debug_string", kAddr.protocol_debug_string);
+
+  // Wind
+  get("set_wind", kAddr.set_wind);
 
   // RndTransformable
   get("set_dirty_force", kAddr.set_dirty_force);
