@@ -186,6 +186,11 @@ struct Dc3Addresses {
   uint32_t rt_dynamic_cast = 0x83610900;  // __RTDynamicCast
   // String constants
   uint32_t g_null_str = 0x83A95DD4;       // gNullStr (pointer to "")
+  // SkeletonIdentifier (Kinect player identification)
+  uint32_t skeleton_identifier_init = 0x836165CC;
+  uint32_t skeleton_identifier_poll = 0x8361669C;
+  // OSCMessenger (Holmes debug networking)
+  uint32_t osc_messenger_poll = 0x83614B60;
 };
 Dc3Addresses kAddr;
 
@@ -1892,7 +1897,7 @@ void ApplyDebugStubs(const Dc3HackContext& ctx,
             // One-time backtrace for "is not Symbol" to find the per-frame caller
             // Dump gHashTable state when mOwnEntries assertion fires.
             if (std::strstr(msg, "mOwnEntries")) {
-              constexpr uint32_t kGHT = 0x83AE01C4;
+              const uint32_t kGHT = kAddr.g_hash_table;
               auto* ht = memory->TranslateVirtual<uint8_t*>(kGHT);
               if (ht) {
                 uint32_t e = xe::load_and_swap<uint32_t>(ht + 0x00);
@@ -2345,6 +2350,97 @@ void ApplyDebugStubs(const Dc3HackContext& ctx,
   RegisterDc3FindArrayOverride(ctx, result);
 }
 
+// Apply XDK SDK function overrides from the manifest.
+// These are JIT-level overrides (no guest memory modification) for XDK
+// library functions (XAudio2, NUI, Speech) that deadlock or crash when
+// their hardware backends aren't available (nop APU, no Kinect).
+//
+// IMPORTANT: The xdk_overrides map may include shared template instantiations
+// (MakeString, STL helpers) that are ICF-merged with game code.  We filter
+// to only override XDK-internal class methods by checking for known prefixes
+// in the mangled symbol name.
+void ApplyXdkOverrides(const Dc3HackContext& ctx,
+                       Dc3HackApplyResult& result) {
+  if (!ctx.processor || !ctx.xdk_overrides || ctx.xdk_overrides->empty()) {
+    return;
+  }
+
+  // Only override symbols containing these XDK-internal identifiers.
+  // This avoids nopping MakeString templates, STL helpers, etc. that
+  // are ICF-merged with game code at the same address.
+  auto is_xdk_internal = [](const std::string& name) -> bool {
+    // XAudio2 internal classes (CX2Engine, CX2SourceVoice, CX2VoiceBase, etc.)
+    if (name.find("CX2") != std::string::npos) return true;
+    if (name.find("XAUDIO2") != std::string::npos) return true;
+    // NUI/Kinect SDK APIs
+    if (name.find("@Nui") != std::string::npos ||
+        name.find("Nui") == 0) return true;
+    // Speech SDK internals
+    if (name.find("@CSp") != std::string::npos) return true;
+    if (name.find("NUISPEECH") != std::string::npos) return true;
+    // NUI runtime internals
+    if (name.find("@NUI@@") != std::string::npos) return true;
+    if (name.find("@NuiRuntime") != std::string::npos) return true;
+    return false;
+  };
+
+  // Single handler for all XDK overrides: return 0 (S_OK for HRESULT,
+  // null for pointers, no-op for void).  r3 = return value in PPC ABI.
+  auto xdk_nop_handler = [](cpu::ppc::PPCContext* ppc_context,
+                            kernel::KernelState*) {
+    ppc_context->r[3] = 0;
+  };
+
+  int applied = 0;
+  int skipped = 0;
+  for (const auto& [name, addr] : *ctx.xdk_overrides) {
+    if (!is_xdk_internal(name)) {
+      ++skipped;
+      continue;
+    }
+    ctx.processor->RegisterGuestFunctionOverride(addr, xdk_nop_handler);
+    ++applied;
+  }
+
+  // Also scan xdk_code_ranges for function prologues that aren't in the
+  // symbol map (internal/static XDK functions).
+  if (ctx.xdk_code_ranges && !ctx.xdk_code_ranges->empty()) {
+    auto* memory = ctx.memory;
+    int prologue_stubs = 0;
+    for (const auto& range : *ctx.xdk_code_ranges) {
+      // Scan for PPC function prologues (stwu r1, -N(r1) = 0x9421xxxx)
+      // within the range.
+      for (uint32_t pc = range.start; pc < range.end; pc += 4) {
+        auto* p = memory->TranslateVirtual<uint8_t*>(pc);
+        if (!p) continue;
+        uint32_t insn = xe::load_and_swap<uint32_t>(p);
+        if ((insn & 0xFFFF0000) == 0x94210000) {
+          // Found a function prologue — register override if not already
+          // covered by the named overrides.
+          bool already_covered = false;
+          for (const auto& [n, a] : *ctx.xdk_overrides) {
+            if (a == pc) { already_covered = true; break; }
+          }
+          if (!already_covered) {
+            ctx.processor->RegisterGuestFunctionOverride(
+                pc, xdk_nop_handler);
+            ++prologue_stubs;
+          }
+        }
+      }
+    }
+    if (prologue_stubs > 0) {
+      XELOGI("DC3: XDK prologue scan: {} additional internal functions stubbed",
+             prologue_stubs);
+      applied += prologue_stubs;
+    }
+  }
+
+  XELOGI("DC3: Applied {} XDK JIT overrides ({} shared templates skipped)",
+         applied, skipped);
+  result.applied += applied;
+}
+
 void ApplyRuntimeStopgaps(const Dc3HackContext& ctx,
                           Dc3HackApplyResult& result) {
   Memory* memory = ctx.memory;
@@ -2465,12 +2561,10 @@ void ApplyRuntimeStopgaps(const Dc3HackContext& ctx,
         {kAddr.occlusion_query_mgr_ctor, "DxRndOcclusionQueryMgr::ctor"},
         {kAddr.dxrnd_init_buffers, "DxRnd::InitBuffers"},
         {kAddr.dxrnd_create_post_textures, "DxRnd::CreatePostTextures"},
-        // Audio: XAudio2 engine creation deadlocks on uninitialized CS
-        // because the nop audio backend returns a dummy driver handle and
-        // the XAudio2 library's CCriticalSectionLock::Enter bypasses the
-        // kernel import (IAT entry is zero), so our auto-init never fires.
-        {kAddr.synth360_preinit, "Synth360::PreInit"},
-        {kAddr.synth_init, "SynthInit"},
+        // Audio: SynthPreInit now creates base Synth (no XAudio2 dependency)
+        // in the decomp build, so SynthInit runs normally and initializes
+        // the Fader system.  XDK JIT overrides handle any stray XAudio2
+        // calls.  No blr patches needed for Synth360::PreInit or SynthInit.
         // Bink: BinkStartAsyncThread blocks waiting for thread readiness
         // on nop GPU; PlatformInit may also block on D3D device.
         {kAddr.bink_start_async_thread, "BinkStartAsyncThread"},
@@ -2522,10 +2616,8 @@ void ApplyRuntimeStopgaps(const Dc3HackContext& ctx,
     // config and calls Sym() on each entry.  Without Kinect/speech recognition,
     // this spins forever on "Data is not Symbol" errors during UIManager::Init.
     PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x8354D8D4, 0, "VoiceInputPanel::LoadVoiceContexts");
-    // Fader::UpdateValue iterates mClients (std::set<FaderGroup*>) which has
-    // corrupt tree nodes when SynthInit was skipped. Infinite loop in set
-    // traversal during CampaignSongSelectPanel construction.
-    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x8326DE2C, 0, "Fader::UpdateValue");
+    // Fader::UpdateValue — no longer needed.  SynthPreInit now creates a base
+    // Synth, so SynthInit runs normally and properly initializes mClients.
     // ShellInput::Init depends on Kinect/gesture subsystems (SpeechMgr,
     // GestureMgr, SkeletonUpdate, DepthBuffer).  TheSpeechMgr->AddSink()
     // hits corrupt MsgSinks lists because SpeechMgr was never initialized.
@@ -2588,6 +2680,49 @@ void ApplyRuntimeStopgaps(const Dc3HackContext& ctx,
     // Without GPU initialization (headless mode), VdSwap crashes on
     // invalid frontbuffer physical address.  Stub to skip rendering.
     PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x8300ABE0, 0, "App::DrawRegular");
+    // OSCMessenger::Poll is a Holmes debug networking function that polls
+    // for OSC (Open Sound Control) messages over UDP.  Hangs forever when
+    // no network is available (headless mode).  Use JIT-level override
+    // (RegisterGuestFunctionOverride) — guest memory patches are unsafe in
+    // /FORCE-linked regions where functions may overlap.
+    if (ctx.processor) {
+      auto nop_handler = [](cpu::ppc::PPCContext* ppc_context,
+                            kernel::KernelState*) {
+        ppc_context->r[3] = 0;
+      };
+      ctx.processor->RegisterGuestFunctionOverride(
+          kAddr.osc_messenger_poll, nop_handler,
+          "DC3:OSCMessenger::Poll");
+      XELOGI("DC3: Registered OSCMessenger::Poll JIT override at {:08X}",
+             kAddr.osc_messenger_poll);
+    }
+    // SkeletonIdentifier uses Kinect for player identification during boot.
+    // Its Init() loops calling Poll() which never completes without Kinect.
+    //
+    // IMPORTANT: Do NOT use PatchStub8 / blr patches for these functions!
+    // The /FORCE linker creates overlapping functions — a different function
+    // (starting at Init+0x7C with its own stwu prologue, called from
+    // merged_827F5720 in WaveFile.obj) has its body extending through
+    // Poll's MAP entry at 0x8361669C.  Writing li r3,0; blr there corrupts
+    // that function's control flow, creating an infinite loop.
+    //
+    // RegisterGuestFunctionOverride hooks at the JIT dispatch level without
+    // modifying guest memory, so overlapping functions are unaffected.
+    if (ctx.processor) {
+      auto nop_handler = [](cpu::ppc::PPCContext* ppc_context,
+                            kernel::KernelState*) {
+        ppc_context->r[3] = 0;
+      };
+      ctx.processor->RegisterGuestFunctionOverride(
+          kAddr.skeleton_identifier_init, nop_handler,
+          "DC3:SkeletonIdentifier::Init");
+      ctx.processor->RegisterGuestFunctionOverride(
+          kAddr.skeleton_identifier_poll, nop_handler,
+          "DC3:SkeletonIdentifier::Poll");
+      XELOGI("DC3: Registered SkeletonIdentifier::Init/Poll JIT overrides "
+             "at {:08X}/{:08X}",
+             kAddr.skeleton_identifier_init, kAddr.skeleton_identifier_poll);
+    }
     result.applied += 25;
   }
 
@@ -2907,8 +3042,8 @@ void ApplyCrtPatches(const Dc3HackContext& ctx,
     const uint32_t kPreInit = kAddr.symbol_preinit;
     auto preinit_handler = [](cpu::ppc::PPCContext* ppc_context,
                               kernel::KernelState* kernel_state) {
-      constexpr uint32_t kGST = 0x83AE01C0;
-      constexpr uint32_t kGHT = 0x83AE01C4;
+      const uint32_t kGST = kAddr.g_string_table_global;
+      const uint32_t kGHT = kAddr.g_hash_table;
       constexpr uint32_t kHashSize = 92681;  // NextHashPrime(80000)
       constexpr uint32_t kEntrySize = 4;     // sizeof(const char*)
       auto* memory = kernel_state ? kernel_state->memory() : nullptr;
@@ -2976,7 +3111,7 @@ void ApplyCrtPatches(const Dc3HackContext& ctx,
     const uint32_t kCheckForArchive = kAddr.check_for_archive;
     auto cfa_handler = [](cpu::ppc::PPCContext* ppc_context,
                           kernel::KernelState* kernel_state) {
-      constexpr uint32_t kUCD = 0x83C7BAF0;  // gUsingCD address
+      const uint32_t kUCD = kAddr.g_using_cd;  // gUsingCD address
       auto* memory = kernel_state ? kernel_state->memory() : nullptr;
       if (!memory) return;
       auto* ucd = memory->TranslateVirtual<uint8_t*>(kUCD);
@@ -3290,6 +3425,7 @@ void ApplyDc3ImportAndRuntimeStopgaps(const Dc3HackContext& ctx,
 
   ApplyImportStopgaps(ctx, import_result);
   ApplyDebugStubs(ctx, debug_result);
+  ApplyXdkOverrides(ctx, stopgap_result);
   ApplyRuntimeStopgaps(ctx, stopgap_result);
   ApplyCrtPatches(ctx, crt_result);
 }
@@ -3489,6 +3625,13 @@ void Dc3PopulateAddressesFromCatalog(
 
   // String constants
   get("g_null_str", kAddr.g_null_str);
+
+  // SkeletonIdentifier (Kinect)
+  get("skeleton_identifier_init", kAddr.skeleton_identifier_init);
+  get("skeleton_identifier_poll", kAddr.skeleton_identifier_poll);
+
+  // OSCMessenger (Holmes debug)
+  get("osc_messenger_poll", kAddr.osc_messenger_poll);
 
   XELOGI("DC3: Populated {} address catalog entries from manifest", updated);
 }
