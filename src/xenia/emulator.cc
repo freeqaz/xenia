@@ -1798,8 +1798,11 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
     int resolved_by_catalog = 0;
     int resolver_strict_rejects = 0;
     for (int i = 0; i < active_count; ++i) {
+      // Always pass the manifest when available — its target addresses come
+      // from the MAP file and are reliable even when PE/XEX fingerprints differ.
+      // The fingerprint mismatch flag only affects the warning, not resolution.
       auto resolved = Dc3ResolveNuiPatchTarget(active_patches[i], text_info,
-                                               use_patch_manifest_targets
+                                               patch_manifest
                                                    ? &*patch_manifest
                                                    : nullptr,
                                                symbol_manifest ? &*symbol_manifest
@@ -1972,16 +1975,18 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
         override_register_failed++;
         continue;
       }
-      // Safety: when the manifest fingerprint doesn't match the runtime
-      // .text (XEX rebuilt since manifest was generated), catalog-fallback
-      // addresses are from the wrong build and may land inside unrelated
-      // functions (e.g. CRT _mtinit, _mtinitlocknum).  Reject them.
-      if (!use_patch_manifest_targets &&
+      // Safety: when no manifest is loaded at all, catalog-fallback
+      // addresses are hardcoded defaults that may be from a different build.
+      // Reject them.  When a manifest IS loaded, catalog addresses come from
+      // MAP symbol resolution and are reliable even if the PE/XEX fingerprint
+      // doesn't match (PE and XEX fingerprints always differ for decomp
+      // builds due to section layout differences).
+      if (!patch_manifest.has_value() &&
           resolved_patch.resolve_method ==
               Dc3PatchResolveMethod::kCatalogAddress) {
         XELOGW(
             "DC3: Guest override registration skipped {:08X}: {} "
-            "(catalog fallback rejected — fingerprint mismatch; address "
+            "(catalog fallback rejected — no manifest loaded; address "
             "likely stale)",
             patch_addr, patch.name);
         override_register_failed++;

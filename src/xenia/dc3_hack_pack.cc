@@ -118,6 +118,7 @@ struct Dc3Addresses {
   uint32_t rndmat_static_name_sym = 0x83AEAB2C;
   uint32_t metamaterial_static_name_sym = 0x83AEBFA8;
   uint32_t g_system_config = 0x83C7BAE8;
+  uint32_t read_system_config = 0;  // ReadSystemConfig(const char*) -> DataArray*
   uint32_t g_string_table_global = 0x83AE01C0;
   // NOTE: MAP says 0x83AED0FC (.bss) but code references 0x83AE01C4 (.data,
   // right after gStringTable at 0x83AE01C0). /FORCE linker artifact.
@@ -139,6 +140,10 @@ struct Dc3Addresses {
   uint32_t merged_dataarray_node = 0x835420C8;
   uint32_t string_table_add = 0x829C1180;
   uint32_t symbol_preinit = 0x82556A78;
+  // DTA text parser
+  uint32_t data_input = 0x8310C9F8;          // DataInput (DataFile.obj) — flex YY_INPUT
+  uint32_t data_read_stream = 0x8310E428;     // DataReadStream (DataFile.obj)
+  uint32_t parse_array = 0x8310E380;          // ParseArray (DataFile.obj)
   // TextStream
   uint32_t textstream_op_const_char = 0x829A7D38;
   // String ops
@@ -153,7 +158,7 @@ struct Dc3Addresses {
   uint32_t file_is_local = 0x82B17958;
   uint32_t file_is_local_assert_branch = 0x82B17980;
   // File system globals
-  uint32_t g_using_cd = 0x83C7BAF0;
+  uint32_t g_using_cd = 0x83A93548;  // was 0x83C7BAF0 (wrong BSS address)
   uint32_t check_for_archive = 0x83516A68;
   uint32_t file_init = 0x83413CDC;
   uint32_t archive_init = 0x834A41F8;
@@ -163,8 +168,25 @@ struct Dc3Addresses {
   // CRT functions that block the main thread
   uint32_t mtinit = 0x835CBB2C;  // _mtinit (tidtable.obj)
   uint32_t xregister_thread_notify = 0x830DCFEC;  // XRegisterThreadNotifyRoutine
-  // gConditional sentinel
-  uint32_t g_conditional = 0x83C7D354;                     // STALE
+  // gConditional / gDataArrayConditional (BSS, not in MAP)
+  // Addresses are extracted at runtime from their ctor functions' PPC code.
+  uint32_t g_conditional = 0;
+  uint32_t g_conditional_ctor = 0;             // ??__EgConditional@@YAXXZ
+  uint32_t g_data_array_conditional = 0;
+  uint32_t g_data_array_conditional_ctor = 0;  // ??__EgDataArrayConditional@@YAXXZ
+  // Object / factory (PPC patch targets)
+  uint32_t load_meta_materials = 0x831E5A84;   // RndMat::LoadMetaMaterials
+  uint32_t object_set_name = 0x82A252B8;       // Hmx::Object::SetName
+  // STL container globals (BSS, sentinel init from host)
+  uint32_t the_load_mgr = 0x83A8A8F0;
+  uint32_t auto_timer_stmrs = 0x83B0F1C8;
+  uint32_t rnd_overlay_soverlays = 0x83B0F764;
+  uint32_t synth_pollable_spollables = 0x83B0FAE4;
+  uint32_t midi_parser_sparsers = 0x83B0D9BC;
+  uint32_t rnd_multi_mesh_sproxy = 0x83B0F998;
+  // LoadMgr (async file I/O)
+  uint32_t poll_front_loader = 0x8341CE08;   // LoadMgr::PollFrontLoader (Loader.obj)
+  uint32_t poll_until_loaded = 0x8341D380;   // LoadMgr::PollUntilLoaded (Loader.obj)
   // Holmes trampoline target (reused as PPC code cave)
   uint32_t protocol_debug_string = 0x831F0838;
   // MemMgr assert addresses (STALE)
@@ -501,6 +523,306 @@ void Dc3LogSetupFontLiteralSanity(Memory* memory) {
   }
 }
 
+// ============================================================================
+// Host-side Rand2 (Park-Miller LCG) — mirrors DC3 Rand2 for DTB decryption
+// ============================================================================
+class HostRand2 {
+ public:
+  explicit HostRand2(int seed) {
+    if (seed == 0) seed = 1;
+    if (seed < 0) seed = -seed;
+    seed_ = seed;
+  }
+  // Returns next value in [1, 2^31-2]. Low 8 bits used as XOR byte.
+  int Int() {
+    int test = (seed_ % 127773) * 16807 - (seed_ / 127773) * 2836;
+    if (test > 0)
+      seed_ = test;
+    else
+      seed_ = test + 0x7FFFFFFF;
+    return seed_;
+  }
+ private:
+  int seed_;
+};
+
+// ============================================================================
+// Host-side ReadCacheStream diagnostic — decrypts DTB header on host
+// ============================================================================
+void Dc3ReadCacheStreamDiagnostic(cpu::ppc::PPCContext* ppc_context,
+                                  kernel::KernelState* kernel_state) {
+  if (!ppc_context || !kernel_state) return;
+  auto* memory = kernel_state->memory();
+  if (!memory) return;
+
+  // ReadCacheStream(BinStream &bs, const char *cc)
+  // PPC ABI: r3 = BinStream* (BufStream on stack), r4 = const char* filename
+  uint32_t bs_addr = static_cast<uint32_t>(ppc_context->r[3]);
+  uint32_t cc_addr = static_cast<uint32_t>(ppc_context->r[4]);
+
+  const char* filename = "<unknown>";
+  if (cc_addr && cc_addr < 0xF0000000) {
+    auto* p = memory->TranslateVirtual<const char*>(cc_addr);
+    if (p) filename = p;
+  }
+
+  auto* bs = memory->TranslateVirtual<uint8_t*>(bs_addr);
+  if (!bs) {
+    XELOGW("DC3:RCS DIAG: BufStream translate fail bs={:08X} file={}",
+           bs_addr, filename);
+    ppc_context->r[3] = 0;
+    return;
+  }
+
+  // Dump raw BufStream object as 4-byte words to determine layout
+  {
+    XELOGI("DC3:RCS DIAG: BufStream raw dump at {:08X} for file={}:",
+           bs_addr, filename);
+    for (int off = 0; off < 0x38; off += 4) {
+      uint32_t w = xe::load_and_swap<uint32_t>(bs + off);
+      XELOGI("DC3:RCS DIAG:   +{:02X}: {:08X}  ({})", off, w, static_cast<int32_t>(w));
+    }
+  }
+
+  // BufStream layout (DC3) — tentative, verify with dump above:
+  //   0x00: vtable
+  //   0x04: mLittleEndian (bool, 4 bytes with padding)
+  //   0x08: mCrypto (Rand2*)
+  //   0x0c: mRevStack (vector<ObjVersion>*)
+  //   0x10: mBuffer (char*)
+  //   0x14: mFail (bool, 4 bytes with padding)
+  //   0x18: mTell (int)
+  //   0x1c: mSize (int)
+  //   0x20: mChecksum (StreamChecksumValidator*)
+  //   0x24: mBytesChecksummed (int)
+  uint32_t vtable = xe::load_and_swap<uint32_t>(bs + 0x00);
+  uint8_t little_endian = bs[0x04];
+  uint32_t crypto_ptr = xe::load_and_swap<uint32_t>(bs + 0x08);
+  uint32_t buf_ptr = xe::load_and_swap<uint32_t>(bs + 0x10);
+  uint8_t fail = bs[0x14];
+  int32_t tell = xe::load_and_swap<int32_t>(bs + 0x18);
+  int32_t size = xe::load_and_swap<int32_t>(bs + 0x1c);
+  uint32_t checksum = xe::load_and_swap<uint32_t>(bs + 0x20);
+
+  XELOGI("DC3:RCS DIAG: file={} bs={:08X} vtbl={:08X} LE={} crypto={:08X} "
+         "buf={:08X} fail={} tell={} size={} chk={:08X}",
+         filename, bs_addr, vtable, little_endian, crypto_ptr,
+         buf_ptr, fail, tell, size, checksum);
+
+  // Check candidate buffer addresses: dump 32 bytes from each pointer-like
+  // field to empirically determine which is the actual file data buffer.
+  uint32_t candidates[] = {
+      xe::load_and_swap<uint32_t>(bs + 0x04),  // +04 (could be ptr if not LE bool)
+      xe::load_and_swap<uint32_t>(bs + 0x10),  // +10 (expected mBuffer)
+      xe::load_and_swap<uint32_t>(bs + 0x14),  // +14 (mystery constant)
+      xe::load_and_swap<uint32_t>(bs + 0x18),  // +18 (expected mTell but looks like ptr)
+  };
+  for (int ci = 0; ci < 4; ++ci) {
+    uint32_t addr = candidates[ci];
+    if (!addr || addr >= 0xF0000000) continue;
+    auto* p = memory->TranslateVirtual<uint8_t*>(addr);
+    if (!p) continue;
+    std::string hex;
+    for (int i = 0; i < 32; ++i) {
+      char tmp[4];
+      snprintf(tmp, sizeof(tmp), "%02X", p[i]);
+      hex += tmp;
+      if ((i % 4) == 3) hex += ' ';
+    }
+    // Also check if it's a printable string
+    bool printable = true;
+    int slen = 0;
+    for (int i = 0; i < 64 && p[i]; ++i) {
+      if (p[i] < 0x20 || p[i] > 0x7e) { printable = false; break; }
+      slen++;
+    }
+    if (printable && slen > 0) {
+      char str[65] = {};
+      std::memcpy(str, p, std::min(slen, 64));
+      XELOGI("DC3:RCS DIAG: ptr[+{:02X}]={:08X} → bytes=[{}] str=\"{}\"",
+             ci == 0 ? 0x04 : (ci == 1 ? 0x10 : (ci == 2 ? 0x14 : 0x18)),
+             addr, hex, str);
+    } else {
+      bool all_zero = true;
+      for (int i = 0; i < 32; ++i) if (p[i]) { all_zero = false; break; }
+      XELOGI("DC3:RCS DIAG: ptr[+{:02X}]={:08X} → bytes=[{}]{}",
+             ci == 0 ? 0x04 : (ci == 1 ? 0x10 : (ci == 2 ? 0x14 : 0x18)),
+             addr, hex, all_zero ? " ALL_ZERO" : "");
+    }
+  }
+
+  // Use +10 as buffer address for now (expected layout)
+  if (!buf_ptr || buf_ptr >= 0xF0000000) {
+    XELOGW("DC3:RCS DIAG: invalid buf_ptr {:08X} — returning nullptr", buf_ptr);
+    ppc_context->r[3] = 0;
+    return;
+  }
+
+  auto* buf = memory->TranslateVirtual<uint8_t*>(buf_ptr);
+  if (!buf) {
+    XELOGW("DC3:RCS DIAG: buffer translate fail buf={:08X}", buf_ptr);
+    ppc_context->r[3] = 0;
+    return;
+  }
+
+  // For the size, use +1C which consistently holds a reasonable value.
+  // If tell looks like a pointer (>0x10000), treat it as 0 (fresh stream).
+  int actual_tell = (tell > 0x10000) ? 0 : tell;
+  int remaining = size - actual_tell;
+  if (remaining <= 0) {
+    XELOGW("DC3:RCS DIAG: no bytes remaining (tell={} size={} actual_tell={})",
+           tell, size, actual_tell);
+    ppc_context->r[3] = 0;
+    return;
+  }
+  int dump_len = std::min(remaining, 128);
+
+  // Dump first 128 raw bytes from buffer start (tell=0)
+  {
+    std::string hex;
+    for (int i = 0; i < dump_len; ++i) {
+      char tmp[4];
+      snprintf(tmp, sizeof(tmp), "%02X", buf[actual_tell + i]);
+      hex += tmp;
+      if ((i % 32) == 31 || i == dump_len - 1) {
+        XELOGI("DC3:RCS DIAG: raw+{:04X}: {}", i - (i % 32), hex);
+        hex.clear();
+      } else if ((i % 4) == 3) {
+        hex += ' ';
+      }
+    }
+  }
+
+  // Now decrypt the header using host-side Rand2
+  if (remaining < 7) {  // need at least 4 (seed) + 1 (bool) + 2 (size)
+    XELOGW("DC3:RCS DIAG: buffer too small ({} bytes from tell={}) for DTB header",
+           remaining, tell);
+    ppc_context->r[3] = 0;
+    return;
+  }
+
+  // Step 1: Read 4-byte seed (UNENCRYPTED, stored in stream's endian format)
+  // BufStream created with littleEndian=true → multi-byte values in LE format
+  uint8_t* p = buf + tell;
+  int32_t seed;
+  if (little_endian) {
+    seed = p[0] | (p[1] << 8) | (p[2] << 16) | (p[3] << 24);
+  } else {
+    seed = (p[0] << 24) | (p[1] << 16) | (p[2] << 8) | p[3];
+  }
+  p += 4;
+  XELOGI("DC3:RCS DIAG: seed={} (0x{:08X})", seed, static_cast<uint32_t>(seed));
+
+  HostRand2 rng(seed);
+
+  // Step 2: Decrypt and read 1-byte bool (has root array?)
+  uint8_t enc_bool = *p++;
+  uint8_t xor_byte = static_cast<uint8_t>(rng.Int());
+  uint8_t dec_bool = enc_bool ^ xor_byte;
+  XELOGI("DC3:RCS DIAG: bool: enc={:02X} xor={:02X} dec={:02X} ({})",
+         enc_bool, xor_byte, dec_bool, dec_bool ? "HAS_ARRAY" : "NULL_ARRAY");
+
+  if (!dec_bool) {
+    XELOGW("DC3:RCS DIAG: root array bool is FALSE — DTB says no DataArray! "
+           "Encryption seed may be wrong.");
+    ppc_context->r[3] = 0;
+    return;
+  }
+
+  // Step 3: Decrypt 2-byte short (node count / size)
+  uint8_t enc_size[2] = {p[0], p[1]};
+  uint8_t xor_size[2];
+  xor_size[0] = static_cast<uint8_t>(rng.Int());
+  xor_size[1] = static_cast<uint8_t>(rng.Int());
+  uint8_t dec_size[2] = {static_cast<uint8_t>(enc_size[0] ^ xor_size[0]),
+                         static_cast<uint8_t>(enc_size[1] ^ xor_size[1])};
+  int16_t node_count;
+  if (little_endian) {
+    node_count = static_cast<int16_t>(dec_size[0] | (dec_size[1] << 8));
+  } else {
+    node_count = static_cast<int16_t>((dec_size[0] << 8) | dec_size[1]);
+  }
+  p += 2;
+  XELOGI("DC3:RCS DIAG: size: enc=[{:02X},{:02X}] xor=[{:02X},{:02X}] "
+         "dec=[{:02X},{:02X}] node_count={}",
+         enc_size[0], enc_size[1], xor_size[0], xor_size[1],
+         dec_size[0], dec_size[1], node_count);
+
+  // Step 4: Decrypt 2-byte short (mLine)
+  uint8_t enc_line[2] = {p[0], p[1]};
+  uint8_t xor_line[2];
+  xor_line[0] = static_cast<uint8_t>(rng.Int());
+  xor_line[1] = static_cast<uint8_t>(rng.Int());
+  uint8_t dec_line[2] = {static_cast<uint8_t>(enc_line[0] ^ xor_line[0]),
+                         static_cast<uint8_t>(enc_line[1] ^ xor_line[1])};
+  int16_t line;
+  if (little_endian) {
+    line = static_cast<int16_t>(dec_line[0] | (dec_line[1] << 8));
+  } else {
+    line = static_cast<int16_t>((dec_line[0] << 8) | dec_line[1]);
+  }
+  p += 2;
+  XELOGI("DC3:RCS DIAG: line: enc=[{:02X},{:02X}] dec=[{:02X},{:02X}] line={}",
+         enc_line[0], enc_line[1], dec_line[0], dec_line[1], line);
+
+  // Step 5: Decrypt 2-byte short (mDeprecated) — was 1-byte bool in some versions
+  uint8_t enc_dep[2] = {p[0], p[1]};
+  uint8_t xor_dep[2];
+  xor_dep[0] = static_cast<uint8_t>(rng.Int());
+  xor_dep[1] = static_cast<uint8_t>(rng.Int());
+  uint8_t dec_dep[2] = {static_cast<uint8_t>(enc_dep[0] ^ xor_dep[0]),
+                         static_cast<uint8_t>(enc_dep[1] ^ xor_dep[1])};
+  int16_t deprecated;
+  if (little_endian) {
+    deprecated = static_cast<int16_t>(dec_dep[0] | (dec_dep[1] << 8));
+  } else {
+    deprecated = static_cast<int16_t>((dec_dep[0] << 8) | dec_dep[1]);
+  }
+  p += 2;
+  XELOGI("DC3:RCS DIAG: deprecated: enc=[{:02X},{:02X}] dec=[{:02X},{:02X}] val={}",
+         enc_dep[0], enc_dep[1], dec_dep[0], dec_dep[1], deprecated);
+
+  // Step 6: Decrypt first few node type values to see if they look valid
+  for (int n = 0; n < std::min(static_cast<int>(node_count), 4); ++n) {
+    if (p + 4 > buf + size) break;
+    uint8_t enc_type[4] = {p[0], p[1], p[2], p[3]};
+    uint8_t xor_type[4];
+    for (int b = 0; b < 4; b++)
+      xor_type[b] = static_cast<uint8_t>(rng.Int());
+    uint8_t dec_type[4];
+    for (int b = 0; b < 4; b++)
+      dec_type[b] = enc_type[b] ^ xor_type[b];
+    int32_t type;
+    if (little_endian) {
+      type = dec_type[0] | (dec_type[1] << 8) | (dec_type[2] << 16) | (dec_type[3] << 24);
+    } else {
+      type = (dec_type[0] << 24) | (dec_type[1] << 16) | (dec_type[2] << 8) | dec_type[3];
+    }
+    XELOGI("DC3:RCS DIAG: node[{}] type_enc=[{:02X}{:02X}{:02X}{:02X}] "
+           "type_dec=[{:02X}{:02X}{:02X}{:02X}] type={}",
+           n, enc_type[0], enc_type[1], enc_type[2], enc_type[3],
+           dec_type[0], dec_type[1], dec_type[2], dec_type[3], type);
+    p += 4;
+    // Skip the value bytes — we don't know the size without full parsing
+    // Just log the next 4 raw bytes for context
+    if (p + 4 <= buf + size) {
+      uint8_t next[4] = {p[0], p[1], p[2], p[3]};
+      // Don't advance rng or p — just show raw bytes
+      XELOGI("DC3:RCS DIAG: node[{}] next_raw=[{:02X}{:02X}{:02X}{:02X}]",
+             n, next[0], next[1], next[2], next[3]);
+    }
+    break;  // Only decode first node type fully (value size varies)
+  }
+
+  XELOGI("DC3:RCS DIAG: summary: seed={} bool={} size={} line={} deprecated={} "
+         "— {} returning nullptr to let game use fallback path",
+         seed, dec_bool, node_count, line, deprecated, filename);
+
+  // Return nullptr — the caller (DataReadFile) will handle it.
+  // gSystemConfig will get nullptr which triggers MILO_ASSERT (handled).
+  ppc_context->r[3] = 0;
+}
+
 void Dc3RcsBufStreamReadImplProbe(cpu::ppc::PPCContext* ppc_context,
                                   kernel::KernelState* kernel_state) {
   if (!ppc_context || !kernel_state) return;
@@ -742,6 +1064,43 @@ bool PatchCheckedNop(Memory* memory, uint32_t address, uint32_t expected_word,
   XELOGI("DC3: Debug-only MemMgr assert bypass active at {:08X} ({})", address,
          name);
   return true;
+}
+
+// Extract a 32-bit address from the first lis+addi/ori pair in PPC code.
+// Used to discover BSS variable addresses from their dynamic initializer
+// functions (e.g. ??__EgConditional@@YAXXZ loads the address of gConditional).
+uint32_t ExtractPpcLisAddiAddr(Memory* memory, uint32_t fn_addr,
+                                int max_insns = 12) {
+  if (!fn_addr) return 0;
+  auto* base = memory->TranslateVirtual<uint8_t*>(fn_addr);
+  if (!base) return 0;
+  for (int i = 0; i < max_insns; ++i) {
+    uint32_t insn = xe::load_and_swap<uint32_t>(base + i * 4);
+    uint32_t opcode = (insn >> 26) & 0x3F;
+    if (opcode == 15) {  // addis (lis when rA=0)
+      uint32_t rD = (insn >> 21) & 0x1F;
+      uint32_t rA = (insn >> 16) & 0x1F;
+      if (rA != 0) continue;  // Must be lis (rA=0)
+      int16_t simm = static_cast<int16_t>(insn & 0xFFFF);
+      uint32_t hi = static_cast<uint32_t>(static_cast<int32_t>(simm)) << 16;
+      // Look ahead for addi rD,rD,lo or ori rD,rD,lo
+      for (int j = i + 1; j < max_insns && j < i + 4; ++j) {
+        uint32_t insn2 = xe::load_and_swap<uint32_t>(base + j * 4);
+        uint32_t op2 = (insn2 >> 26) & 0x3F;
+        uint32_t rD2 = (insn2 >> 21) & 0x1F;
+        uint32_t rA2 = (insn2 >> 16) & 0x1F;
+        if (rA2 == rD) {  // source register of addi/ori matches lis register
+          if (op2 == 14) {  // addi
+            int16_t lo = static_cast<int16_t>(insn2 & 0xFFFF);
+            return hi + static_cast<uint32_t>(static_cast<int32_t>(lo));
+          } else if (op2 == 24) {  // ori
+            return hi | (insn2 & 0xFFFF);
+          }
+        }
+      }
+    }
+  }
+  return 0;
 }
 
 bool PatchCheckedWord(Memory* memory, uint32_t address, uint32_t expected_word,
@@ -1499,7 +1858,7 @@ void RegisterDc3MemAllocBootstrap(const Dc3HackContext& ctx,
   // Rand2::Rand2(int) — host implementation + diagnostics.
   // Ensures correct PRNG seeding for BinStream DTB decryption.
   {
-    constexpr uint32_t kRand2Ctor = 0x82F4FDC0;
+    const uint32_t kRand2Ctor = kAddr.rand2_ctor;
     auto handler = [](cpu::ppc::PPCContext* ppc_context,
                       kernel::KernelState* kernel_state) {
       if (!ppc_context || !kernel_state) return;
@@ -1532,7 +1891,7 @@ void RegisterDc3MemAllocBootstrap(const Dc3HackContext& ctx,
   // Rand2::Int() — host implementation + diagnostics.
   // Park-Miller PRNG: test = (seed%127773)*16807 - (seed/127773)*2836
   {
-    constexpr uint32_t kRand2Int = 0x82F4FDE8;
+    const uint32_t kRand2Int = kAddr.rand2_int;
     auto handler = [](cpu::ppc::PPCContext* ppc_context,
                       kernel::KernelState* kernel_state) {
       if (!ppc_context || !kernel_state) return;
@@ -1860,6 +2219,43 @@ void RegisterDc3SystemConfigProbe(const Dc3HackContext& ctx,
     uint32_t g_system_config = 0;
     if (auto* p = memory->TranslateVirtual<uint8_t*>(kAddr.g_system_config)) {
       g_system_config = xe::load_and_swap<uint32_t>(p + 0x0);
+    }
+    // One-time check of gConditional list and gSystemConfig DataArray
+    static bool checked_cond = false;
+    if (!checked_cond && g_system_config != 0) {
+      checked_cond = true;
+      auto* da = memory->TranslateVirtual<uint8_t*>(g_system_config);
+      if (da) {
+        uint32_t nodes_ptr = xe::load_and_swap<uint32_t>(da + 0x0);
+        int16_t da_size = xe::load_and_swap<int16_t>(da + 0x8);
+        XELOGI("DC3: gSysCfg addr={:08X} nodes={:08X} size={}",
+               g_system_config, nodes_ptr, da_size);
+      }
+      // gConditional list at 0x83B0EF98 (extracted from ctor at 0x825A0D7C)
+      constexpr uint32_t kGCondAddr = 0x83B0EF98;
+      auto* gc = memory->TranslateVirtual<uint8_t*>(kGCondAddr);
+      if (gc) {
+        uint32_t m_next = xe::load_and_swap<uint32_t>(gc + 0);
+        uint32_t m_prev = xe::load_and_swap<uint32_t>(gc + 4);
+        XELOGI("DC3: gConditional@{:08X}: next={:08X} prev={:08X} "
+               "(empty if both={:08X})",
+               kGCondAddr, m_next, m_prev, kGCondAddr);
+      }
+      // Scan for STL list<bool> sentinel patterns in BSS:
+      // Look for addresses where [addr]=addr (self-pointing _M_next)
+      // This finds all properly-initialized empty lists
+      XELOGI("DC3: Scanning BSS 83A00000-83B20000 for list sentinels:");
+      for (uint32_t scan = 0x83A00000; scan < 0x83B20000; scan += 4) {
+        auto* sp = memory->TranslateVirtual<uint8_t*>(scan);
+        if (!sp) continue;
+        uint32_t v = xe::load_and_swap<uint32_t>(sp);
+        if (v == scan) {
+          uint32_t v2 = xe::load_and_swap<uint32_t>(sp + 4);
+          if (v2 == scan) {
+            XELOGI("DC3:   list sentinel at {:08X} (self-pointing)", scan);
+          }
+        }
+      }
     }
     uint32_t arr1 = Dc3FindArrayLinearBySymbol(memory, g_system_config, s1);
     uint32_t arr2 = Dc3FindArrayLinearBySymbol(memory, arr1, s2);
@@ -2209,6 +2605,69 @@ void ApplyDebugStubs(const Dc3HackContext& ctx,
     XELOGI("DC3: ReadCacheStream step override disabled (default; non-invasive)");
   }
 
+  // ReadCacheStream: return nullptr to prevent corrupt data loading.
+  // Guest DTB deserialization (bs >> DataArray*) creates objects with corrupt
+  // STL containers (/FORCE:MULTIPLE BSS shifts), causing infinite loops in
+  // _M_increment, list::remove, etc.  Returning nullptr makes config lookups
+  // fail non-fatally ("Couldn't find X in array") but avoids cascading
+  // corruption.  The gBinStream PPC cave and DTA text parser still work for
+  // .dta files (not affected by this override).
+  {
+    auto handler = [](cpu::ppc::PPCContext* ppc_context,
+                      kernel::KernelState*) {
+      ppc_context->r[3] = 0;  // return nullptr
+    };
+    ctx.processor->RegisterGuestFunctionOverride(kAddr.rcs_read_cache_stream,
+                                                 handler,
+                                                 "DC3:ReadCacheStream(null)");
+    result.applied++;
+    XELOGI("DC3: ReadCacheStream override returns nullptr — prevents corrupt STL cascades");
+  }
+
+  // DataInput diagnostic: check if the flex scanner is getting any input.
+  // DataInput(void* buf, int size) returns bytes read; 0 = EOF.
+  // This is a DESTRUCTIVE override — the original DataInput is replaced.
+  // We need to forward to gBinStream->Read, but first we need to find
+  // gBinStream's address in the original DataFile.obj.
+  // Strategy: read the first few instructions of the original DataInput
+  // to extract the gBinStream address (it will be a lis/lwz or similar pattern).
+  if (ctx.processor && kAddr.data_input) {
+    auto* di_code = memory->TranslateVirtual<uint8_t*>(kAddr.data_input);
+    if (di_code) {
+      // Dump first 8 instructions of DataInput to find gBinStream reference
+      XELOGI("DC3: DataInput at {:08X} first 8 instructions:", kAddr.data_input);
+      for (int i = 0; i < 8; ++i) {
+        uint32_t insn = xe::load_and_swap<uint32_t>(di_code + i * 4);
+        XELOGI("DC3: DataInput+{:02X}: {:08X}", i * 4, insn);
+      }
+      // Try to extract gBinStream address from lis/ori or lis/lwz pattern
+      // Pattern: lis rX, hi16 ; lwz rY, lo16(rX)
+      uint32_t g_bin_stream_addr = 0;
+      for (int i = 0; i < 7; ++i) {
+        uint32_t insn0 = xe::load_and_swap<uint32_t>(di_code + i * 4);
+        uint32_t insn1 = xe::load_and_swap<uint32_t>(di_code + (i + 1) * 4);
+        // lis rX, imm: 001111 XXXXX 00000 IIIIIIIIIIIIIIII = 0x3Cxx0000
+        if ((insn0 & 0xFC1F0000) == 0x3C000000) {
+          uint32_t hi16 = insn0 & 0xFFFF;
+          uint32_t rX = (insn0 >> 21) & 0x1F;
+          // lwz rY, lo16(rX): 100000 YYYYY XXXXX DDDDDDDDDDDDDDDD
+          if ((insn1 & 0xFC000000) == 0x80000000) {
+            uint32_t rX2 = (insn1 >> 16) & 0x1F;
+            if (rX2 == rX) {
+              int16_t lo16 = static_cast<int16_t>(insn1 & 0xFFFF);
+              g_bin_stream_addr = (hi16 << 16) + lo16;
+              XELOGI("DC3: DataInput: found gBinStream candidate at {:08X} "
+                     "(lis r{},{:04X} + lwz lo16={:04X} at insn+{:02X})",
+                     g_bin_stream_addr, rX, hi16,
+                     static_cast<uint16_t>(lo16), i * 4);
+              break;
+            }
+          }
+        }
+      }
+    }
+  }
+
   // Redirect DECOMP Debug::Print to XELOG.
   if (ctx.processor) {
     const uint32_t kDebugPrint = kAddr.debug_print;
@@ -2395,6 +2854,107 @@ void ApplyDebugStubs(const Dc3HackContext& ctx,
                        ht[12], ht[13], ht[14], ht[15],
                        ht[16], ht[17], ht[18], ht[19],
                        ht[20], ht[21], ht[22], ht[23]);
+              }
+            }
+            // One-shot gSystemConfig dump on first "Couldn't find" to see
+            // what ReadSystemConfig actually returned.
+            if (std::strstr(msg, "Couldn't find") && std::strstr(msg, "in array")) {
+              static bool s_config_dumped = false;
+              if (!s_config_dumped) {
+                s_config_dumped = true;
+                // gSystemConfig at kAddr.g_system_config (set by code cave)
+                const uint32_t kGSC = 0x83A93538;
+                // Also check gUsingCD and gBinStream at runtime
+                const uint32_t kUCD = 0x83A93548;
+                auto* ucd_mem = memory->TranslateVirtual<uint8_t*>(kUCD);
+                if (ucd_mem) {
+                  uint32_t ucd_val = xe::load_and_swap<uint32_t>(ucd_mem);
+                  XELOGE("DC3: gUsingCD@{:08X} = {} at first config lookup", kUCD, ucd_val);
+                }
+                // gBinStream (original DataFile.obj static) at 0x83CA2FC4
+                const uint32_t kGBS = 0x83CA2FC4;
+                auto* gbs_mem = memory->TranslateVirtual<uint8_t*>(kGBS);
+                if (gbs_mem) {
+                  uint32_t gbs_val = xe::load_and_swap<uint32_t>(gbs_mem);
+                  XELOGE("DC3: gBinStream@{:08X} = {:08X} at first config lookup",
+                         kGBS, gbs_val);
+                }
+                auto* gsc = memory->TranslateVirtual<uint8_t*>(kGSC);
+                if (gsc) {
+                  uint32_t da_ptr = xe::load_and_swap<uint32_t>(gsc);
+                  XELOGE("DC3: gSystemConfig@{:08X} = {:08X}", kGSC, da_ptr);
+                  if (da_ptr && da_ptr < 0xF0000000) {
+                    auto* da = memory->TranslateVirtual<uint8_t*>(da_ptr);
+                    if (da) {
+                      // DataArray layout: mNodes@+0, mFile@+4, mSize@+8(short),
+                      //   mRefs@+A(short), mLine@+C(short), mDeprecated@+E(short)
+                      uint32_t nodes = xe::load_and_swap<uint32_t>(da + 0x0);
+                      uint32_t file = xe::load_and_swap<uint32_t>(da + 0x4);
+                      int16_t sz = xe::load_and_swap<int16_t>(da + 0x8);
+                      int16_t refs = xe::load_and_swap<int16_t>(da + 0xA);
+                      int16_t line = xe::load_and_swap<int16_t>(da + 0xC);
+                      const char* file_str = "<null>";
+                      if (file && file < 0xF0000000) {
+                        if (auto* f = memory->TranslateVirtual<const char*>(file))
+                          file_str = f;
+                      }
+                      XELOGE("DC3: gSystemConfig DataArray: nodes={:08X} file='{}' "
+                             "size={} refs={} line={}",
+                             nodes, file_str, sz, refs, line);
+                      // Dump first 8 DataNode entries (each 8 bytes: type@+0, value@+4)
+                      if (nodes && nodes < 0xF0000000 && sz > 0) {
+                        auto* n = memory->TranslateVirtual<uint8_t*>(nodes);
+                        if (n) {
+                          int count = std::min((int)sz, 8);
+                          for (int i = 0; i < count; ++i) {
+                            uint32_t type = xe::load_and_swap<uint32_t>(n + i * 8);
+                            uint32_t val = xe::load_and_swap<uint32_t>(n + i * 8 + 4);
+                            // Type 5 = Symbol, 16 = Array, 18 = String
+                            const char* type_name = "?";
+                            switch (type) {
+                              case 0: type_name = "Int"; break;
+                              case 1: type_name = "Float"; break;
+                              case 2: type_name = "Var"; break;
+                              case 5: type_name = "Symbol"; break;
+                              case 16: type_name = "Array"; break;
+                              case 17: type_name = "Command"; break;
+                              case 18: type_name = "String"; break;
+                              case 32: type_name = "Define"; break;
+                              case 33: type_name = "Include"; break;
+                            }
+                            std::string val_desc;
+                            if (type == 5 && val && val < 0xF0000000) {
+                              if (auto* s = memory->TranslateVirtual<const char*>(val))
+                                val_desc = std::string("'") + s + "'";
+                            } else if (type == 16 && val && val < 0xF0000000) {
+                              // val is DataArray*, peek its size
+                              if (auto* sub = memory->TranslateVirtual<uint8_t*>(val)) {
+                                int16_t sub_sz = xe::load_and_swap<int16_t>(sub + 0x8);
+                                val_desc = "size=" + std::to_string(sub_sz);
+                                // Peek first node of sub-array for symbol name
+                                uint32_t sub_nodes = xe::load_and_swap<uint32_t>(sub + 0x0);
+                                if (sub_nodes && sub_nodes < 0xF0000000) {
+                                  auto* sn = memory->TranslateVirtual<uint8_t*>(sub_nodes);
+                                  if (sn) {
+                                    uint32_t st = xe::load_and_swap<uint32_t>(sn + 0);
+                                    uint32_t sv = xe::load_and_swap<uint32_t>(sn + 4);
+                                    if (st == 5 && sv && sv < 0xF0000000) {
+                                      if (auto* ss = memory->TranslateVirtual<const char*>(sv))
+                                        val_desc += std::string(" first='") + ss + "'";
+                                    }
+                                  }
+                                }
+                              }
+                            }
+                            XELOGE("DC3: gSC node[{}]: type={} ({}) val={:08X} {}",
+                                   i, type, type_name, val,
+                                   val_desc.empty() ? "" : val_desc.c_str());
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
               }
             }
             if (std::strncmp(msg, "Unknown class ", 14) == 0 ||
@@ -2650,7 +3210,7 @@ void ApplyDebugStubs(const Dc3HackContext& ctx,
   // (ChunkStream threads fail on headless) and D3DXShader::CombineMERGEs
   // (infinite shader compilation loop). Return null ObjectDir*.
   {
-    constexpr uint32_t kLoadMetaMaterials = 0x831E5A84;
+    const uint32_t kLoadMetaMaterials = kAddr.load_meta_materials;
     PatchStub8Resolved(memory, ctx.hack_pack_stubs, kLoadMetaMaterials, 0,
                        "RndMat::LoadMetaMaterials");
   }
@@ -2667,9 +3227,9 @@ void ApplyDebugStubs(const Dc3HackContext& ctx,
   // Patched  at +0x40: beq cr6,+0xA8  (if dir null → null-name cleanup path)
   // Patched  at +0x44: b +0x38        (if dir non-null → normal registration)
   {
-    constexpr uint32_t kSetName = 0x82A252B8;
-    constexpr uint32_t kPatchAddr0 = kSetName + 0x40;  // 0x82A252F8
-    constexpr uint32_t kPatchAddr1 = kSetName + 0x44;  // 0x82A252FC
+    const uint32_t kSetName = kAddr.object_set_name;
+    const uint32_t kPatchAddr0 = kSetName + 0x40;
+    const uint32_t kPatchAddr1 = kSetName + 0x44;
     constexpr uint32_t kExpected0 = 0x409A003C;  // bne cr6,+0x3C
     constexpr uint32_t kExpected1 = 0x396000E7;  // li r11,231
     constexpr uint32_t kPatched0 = 0x419A00A8;   // beq cr6,+0xA8 (→ null cleanup)
@@ -3042,14 +3602,48 @@ void ApplyRuntimeStopgaps(const Dc3HackContext& ctx,
     }
 
     // Initialize STLport std::list<bool> gConditional sentinel.
+    // BSS variables don't appear in MAP, so we extract addresses from
+    // their dynamic initializer functions' PPC lis+addi instructions.
     {
-      const uint32_t kGConditionalAddr = kAddr.g_conditional;  // STALE
-      auto* pcond = memory->TranslateVirtual<uint8_t*>(kGConditionalAddr);
-      if (pcond) {
-        xe::store_and_swap<uint32_t>(pcond + 0, kGConditionalAddr);
-        xe::store_and_swap<uint32_t>(pcond + 4, kGConditionalAddr);
-        XELOGI("DC3: Initialized gConditional sentinel at {:08X}", kGConditionalAddr);
-        result.applied++;
+      uint32_t addr = kAddr.g_conditional;
+      XELOGI("DC3: gConditional: addr={:08X} ctor={:08X}",
+             addr, kAddr.g_conditional_ctor);
+      if (!addr && kAddr.g_conditional_ctor) {
+        addr = ExtractPpcLisAddiAddr(memory, kAddr.g_conditional_ctor);
+        if (addr) {
+          kAddr.g_conditional = addr;
+          XELOGI("DC3: Extracted gConditional BSS addr {:08X} from ctor {:08X}",
+                 addr, kAddr.g_conditional_ctor);
+        } else {
+          // Dump first 8 instructions for debugging
+          auto* base = memory->TranslateVirtual<uint8_t*>(kAddr.g_conditional_ctor);
+          if (base) {
+            XELOGW("DC3: PPC extraction failed at {:08X}; insns: {:08X} {:08X} "
+                    "{:08X} {:08X} {:08X} {:08X} {:08X} {:08X}",
+                    kAddr.g_conditional_ctor,
+                    xe::load_and_swap<uint32_t>(base + 0),
+                    xe::load_and_swap<uint32_t>(base + 4),
+                    xe::load_and_swap<uint32_t>(base + 8),
+                    xe::load_and_swap<uint32_t>(base + 12),
+                    xe::load_and_swap<uint32_t>(base + 16),
+                    xe::load_and_swap<uint32_t>(base + 20),
+                    xe::load_and_swap<uint32_t>(base + 24),
+                    xe::load_and_swap<uint32_t>(base + 28));
+          }
+        }
+      }
+      if (addr) {
+        auto* pcond = memory->TranslateVirtual<uint8_t*>(addr);
+        if (pcond) {
+          xe::store_and_swap<uint32_t>(pcond + 0, addr);
+          xe::store_and_swap<uint32_t>(pcond + 4, addr);
+          XELOGI("DC3: Initialized gConditional sentinel at {:08X}", addr);
+          result.applied++;
+        }
+      } else {
+        XELOGW("DC3: gConditional address unknown — sentinel init skipped "
+               "(ctors should handle it during _cinit)");
+        result.skipped++;
       }
     }
 
@@ -3059,14 +3653,28 @@ void ApplyRuntimeStopgaps(const Dc3HackContext& ctx,
     // non-empty (head->next=0 != sentinel), causing DataArrayDefined()
     // to return false and silently skip ALL #include directives.
     {
-      constexpr uint32_t kGDataArrayConditionalAddr = 0x83CA7B5C;
-      auto* pcond = memory->TranslateVirtual<uint8_t*>(kGDataArrayConditionalAddr);
-      if (pcond) {
-        xe::store_and_swap<uint32_t>(pcond + 0, kGDataArrayConditionalAddr);
-        xe::store_and_swap<uint32_t>(pcond + 4, kGDataArrayConditionalAddr);
-        XELOGI("DC3: Initialized gDataArrayConditional sentinel at {:08X}",
-               kGDataArrayConditionalAddr);
-        result.applied++;
+      uint32_t addr = kAddr.g_data_array_conditional;
+      if (!addr && kAddr.g_data_array_conditional_ctor) {
+        addr = ExtractPpcLisAddiAddr(memory, kAddr.g_data_array_conditional_ctor);
+        if (addr) {
+          kAddr.g_data_array_conditional = addr;
+          XELOGI("DC3: Extracted gDataArrayConditional BSS addr {:08X} from "
+                 "ctor {:08X}", addr, kAddr.g_data_array_conditional_ctor);
+        }
+      }
+      if (addr) {
+        auto* pcond = memory->TranslateVirtual<uint8_t*>(addr);
+        if (pcond) {
+          xe::store_and_swap<uint32_t>(pcond + 0, addr);
+          xe::store_and_swap<uint32_t>(pcond + 4, addr);
+          XELOGI("DC3: Initialized gDataArrayConditional sentinel at {:08X}",
+                 addr);
+          result.applied++;
+        }
+      } else {
+        XELOGW("DC3: gDataArrayConditional address unknown — sentinel init "
+               "skipped (ctors should handle it during _cinit)");
+        result.skipped++;
       }
     }
 
@@ -3121,6 +3729,10 @@ void ApplyRuntimeStopgaps(const Dc3HackContext& ctx,
         // on nop GPU; PlatformInit may also block on D3D device.
         {kAddr.bink_start_async_thread, "BinkStartAsyncThread"},
         {kAddr.bink_platform_init, "BinkMovieSys::PlatformInit"},
+        // LoadMgr::PollFrontLoader and PollUntilLoaded — NOT stubbed.
+        // With gUsingCD=0 (forced below), no ARK loading occurs, so no
+        // DataLoaders are created and PollFrontLoader is never called with
+        // corrupt loaders.  Stubbing these causes IsLoaded() asserts.
         // NOTE: Do NOT stub D3DDevice_Suspend/Resume — they pair
         // critical section enter/leave. Stubbing breaks CS ownership.
     };
@@ -3168,8 +3780,16 @@ void ApplyRuntimeStopgaps(const Dc3HackContext& ctx,
     // config and calls Sym() on each entry.  Without Kinect/speech recognition,
     // this spins forever on "Data is not Symbol" errors during UIManager::Init.
     PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x8354D8D4, 0, "VoiceInputPanel::LoadVoiceContexts");
-    // Fader::UpdateValue — no longer needed.  SynthPreInit now creates a base
-    // Synth, so SynthInit runs normally and properly initializes mClients.
+    // Fader::UpdateValue iterates FaderGroup set (STL rb-tree at this+0x84).
+    // With config parsing fixed (gBinStream cave), real fader data loads but
+    // the STL container is corrupt (/FORCE:MULTIPLE BSS shifts).  Infinite
+    // loop in _M_increment during SynthInit → SetVolume → UpdateValue.
+    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x8325d84c, 0, "Fader::UpdateValue");
+    // Synth::InitSecurity (0x832E164C) calls ByteGrinder::Init which tries to
+    // parse DTA data via DataReadString → yylex.  The flex lexer hangs in an
+    // infinite loop (corrupt global state or garbage input from /FORCE BSS shifts).
+    // Security/DRM init is unnecessary for emulation.
+    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x832E164C, 0, "Synth::InitSecurity");
     // ShellInput::Init depends on Kinect/gesture subsystems (SpeechMgr,
     // GestureMgr, SkeletonUpdate, DepthBuffer).  TheSpeechMgr->AddSink()
     // hits corrupt MsgSinks lists because SpeechMgr was never initialized.
@@ -3181,6 +3801,15 @@ void ApplyRuntimeStopgaps(const Dc3HackContext& ctx,
     // LoadCategoryData("genres") crashes (SP corruption) because config
     // data for move categories is missing or corrupt in decomp build.
     PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x831634A4, 0, "MoveMgr::Init");
+    // HamSongMgr::Init (0x82AF6720) reads song count from config, calls
+    // vector::reserve with corrupt/huge size → length_error throw → memcpy
+    // crashes reading past stack end (10 SIGSEGVs).  C++ exception handling
+    // doesn't work in JIT, so the crash is unrecoverable.
+    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x82AF6720, 0, "HamSongMgr::Init");
+    // Locale::Init tries to find 'locale' key in config, then opens
+    // devkit:\locale_keep.dta which fails (no devkit: device in emulator).
+    // Crashes inside a vector/array operation with null data.
+    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x835bf9cc, 0, "Locale::Init");
     // ObjRef::ReplaceList and list<ObjectDir*>::clear — un-stubbed (Session 41).
     // The "corrupt lists from .milo load failures" should be resolved now that
     // factories are registered and SynthInit properly initializes.
@@ -3194,6 +3823,15 @@ void ApplyRuntimeStopgaps(const Dc3HackContext& ctx,
     // ClassAndNameSort and SaveObjects were needed because of corrupt objects
     // from failed .milo loads.  With proper factory registration and SynthInit
     // fixed, .milo files should load as correct types with valid objects.
+    // list<RndTransformable*>::remove iterates a corrupt STL list sentinel
+    // (/FORCE:MULTIPLE BSS shift).  Infinite loop in StlAlloc.h assert.
+    // Called during Rnd::Init → ObjectDir init regardless of data loading.
+    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x83474048, 0, "list<RndTransformable*>::remove");
+    // FlowManager::Poll (0x831043A4) iterates FlowNodes calling virtual methods
+    // via bctrl.  FlowNodes have corrupt vtables (/FORCE:MULTIPLE BSS shifts)
+    // dispatching to 0x0C000000 (garbage).  24M+ no-op stub calls per second.
+    // Game flow won't advance, but main loop continues.
+    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x831043A4, 0, "FlowManager::Poll");
     // SkeletonUpdate::InstanceHandle creates a handle wrapper but asserts
     // sInstance != null each frame.  Return null handle (r3=0) to skip.
     PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x830F1984, 0, "SkeletonUpdate::InstanceHandle");
@@ -3639,14 +4277,198 @@ void ApplyCrtPatches(const Dc3HackContext& ctx,
         "DC3:Symbol::PreInit(host-impl)");
     XELOGI("DC3: Registered PreInit host-impl at {:08X}", kPreInit);
 
-    // Patch CheckForArchive in guest memory to set gUsingCD=1 and return.
-    // The original function does: gUsingCD=true; gUsingCD &= FileGetStat(...);
-    // If FileGetStat fails (Xenia VFS can't stat gen/main_xbox.hdr),
-    // gUsingCD gets reset to 0 and ArchiveInit skips loading .ark files.
+    // gSystemConfig fix: the /FORCE linker shifts BSS layout, so
+    // PreInitSystem stores the config DataArray* at the wrong offset,
+    // leaving gSystemConfig = NULL.  We fix this by PPC-patching the
+    // end of ReadSystemConfig: replace the final `blr` with a jump to
+    // a code cave that stores r3 into gSystemConfig then returns.
+    // This replaces the old approach of patching specific stw/lwz
+    // instructions in PreInitSystem (which broke on every rebuild).
+    if (kAddr.read_system_config != 0 && kAddr.g_system_config != 0) {
+      // Find the blr at the end of ReadSystemConfig by scanning forward.
+      const uint32_t fn = kAddr.read_system_config;
+      auto* fn_mem = memory->TranslateVirtual<uint8_t*>(fn);
+      // Use ProtocolDebugString as a code cave (already stubbed to blr).
+      const uint32_t cave = kAddr.protocol_debug_string;
+      auto* cave_heap = memory->LookupHeap(cave);
+      auto* cave_mem = memory->TranslateVirtual<uint8_t*>(cave);
+      auto* fn_heap = memory->LookupHeap(fn);
+      if (fn_mem && cave_mem && cave_heap && fn_heap) {
+        // Write code cave: store r3 to gSystemConfig, then blr.
+        //   lis r11, hi(gSystemConfig)
+        //   stw r3, lo(gSystemConfig)(r11)
+        //   blr
+        const uint32_t gsc = kAddr.g_system_config;
+        uint32_t hi = (gsc >> 16) & 0xFFFF;
+        int16_t lo = static_cast<int16_t>(gsc & 0xFFFF);
+        // If lo is negative, we need to adjust hi (addis semantics)
+        if (lo < 0) hi += 1;
+
+        cave_heap->Protect(cave, 16,
+                           kMemoryProtectRead | kMemoryProtectWrite);
+        xe::store_and_swap<uint32_t>(cave_mem + 0,
+            0x3D600000 | (hi & 0xFFFF));         // lis r11, hi
+        xe::store_and_swap<uint32_t>(cave_mem + 4,
+            0x906B0000 | (gsc & 0xFFFF));         // stw r3, lo(r11)
+        xe::store_and_swap<uint32_t>(cave_mem + 8, 0x4E800020);  // blr
+
+        // Find ReadSystemConfig's `blr` by scanning backwards from
+        // the next function.  ReadSystemConfig is typically ~200 bytes.
+        int blr_offset = -1;
+        for (int off = 0; off < 0x200; off += 4) {
+          uint32_t insn = xe::load_and_swap<uint32_t>(fn_mem + off);
+          if (insn == 0x4E800020) {  // blr
+            blr_offset = off;
+            // Don't break — we want the LAST blr (could be multiple).
+          }
+        }
+        if (blr_offset >= 0) {
+          // Replace blr with branch to cave.
+          int32_t delta = static_cast<int32_t>(cave - (fn + blr_offset));
+          uint32_t b_insn = 0x48000000 | (delta & 0x03FFFFFC);
+          fn_heap->Protect(fn + blr_offset, 4,
+                           kMemoryProtectRead | kMemoryProtectWrite);
+          xe::store_and_swap<uint32_t>(fn_mem + blr_offset, b_insn);
+          // Dump the first N instructions of ReadSystemConfig for debugging
+          {
+            int dump_count = std::min(blr_offset / 4 + 4, 0x200 / 4);
+            std::string dump;
+            for (int d = 0; d < dump_count; ++d) {
+              uint32_t insn = xe::load_and_swap<uint32_t>(fn_mem + d * 4);
+              if (!dump.empty()) dump += " ";
+              char tmp[16];
+              snprintf(tmp, sizeof(tmp), "%08X", insn);
+              dump += tmp;
+              if ((d % 8) == 7 || d == dump_count - 1) {
+                XELOGI("DC3: ReadSystemConfig+{:03X}: {}", d * 4 - (d % 8) * 4, dump);
+                dump.clear();
+              }
+            }
+          }
+          XELOGI("DC3: Patched ReadSystemConfig blr at {:08X}+{:X} -> "
+                 "code cave at {:08X} (stores r3 to gSystemConfig={:08X})",
+                 fn, blr_offset, cave, gsc);
+          result.applied++;
+        } else {
+          XELOGW("DC3: Could not find blr in ReadSystemConfig at {:08X}",
+                 fn);
+        }
+      }
+    }
+
+    // gBinStream fix: the decomp's DataReadStream won the /FORCE conflict
+    // but doesn't set gBinStream (the original static in DataFile.obj at
+    // 0x83CA2FC4).  DataInput (flex YY_INPUT) reads gBinStream to get
+    // scanner input.  Without this, the text parser gets EOF immediately,
+    // producing empty DataArrays for ALL .dta file parsing.
     //
-    // JIT overrides don't fire for this function because the main thread
-    // never reaches _cinit or main() (blocked in _mtinit).  PPC patching
-    // works regardless of how/whether the function is called.
+    // Fix: PPC code cave at the start of DataReadStream that stores r3
+    // (BinStream* argument) to gBinStream before the function body runs.
+    if (kAddr.data_read_stream != 0) {
+      const uint32_t kDRS = kAddr.data_read_stream;
+      const uint32_t kGBS = 0x83CA2FC4;  // gBinStream (original DataFile.obj static)
+      auto* drs_mem = memory->TranslateVirtual<uint8_t*>(kDRS);
+      auto* drs_heap = memory->LookupHeap(kDRS);
+      // Code cave: use space after gSystemConfig cave in protocol_debug_string
+      const uint32_t kCave = kAddr.protocol_debug_string + 12;
+      auto* cave_mem = memory->TranslateVirtual<uint8_t*>(kCave);
+      auto* cave_heap = memory->LookupHeap(kCave);
+      if (drs_mem && drs_heap && cave_mem && cave_heap) {
+        // Read the first instruction of DataReadStream (will be displaced)
+        uint32_t displaced_insn = xe::load_and_swap<uint32_t>(drs_mem);
+        XELOGI("DC3: DataReadStream at {:08X}, first insn: {:08X}",
+               kDRS, displaced_insn);
+
+        // Build code cave (4 instructions = 16 bytes):
+        //   lis r0, hi16(gBinStream)
+        //   stw r3, lo16(gBinStream)(r0)
+        //   <displaced instruction>
+        //   b DataReadStream+4
+        uint32_t gbs_hi = (kGBS >> 16) & 0xFFFF;
+        int16_t gbs_lo = static_cast<int16_t>(kGBS & 0xFFFF);
+        if (gbs_lo < 0) gbs_hi += 1;  // addis sign adjustment
+
+        cave_heap->Protect(kCave, 16,
+                           kMemoryProtectRead | kMemoryProtectWrite);
+        xe::store_and_swap<uint32_t>(cave_mem + 0,
+            0x3C000000 | (gbs_hi & 0xFFFF));      // lis r0, hi
+        xe::store_and_swap<uint32_t>(cave_mem + 4,
+            0x90600000 | (kGBS & 0xFFFF));         // stw r3, lo(r0)
+        xe::store_and_swap<uint32_t>(cave_mem + 8, displaced_insn);
+        // Branch back to DataReadStream+4
+        int32_t back_delta = static_cast<int32_t>((kDRS + 4) - (kCave + 12));
+        xe::store_and_swap<uint32_t>(cave_mem + 12,
+            0x48000000 | (back_delta & 0x03FFFFFC));  // b DataReadStream+4
+
+        // Replace first instruction of DataReadStream with branch to cave
+        drs_heap->Protect(kDRS, 4,
+                          kMemoryProtectRead | kMemoryProtectWrite);
+        int32_t fwd_delta = static_cast<int32_t>(kCave - kDRS);
+        xe::store_and_swap<uint32_t>(drs_mem,
+            0x48000000 | (fwd_delta & 0x03FFFFFC));  // b cave
+
+        XELOGI("DC3: Patched DataReadStream at {:08X} -> cave at {:08X} "
+               "(stores r3 to gBinStream={:08X})",
+               kDRS, kCave, kGBS);
+        result.applied++;
+      } else {
+        XELOGW("DC3: Could not patch DataReadStream (addr={:08X}, heap/mem failed)",
+               kDRS);
+      }
+    }
+
+    // Override DataArray::Load to log what size it reads from the stream.
+    // DataArray::Load is at 0x8351F540.  We can't re-implement it, but
+    // we CAN intercept it to check the first value read from the stream
+    // (the node count).  Load(bs) has: this=r3, bs=r4.
+    // We'll read the DataArray* (this) before and after to see the change.
+    // Actually, we'll override operator>>(BinStream&, DataArray*&) at
+    // 0x8351FCD4 to log what bool it reads.
+    {
+      constexpr uint32_t kOpGtGtDA = 0x8351FCD4;
+      auto op_handler = [](cpu::ppc::PPCContext* ppc_context,
+                           kernel::KernelState* kernel_state) {
+        auto* memory = kernel_state->memory();
+        // r3 = BinStream&, r4 = DataArray*& (pointer to pointer)
+        uint32_t bs_addr = static_cast<uint32_t>(ppc_context->r[3]);
+        uint32_t da_ptr_addr = static_cast<uint32_t>(ppc_context->r[4]);
+        // Read first byte from BinStream to check if it would be 'true'
+        // Actually, we can't easily do this without knowing BinStream layout.
+        // Let's just log the call and return what the original would.
+        static int call_count = 0;
+        call_count++;
+        if (call_count <= 20) {
+          XELOGI("DC3: operator>>(BinStream,DataArray*) call #{} "
+                 "bs={:08X} da_ptr={:08X} LR={:08X}",
+                 call_count, bs_addr, da_ptr_addr,
+                 static_cast<uint32_t>(ppc_context->lr));
+        }
+        // We can't forward to original, so we need to either:
+        // 1. Not override (just log)
+        // 2. Re-implement
+        // For now, return nullptr to flag that it was called.
+        // This will break things but gives us diagnostic info.
+        if (memory && da_ptr_addr) {
+          auto* p = memory->TranslateVirtual<uint8_t*>(da_ptr_addr);
+          if (p) {
+            xe::store_and_swap<uint32_t>(p, 0);  // *da = nullptr
+          }
+        }
+        ppc_context->r[3] = bs_addr;  // return bs&
+      };
+      // DON'T register this override - it would break the DTB reading.
+      // Instead, just log a note.
+      XELOGI("DC3: operator>>(BinStream,DataArray*) at {:08X} (not overridden)",
+             kOpGtGtDA);
+    }
+
+    // Patch CheckForArchive in guest memory to set gUsingCD=0 and return.
+    // With gUsingCD=0, ArchiveInit skips ARK loading.  This prevents
+    // creation of DataLoaders that hang in PollFrontLoader due to corrupt
+    // Loader vtables (/FORCE:MULTIPLE BSS shifts).  Config files load via
+    // DTA text path (DataReadStream + gBinStream cave) instead of DTB binary.
+    // NOTE: Previous sessions set gUsingCD=1 to enable ARK loading, but the
+    // resulting objects had corrupt STL containers causing infinite loops.
     {
       const uint32_t kCheckForArchive = kAddr.check_for_archive;
       const uint32_t kUCD = kAddr.g_using_cd;
@@ -3661,11 +4483,11 @@ void ApplyCrtPatches(const Dc3HackContext& ctx,
           uint32_t lo = kUCD & 0xFFFF;
           xe::store_and_swap<uint32_t>(mem + 0,  0x3C600000 | hi);   // lis r3, hi
           xe::store_and_swap<uint32_t>(mem + 4,  0x60630000 | lo);   // ori r3, r3, lo
-          xe::store_and_swap<uint32_t>(mem + 8,  0x38800001);        // li r4, 1
+          xe::store_and_swap<uint32_t>(mem + 8,  0x38800000);        // li r4, 0
           xe::store_and_swap<uint32_t>(mem + 12, 0x90830000);        // stw r4, 0(r3)
           xe::store_and_swap<uint32_t>(mem + 16, 0x4E800020);        // blr
-          XELOGI("DC3: Patched CheckForArchive at {:08X} to set gUsingCD=1 "
-                 "at {:08X} (5 PPC instructions)", kCheckForArchive, kUCD);
+          XELOGI("DC3: Patched CheckForArchive at {:08X} to set gUsingCD=0 "
+                 "at {:08X} (devkit mode — no ARK loading)", kCheckForArchive, kUCD);
         }
       }
     }
@@ -3940,16 +4762,16 @@ void ApplyCrtPatches(const Dc3HackContext& ctx,
     {
       // Lists: write self-referencing sentinel (_M_next = _M_prev = self).
       // Includes both static globals (BSS) and member lists inside globals
-      // whose constructors were skipped (e.g. TheLoadMgr at 0x83A8A8F0).
-      const uint32_t kTheLoadMgr = 0x83A8A8F0;
+      // whose constructors were skipped (e.g. TheLoadMgr).
+      const uint32_t kTheLoadMgr = kAddr.the_load_mgr;
       const uint32_t stl_lists[] = {
           // Static globals (BSS, __xc initializers ICF'd to blr)
-          0x83B0F1C8,  // AutoTimer::sTimers
-          0x83B0F764,  // RndOverlay::sOverlays
-          0x83B0FAE4,  // SynthPollable::sPollables
-          0x83B0D9BC,  // MidiParser::sParsers
-          0x83B0F998,  // RndMultiMesh::sProxyPool
-          // TheLoadMgr member lists (CRT[155] skipped in 142-328 range)
+          kAddr.auto_timer_stmrs,        // AutoTimer::sTimers
+          kAddr.rnd_overlay_soverlays,    // RndOverlay::sOverlays
+          kAddr.synth_pollable_spollables, // SynthPollable::sPollables
+          kAddr.midi_parser_sparsers,     // MidiParser::sParsers
+          kAddr.rnd_multi_mesh_sproxy,    // RndMultiMesh::sProxyPool
+          // TheLoadMgr member lists (CRT skipped in bisect range)
           kTheLoadMgr + 0x00,  // mLoaders
           kTheLoadMgr + 0x10,  // mFactories
           kTheLoadMgr + 0x20,  // mLoading
@@ -3977,8 +4799,9 @@ void ApplyCrtPatches(const Dc3HackContext& ctx,
       }
 
       // Map: Hmx::Object::sFactories (_Rb_tree sentinel).
+      // The std::map address from the catalog IS the _Rb_tree sentinel node.
       {
-        const uint32_t addr = 0x83B0DEA8;
+        const uint32_t addr = kAddr.object_factories_map;
         auto* p = memory->TranslateVirtual<uint8_t*>(addr);
         if (p) {
           uint32_t cur_parent = xe::load_and_swap<uint32_t>(p + 0x04);
@@ -4041,15 +4864,14 @@ void ApplyCrtPatches(const Dc3HackContext& ctx,
       }
     }
 
-    // Set gUsingCD=1 early (Session 37): belt-and-suspenders backup.
-    // CheckForArchive is also patched in PPC (above) to set gUsingCD=1,
-    // but this early write ensures it's set even if CheckForArchive
-    // runs from an unexpected address (e.g. /FORCE-linked duplicate).
+    // Set gUsingCD=0 early: devkit mode, no ARK loading.
+    // This matches Session 39's accidental behavior (wrong address read as 0)
+    // which avoided corrupt DataLoader vtables from /FORCE:MULTIPLE.
     {
       auto* ucd = memory->TranslateVirtual<uint8_t*>(kAddr.g_using_cd);
       if (ucd) {
-        xe::store_and_swap<uint32_t>(ucd, 1);
-        XELOGI("DC3: Set gUsingCD=1 at {:08X} (disc mode for Xenia)",
+        xe::store_and_swap<uint32_t>(ucd, 0);
+        XELOGI("DC3: Set gUsingCD=0 at {:08X} (devkit mode — no ARK loading)",
                kAddr.g_using_cd);
         result.applied++;
       }
@@ -4219,9 +5041,12 @@ void Dc3PopulateAddressesFromCatalog(
   get("object_factories_map", kAddr.object_factories_map);
   get("register_factory", kAddr.register_factory);
   get("new_object", kAddr.new_object);
+  get("object_set_name", kAddr.object_set_name);
+  get("load_meta_materials", kAddr.load_meta_materials);
   get("rndmat_static_name_sym", kAddr.rndmat_static_name_sym);
   get("metamaterial_static_name_sym", kAddr.metamaterial_static_name_sym);
   get("g_system_config", kAddr.g_system_config);
+  get("read_system_config", kAddr.read_system_config);
   get("g_string_table_global", kAddr.g_string_table_global);
   get("g_hash_table", kAddr.g_hash_table);
 
@@ -4304,6 +5129,10 @@ void Dc3PopulateAddressesFromCatalog(
   get("bink_start_async_thread", kAddr.bink_start_async_thread);
   get("bink_platform_init", kAddr.bink_platform_init);
 
+  // LoadMgr
+  get("poll_front_loader", kAddr.poll_front_loader);
+  get("poll_until_loaded", kAddr.poll_until_loaded);
+
   // CRT RTTI
   get("rt_dynamic_cast", kAddr.rt_dynamic_cast);
 
@@ -4317,7 +5146,31 @@ void Dc3PopulateAddressesFromCatalog(
   // OSCMessenger (Holmes debug)
   get("osc_messenger_poll", kAddr.osc_messenger_poll);
 
+  // BinStream / Rand2
+  get("binstream_read", kAddr.binstream_read);
+  get("binstream_read_endian", kAddr.binstream_read_endian);
+  get("rand2_ctor", kAddr.rand2_ctor);
+  get("rand2_int", kAddr.rand2_int);
+  get("bs_op_dataarray", kAddr.bs_op_dataarray);
+
+  // STL container globals (BSS, sentinel init from host)
+  get("the_load_mgr", kAddr.the_load_mgr);
+  get("auto_timer_stmrs", kAddr.auto_timer_stmrs);
+  get("rnd_overlay_soverlays", kAddr.rnd_overlay_soverlays);
+  get("synth_pollable_spollables", kAddr.synth_pollable_spollables);
+  get("midi_parser_sparsers", kAddr.midi_parser_sparsers);
+  get("rnd_multi_mesh_sproxy", kAddr.rnd_multi_mesh_sproxy);
+
+  // gConditional / gDataArrayConditional ctor functions
+  // (BSS variable addresses extracted at runtime from PPC code)
+  get("g_conditional_ctor", kAddr.g_conditional_ctor);
+  get("g_data_array_conditional_ctor", kAddr.g_data_array_conditional_ctor);
+
   XELOGI("DC3: Populated {} address catalog entries from manifest", updated);
+  XELOGI("DC3: Key addresses: system_config_2={:08X} g_system_config={:08X} "
+         "the_load_mgr={:08X} object_factories_map={:08X}",
+         kAddr.system_config_2, kAddr.g_system_config,
+         kAddr.the_load_mgr, kAddr.object_factories_map);
 }
 
 }  // namespace xe
