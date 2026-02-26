@@ -242,6 +242,88 @@ static uint32_t g_dc3_safe_lvalue_datanode = 0;
 static uint32_t g_dc3_safe_empty_array_datanode = 0;
 static uint32_t g_dc3_safe_empty_dataarray = 0;
 
+// --------------------------------------------------------------------------
+// Guest-memory pool allocator.
+//
+// SystemHeapAlloc has a 4KB minimum granularity (virtual page commit),
+// which wastes ~500MB when the game makes 125,000+ small allocations
+// (16-32 byte DataArray nodes during config parsing).
+//
+// This pool allocator pre-allocates 1MB chunks from SystemHeapAlloc and
+// bump-allocates within them.  Free is a no-op for pool allocations —
+// the memory stays allocated until the process exits.  Only allocations
+// ≤ kPoolMaxSize go through the pool; larger ones fall through to
+// SystemHeapAlloc directly.
+// --------------------------------------------------------------------------
+class Dc3GuestPool {
+ public:
+  static constexpr uint32_t kChunkSize = 1024 * 1024;  // 1MB chunks
+  static constexpr uint32_t kPoolMaxSize = 512;         // pool allocs ≤ 512B
+  static constexpr uint32_t kAlignment = 16;            // 16-byte aligned
+
+  void Init(Memory* mem) { memory_ = mem; }
+
+  // Returns guest address, or 0 on failure.
+  uint32_t Alloc(uint32_t size) {
+    if (!memory_ || size == 0 || size > kPoolMaxSize) return 0;
+    uint32_t aligned = (size + kAlignment - 1) & ~(kAlignment - 1);
+    std::lock_guard<std::mutex> lock(mu_);
+    if (cursor_ + aligned > chunk_end_) {
+      if (!AllocNewChunk()) return 0;
+    }
+    uint32_t ptr = cursor_;
+    cursor_ += aligned;
+    total_pool_bytes_ += aligned;
+    ++total_pool_allocs_;
+    return ptr;
+  }
+
+  // Check if an address was allocated from this pool.
+  // Used by free() handlers to skip SystemHeapFree for pool addresses.
+  bool IsPoolAddress(uint32_t addr) const {
+    std::lock_guard<std::mutex> lock(mu_);
+    for (const auto& chunk : chunks_) {
+      if (addr >= chunk.start && addr < chunk.end) return true;
+    }
+    return false;
+  }
+
+  uint64_t total_pool_allocs() const { return total_pool_allocs_; }
+  uint64_t total_pool_bytes() const { return total_pool_bytes_; }
+  uint32_t chunks_allocated() const { return chunks_allocated_; }
+
+ private:
+  struct ChunkRange {
+    uint32_t start;
+    uint32_t end;
+  };
+
+  bool AllocNewChunk() {
+    uint32_t chunk = memory_->SystemHeapAlloc(kChunkSize, kAlignment);
+    if (!chunk) {
+      XELOGW("DC3: Pool allocator failed to allocate {}KB chunk",
+             kChunkSize / 1024);
+      return false;
+    }
+    cursor_ = chunk;
+    chunk_end_ = chunk + kChunkSize;
+    chunks_.push_back({chunk, chunk_end_});
+    ++chunks_allocated_;
+    return true;
+  }
+
+  Memory* memory_ = nullptr;
+  mutable std::mutex mu_;
+  uint32_t cursor_ = 0;
+  uint32_t chunk_end_ = 0;
+  std::vector<ChunkRange> chunks_;
+  uint32_t chunks_allocated_ = 0;
+  uint64_t total_pool_allocs_ = 0;
+  uint64_t total_pool_bytes_ = 0;
+};
+
+static Dc3GuestPool g_dc3_pool;
+
 std::string Dc3FmtBytePreview(const uint8_t* data, size_t len) {
   if (!data || !len) return "";
   std::ostringstream os;
@@ -1195,6 +1277,9 @@ void RegisterDc3MemAllocBootstrap(const Dc3HackContext& ctx,
     return;
   }
 
+  // Initialize the pool allocator for small guest allocations.
+  g_dc3_pool.Init(ctx.memory);
+
   // Minimum valid guest address — anything below this from a free() call
   // is a garbage pointer from the broken operator new (returns sizeof).
   constexpr uint32_t kMinValidPtr = 0x10000;
@@ -1206,11 +1291,10 @@ void RegisterDc3MemAllocBootstrap(const Dc3HackContext& ctx,
       if (!ppc_context || !kernel_state) return;
       auto* memory = kernel_state->memory();
       if (!memory) return;
-
       uint32_t size = static_cast<uint32_t>(ppc_context->r[3]);
       uint32_t lr = static_cast<uint32_t>(ppc_context->lr);
-      uint32_t ptr = 0;
-      if (size > 0) {
+      uint32_t ptr = g_dc3_pool.Alloc(size);
+      if (!ptr && size > 0) {
         ptr = memory->SystemHeapAlloc(size, 0x10);
         if (ptr) {
           auto* dest = memory->TranslateVirtual<uint8_t*>(ptr);
@@ -1226,7 +1310,7 @@ void RegisterDc3MemAllocBootstrap(const Dc3HackContext& ctx,
       ppc_context->r[3] = ptr;
     };
     ctx.processor->RegisterGuestFunctionOverride(kAddr.operator_new, handler,
-                                                 "DC3:op_new(sysheap)");
+                                                 "DC3:op_new(pool)");
     result.applied++;
   }
 
@@ -1238,28 +1322,29 @@ void RegisterDc3MemAllocBootstrap(const Dc3HackContext& ctx,
       if (!ppc_context || !kernel_state) return;
       auto* memory = kernel_state->memory();
       if (!memory) return;
-
       int32_t size = static_cast<int32_t>(ppc_context->r[3]);
       uint32_t lr = static_cast<uint32_t>(ppc_context->lr);
       uint32_t ptr = 0;
       if (size > 0) {
-        ptr = memory->SystemHeapAlloc(static_cast<uint32_t>(size), 0x10);
-        if (ptr) {
-          auto* dest = memory->TranslateVirtual<uint8_t*>(ptr);
-          if (dest) std::memset(dest, 0, size);
+        ptr = g_dc3_pool.Alloc(static_cast<uint32_t>(size));
+        if (!ptr) {
+          ptr = memory->SystemHeapAlloc(static_cast<uint32_t>(size), 0x10);
+          if (ptr) {
+            auto* dest = memory->TranslateVirtual<uint8_t*>(ptr);
+            if (dest) std::memset(dest, 0, size);
+          }
         }
       }
       static uint32_t s_alloc_count = 0;
       ++s_alloc_count;
-      if (s_alloc_count <= 50 || (size > 0 && size < 128) ||
-          (s_alloc_count % 5000) == 0) {
+      if (s_alloc_count <= 50 || (s_alloc_count % 5000) == 0) {
         XELOGI("DC3: MemAlloc[{}]: size={} -> {:08X} (LR={:08X})",
                s_alloc_count, size, ptr, lr);
       }
       ppc_context->r[3] = ptr;
     };
     ctx.processor->RegisterGuestFunctionOverride(kAddr.mem_alloc, handler,
-                                                 "DC3:MemAlloc(sysheap)");
+                                                 "DC3:MemAlloc(pool)");
     result.applied++;
   }
 
@@ -1271,15 +1356,17 @@ void RegisterDc3MemAllocBootstrap(const Dc3HackContext& ctx,
       if (!ppc_context || !kernel_state) return;
       auto* memory = kernel_state->memory();
       if (!memory) return;
-
       int32_t size = static_cast<int32_t>(ppc_context->r[3]);
       uint32_t lr = static_cast<uint32_t>(ppc_context->lr);
       uint32_t ptr = 0;
       if (size > 0) {
-        ptr = memory->SystemHeapAlloc(static_cast<uint32_t>(size), 0x10);
-        if (ptr) {
-          auto* dest = memory->TranslateVirtual<uint8_t*>(ptr);
-          if (dest) std::memset(dest, 0, size);
+        ptr = g_dc3_pool.Alloc(static_cast<uint32_t>(size));
+        if (!ptr) {
+          ptr = memory->SystemHeapAlloc(static_cast<uint32_t>(size), 0x10);
+          if (ptr) {
+            auto* dest = memory->TranslateVirtual<uint8_t*>(ptr);
+            if (dest) std::memset(dest, 0, size);
+          }
         }
       }
       static uint32_t s_pool_count = 0;
@@ -1291,7 +1378,7 @@ void RegisterDc3MemAllocBootstrap(const Dc3HackContext& ctx,
       ppc_context->r[3] = ptr;
     };
     ctx.processor->RegisterGuestFunctionOverride(kAddr.pool_alloc, handler,
-                                                 "DC3:PoolAlloc(sysheap)");
+                                                 "DC3:PoolAlloc(pool)");
     result.applied++;
   }
 
@@ -1303,15 +1390,17 @@ void RegisterDc3MemAllocBootstrap(const Dc3HackContext& ctx,
       if (!ppc_context || !kernel_state) return;
       auto* memory = kernel_state->memory();
       if (!memory) return;
-
       int32_t size = static_cast<int32_t>(ppc_context->r[3]);
       uint32_t lr = static_cast<uint32_t>(ppc_context->lr);
       uint32_t ptr = 0;
       if (size > 0) {
-        ptr = memory->SystemHeapAlloc(static_cast<uint32_t>(size), 0x10);
-        if (ptr) {
-          auto* dest = memory->TranslateVirtual<uint8_t*>(ptr);
-          if (dest) std::memset(dest, 0, size);
+        ptr = g_dc3_pool.Alloc(static_cast<uint32_t>(size));
+        if (!ptr) {
+          ptr = memory->SystemHeapAlloc(static_cast<uint32_t>(size), 0x10);
+          if (ptr) {
+            auto* dest = memory->TranslateVirtual<uint8_t*>(ptr);
+            if (dest) std::memset(dest, 0, size);
+          }
         }
       }
       static uint32_t s_mpool_count = 0;
@@ -1323,45 +1412,44 @@ void RegisterDc3MemAllocBootstrap(const Dc3HackContext& ctx,
       ppc_context->r[3] = ptr;
     };
     ctx.processor->RegisterGuestFunctionOverride(kAddr.mem_or_pool_alloc, handler,
-                                                 "DC3:MemOrPoolAlloc(sysheap)");
+                                                 "DC3:MemOrPoolAlloc(pool)");
     result.applied++;
   }
 
   // MemFree: void MemFree(void* ptr, const char* file, int line,
   //                       const char* name)
+  // Pool allocations are not individually freed — skip SystemHeapFree
+  // for addresses within pool chunks.
   {
     auto handler = [](cpu::ppc::PPCContext* ppc_context,
                       kernel::KernelState* kernel_state) {
       if (!ppc_context || !kernel_state) return;
       auto* memory = kernel_state->memory();
       if (!memory) return;
-
       uint32_t ptr = static_cast<uint32_t>(ppc_context->r[3]);
-      if (ptr >= kMinValidPtr) {
+      if (ptr >= kMinValidPtr && !g_dc3_pool.IsPoolAddress(ptr)) {
         memory->SystemHeapFree(ptr);
       }
     };
     ctx.processor->RegisterGuestFunctionOverride(kAddr.mem_free, handler,
-                                                 "DC3:MemFree(sysheap)");
+                                                 "DC3:MemFree(pool)");
     result.applied++;
   }
 
-  // PoolFree: void PoolFree(int size, void* ptr, const char* file,
-  //                         int line, const char* name)
+  // PoolFree: void PoolFree(int size, void* ptr, ...)
   {
     auto handler = [](cpu::ppc::PPCContext* ppc_context,
                       kernel::KernelState* kernel_state) {
       if (!ppc_context || !kernel_state) return;
       auto* memory = kernel_state->memory();
       if (!memory) return;
-
       uint32_t ptr = static_cast<uint32_t>(ppc_context->r[4]);
-      if (ptr >= kMinValidPtr) {
+      if (ptr >= kMinValidPtr && !g_dc3_pool.IsPoolAddress(ptr)) {
         memory->SystemHeapFree(ptr);
       }
     };
     ctx.processor->RegisterGuestFunctionOverride(kAddr.pool_free, handler,
-                                                 "DC3:PoolFree(sysheap)");
+                                                 "DC3:PoolFree(pool)");
     result.applied++;
   }
 
@@ -1372,14 +1460,13 @@ void RegisterDc3MemAllocBootstrap(const Dc3HackContext& ctx,
       if (!ppc_context || !kernel_state) return;
       auto* memory = kernel_state->memory();
       if (!memory) return;
-
       uint32_t ptr = static_cast<uint32_t>(ppc_context->r[4]);
-      if (ptr >= kMinValidPtr) {
+      if (ptr >= kMinValidPtr && !g_dc3_pool.IsPoolAddress(ptr)) {
         memory->SystemHeapFree(ptr);
       }
     };
     ctx.processor->RegisterGuestFunctionOverride(kAddr.mem_or_pool_free, handler,
-                                                 "DC3:MemOrPoolFree(sysheap)");
+                                                 "DC3:MemOrPoolFree(pool)");
     result.applied++;
   }
 
@@ -1390,20 +1477,21 @@ void RegisterDc3MemAllocBootstrap(const Dc3HackContext& ctx,
       if (!ppc_context || !kernel_state) return;
       auto* memory = kernel_state->memory();
       if (!memory) return;
-
       uint32_t ptr = static_cast<uint32_t>(ppc_context->r[3]);
-      if (ptr >= kMinValidPtr) {
+      if (ptr >= kMinValidPtr && !g_dc3_pool.IsPoolAddress(ptr)) {
         memory->SystemHeapFree(ptr);
       }
     };
     ctx.processor->RegisterGuestFunctionOverride(kAddr.operator_delete, handler,
-                                                 "DC3:op_delete(sysheap)");
+                                                 "DC3:op_delete(pool)");
     result.applied++;
   }
 
-  XELOGI("DC3: Replaced game memory manager with SystemHeapAlloc/Free "
-         "(op_new={:08X} MemAlloc={:08X} PoolAlloc={:08X} MemOrPoolAlloc={:08X} "
+  XELOGI("DC3: Replaced game memory manager with pool allocator "
+         "(pool: {}B max, {}MB chunks; "
+         "op_new={:08X} MemAlloc={:08X} PoolAlloc={:08X} MemOrPoolAlloc={:08X} "
          "MemFree={:08X} PoolFree={:08X} MemOrPoolFree={:08X} op_delete={:08X})",
+         Dc3GuestPool::kPoolMaxSize, Dc3GuestPool::kChunkSize / (1024 * 1024),
          kAddr.operator_new, kAddr.mem_alloc, kAddr.pool_alloc,
          kAddr.mem_or_pool_alloc, kAddr.mem_free, kAddr.pool_free,
          kAddr.mem_or_pool_free, kAddr.operator_delete);
