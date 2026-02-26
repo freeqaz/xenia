@@ -2622,42 +2622,25 @@ void ApplyRuntimeStopgaps(const Dc3HackContext& ctx,
     // GestureMgr, SkeletonUpdate, DepthBuffer).  TheSpeechMgr->AddSink()
     // hits corrupt MsgSinks lists because SpeechMgr was never initialized.
     PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x8339CC08, 0, "ShellInput::Init");
-    // UIScreen::HasPanel iterates mPanelList (std::list) which has corrupt
-    // nodes for screens whose .milo data hasn't fully loaded.  Infinite loop
-    // in HamUI::Init validation loop that only prints warnings.
-    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x835DC3C4, 0, "UIScreen::HasPanel");
+    // UIScreen::HasPanel — un-stubbed (Session 41).
+    // mPanelList should be valid now that factories are registered and
+    // .milo files load as correct types.
     // MoveMgr::Init loads choreography/move category data from config.
     // LoadCategoryData("genres") crashes (SP corruption) because config
     // data for move categories is missing or corrupt in decomp build.
     PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x831634A4, 0, "MoveMgr::Init");
-    // ObjRef::ReplaceList iterates a linked list of ObjRef nodes calling
-    // Replace() on each.  With corrupt lists (from .milo load failures),
-    // it enters an infinite loop → MILO_FAIL returns → loops again.
-    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x829ABC18, 0, "ObjRef::ReplaceList");
-    // _List_base<ObjectDir*>::clear — corrupt linked list from ObjDirItr
-    // causes infinite iteration in main loop Poll() calls.  Stub to leak
-    // memory instead of looping forever.
-    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x823D29A0, 0, "list<ObjectDir*>::clear");
-    // UIManager::GotoFirstScreen triggers screen transitions that require
-    // .milo files loaded as PanelDir.  Without the Rnd subsystem, panels
-    // load as plain ObjectDir → cascading failures + infinite loops in
-    // DataArray::FindArray with corrupt vtable dispatch to stack addresses.
-    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x83429904, 0, "UIManager::GotoFirstScreen");
-    // DirLoader::ClassAndNameSort::ClassIndex calls SystemConfig("system",
-    // "dir_sort") which triggers DataArray::FindArray on a corrupt config
-    // array → infinite loop with bctrl to stack garbage (0x7054F3D8).
-    // Return 0 so all objects get the same sort order (no reordering).
-    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x8300E008, 0, "ClassAndNameSort::ClassIndex");
-    // DirLoader::ClassAndNameSort::operator() does virtual calls on Object
-    // (ClassName, Name) — with corrupt objects from failed .milo loads,
-    // vtable dispatch goes to stack addresses (0x7054F3D8).  Return false
-    // (no reorder) to skip the sort comparison entirely.
-    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x8300F054, 0, "ClassAndNameSort::operator()");
-    // DirLoader::SaveObjects sorts objects using ClassAndNameSort, which
-    // iterates corrupt STL list nodes even with a stubbed comparator.
-    // The sort loop in _S_sort (0x8300FBA0) infinite-loops on corrupt
-    // list sentinels.  Stub SaveObjects to skip the sort entirely.
-    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x830100F0, 0, "DirLoader::SaveObjects");
+    // ObjRef::ReplaceList and list<ObjectDir*>::clear — un-stubbed (Session 41).
+    // The "corrupt lists from .milo load failures" should be resolved now that
+    // factories are registered and SynthInit properly initializes.
+    // UIManager::GotoFirstScreen — un-stubbed (Session 41).
+    // PanelDir and RndDir factories are now properly registered during
+    // App init, so .milo files should load as correct types.  The previous
+    // "corrupt vtable dispatch" crashes were likely caused by the Synth/Fader
+    // corruption cascade (now fixed via base Synth in SynthPreInit).
+    // DirLoader stubs — un-stubbed (Session 41).
+    // ClassAndNameSort and SaveObjects were needed because of corrupt objects
+    // from failed .milo loads.  With proper factory registration and SynthInit
+    // fixed, .milo files should load as correct types with valid objects.
     // SkeletonUpdate::InstanceHandle creates a handle wrapper but asserts
     // sInstance != null each frame.  Return null handle (r3=0) to skip.
     PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x830F1984, 0, "SkeletonUpdate::InstanceHandle");
