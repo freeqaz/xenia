@@ -10,7 +10,9 @@
 #include "xenia/base/memory.h"
 
 #include <fcntl.h>
+#include <linux/memfd.h>
 #include <sys/mman.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 #include <cinttypes>
 #include <cstddef>
@@ -180,6 +182,20 @@ FileMappingHandle CreateFileMappingHandle(const std::filesystem::path& path,
   }
   return ashmem_fd;
 #else
+  // Use memfd_create for anonymous file-backed memory. This avoids /dev/shm
+  // which can fail with SIGBUS on some systems (e.g., tmpfs with usrquota on
+  // Linux 6.18+). Fall back to shm_open if memfd_create is not available.
+  int ret = static_cast<int>(
+      syscall(SYS_memfd_create, path.c_str(), 0));
+  if (ret >= 0) {
+    if (ftruncate64(ret, length) != 0) {
+      close(ret);
+      return kFileMappingHandleInvalid;
+    }
+    return ret;
+  }
+
+  // Fallback: shm_open
   int oflag;
   switch (access) {
     case PageAccess::kNoAccess:
@@ -199,12 +215,15 @@ FileMappingHandle CreateFileMappingHandle(const std::filesystem::path& path,
   }
   oflag |= O_CREAT;
   auto full_path = "/" / path;
-  int ret = shm_open(full_path.c_str(), oflag, 0777);
-  if (ret < 0) {
+  int shm_ret = shm_open(full_path.c_str(), oflag, 0777);
+  if (shm_ret < 0) {
     return kFileMappingHandleInvalid;
   }
-  ftruncate64(ret, length);
-  return ret;
+  if (ftruncate64(shm_ret, length) != 0) {
+    close(shm_ret);
+    return kFileMappingHandleInvalid;
+  }
+  return shm_ret;
 #endif
 }
 
@@ -212,6 +231,8 @@ void CloseFileMappingHandle(FileMappingHandle handle,
                             const std::filesystem::path& path) {
   close(handle);
 #if !XE_PLATFORM_ANDROID
+  // Only unlink if this was a shm_open fd (not memfd_create).
+  // Try shm_unlink — it will harmlessly fail if the name doesn't exist.
   auto full_path = "/" / path;
   shm_unlink(full_path.c_str());
 #endif
