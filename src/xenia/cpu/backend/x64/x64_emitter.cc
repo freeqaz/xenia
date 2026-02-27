@@ -537,7 +537,7 @@ void X64Emitter::Call(const hir::Instr* instr, GuestFunction* function) {
   assert_not_null(function);
   if (auto* reason =
           ClassifyNonTextExecutableTarget(processor_, function->address())) {
-    uint32_t caller_fn = trace_data_ ? trace_data_->start_address() : 0;
+    uint32_t caller_fn = (trace_data_ && trace_data_->is_valid()) ? trace_data_->start_address() : 0;
     std::string telemetry_reason = "direct_call_non_text_";
     telemetry_reason += reason;
     xe::Dc3RuntimeTelemetryRecordUnresolvedCallStubHit(telemetry_reason,
