@@ -846,7 +846,7 @@ bool BaseHeap::AllocFixed(uint32_t base_address, uint32_t size,
   uint32_t start_page_number = (base_address - heap_base_) / page_size_;
   uint32_t end_page_number = start_page_number + page_count - 1;
   if (start_page_number >= page_table_.size() ||
-      end_page_number > page_table_.size()) {
+      end_page_number >= page_table_.size()) {
     XELOGE("BaseHeap::AllocFixed passed out of range address range");
     return false;
   }
@@ -1047,14 +1047,18 @@ bool BaseHeap::AllocRange(uint32_t low_address, uint32_t high_address,
   }
 
   // Set page state.
-  for (uint32_t page_number = start_page_number; page_number <= end_page_number;
-       ++page_number) {
-    auto& page_entry = page_table_[page_number];
-    page_entry.base_address = start_page_number;
-    page_entry.region_page_count = page_count;
-    page_entry.allocation_protect = protect;
-    page_entry.current_protect = protect;
-    page_entry.state = kMemoryAllocationReserve | allocation_type;
+  {
+    uint32_t max_page = uint32_t(page_table_.size());
+    uint32_t clamped_end = std::min(end_page_number, max_page - 1);
+    for (uint32_t page_number = start_page_number; page_number <= clamped_end;
+         ++page_number) {
+      auto& page_entry = page_table_[page_number];
+      page_entry.base_address = start_page_number;
+      page_entry.region_page_count = page_count;
+      page_entry.allocation_protect = protect;
+      page_entry.current_protect = protect;
+      page_entry.state = kMemoryAllocationReserve | allocation_type;
+    }
   }
 
   *out_address = heap_base_ + (start_page_number * page_size_);
@@ -1097,6 +1101,11 @@ bool BaseHeap::Release(uint32_t base_address, uint32_t* out_region_size) {
 
   // Given address must be a region base address.
   uint32_t base_page_number = (base_address - heap_base_) / page_size_;
+  if (base_page_number >= page_table_.size()) {
+    XELOGE("BaseHeap::Release({:08X}): page {} out of range (max {})",
+           base_address, base_page_number, page_table_.size());
+    return false;
+  }
   auto base_page_entry = page_table_[base_page_number];
   if (base_page_entry.base_address != base_page_number) {
     XELOGE("BaseHeap::Release failed because address is not a region start");
@@ -1139,8 +1148,15 @@ bool BaseHeap::Release(uint32_t base_address, uint32_t* out_region_size) {
   }
 
   // Perform table change.
+  if (base_page_entry.region_page_count == 0) {
+    XELOGE("BaseHeap::Release({:08X}): region_page_count is 0", base_address);
+    return false;
+  }
   uint32_t end_page_number =
       base_page_number + base_page_entry.region_page_count - 1;
+  if (end_page_number >= page_table_.size()) {
+    end_page_number = uint32_t(page_table_.size()) - 1;
+  }
   for (uint32_t page_number = base_page_number; page_number <= end_page_number;
        ++page_number) {
     auto& page_entry = page_table_[page_number];
