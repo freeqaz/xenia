@@ -48,15 +48,40 @@ Historical snapshot note:
   - `docs/dc3-boot/DEBUGGING_TIPS.md`
   - `docs/dc3-boot/ARCHIVED.md` (historical context only)
 
-## Current Active Blocker (2026-02-25)
+## Current Status (2026-02-27, Session 44)
 
-- The decomp boot is currently blocked in CRT C++ constructor iteration (`_cinit` `__xc` loop), before `main()`.
-- `Symbol::PreInit` is injected via a PPC trampoline at `__xc[0]` and does execute, but it produces `gStringTable=0x14` (garbage) instead of a valid `StringTable*`.
-- This causes subsequent `Symbol::Symbol` calls to pass an invalid `this` into `StringTable::Add`, leading to crash/loop behavior.
-- The highest-leverage next work is therefore:
-  1. disassemble and trace `Symbol::PreInit`,
-  2. identify allocator/internal call failure (or argument/timing issue),
-  3. fix `gStringTable` initialization so CRT `__xc` completes and `main()` is reached.
+**MAIN LOOP RUNNING** — ~175 fps, SIGSEGV=0, 40+ seconds stable.
+
+```
+mainCRTStartup → _cinit → main() → App::App() → [full init] →
+App::Run() → RunWithoutDebugging → main loop (STABLE, ~175 fps)
+```
+
+**Operating mode**: `gUsingCD=0` (devkit/loose file mode), `ReadCacheStream→nullptr` (no DTB binary loading),
+gBinStream PPC cave active (DTA text parser works), pool allocator for small guest allocs.
+
+### Active investigation targets (3 stubs that will become blockers)
+
+These stubs prevent crashes/hangs but block real game functionality. Each must be
+investigated and fixed before the game can progress beyond an idle main loop.
+
+| Stub | Address | Symptom | Root cause hypothesis | Investigation approach |
+|---|---|---|---|---|
+| **Synth::InitSecurity** | `0x832E164C` | yylex infinite loop in ByteGrinder DTA parsing | Corrupt flex lexer global state from /FORCE BSS shifts, OR garbage input buffer from missing security DTA | Dump DataReadString input buffer (r3/r4 at 0x8310E680 call), check yy_current_buffer validity, trace ByteGrinder::Init to see what string it passes |
+| **HamSongMgr::Init** | `0x82AF6720` | vector::reserve crash → length_error → memcpy SIGSEGV past stack | Config returns garbage int for song count → huge reserve → C++ exception (not supported in JIT) | Override the config read that feeds reserve size (trace LR=0x82AF430C for the reserve call), provide minimal song config, or fix DataArray lookup path |
+| **FlowManager::Poll** | `0x831043A4` | 24M+/sec bctrl dispatch to 0x0C000000 (corrupt FlowNode vtable) | FlowInit creates FlowNodes with corrupt vtables from /FORCE BSS shifts | Trace FlowInit (0x83085950) to see how FlowNodes are allocated, check vtable pointers at runtime, identify which FlowNode is corrupt |
+
+**Priority order**: FlowManager::Poll > HamSongMgr::Init > Synth::InitSecurity.
+FlowManager controls game state transitions (screens, menus). HamSongMgr manages song selection.
+InitSecurity is DRM and likely unnecessary even when fully working.
+
+### Per-frame noise (non-fatal, non-blocking)
+
+| Error | Count/frame | Source | Status |
+|---|---|---|---|
+| "gControllersCfg" | 4 | Joypad::Poll, no controller config | Config loading fix will resolve |
+| "leaderboards_panel" | 1 | ObjectDir::Find for missing UI panel | .milo file loading will resolve |
+| RtlLeaveCriticalSection mismatch | 1 | CS ownership issue | Low priority |
 
 Critical debugging constraint (must respect):
 - Guest override "intercept then delegate to same address" is not reliable once JIT call sites are compiled, because the x64 JIT bakes the extern handler pointer into generated host code.
@@ -110,17 +135,40 @@ Historical 2026-02-23 blocker details were moved to `docs/dc3-boot/ARCHIVED.md`.
 # DC3-Decomp rebuild
 cd ~/code/milohax/dc3-decomp && ninja link 2>&1 | tee /tmp/link.txt && python3 scripts/build/build_xex.py
 
-# Xenia rebuild (preferred workflow in this repo)
-cd ~/code/milohax/xenia && ./xb build --config=debug --target=xenia-headless --no_premake -j $(nproc)
+# Xenia rebuild (Checked config via Makefile)
+make -C ~/code/milohax/xenia/build -f Makefile xenia-headless
 
-# Test
-rm -f /dev/shm/xenia_* 2>/dev/null
-~/code/milohax/xenia/build/bin/Linux/Debug/xenia-headless \
-    --gpu=null --target=~/code/milohax/dc3-decomp/build/373307D9/default.xex \
-    --headless_timeout_ms=20000 2>&1 | tee /tmp/test.log
+# Test (40s default timeout from config, extend with --headless_timeout_ms)
+~/code/milohax/xenia/build/bin/Linux/Checked/xenia-headless \
+    --target=~/code/milohax/dc3-decomp/build/373307D9/default.xex \
+    --dc3_nui_patch_layout=auto --dc3_crt_skip_nui=true \
+    2>&1 | tee /tmp/dc3_test.log
 ```
 
 ## Roadmap (Next Milestones)
+
+### 0. Investigate and fix the 3 critical stubs (CURRENT PRIORITY)
+
+The game runs an idle main loop but can't progress to menus or gameplay because
+three subsystems are stubbed. These are the **highest-leverage investigation targets**:
+
+**FlowManager::Poll** (game state machine — controls screen transitions):
+- FlowNodes have corrupt vtables from /FORCE:MULTIPLE BSS shifts
+- Investigation: trace FlowInit (0x83085950) to see how FlowNodes are created,
+  check if the FlowNode list itself is corrupt or if specific nodes have bad vtables
+- This is the #1 blocker for reaching any game screen
+
+**HamSongMgr::Init** (song database — needed for song selection):
+- Reads song count from config, gets garbage → vector::reserve(huge) → crash
+- C++ exceptions not supported in JIT (no SEH), so crash is unrecoverable
+- Investigation: intercept the DataArray read that feeds the song count, provide
+  a minimal song config DataArray, or guard the reserve call
+
+**Synth::InitSecurity** (DRM verification — likely unnecessary):
+- ByteGrinder::Init → DataReadString → yylex hangs
+- Lower priority because DRM verification is unnecessary for decomp testing
+- Investigation: trace what string is passed to DataReadString, check if the
+  flex lexer hang is fixable (corrupt global state) or if the input is garbage
 
 ### 1. Extract remaining DC3 hacks into a title hack pack (Xenia)
 

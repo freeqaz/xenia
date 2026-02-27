@@ -1,6 +1,63 @@
-# Status: OODA Loop Iteration 7
+# Status: OODA Loop Iteration 8
 
-*Last updated: 2026-02-25 (Session 39 — main event loop stable, 60s+ runtime achieved)*
+*Last updated: 2026-02-27 (Session 44 — main loop 175fps, 3 critical stubs identified for investigation)*
+
+## 2026-02-27 Update (Sessions 40-44): Config Expansion, Pool Allocator, Main Loop at 175fps
+
+### MILESTONE: Main loop running at ~175 fps, SIGSEGV=0, 40+ seconds stable
+
+Boot progression upgraded from Session 39's ~67fps to ~175fps through multiple
+improvements across sessions 40-44. Key changes:
+
+**Session 40-41**: Config include expansion + factory registration
+- Fixed `gDataArrayConditional` sentinel → `#include`/`#ifdef` directives now work
+- 100+ object factories registered (SynthFader, MidiInstrument, SynthSample, etc.)
+- `.milo` file loading attempted (cylinder.milo, sphere.milo — fail due to missing VFS)
+
+**Session 42-43**: Pool allocator + memory management
+- Added `Dc3GuestPool` — 1MB bump-allocator chunks for small guest allocs (≤512B)
+- 64x speedup for config parsing (236ms vs 15,273ms for 125,000+ DataArray nodes)
+- Fixed `SystemHeapAlloc` replacement as memory manager
+- Fixed `SetName` PPC patch SIGSEGV
+
+**Session 44**: Three init hangs/crashes identified and stubbed
+- Set `gUsingCD=0` (devkit mode) — avoids ARK loading with corrupt DataLoader vtables
+- Re-enabled `ReadCacheStream→nullptr` to prevent corrupt STL cascades from DTB loading
+- Added `gBinStream` PPC code cave for DTA text parsing support
+
+| Blocker | Root cause | Fix |
+|---|---|---|
+| Synth::InitSecurity yylex hang | ByteGrinder::Init → DataReadString → yylex infinite loop (DRM DTA parsing) | Stub InitSecurity (0x832E164C) — DRM unnecessary |
+| HamSongMgr::Init crash (10 SIGSEGVs) | Config returns garbage → vector::reserve(huge) → length_error → memcpy past stack | Stub HamSongMgr::Init (0x82AF6720) |
+| FlowManager::Poll infinite dispatch (24M+/s) | Corrupt FlowNode vtable dispatches to 0x0C000000 via bctrl | Stub FlowManager::Poll (0x831043A4) |
+
+### Current per-frame noise (non-fatal)
+
+| Error | Count/frame | Source | Status |
+|---|---|---|---|
+| "gControllersCfg" | 4 | Joypad::Poll, no controller config | Needs config loading fix |
+| "leaderboards_panel" | 1 | ObjectDir::Find for missing UI panel | Needs .milo loading fix |
+| RtlLeaveCriticalSection mismatch | 1 | CS ownership issue | Low priority |
+
+### Investigation targets (3 stubs that will become blockers)
+
+These three stubs prevent game state progression. See `GOAL.md` for detailed
+investigation plans and `HACK_RETIREMENT_MATRIX.md` for retirement criteria.
+
+1. **FlowManager::Poll** — #1 blocker for screen transitions
+2. **HamSongMgr::Init** — #2 blocker for song selection
+3. **Synth::InitSecurity** — #3 (DRM, likely permanently unnecessary)
+
+### Key commits (Sessions 40-44)
+
+| Hash | Description |
+|---|---|
+| `a26a3aba7` | Fix SynthInit hang + HamSongMgr crash + FlowManager loop — 175fps |
+| `767451784` | Add guest-memory pool allocator — 64x config parse speedup |
+| `46cf7aa3b` | Fix SetName PPC patch SIGSEGV + enable config include expansion |
+| `83bca16a0` | Add SystemHeapAlloc memory manager replacement + fix stale addresses |
+
+---
 
 ## 2026-02-25 Update (Session 39): Main Event Loop Running Stably
 
