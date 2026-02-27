@@ -35,6 +35,9 @@ Rules:
 | `dc3_manifest_address_automation` | Infrastructure | `dc3_hack_pack.cc` + `emulator.cc` + manifest generator | `address_catalog` JSON → `Dc3PopulateAddressesFromCatalog()` | decomp | required | multi | Decomp XEX rebuilds shift all addresses; manual refresh is error-prone | N/A — this IS the fix for stale addresses. Becomes unnecessary only if decomp produces bit-identical XEX | Rebuild decomp XEX → regenerate manifest → boot in xenia → verify "Populated N address catalog entries" log | 73 entries auto-resolved (81% of kAddr); 13 instruction-level fields remain hardcoded |
 | `dc3_hack_pack_stub_resolved` | DecompRuntimeStopgap | `dc3_hack_pack.cc` | `PatchStub8Resolved` via manifest `hack_pack_stubs` | decomp | required | multi | 25 PatchStub8 calls used raw hex addresses that went stale on XEX rebuild | N/A — these now use manifest-resolved addresses with hardcoded fallbacks | Boot decomp XEX → verify all 25 stubs resolve from manifest (check "resolved from manifest" logs) | Covers: Splash (4), LiveCameraInput (2), HasFileChecksumData, VoiceInputPanel, Fader, ShellInput, UIScreen, MoveMgr, ObjRef, list clear, GotoFirstScreen, ClassAndNameSort (2), DirLoader::SaveObjects, SkeletonUpdate (2), SkeletonHistoryArchive, GestureMgr (3), DrawRegular |
 | `dc3_main_loop_stubs` | DecompRuntimeStopgap | `dc3_hack_pack.cc` | `PatchStub8Resolved` | decomp | required | multi | Main loop poll functions hit corrupt data/vtables from uninitialized subsystems | Fix underlying subsystem init (Kinect, Synth, .milo loading) | Decomp boot 60s smoke with stubs removed one-by-one | Session 39: 11 new stubs for main loop stability (SkeletonUpdate, GestureMgr, DirLoader, DrawRegular) |
+| `dc3_synth_security_stub` | DecompRuntimeStopgap | `dc3_hack_pack.cc` | `PatchStub8Resolved` | decomp | required | multi | Synth::InitSecurity → ByteGrinder::Init → DataReadString → yylex infinite loop (DRM init tries DTA parsing with corrupt/garbage input) | Fix flex lexer input OR determine InitSecurity is unnecessary for decomp (DRM) | Remove stub, verify SynthInit completes without hang | Session 44: DRM security init — likely permanently unnecessary for decomp testing |
+| `dc3_hamsongmgr_init_stub` | DecompRuntimeStopgap | `dc3_hack_pack.cc` | `PatchStub8Resolved` | decomp | required | multi | HamSongMgr::Init reads corrupt song count from empty config → vector::reserve(huge) → length_error throw → memcpy crash past stack (C++ exceptions unsupported in JIT) | Provide minimal song config DataArray OR guard the reserve call OR fix config loading | Remove stub, verify Init completes without crash (need valid config data) | Session 44: Blocks song selection — needs config parsing fix first |
+| `dc3_flowmanager_poll_stub` | DecompRuntimeStopgap | `dc3_hack_pack.cc` | `PatchStub8Resolved` | decomp | required | multi | FlowManager::Poll iterates FlowNodes via bctrl — corrupt vtable dispatches to 0x0C000000 (24M+/sec) | Fix FlowNode vtable corruption (from /FORCE BSS shifts during FlowInit) OR fix FlowInit to not create corrupt nodes | Remove stub, verify Poll iterates FlowNodes without corrupt dispatch | Session 44: **#1 blocker** for game state progression (screens, menus) |
 
 ## Stub Tier Classification (Session 39 Audit — updated)
 
@@ -74,22 +77,25 @@ Rules:
 | GestureMgr::Poll/GetSkeleton/UpdateTracked (3) | Kinect not available | Same |
 | App::DrawRegular | No GPU init in headless | Headless-permanent OR fix GPU init |
 
-### Tier 3: XAudio2/Synth cascade (~8 stubs) — FIXABLE VIA XENIA APU WORK
+### Tier 3: Subsystem init blockers (~11 stubs) — FIXABLE VIA TARGETED INVESTIGATION
 
-| Stub | Root cause | Fix path |
-|---|---|---|
-| Synth360::PreInit | XAudio2 CS deadlock under nop APU | Fix xenia nop APU CS init |
-| SynthInit | Same | Same |
-| Fader::UpdateValue | Corrupt std::set because Synth skipped | Unstubbing Synth fixes this |
-| Splash (4) | DirLoader blocks on file I/O | Investigate VFS completion |
+| Stub | Root cause | Fix path | Priority |
+|---|---|---|---|
+| **FlowManager::Poll** | Corrupt FlowNode vtable (0x0C000000) from /FORCE BSS shifts | Trace FlowInit, fix FlowNode allocation/vtable | **#1 — blocks game state progression** |
+| **HamSongMgr::Init** | Empty config → garbage song count → vector::reserve crash | Provide minimal config OR guard reserve | **#2 — blocks song selection** |
+| **Synth::InitSecurity** | ByteGrinder DTA parsing → yylex hang | DRM init — likely unnecessary for decomp | #3 — low priority (DRM) |
+| Synth360::PreInit | XAudio2 CS deadlock under nop APU | Fix xenia nop APU CS init | Medium |
+| SynthInit | Same | Same | Medium |
+| Fader::UpdateValue | Corrupt std::set because Synth skipped | Unstubbing Synth fixes this | Medium |
+| Splash (4) | DirLoader blocks on file I/O | Investigate VFS completion | Medium |
+| Locale::Init | devkit: device not in emulator | Either stub permanently or fake device | Low |
 
-## Next Matrix Work (Planned)
+## Next Matrix Work (Planned — updated Session 44)
 
-1. Add `last_validated` timestamps for high-risk entries (CRT sanitizer, import cleanup, zero-page).
-2. Split `dc3_assert_locale_runtime_stub_block` further if specific stubs prove independently removable.
-3. Re-attempt extracting `dc3_fake_kinect_skeleton_injection` after preserving exact inline semantics (or replace with a host-level hook).
-4. **Highest-leverage fix**: XAudio2 CS deadlock in nop APU — one xenia fix eliminates 3 stubs (Synth360::PreInit, SynthInit, Fader::UpdateValue).
-5. **Second-highest**: .milo file I/O completion — fixing VFS or content directory issues unstubs ~10 functions (UIScreen, ObjRef, list clear, ClassAndNameSort, SaveObjects, GotoFirstScreen, Splash).
-6. **Third-highest**: Kinect subsystem init — proper SkeletonUpdate/GestureMgr initialization eliminates ~6 stubs.
+1. **HIGHEST PRIORITY: Investigate FlowManager::Poll** — trace FlowInit (0x83085950) to understand FlowNode creation, identify corrupt vtable source. This is the #1 blocker for game state transitions.
+2. **Investigate HamSongMgr::Init** — identify the config read that produces the huge reserve size. Either provide minimal song config via host-side DataArray injection, or guard the vector::reserve call.
+3. **Investigate Synth::InitSecurity** — determine if this can be permanently stubbed (DRM is unnecessary for decomp). If not, trace the DataReadString input buffer to diagnose the yylex hang.
+4. **Config loading**: Many stubs (HamSongMgr, FlowManager, per-frame noise) trace back to empty gSystemConfig. Fixing DTB binary loading (currently blocked by corrupt STL containers from /FORCE) or providing host-side config data would eliminate multiple stubs at once.
+5. **.milo file I/O completion** — fixing VFS or content directory issues unstubs ~10 functions (UIScreen, ObjRef, list clear, ClassAndNameSort, SaveObjects, GotoFirstScreen, Splash).
+6. **Kinect subsystem init** — proper SkeletonUpdate/GestureMgr initialization eliminates ~6 stubs.
 7. Investigate staged Tier 2 stub removal as decomp LNK4006/LNK2001 errors are resolved.
-8. Investigate "Data is not Symbol" per-frame noise from campaign.dta config parsing (7 per frame, non-fatal).
