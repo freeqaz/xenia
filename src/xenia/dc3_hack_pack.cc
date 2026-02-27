@@ -67,6 +67,9 @@ struct Dc3Addresses {
   uint32_t xc_z = 0x83ADF3B0;
   uint32_t xi_a = 0x83ADF3B4;
   uint32_t xi_z = 0x83ADF3C0;
+  // Decomp .CRT$XCU section (separate from auto_08 __xc table)
+  uint32_t crt_xcu_start = 0x83BD1800;
+  uint32_t crt_xcu_end = 0x83BD1A10;
   // CRT functions
   uint32_t ioinit = 0x8361EDBC;
   uint32_t cinit = 0x8311B4B8;
@@ -184,6 +187,7 @@ struct Dc3Addresses {
   uint32_t synth_pollable_spollables = 0x83B0FAE4;
   uint32_t midi_parser_sparsers = 0x83B0D9BC;
   uint32_t rnd_multi_mesh_sproxy = 0x83B0F998;
+  uint32_t g_caches = 0x83966B0C;           // gCaches (FileCache.obj std::list<FileCache*>)
   // LoadMgr (async file I/O)
   uint32_t poll_front_loader = 0x8341CE08;   // LoadMgr::PollFrontLoader (Loader.obj)
   uint32_t poll_until_loaded = 0x8341D380;   // LoadMgr::PollUntilLoaded (Loader.obj)
@@ -1786,7 +1790,10 @@ void RegisterDc3MemAllocBootstrap(const Dc3HackContext& ctx,
       auto* memory = kernel_state->memory();
       if (!memory) return;
       uint32_t ptr = static_cast<uint32_t>(ppc_context->r[3]);
-      if (ptr >= kMinValidPtr && !g_dc3_pool.IsPoolAddress(ptr)) {
+      // Only free addresses in v00000000 heap range (where SystemHeapAlloc puts them).
+      // Guest-heap pointers (>=0x40000000) were not allocated by us.
+      if (ptr >= kMinValidPtr && ptr < 0x40000000 &&
+          !g_dc3_pool.IsPoolAddress(ptr)) {
         memory->SystemHeapFree(ptr);
       }
     };
@@ -1803,7 +1810,8 @@ void RegisterDc3MemAllocBootstrap(const Dc3HackContext& ctx,
       auto* memory = kernel_state->memory();
       if (!memory) return;
       uint32_t ptr = static_cast<uint32_t>(ppc_context->r[4]);
-      if (ptr >= kMinValidPtr && !g_dc3_pool.IsPoolAddress(ptr)) {
+      if (ptr >= kMinValidPtr && ptr < 0x40000000 &&
+          !g_dc3_pool.IsPoolAddress(ptr)) {
         memory->SystemHeapFree(ptr);
       }
     };
@@ -1820,7 +1828,8 @@ void RegisterDc3MemAllocBootstrap(const Dc3HackContext& ctx,
       auto* memory = kernel_state->memory();
       if (!memory) return;
       uint32_t ptr = static_cast<uint32_t>(ppc_context->r[4]);
-      if (ptr >= kMinValidPtr && !g_dc3_pool.IsPoolAddress(ptr)) {
+      if (ptr >= kMinValidPtr && ptr < 0x40000000 &&
+          !g_dc3_pool.IsPoolAddress(ptr)) {
         memory->SystemHeapFree(ptr);
       }
     };
@@ -1837,7 +1846,8 @@ void RegisterDc3MemAllocBootstrap(const Dc3HackContext& ctx,
       auto* memory = kernel_state->memory();
       if (!memory) return;
       uint32_t ptr = static_cast<uint32_t>(ppc_context->r[3]);
-      if (ptr >= kMinValidPtr && !g_dc3_pool.IsPoolAddress(ptr)) {
+      if (ptr >= kMinValidPtr && ptr < 0x40000000 &&
+          !g_dc3_pool.IsPoolAddress(ptr)) {
         memory->SystemHeapFree(ptr);
       }
     };
@@ -4616,6 +4626,75 @@ void ApplyCrtPatches(const Dc3HackContext& ctx,
       result.applied++;
     }
 
+    // Inject decomp .CRT$XCU entries into null slots of __xc table.
+    //
+    // The decomp build produces a separate .CRT$XCU PE section containing
+    // function pointers to the decomp's real ??__E dynamic initializers
+    // (std::list ctors, std::map ctors, etc.).  These are OUTSIDE the
+    // __xc_a..__xc_z range (.bss sits between them), so _cinit never
+    // walks them.  Fix: copy them into null slots created by the NUI skip
+    // list, so _cinit picks them up naturally.
+    {
+      const uint32_t kXcuStart = kAddr.crt_xcu_start;
+      const uint32_t kXcuEnd = kAddr.crt_xcu_end;
+      int xcu_count = (kXcuEnd - kXcuStart) / 4;
+      if (kXcuStart && kXcuEnd > kXcuStart && xcu_count > 0) {
+        // Collect null slot addresses in __xc table (post-sanitization).
+        std::vector<uint32_t> null_slots;
+        for (uint32_t addr = kXcA; addr < kXcZ; addr += 4) {
+          auto* p = memory->TranslateVirtual<uint8_t*>(addr);
+          uint32_t entry = xe::load_and_swap<uint32_t>(p);
+          if (entry == 0) {
+            null_slots.push_back(addr);
+          }
+        }
+
+        // Read .CRT$XCU entries.
+        auto* xcu_heap = memory->LookupHeap(kXcuStart);
+        if (xcu_heap) {
+          uint32_t xcu_page_start = kXcuStart & ~0xFFFu;
+          uint32_t xcu_page_end = (kXcuEnd + 0xFFFu) & ~0xFFFu;
+          xcu_heap->Protect(xcu_page_start, xcu_page_end - xcu_page_start,
+                            kMemoryProtectRead);
+        }
+
+        int injected = 0;
+        int skipped_null = 0;
+        int skipped_no_slot = 0;
+        // Use null slots from the end (higher indices run later in _cinit).
+        size_t slot_idx = null_slots.size();
+        for (int i = xcu_count - 1; i >= 0; --i) {
+          auto* xcu_p = memory->TranslateVirtual<uint8_t*>(kXcuStart + i * 4);
+          uint32_t xcu_entry = xe::load_and_swap<uint32_t>(xcu_p);
+          if (xcu_entry == 0) {
+            skipped_null++;
+            continue;
+          }
+          if (slot_idx == 0) {
+            skipped_no_slot++;
+            continue;
+          }
+          --slot_idx;
+          auto* slot_p =
+              memory->TranslateVirtual<uint8_t*>(null_slots[slot_idx]);
+          xe::store_and_swap<uint32_t>(slot_p, xcu_entry);
+          injected++;
+        }
+        XELOGI(
+            "DC3: .CRT$XCU injection: {} entries from {:08X}..{:08X}, "
+            "{} injected into __xc null slots, {} null, {} no-slot",
+            xcu_count, kXcuStart, kXcuEnd, injected, skipped_null,
+            skipped_no_slot);
+        if (skipped_no_slot > 0) {
+          XELOGW(
+              "DC3: WARNING: {} .CRT$XCU entries could not be injected "
+              "(not enough null slots in __xc table!)",
+              skipped_no_slot);
+        }
+        result.applied++;
+      }
+    }
+
     // Inject _ioinit into the __xi_a slot.
     {
       const uint32_t kIoinitAddr = kAddr.ioinit;
@@ -4771,6 +4850,7 @@ void ApplyCrtPatches(const Dc3HackContext& ctx,
           kAddr.synth_pollable_spollables, // SynthPollable::sPollables
           kAddr.midi_parser_sparsers,     // MidiParser::sParsers
           kAddr.rnd_multi_mesh_sproxy,    // RndMultiMesh::sProxyPool
+          kAddr.g_caches,                 // gCaches (FileCache.obj)
           // TheLoadMgr member lists (CRT skipped in bisect range)
           kTheLoadMgr + 0x00,  // mLoaders
           kTheLoadMgr + 0x10,  // mFactories
@@ -4991,6 +5071,10 @@ void Dc3PopulateAddressesFromCatalog(
   get_crt("__xi_a", kAddr.xi_a);
   get_crt("__xi_z", kAddr.xi_z);
 
+  // Decomp .CRT$XCU section
+  get("crt_xcu_start", kAddr.crt_xcu_start);
+  get("crt_xcu_end", kAddr.crt_xcu_end);
+
   // CRT functions
   get("ioinit", kAddr.ioinit);
   get("cinit", kAddr.cinit);
@@ -5160,6 +5244,7 @@ void Dc3PopulateAddressesFromCatalog(
   get("synth_pollable_spollables", kAddr.synth_pollable_spollables);
   get("midi_parser_sparsers", kAddr.midi_parser_sparsers);
   get("rnd_multi_mesh_sproxy", kAddr.rnd_multi_mesh_sproxy);
+  get("g_caches", kAddr.g_caches);
 
   // gConditional / gDataArrayConditional ctor functions
   // (BSS variable addresses extracted at runtime from PPC code)
