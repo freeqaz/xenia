@@ -11,7 +11,7 @@
 # original=0x0123456789ABCDEF
 # decomp=0xFEDCBA9876543210
 
-# Runtime-validated on 2026-02-23 via xenia-headless + dc3-decomp build.
+# Runtime-validated on 2026-02-27 via xenia-headless + dc3-decomp build.
 # Note: these are Xenia runtime .text fingerprints, not static PE .text hashes.
 original=0x5E827ACDEE70CB4F
-decomp=0x2526E4B100F1679D
+decomp=0xD8E3FE7B3CE1C985

@@ -15,12 +15,14 @@
 #include <sys/mman.h>
 #endif
 
+#include "xenia/base/atomic.h"
 #include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/string.h"
 #include "xenia/cpu/ppc/ppc_context.h"
 #include "xenia/cpu/processor.h"
 #include "xenia/kernel/kernel_state.h"
+#include "xenia/kernel/xthread.h"
 #include "xenia/kernel/user_module.h"
 #include "xenia/memory.h"
 
@@ -28,7 +30,7 @@ DECLARE_int32(dc3_crt_bisect_max);
 DECLARE_string(dc3_crt_skip_indices);
 DECLARE_bool(dc3_crt_skip_nui);
 DECLARE_bool(dc3_debug_read_cache_stream_step_override);
-DECLARE_bool(dc3_debug_memmgr_assert_nop_bypass);
+DECLARE_bool(dc3_null_read_cache_stream);
 DECLARE_bool(dc3_debug_mempool_alloc_probe);
 DECLARE_string(dc3_debug_findarray_override_mode);
 DECLARE_bool(fake_kinect_data);
@@ -68,8 +70,8 @@ struct Dc3Addresses {
   uint32_t xi_a = 0x83ADF3B4;
   uint32_t xi_z = 0x83ADF3C0;
   // Decomp .CRT$XCU section (separate from auto_08 __xc table)
-  uint32_t crt_xcu_start = 0x83BD1800;
-  uint32_t crt_xcu_end = 0x83BD1A10;
+  uint32_t crt_xcu_start = 0x83635C00;
+  uint32_t crt_xcu_end = 0x83635F44;
   // CRT functions
   uint32_t ioinit = 0x8361EDBC;
   uint32_t cinit = 0x8311B4B8;
@@ -89,12 +91,12 @@ struct Dc3Addresses {
   uint32_t datanode_print = 0x82551EF8;
   // Import/thunk
   uint32_t xapi_call_thread_notify = 0x8311B60C;
-  uint32_t text_start = 0x82320000;
-  uint32_t text_size = 0x0173604C;
-  uint32_t idata_start = 0x8230D800;
-  uint32_t idata_end = 0x8230DE34;
-  uint32_t thunk_area_start = 0x83A52000;
-  uint32_t thunk_area_end = 0x83A54000;
+  uint32_t text_start = 0x82450000;
+  uint32_t text_size = 0x00E1BCE4;
+  uint32_t idata_start = 0x82447C00;
+  uint32_t idata_end = 0x82448034;
+  uint32_t thunk_area_start = 0x82450000;
+  uint32_t thunk_area_end = 0x8326BCE4;
   // Locale
   uint32_t get_system_language = 0x834099C8;
   uint32_t get_system_locale = 0x83409E88;
@@ -126,6 +128,10 @@ struct Dc3Addresses {
   // NOTE: MAP says 0x83AED0FC (.bss) but code references 0x83AE01C4 (.data,
   // right after gStringTable at 0x83AE01C0). /FORCE linker artifact.
   uint32_t g_hash_table = 0x83AE01C4;
+  // CriticalSection (broken IAT import thunk bypass)
+  uint32_t critsec_ctor = 0x8287C060;   // ??0CriticalSection@@QAA@XZ (CritSec.obj)
+  uint32_t critsec_enter = 0x8287C0A0;  // ?Enter@CriticalSection@@QAAXXZ
+  uint32_t critsec_exit = 0x8287C0E0;   // ?Exit@CriticalSection@@QAAXXZ
   // Memory / allocator probes
   uint32_t mem_or_pool_alloc = 0x83406350;  // ?MemOrPoolAlloc@@YAPAXIHPBDH1@Z (MemMgr.obj)
   uint32_t mem_alloc = 0x83405918;          // ?MemAlloc@@YAPAXHPBDH1H@Z (MemMgr.obj)
@@ -158,14 +164,19 @@ struct Dc3Addresses {
   uint32_t write_nolock = 0x83618444;
   uint32_t write_fn = 0x83618684;
   // FileIsLocal
-  uint32_t file_is_local = 0x82B17958;
-  uint32_t file_is_local_assert_branch = 0x82B17980;
+  uint32_t file_is_local = 0x82B64E38;
+  uint32_t file_is_local_assert_branch = 0x82B64E60;
   // File system globals
   uint32_t g_using_cd = 0x83A93548;  // was 0x83C7BAF0 (wrong BSS address)
   uint32_t check_for_archive = 0x83516A68;
   uint32_t file_init = 0x83413CDC;
   uint32_t archive_init = 0x834A41F8;
   uint32_t the_archive = 0x83A9036C;
+  // Original binary addresses for globals (from symbols.txt).
+  // When decomp code writes to the decomp address but original binary code
+  // reads from the original address, we must sync both.
+  uint32_t g_using_cd_orig = 0x82F652E8;
+  uint32_t the_archive_orig = 0x82F679FC;
   uint32_t system_pre_init_1 = 0x834D6D44;  // SystemPreInit(const char*)
   uint32_t system_pre_init_2 = 0x834D6F94;  // SystemPreInit(const char*, const char*)
   // CRT functions that block the main thread
@@ -188,14 +199,12 @@ struct Dc3Addresses {
   uint32_t midi_parser_sparsers = 0x83B0D9BC;
   uint32_t rnd_multi_mesh_sproxy = 0x83B0F998;
   uint32_t g_caches = 0x83966B0C;           // gCaches (FileCache.obj std::list<FileCache*>)
+  uint32_t g_decompression_queue = 0x8396b404; // gDecompressionQueue (ChunkStream.obj std::list<DecompressTask>)
   // LoadMgr (async file I/O)
   uint32_t poll_front_loader = 0x8341CE08;   // LoadMgr::PollFrontLoader (Loader.obj)
   uint32_t poll_until_loaded = 0x8341D380;   // LoadMgr::PollUntilLoaded (Loader.obj)
   // Holmes trampoline target (reused as PPC code cave)
   uint32_t protocol_debug_string = 0x831F0838;
-  // MemMgr assert addresses (STALE)
-  uint32_t meminit_assert = 0x83447AF4;                    // STALE
-  uint32_t memalloc_assert = 0x83446A24;                   // STALE
   // Wind (DC3-specific; RB3 stubs SetWind)
   uint32_t set_wind = 0x8325AD38;  // SetWind(int,int,float,float,float)
   // RndTransformable
@@ -1205,11 +1214,11 @@ void Dc3OutputLBridgeExtern(cpu::ppc::PPCContext* ppc_context,
 
     static uint32_t str_count = 0;
     ++str_count;
-    if (str_count <= 32 || (str_count % 500) == 0) {
+    if (str_count <= 200 || (str_count % 500) == 0) {
       XELOGI(
-          "DC3: _output_l string FILE={:08X} flags={:08X} cnt={} fmt='{}' "
+          "DC3: _output_l string #{} FILE={:08X} flags={:08X} cnt={} fmt='{}' "
           "arg={:08X} -> {}",
-          file_ptr, flags, dst_cnt, fmt, arg_ptr, count);
+          str_count, file_ptr, flags, dst_cnt, fmt, arg_ptr, count);
     }
     return;
   }
@@ -1625,6 +1634,39 @@ void RegisterDc3MemOrPoolAllocProbe(const Dc3HackContext& ctx,
   debug_result.applied++;
 }
 
+// --------------------------------------------------------------------------
+// Global address split-brain sync
+// --------------------------------------------------------------------------
+// The decomp linker places globals at different addresses than the original
+// binary.  Original PPC code (CDRead, ArkFilesInit, BlockMgr, etc.) has
+// hardcoded addresses baked in.  After decomp code stores a global (e.g.
+// TheArchive) at the decomp address, we must copy it to the original binary
+// address so that original code can find it.
+//
+// This is done lazily: on each allocation, we check if TheArchive has been
+// stored and sync it.  The check is a single memory read + comparison per
+// call, which is negligible overhead.
+static bool s_globals_synced = false;
+static void Dc3SyncGlobalsIfNeeded(xe::Memory* memory) {
+  if (s_globals_synced) return;
+  // Check TheArchive at decomp address
+  auto* the_archive_mem =
+      memory->TranslateVirtual<uint8_t*>(kAddr.the_archive);
+  if (!the_archive_mem) return;
+  uint32_t archive_val = xe::load_and_swap<uint32_t>(the_archive_mem);
+  if (archive_val == 0) return;  // not yet stored by ArchiveInit
+  // Sync TheArchive to original binary address
+  auto* orig_mem =
+      memory->TranslateVirtual<uint8_t*>(kAddr.the_archive_orig);
+  if (orig_mem) {
+    xe::store_and_swap<uint32_t>(orig_mem, archive_val);
+    XELOGI(
+        "DC3: Synced TheArchive={:08X} from decomp {:08X} -> original {:08X}",
+        archive_val, kAddr.the_archive, kAddr.the_archive_orig);
+  }
+  s_globals_synced = true;
+}
+
 // Replace the game's broken memory allocator functions with SystemHeapAlloc.
 // The /FORCE:MULTIPLE linker merged link_glue.obj stubs over the real
 // MemMgr.obj implementations, so operator new, MemAlloc, PoolAlloc, etc.
@@ -1664,6 +1706,9 @@ void RegisterDc3MemAllocBootstrap(const Dc3HackContext& ctx,
           if (dest) std::memset(dest, 0, size);
         }
       }
+      // Lazy sync: copy globals from decomp addresses to original binary
+      // addresses once they've been stored (e.g. TheArchive after ArchiveInit).
+      Dc3SyncGlobalsIfNeeded(memory);
       static uint32_t s_new_count = 0;
       ++s_new_count;
       if (s_new_count <= 50 || (s_new_count % 5000) == 0) {
@@ -2403,47 +2448,80 @@ const DebugStubEntry kDebugStubTable[] = {
     {kAddr.debug_break, "DebugBreak", 0},
     {kAddr.datanode_print, "DataNode::Print", 0},
     // Holmes network/file/poll stubs (not needed for current bring-up).
-    {0x831F246C, "HolmesClientInit", 0},
-    {0x831F273C, "HolmesClientReInit", 0},
-    {0x831F27BC, "HolmesClientPoll", 0},
-    {0x831F203C, "HolmesClientPollInternal", 0},
-    {0x831F2154, "HolmesClientInitOpcode", 0},
-    {0x831F15F8, "HolmesClientTerminate", 0},
-    {0x831F0968, "CanUseHolmes", 0},
-    {0x831F09DC, "UsingHolmes", 0},
+    // Addresses are fallbacks; manifest resolution overrides them.
+    {0x82632000, "HolmesClientInit", 0},
+    {0x82630C50, "HolmesClientReInit", 0},
+    {0x82631C58, "HolmesClientPoll", 0},
+    {0x82630B68, "HolmesClientPollInternal", 0},
+    {0x826304C0, "HolmesClientInitOpcode", 0},
+    {0x83279E80, "HolmesClientTerminate", 0},
+    {0x8262FE80, "CanUseHolmes", 0},
+    {0x82630220, "UsingHolmes", 0},
     {kAddr.protocol_debug_string, "ProtocolDebugString", 0},
-    {0x831F09F8, "HolmesSetFileShare", 0},
-    {0x831F0A50, "HolmesFileHostName", 0},
-    {0x831F0A5C, "HolmesFileShare", 0},
-    {0x831F0A68, "HolmesResolveIP", 0},
-    {0x831F0EC4, "BeginCmd", 0},
-    {0x831F0F14, "CheckForResponse", 0},
-    {0x831F1118, "WaitForAnyResponse", 0},
-    {0x831F1D48, "EndCmd", 0},
-    {0x831F1E50, "CheckReads", 0},
-    {0x831F1F34, "CheckInput", 0},
-    {0x831F1FD4, "WaitForResponse", 0},
-    {0x831F3820, "WaitForReads", 0},
-    {0x831F209C, "HolmesClientPollKeyboard", 0},
-    {0x831F20F4, "HolmesClientPollJoypad", 0},
-    {0x831F2C20, "HolmesClientOpen", 0},
-    {0x831F3108, "HolmesClientRead", 0},
-    {0x831F3240, "HolmesClientReadDone", 0},
-    {0x831F2E5C, "HolmesClientWrite", 0},
-    {0x831F2FCC, "HolmesClientTruncate", 0},
-    {0x831F38BC, "HolmesClientClose", 0},
-    {0x831F2928, "HolmesClientGetStat", 0},
-    {0x831F2834, "HolmesClientSysExec", 0},
-    {0x831F2A40, "HolmesClientMkDir", 0},
-    {0x831F2B30, "HolmesClientDelete", 0},
-    {0x831F3A44, "HolmesClientEnumerate", 0},
-    {0x831F32F8, "HolmesClientCacheFile", 0},
-    {0x831F34C8, "HolmesClientCacheResource", 0},
-    {0x831F12A4, "HolmesToLocal", 0},
-    {0x831F1394, "HolmesFlushStreamBuffer", 0},
-    {0x831F1428, "DumpHolmesLog", 0},
-    {0x831F35FC, "HolmesClientStackTrace", 0},
-    {0x831F372C, "HolmesClientSendMessage", 0},
+    {0x83279824, "HolmesSetFileShare", 0},
+    {0x8262FFC8, "HolmesFileHostName", 0},
+    // HolmesFileShare removed from stub list — real code returns gShareName
+    // (empty string ""), which is non-null and prevents iRoot assert crash.
+    // Previous null stub broke all file I/O in devkit mode.
+    {0x82630240, "HolmesResolveIP", 0},
+    {0x8262FE20, "BeginCmd", 0},
+    {0x83279A5C, "CheckForResponse", 0},
+    {0x83279C60, "WaitForAnyResponse", 0},
+    {0x826309B0, "EndCmd", 0},
+    {0x83279FE8, "CheckReads", 0},
+    {0x82630AC0, "CheckInput", 0},
+    {0x8327A0CC, "WaitForResponse", 0},
+    {0x8327A194, "WaitForReads", 0},
+    {0x82630BF0, "HolmesClientPollKeyboard", 0},
+    {0x8327A134, "HolmesClientPollJoypad", 0},
+    {0x82631318, "HolmesClientOpen", 0},
+    {0x82631718, "HolmesClientRead", 0},
+    {0x82632328, "HolmesClientReadDone", 0},
+    {0x82631580, "HolmesClientWrite", 0},
+    {0x826311B0, "HolmesClientTruncate", 0},
+    {0x82631B18, "HolmesClientClose", 0},
+    {0x82630E28, "HolmesClientGetStat", 0},
+    {0x82630D00, "HolmesClientSysExec", 0},
+    {0x82630F70, "HolmesClientMkDir", 0},
+    {0x82631090, "HolmesClientDelete", 0},
+    {0x826DE348, "HolmesClientEnumerate", 0},
+    {0x82631D00, "HolmesClientCacheFile", 0},
+    {0x831F34C8, "HolmesClientCacheResource", 0},  // not in MAP, fallback stale
+    {0x8262FF00, "HolmesToLocal", 0},
+    {0x83279DEC, "HolmesFlushStreamBuffer", 0},
+    {0x826302A0, "DumpHolmesLog", 0},
+    {0x82631878, "HolmesClientStackTrace", 0},
+    {0x826319D8, "HolmesClientSendMessage", 0},
+    // FileCache crash workaround: GetFileAll iterates gCaches which has
+    // corrupt list nodes after 339-unit promotion.  GetFile dereferences a
+    // FileCacheEntry with garbled mStr → fault at 0x70000000.
+    // During early init the file cache is empty anyway, so return null.
+    {0x82675B50, "FileCache::GetFileAll", 0},
+    // CharClip::Init crash workaround: AddBones vector reallocation writes
+    // to 0x70000000 (stack guard) due to corrupt vector buffer pointer.
+    // This is in the CharInit path during App::App, before SystemInit.
+    {0x824951D0, "CharClip::Init", 0},
+    // ReadError: called by AsyncFileWin::_OpenAsync when CreateFile fails with
+    // an error other than FILE_NOT_FOUND/PATH_NOT_FOUND/NOT_READY.  In CD mode,
+    // ReadError calls ThePlatformMgr.SetDiskError(kDiskError) which enters an
+    // infinite "reinsert disc" retry loop.  In Xenia, cache paths (cache0:\ etc.)
+    // return ERROR_INVALID_NAME instead of FILE_NOT_FOUND, triggering the loop.
+    // Stubbing ReadError lets the game gracefully handle missing cache files.
+    {0x829571F0, "ReadError", 0},
+    // CDReadDone: checks GetOverlappedResult on the global OVERLAPPED used by
+    // CDRead for async ARK file reads.  Xenia completes all NtReadFile calls
+    // synchronously, but the XAPILIB ReadFile wrapper sets OVERLAPPED.Internal
+    // to STATUS_PENDING before calling NtReadFile and Xenia writes the result
+    // to a separate stack IO_STATUS_BLOCK — so OVERLAPPED.Internal stays
+    // PENDING forever.  GetOverlappedResult then returns ERROR_IO_PENDING and
+    // CDReadDone returns false, causing ChunkStream::Eof to spin forever.
+    // Returning true (li r3,1; blr) is correct because reads are always done.
+    {0x826026E0, "CDReadDone", 1},
+    // SetFileChecksumData(FileChecksum*, int): called from App::App to populate
+    // a global vector<ChecksumData>.  The vector's STL allocator (StlNodeAlloc)
+    // triggers _M_insert_overflow_aux which crashes writing to RWDATA during
+    // reallocation.  Not needed for boot testing.
+    {0x828E2438, "SetFileChecksumData", 0},
 };
 
 // ============================================================================
@@ -2615,14 +2693,10 @@ void ApplyDebugStubs(const Dc3HackContext& ctx,
     XELOGI("DC3: ReadCacheStream step override disabled (default; non-invasive)");
   }
 
-  // ReadCacheStream: return nullptr to prevent corrupt data loading.
-  // Guest DTB deserialization (bs >> DataArray*) creates objects with corrupt
-  // STL containers (/FORCE:MULTIPLE BSS shifts), causing infinite loops in
-  // _M_increment, list::remove, etc.  Returning nullptr makes config lookups
-  // fail non-fatally ("Couldn't find X in array") but avoids cascading
-  // corruption.  The gBinStream PPC cave and DTA text parser still work for
-  // .dta files (not affected by this override).
-  {
+  // ReadCacheStream: optionally return nullptr to prevent corrupt data loading.
+  // Was needed before DataReadFile was decomped; now that the decomp has
+  // ReadCacheStream + DataReadFile, the guest code should work natively.
+  if (cvars::dc3_null_read_cache_stream) {
     auto handler = [](cpu::ppc::PPCContext* ppc_context,
                       kernel::KernelState*) {
       ppc_context->r[3] = 0;  // return nullptr
@@ -2631,7 +2705,9 @@ void ApplyDebugStubs(const Dc3HackContext& ctx,
                                                  handler,
                                                  "DC3:ReadCacheStream(null)");
     result.applied++;
-    XELOGI("DC3: ReadCacheStream override returns nullptr — prevents corrupt STL cascades");
+    XELOGI("DC3: ReadCacheStream override returns nullptr (--dc3_null_read_cache_stream=true)");
+  } else {
+    XELOGI("DC3: ReadCacheStream override DISABLED — guest ReadCacheStream runs natively");
   }
 
   // DataInput diagnostic: check if the flex scanner is getting any input.
@@ -2873,9 +2949,9 @@ void ApplyDebugStubs(const Dc3HackContext& ctx,
               if (!s_config_dumped) {
                 s_config_dumped = true;
                 // gSystemConfig at kAddr.g_system_config (set by code cave)
-                const uint32_t kGSC = 0x83A93538;
+                const uint32_t kGSC = kAddr.g_system_config;
                 // Also check gUsingCD and gBinStream at runtime
-                const uint32_t kUCD = 0x83A93548;
+                const uint32_t kUCD = kAddr.g_using_cd;
                 auto* ucd_mem = memory->TranslateVirtual<uint8_t*>(kUCD);
                 if (ucd_mem) {
                   uint32_t ucd_val = xe::load_and_swap<uint32_t>(ucd_mem);
@@ -3561,13 +3637,42 @@ void ApplyRuntimeStopgaps(const Dc3HackContext& ctx,
     result.skipped++;
   }
 
-  // Make the full PE image + heap region writable.
+  // Make the full PE image writable (split into individual page descriptor
+  // ranges to avoid "spanning regions" failure when the range extends past
+  // the XEX allocation boundary).
   {
     auto* heap1 = memory->LookupHeap(0x82000000);
     if (heap1) {
-      heap1->Protect(0x82000000, 0x1F60000,
-                     kMemoryProtectRead | kMemoryProtectWrite);
-      XELOGI("DC3: Made PE image 0x82000000-0x83F60000 writable");
+      // XEX page descriptors for decomp PE (from build_xex.py):
+      //   DESC[0]: RODATA  70 pages  0x82000000-0x82460000
+      //   DESC[1]: CODE   236 pages  0x82460000-0x83320000
+      //   DESC[2]: DATA    58 pages  0x83320000-0x836C0000
+      //   DESC[3]: RODATA  36 pages  0x836C0000-0x83900000
+      // The XEX loader already set DESC[2] to RW.  We need to also make
+      // CODE and RODATA writable for runtime patching.
+      struct PageRange {
+        uint32_t start;
+        uint32_t size;
+        const char* name;
+      };
+      const PageRange ranges[] = {
+          {0x82000000, 70 * 0x10000, "RODATA-pre"},   // DESC[0]
+          {0x82460000, 236 * 0x10000, "CODE"},         // DESC[1]
+          {0x83320000, 58 * 0x10000, "DATA"},           // DESC[2]
+          {0x836C0000, 36 * 0x10000, "RODATA-post"},   // DESC[3]
+      };
+      int ok_count = 0;
+      for (const auto& r : ranges) {
+        bool ok = heap1->Protect(r.start, r.size,
+                                 kMemoryProtectRead | kMemoryProtectWrite);
+        if (ok) {
+          ok_count++;
+        } else {
+          XELOGW("DC3: Protect {:08X}-{:08X} ({}) FAILED",
+                 r.start, r.start + r.size, r.name);
+        }
+      }
+      XELOGI("DC3: Made PE image writable ({}/4 ranges succeeded)", ok_count);
     }
     constexpr uint32_t kHeapExtStart = 0x83F60000;
     constexpr uint32_t kHeapExtSize = 0x1000000;  // 16MB for heap growth
@@ -3588,27 +3693,147 @@ void ApplyRuntimeStopgaps(const Dc3HackContext& ctx,
     }
     result.applied++;
 
-    if (cvars::dc3_debug_memmgr_assert_nop_bypass) {
-      XELOGW("DC3: MemMgr assert nop bypass ENABLED (temporary debug mode)");
-      struct MemPatch {
-        uint32_t addr;
-        uint32_t expected_word;
-        const char* name;
-      };
-      const MemPatch mem_patches[] = {
-          {kAddr.meminit_assert, 0x481032B9, "MemInit line 690: Debug::Fail call (STALE)"},
-          {kAddr.memalloc_assert, 0x48104389, "MemAlloc line 961: Debug::Fail call (STALE)"},
-      };
-      for (const auto& p : mem_patches) {
-        if (PatchCheckedNop(memory, p.addr, p.expected_word, p.name)) {
-          result.applied++;
-        } else {
-          result.failed++;
-        }
+    // Override CriticalSection::CriticalSection — the guest ctor calls
+    // RtlInitializeCriticalSection via an IAT import thunk.  The decomp PE
+    // has 379 xboxkrnl imports but the XEX only resolves ~196; unresolved
+    // IAT entries (including RtlInitializeCriticalSection at 0x823F2D60)
+    // remain null, causing CTR=0 → crash on bctr.  This host override
+    // bypasses the broken thunk by calling Xenia's kernel implementation
+    // directly.
+    {
+      const uint32_t critsec_ctor = kAddr.critsec_ctor;
+      if (critsec_ctor && ctx.processor) {
+        auto handler = [](xe::cpu::ppc::PPCContext* ppc_context,
+                          xe::kernel::KernelState* kernel_state) {
+          auto* memory = kernel_state->memory();
+          uint32_t this_ptr = static_cast<uint32_t>(ppc_context->r[3]);
+          auto* base = memory->TranslateVirtual<uint8_t*>(this_ptr);
+          // mEntryCount = 0 (offset 0x0, big-endian uint32)
+          xe::store_and_swap<uint32_t>(base + 0x00, 0);
+          // mCritSec starts at offset 0x4 — this is X_RTL_CRITICAL_SECTION:
+          //   X_DISPATCH_HEADER (0x10 bytes) + lock_count + recursion_count +
+          //   owning_thread
+          // Matches xeRtlInitializeCriticalSection() from xboxkrnl_rtl.cc.
+          uint32_t cs_ptr = this_ptr + 4;
+          // header.type=1, header.absolute=0, header.size=0, header.inserted=0
+          xe::store_and_swap<uint32_t>(base + 0x04, 0x01000000);
+          // header.signal_state = 0
+          xe::store_and_swap<uint32_t>(base + 0x08, 0);
+          // header.wait_list_flink = &header.wait_list_flink (self-referential)
+          uint32_t wait_list_ptr = cs_ptr + 0x08;  // offsetof(header, wait_list_flink)
+          xe::store_and_swap<uint32_t>(base + 0x0C, wait_list_ptr);
+          // header.wait_list_blink = same
+          xe::store_and_swap<uint32_t>(base + 0x10, wait_list_ptr);
+          // lock_count = -1 (native int32_t, NOT be<> in Xenia's struct)
+          *reinterpret_cast<int32_t*>(base + 0x14) = -1;
+          // recursion_count = 0 (be<int32_t>)
+          xe::store_and_swap<int32_t>(base + 0x18, 0);
+          // owning_thread = 0 (be<uint32_t>)
+          xe::store_and_swap<uint32_t>(base + 0x1C, 0);
+          // Return this
+          ppc_context->r[3] = static_cast<uint64_t>(this_ptr);
+        };
+        ctx.processor->RegisterGuestFunctionOverride(
+            critsec_ctor, handler, "CriticalSection::CriticalSection");
+        XELOGI("DC3: Registered CriticalSection ctor override at {:08X} "
+               "(bypasses unresolved IAT thunk)", critsec_ctor);
+        result.applied++;
+      } else {
+        result.skipped++;
       }
-    } else {
-      XELOGI("DC3: MemMgr assert nop bypass disabled (default)");
-      result.skipped++;
+    }
+
+    // Override CriticalSection::Enter — bypasses RtlEnterCriticalSection IAT thunk.
+    // Layout: mEntryCount at +0x0, mCritSec (X_RTL_CRITICAL_SECTION) at +0x4.
+    // Within mCritSec: lock_count at +0x14 (native int32), recursion_count at
+    // +0x18 (be<int32>), owning_thread at +0x1C (be<uint32>).
+    {
+      const uint32_t addr = kAddr.critsec_enter;
+      if (addr && ctx.processor) {
+        auto handler = [](xe::cpu::ppc::PPCContext* ppc_context,
+                          xe::kernel::KernelState* kernel_state) {
+          auto* memory = kernel_state->memory();
+          uint32_t this_ptr = static_cast<uint32_t>(ppc_context->r[3]);
+          auto* base = memory->TranslateVirtual<uint8_t*>(this_ptr);
+          auto* lock_count = reinterpret_cast<volatile int32_t*>(base + 0x14);
+          uint32_t cur_thread =
+              xe::kernel::XThread::GetCurrentThread()->guest_object();
+          uint32_t owner =
+              xe::load_and_swap<uint32_t>(base + 0x1C);
+          if (owner == cur_thread) {
+            // Already own the lock — re-enter.
+            xe::atomic_inc(lock_count);
+            int32_t rc = xe::load_and_swap<int32_t>(base + 0x18);
+            xe::store_and_swap<int32_t>(base + 0x18, rc + 1);
+          } else {
+            // Fast uncontended path: CAS lock_count from -1 to 0.
+            if (xe::atomic_cas(-1, 0, lock_count)) {
+              xe::store_and_swap<uint32_t>(base + 0x1C, cur_thread);
+              xe::store_and_swap<int32_t>(base + 0x18, 1);
+            } else {
+              // Contended — spin then wait (simplified: just spin for boot).
+              for (int spin = 0; spin < 4000; spin++) {
+                if (xe::atomic_cas(-1, 0, lock_count)) {
+                  xe::store_and_swap<uint32_t>(base + 0x1C, cur_thread);
+                  xe::store_and_swap<int32_t>(base + 0x18, 1);
+                  goto acquired;
+                }
+              }
+              // Waiter path
+              xe::atomic_inc(lock_count);
+              while (!xe::atomic_cas(0, 0, lock_count)) {
+                // Busy-wait (boot is mostly single-threaded)
+              }
+              xe::store_and_swap<uint32_t>(base + 0x1C, cur_thread);
+              xe::store_and_swap<int32_t>(base + 0x18, 1);
+              acquired:;
+            }
+          }
+          // mEntryCount++ (be<int32> at +0x0)
+          int32_t entry = xe::load_and_swap<int32_t>(base);
+          xe::store_and_swap<int32_t>(base, entry + 1);
+        };
+        ctx.processor->RegisterGuestFunctionOverride(
+            addr, handler, "CriticalSection::Enter");
+        XELOGI("DC3: Registered CriticalSection::Enter override at {:08X}", addr);
+        result.applied++;
+      } else {
+        result.skipped++;
+      }
+    }
+
+    // Override CriticalSection::Exit — bypasses RtlLeaveCriticalSection IAT thunk.
+    {
+      const uint32_t addr = kAddr.critsec_exit;
+      if (addr && ctx.processor) {
+        auto handler = [](xe::cpu::ppc::PPCContext* ppc_context,
+                          xe::kernel::KernelState* kernel_state) {
+          auto* memory = kernel_state->memory();
+          uint32_t this_ptr = static_cast<uint32_t>(ppc_context->r[3]);
+          auto* base = memory->TranslateVirtual<uint8_t*>(this_ptr);
+          auto* lock_count = reinterpret_cast<volatile int32_t*>(base + 0x14);
+          // mEntryCount-- (be<int32> at +0x0)
+          int32_t entry = xe::load_and_swap<int32_t>(base);
+          xe::store_and_swap<int32_t>(base, entry - 1);
+          // recursion_count-- at +0x18
+          int32_t rc = xe::load_and_swap<int32_t>(base + 0x18);
+          if (rc <= 1) {
+            // Fully releasing the lock.
+            xe::store_and_swap<int32_t>(base + 0x18, 0);
+            xe::store_and_swap<uint32_t>(base + 0x1C, 0);  // owning_thread = 0
+            xe::atomic_dec(lock_count);
+          } else {
+            xe::store_and_swap<int32_t>(base + 0x18, rc - 1);
+            xe::atomic_dec(lock_count);
+          }
+        };
+        ctx.processor->RegisterGuestFunctionOverride(
+            addr, handler, "CriticalSection::Exit");
+        XELOGI("DC3: Registered CriticalSection::Exit override at {:08X}", addr);
+        result.applied++;
+      } else {
+        result.skipped++;
+      }
     }
 
     // Initialize STLport std::list<bool> gConditional sentinel.
@@ -3700,8 +3925,8 @@ void ApplyRuntimeStopgaps(const Dc3HackContext& ctx,
       const char* name;
     };
     const CdPatch cd_patches[] = {
-        {0x833391A4, 0x4BE48C41, "NgRnd::PreInit: 2nd CreateDefaults"},
-        {0x833A3E68, 0x4BDDDF7D, "DxRnd::PreInit: 3rd CreateDefaults"},
+        {0x8285D3D8, 0x488907C9, "NgRnd::PreInit: 2nd CreateDefaults"},
+        {0x83272CB4, 0x4BE7AEED, "DxRnd::PreInit: 3rd CreateDefaults"},
     };
     for (const auto& p : cd_patches) {
       if (PatchCheckedNop(memory, p.addr, p.expected, p.name)) {
@@ -3714,19 +3939,15 @@ void ApplyRuntimeStopgaps(const Dc3HackContext& ctx,
 
     // Patch GPU-dependent init functions to immediately return (blr).
     // These allocate GPU textures/surfaces that block on null GPU.
-    // NgPostProc::Init calls RebuildTex which allocates velocity/bloom
-    // textures; NgDOFProc::Init allocates DOF textures; RndShadowMap::Init
-    // creates shadow camera + texture with SetBitmap.
-    // We keep NgPostProc::Init because it registers the PostProc factory,
-    // but patch RebuildTex to blr so the factory registration still fires.
+    // NgPostProc::RebuildTex and NgDOFProc::Init are handled by JIT
+    // overrides in ApplyDebugStubs; RndShadowMap::Init creates shadow
+    // camera + texture with SetBitmap.
     constexpr uint32_t kPpcBlr = 0x4E800020;
     struct BlrPatch {
       uint32_t addr;
       const char* name;
     };
     const BlrPatch blr_patches[] = {
-        {kAddr.ng_postproc_rebuild_tex, "NgPostProc::RebuildTex"},
-        {kAddr.ng_dofproc_init, "NgDOFProc::Init"},
         {kAddr.rnd_shadowmap_init, "RndShadowMap::Init"},
         {kAddr.occlusion_query_mgr_ctor, "DxRndOcclusionQueryMgr::ctor"},
         {kAddr.dxrnd_init_buffers, "DxRnd::InitBuffers"},
@@ -3740,9 +3961,8 @@ void ApplyRuntimeStopgaps(const Dc3HackContext& ctx,
         {kAddr.bink_start_async_thread, "BinkStartAsyncThread"},
         {kAddr.bink_platform_init, "BinkMovieSys::PlatformInit"},
         // LoadMgr::PollFrontLoader and PollUntilLoaded — NOT stubbed.
-        // With gUsingCD=0 (forced below), no ARK loading occurs, so no
-        // DataLoaders are created and PollFrontLoader is never called with
-        // corrupt loaders.  Stubbing these causes IsLoaded() asserts.
+        // With gUsingCD=1, ARK loading creates DataLoaders. PollFrontLoader
+        // must run to complete async loads.  Stubbing causes IsLoaded() asserts.
         // NOTE: Do NOT stub D3DDevice_Suspend/Resume — they pair
         // critical section enter/leave. Stubbing breaks CS ownership.
     };
@@ -3768,58 +3988,58 @@ void ApplyRuntimeStopgaps(const Dc3HackContext& ctx,
   // false (no screens) so the splash system is inert.
   {
     // PrepareNext returns bool — 0 = no screens available
-    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x834E2050, 0, "Splash::PrepareNext");
+    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x82921430, 0, "Splash::PrepareNext");
     // BeginSplasher creates a render thread and waits for state; skip it
-    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x834E2DEC, 0, "Splash::BeginSplasher");
+    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x82922390, 0, "Splash::BeginSplasher");
     // Suspend/Resume wait for splash thread state changes, but the thread
     // was never created (BeginSplasher stubbed).  mThreaded=1 in ctor causes
     // Suspend to call WaitForState(kSuspended) → deadlock.
-    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x834E190C, 0, "Splash::Suspend");
-    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x834E1A94, 0, "Splash::Resume");
+    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x82920AA8, 0, "Splash::Suspend");
+    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x82920C30, 0, "Splash::Resume");
     // LiveCameraInput::PreInit calls `new LiveCameraInput()` whose ctor
     // calls NuiInitialize/NuiAudioCreate/NuiSkeletonTrackingEnable/
     // NuiImageStreamOpen — all block without Kinect hardware.
-    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x832AAAFC, 0, "LiveCameraInput::PreInit");
+    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x826D30D0, 0, "LiveCameraInput::PreInit");
     // LiveCameraInput::Init also blocks on NUI/Kinect hardware
-    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x832AABE4, 0, "LiveCameraInput::Init");
+    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x826D31E0, 0, "LiveCameraInput::Init");
     // HasFileChecksumData() — return false to skip DTB checksum validation.
     // The decomp build's DTB files don't match original checksums, triggering
     // dirty disc errors and XamLoaderLaunchTitle (exit to dashboard).
-    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x82924218, 0, "HasFileChecksumData");
+    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x828E2100, 0, "HasFileChecksumData");
     // VoiceInputPanel::LoadVoiceContexts reads kinect/speech/voice_contexts
     // config and calls Sym() on each entry.  Without Kinect/speech recognition,
     // this spins forever on "Data is not Symbol" errors during UIManager::Init.
-    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x8354D8D4, 0, "VoiceInputPanel::LoadVoiceContexts");
+    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x829844B8, 0, "VoiceInputPanel::LoadVoiceContexts");
     // Fader::UpdateValue iterates FaderGroup set (STL rb-tree at this+0x84).
     // With config parsing fixed (gBinStream cave), real fader data loads but
     // the STL container is corrupt (/FORCE:MULTIPLE BSS shifts).  Infinite
     // loop in _M_increment during SynthInit → SetVolume → UpdateValue.
-    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x8325d84c, 0, "Fader::UpdateValue");
+    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x82697920, 0, "Fader::UpdateValue");
     // Synth::InitSecurity (0x832E164C) calls ByteGrinder::Init which tries to
     // parse DTA data via DataReadString → yylex.  The flex lexer hangs in an
     // infinite loop (corrupt global state or garbage input from /FORCE BSS shifts).
     // Security/DRM init is unnecessary for emulation.
-    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x832E164C, 0, "Synth::InitSecurity");
+    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x82717380, 0, "Synth::InitSecurity");
     // ShellInput::Init depends on Kinect/gesture subsystems (SpeechMgr,
     // GestureMgr, SkeletonUpdate, DepthBuffer).  TheSpeechMgr->AddSink()
     // hits corrupt MsgSinks lists because SpeechMgr was never initialized.
-    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x8339CC08, 0, "ShellInput::Init");
+    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x8339CC08, 0, "ShellInput::Init");  // not in MAP, fallback stale
     // UIScreen::HasPanel — un-stubbed (Session 41).
     // mPanelList should be valid now that factories are registered and
     // .milo files load as correct types.
     // MoveMgr::Init loads choreography/move category data from config.
     // LoadCategoryData("genres") crashes (SP corruption) because config
     // data for move categories is missing or corrupt in decomp build.
-    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x831634A4, 0, "MoveMgr::Init");
+    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x825B2580, 0, "MoveMgr::Init");
     // HamSongMgr::Init (0x82AF6720) reads song count from config, calls
     // vector::reserve with corrupt/huge size → length_error throw → memcpy
     // crashes reading past stack end (10 SIGSEGVs).  C++ exception handling
     // doesn't work in JIT, so the crash is unrecoverable.
-    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x82AF6720, 0, "HamSongMgr::Init");
+    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x8298AA18, 0, "HamSongMgr::Init");
     // Locale::Init tries to find 'locale' key in config, then opens
     // devkit:\locale_keep.dta which fails (no devkit: device in emulator).
     // Crashes inside a vector/array operation with null data.
-    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x835bf9cc, 0, "Locale::Init");
+    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x82A5C2F8, 0, "Locale::Init");
     // ObjRef::ReplaceList and list<ObjectDir*>::clear — un-stubbed (Session 41).
     // The "corrupt lists from .milo load failures" should be resolved now that
     // factories are registered and SynthInit properly initializes.
@@ -3828,7 +4048,7 @@ void ApplyRuntimeStopgaps(const Dc3HackContext& ctx,
     // via ChunkStream.  ChunkStream's async I/O threads fail to start
     // (thread creation fails in headless), causing the game to hang forever
     // waiting for the load to complete.  Stub this until async I/O is fixed.
-    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x83429904, 0, "UIManager::GotoFirstScreen");
+    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x8284AD00, 0, "UIManager::GotoFirstScreen");
     // DirLoader stubs — un-stubbed (Session 41).
     // ClassAndNameSort and SaveObjects were needed because of corrupt objects
     // from failed .milo loads.  With proper factory registration and SynthInit
@@ -3836,34 +4056,34 @@ void ApplyRuntimeStopgaps(const Dc3HackContext& ctx,
     // list<RndTransformable*>::remove iterates a corrupt STL list sentinel
     // (/FORCE:MULTIPLE BSS shift).  Infinite loop in StlAlloc.h assert.
     // Called during Rnd::Init → ObjectDir init regardless of data loading.
-    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x83474048, 0, "list<RndTransformable*>::remove");
+    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x828B33D8, 0, "list<RndTransformable*>::remove");
     // FlowManager::Poll (0x831043A4) iterates FlowNodes calling virtual methods
     // via bctrl.  FlowNodes have corrupt vtables (/FORCE:MULTIPLE BSS shifts)
     // dispatching to 0x0C000000 (garbage).  24M+ no-op stub calls per second.
     // Game flow won't advance, but main loop continues.
-    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x831043A4, 0, "FlowManager::Poll");
+    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x82563200, 0, "FlowManager::Poll");
     // SkeletonUpdate::InstanceHandle creates a handle wrapper but asserts
     // sInstance != null each frame.  Return null handle (r3=0) to skip.
-    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x830F1984, 0, "SkeletonUpdate::InstanceHandle");
+    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x82544BF8, 0, "SkeletonUpdate::InstanceHandle");
     // SkeletonUpdate::PostUpdate is called from the main loop via
     // SkeletonUpdateHandle.  It calls Update → UpdateCallbacks which
     // iterate Kinect skeleton data that was never initialized, causing
     // corrupt vtable dispatch and DirLoader::SaveObjects infinite sort.
-    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x830F2C24, 0, "SkeletonUpdate::PostUpdate");
+    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x82544C90, 0, "SkeletonUpdate::PostUpdate");
     // SkeletonHistoryArchive::AddToHistory dispatches to garbage addresses
     // (string data interpreted as pointers) from corrupt Skeleton objects.
-    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x834AA9C4, 0, "SkeletonHistoryArchive::AddToHistory");
+    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x828C8AE0, 0, "SkeletonHistoryArchive::AddToHistory");
     // GestureMgr::Poll reads Kinect skeleton data with bounds-check asserts
     // that fire on uninitialized data.  Kinect not available in headless mode.
-    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x833ACA6C, 0, "GestureMgr::Poll");
+    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x827D0EC0, 0, "GestureMgr::Poll");
     // GestureMgr::GetSkeleton and UpdateTrackedSkeletons are called from
     // non-Poll paths (UI character updates) causing per-frame asserts.
-    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x833ACEE0, 0, "GestureMgr::GetSkeleton");
-    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x833AD2E0, 0, "GestureMgr::UpdateTrackedSkeletons");
+    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x827D1130, 0, "GestureMgr::GetSkeleton");
+    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x827D1370, 0, "GestureMgr::UpdateTrackedSkeletons");
     // App::DrawRegular tries to render via DxRnd::Present → VdSwap.
     // Without GPU initialization (headless mode), VdSwap crashes on
     // invalid frontbuffer physical address.  Stub to skip rendering.
-    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x8300ABE0, 0, "App::DrawRegular");
+    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x82450D80, 0, "App::DrawRegular");
     // OSCMessenger::Poll is a Holmes debug networking function that polls
     // for OSC (Open Sound Control) messages over UDP.  Hangs forever when
     // no network is available (headless mode).  Use JIT-level override
@@ -4472,32 +4692,36 @@ void ApplyCrtPatches(const Dc3HackContext& ctx,
              kOpGtGtDA);
     }
 
-    // Patch CheckForArchive in guest memory to set gUsingCD=0 and return.
-    // With gUsingCD=0, ArchiveInit skips ARK loading.  This prevents
-    // creation of DataLoaders that hang in PollFrontLoader due to corrupt
-    // Loader vtables (/FORCE:MULTIPLE BSS shifts).  Config files load via
-    // DTA text path (DataReadStream + gBinStream cave) instead of DTB binary.
-    // NOTE: Previous sessions set gUsingCD=1 to enable ARK loading, but the
-    // resulting objects had corrupt STL containers causing infinite loops.
+    // Patch CheckForArchive in guest memory to set gUsingCD=1 and return.
+    // gUsingCD=1 = CD mode: ARK archive loaded, files read as .dtb.
+    // Writes to BOTH the decomp address and the original binary address
+    // so that original code (CDRead) can also see gUsingCD=1.
     {
       const uint32_t kCheckForArchive = kAddr.check_for_archive;
       const uint32_t kUCD = kAddr.g_using_cd;
+      const uint32_t kUCDOrig = kAddr.g_using_cd_orig;
       auto* heap = memory->LookupHeap(kCheckForArchive);
       auto* mem = memory->TranslateVirtual<uint8_t*>(kCheckForArchive);
       if (heap && mem) {
         uint32_t w0 = xe::load_and_swap<uint32_t>(mem);
         if (w0 != 0x00000000) {
-          heap->Protect(kCheckForArchive, 20,
+          heap->Protect(kCheckForArchive, 32,
                         kMemoryProtectRead | kMemoryProtectWrite);
           uint32_t hi = (kUCD >> 16) & 0xFFFF;
           uint32_t lo = kUCD & 0xFFFF;
-          xe::store_and_swap<uint32_t>(mem + 0,  0x3C600000 | hi);   // lis r3, hi
-          xe::store_and_swap<uint32_t>(mem + 4,  0x60630000 | lo);   // ori r3, r3, lo
-          xe::store_and_swap<uint32_t>(mem + 8,  0x38800000);        // li r4, 0
-          xe::store_and_swap<uint32_t>(mem + 12, 0x90830000);        // stw r4, 0(r3)
-          xe::store_and_swap<uint32_t>(mem + 16, 0x4E800020);        // blr
-          XELOGI("DC3: Patched CheckForArchive at {:08X} to set gUsingCD=0 "
-                 "at {:08X} (devkit mode — no ARK loading)", kCheckForArchive, kUCD);
+          uint32_t hi_o = (kUCDOrig >> 16) & 0xFFFF;
+          uint32_t lo_o = kUCDOrig & 0xFFFF;
+          xe::store_and_swap<uint32_t>(mem + 0,  0x3C600000 | hi);     // lis r3, hi(decomp)
+          xe::store_and_swap<uint32_t>(mem + 4,  0x60630000 | lo);     // ori r3, r3, lo(decomp)
+          xe::store_and_swap<uint32_t>(mem + 8,  0x38800001);          // li r4, 1
+          xe::store_and_swap<uint32_t>(mem + 12, 0x90830000);          // stw r4, 0(r3)
+          xe::store_and_swap<uint32_t>(mem + 16, 0x3C600000 | hi_o);   // lis r3, hi(orig)
+          xe::store_and_swap<uint32_t>(mem + 20, 0x60630000 | lo_o);   // ori r3, r3, lo(orig)
+          xe::store_and_swap<uint32_t>(mem + 24, 0x90830000);          // stw r4, 0(r3)
+          xe::store_and_swap<uint32_t>(mem + 28, 0x4E800020);          // blr
+          XELOGI("DC3: Patched CheckForArchive at {:08X} to set gUsingCD=1 "
+                 "at {:08X} (decomp) + {:08X} (orig)",
+                 kCheckForArchive, kUCD, kUCDOrig);
         }
       }
     }
@@ -4851,6 +5075,7 @@ void ApplyCrtPatches(const Dc3HackContext& ctx,
           kAddr.midi_parser_sparsers,     // MidiParser::sParsers
           kAddr.rnd_multi_mesh_sproxy,    // RndMultiMesh::sProxyPool
           kAddr.g_caches,                 // gCaches (FileCache.obj)
+          kAddr.g_decompression_queue,     // gDecompressionQueue (ChunkStream.obj)
           // TheLoadMgr member lists (CRT skipped in bisect range)
           kTheLoadMgr + 0x00,  // mLoaders
           kTheLoadMgr + 0x10,  // mFactories
@@ -4944,15 +5169,25 @@ void ApplyCrtPatches(const Dc3HackContext& ctx,
       }
     }
 
-    // Set gUsingCD=0 early: devkit mode, no ARK loading.
-    // This matches Session 39's accidental behavior (wrong address read as 0)
-    // which avoided corrupt DataLoader vtables from /FORCE:MULTIPLE.
+    // Set gUsingCD=1 early: CD mode, files from ARK archive.
+    // GetFileAll crash is bypassed by stubbing it to return null.
+    // Must write to BOTH the decomp address and the original binary address
+    // because original binary code (CDRead, etc.) reads gUsingCD from the
+    // original hardcoded address, not the decomp's relocated address.
     {
       auto* ucd = memory->TranslateVirtual<uint8_t*>(kAddr.g_using_cd);
       if (ucd) {
-        xe::store_and_swap<uint32_t>(ucd, 0);
-        XELOGI("DC3: Set gUsingCD=0 at {:08X} (devkit mode — no ARK loading)",
+        xe::store_and_swap<uint32_t>(ucd, 1);
+        XELOGI("DC3: Set gUsingCD=1 at {:08X} (decomp address)",
                kAddr.g_using_cd);
+        result.applied++;
+      }
+      auto* ucd_orig = memory->TranslateVirtual<uint8_t*>(kAddr.g_using_cd_orig);
+      if (ucd_orig) {
+        xe::store_and_swap<uint32_t>(ucd_orig, 1);
+        XELOGI("DC3: Set gUsingCD=1 at {:08X} (original binary address — "
+               "synced for original CDRead/UsingCD)",
+               kAddr.g_using_cd_orig);
         result.applied++;
       }
     }
@@ -5134,6 +5369,11 @@ void Dc3PopulateAddressesFromCatalog(
   get("g_string_table_global", kAddr.g_string_table_global);
   get("g_hash_table", kAddr.g_hash_table);
 
+  // CriticalSection (IAT thunk bypass)
+  get("critsec_ctor", kAddr.critsec_ctor);
+  get("critsec_enter", kAddr.critsec_enter);
+  get("critsec_exit", kAddr.critsec_exit);
+
   // Memory / allocator
   get("mem_or_pool_alloc", kAddr.mem_or_pool_alloc);
   get("mem_alloc", kAddr.mem_alloc);
@@ -5245,6 +5485,7 @@ void Dc3PopulateAddressesFromCatalog(
   get("midi_parser_sparsers", kAddr.midi_parser_sparsers);
   get("rnd_multi_mesh_sproxy", kAddr.rnd_multi_mesh_sproxy);
   get("g_caches", kAddr.g_caches);
+  get("g_decompression_queue", kAddr.g_decompression_queue);
 
   // gConditional / gDataArrayConditional ctor functions
   // (BSS variable addresses extracted at runtime from PPC code)
