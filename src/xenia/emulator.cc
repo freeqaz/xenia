@@ -116,10 +116,10 @@ DEFINE_bool(dc3_debug_read_cache_stream_step_override, false,
             "for DTB debugging. WARNING: performs extra reads/seeks and can "
             "perturb checksum/parser behavior; use only in dedicated probe runs.",
             "DC3");
-DEFINE_bool(dc3_debug_memmgr_assert_nop_bypass, false,
-            "DC3: debug-only bypass of selected MemMgr Debug::Fail callsites "
-            "(replaces assert calls with nop). Temporary progression tool only; "
-            "can mask data/config corruption.",
+DEFINE_bool(dc3_null_read_cache_stream, false,
+            "DC3: override ReadCacheStream to return nullptr, preventing DTB "
+            "loading. Was needed before DataReadFile was decomped; now that "
+            "the decomp has ReadCacheStream, this should be false.",
             "DC3");
 DEFINE_bool(dc3_debug_mempool_alloc_probe, false,
             "DC3: log-only probe for MemOrPoolAlloc. Captures caller LR, "
