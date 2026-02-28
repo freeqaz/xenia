@@ -517,6 +517,7 @@ uint64_t ResolveFunction(void* raw_context, uint64_t target_address) {
         "resolve_failed", static_cast<uint32_t>(target_address), callsite_pc);
     return GetNoopReturnStub(thread_state);
   }
+
   auto x64_fn = static_cast<X64Function*>(fn);
   uint64_t addr = reinterpret_cast<uint64_t>(x64_fn->machine_code());
   if (!addr) {
