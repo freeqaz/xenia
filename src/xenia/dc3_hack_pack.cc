@@ -25,6 +25,7 @@
 #include "xenia/kernel/xthread.h"
 #include "xenia/kernel/user_module.h"
 #include "xenia/memory.h"
+#include "xenia/vfs/virtual_file_system.h"
 
 DECLARE_int32(dc3_crt_bisect_max);
 DECLARE_string(dc3_crt_skip_indices);
@@ -172,6 +173,8 @@ struct Dc3Addresses {
   uint32_t file_init = 0x83413CDC;
   uint32_t archive_init = 0x834A41F8;
   uint32_t the_archive = 0x83A9036C;
+  // ArkFile (BlockMgr bypass — all BlockMgr methods are noop'd via ALTERNATENAME)
+  uint32_t arkfile_read = 0x826820C0;  // ?Read@ArkFile@@UAAHPAXH@Z
   // Original binary addresses for globals (from symbols.txt).
   // When decomp code writes to the decomp address but original binary code
   // reads from the original address, we must sync both.
@@ -558,6 +561,174 @@ class HostRand2 {
  private:
   int seed_;
 };
+
+// ============================================================================
+// Host-side ArkFile::Read — bypasses the noop'd BlockMgr layer
+//
+// All BlockMgr methods (GetAssociatedBlocks, AddTask, Poll, KillBlockRequests)
+// resolve to __link_glue_noop via ALTERNATENAME.  This makes ArkFile::Read
+// (which calls ReadAsync → BlockMgr) completely broken: ReadAsync enqueues
+// nothing, ReadDone loops forever since mNumOutstandingTasks never clears.
+//
+// This handler replaces the entire ArkFile::Read with a host-side
+// implementation that reads directly from .ark files via Xenia's VFS.
+//
+// Guest ArkFile layout (from ArkFile_p.h):
+//   +0x00  vtable ptr
+//   +0x04  mArkfileNum (int)
+//   +0x08  mByteStart  (u64)   — byte offset within .ark file
+//   +0x10  mSize       (int)   — file entry size
+//   +0x14  mUCSize     (int)   — uncompressed size
+//   +0x18  mNumOutstandingTasks (int)
+//   +0x1C  mBytesRead  (int)
+//   +0x20  mTell       (int)   — current read position
+//   +0x24  mFail       (bool)
+//   +0x28  mReadStartTime (float)
+//   +0x2C  mReadAhead  (bool)
+//   +0x30  mFilename   (String)
+//
+// Guest Archive layout (from Archive.h):
+//   +0x00  mNumArkfiles (int)
+//   +0x04  mArkfileSizes (vector<uint>)  — [_Myfirst, _Mylast, _Myend]
+//   +0x10  mArkfileNames (vector<String>) — [_Myfirst, _Mylast, _Myend]
+//
+// Guest String layout: [vtable (0x0), char* mStr (0x4)] = 8 bytes
+// ============================================================================
+void Dc3ArkFileReadHandler(cpu::ppc::PPCContext* ppc_context,
+                           kernel::KernelState* kernel_state) {
+  if (!ppc_context || !kernel_state) return;
+  auto* memory = kernel_state->memory();
+  if (!memory) return;
+  auto* mem = memory->virtual_membase();
+
+  // PPC ABI: r3=this, r4=buffer, r5=size
+  uint32_t this_ptr = static_cast<uint32_t>(ppc_context->r[3]);
+  uint32_t buf_addr = static_cast<uint32_t>(ppc_context->r[4]);
+  int requested = static_cast<int>(ppc_context->r[5]);
+
+  // Read ArkFile member fields (big-endian guest memory).
+  int arkfileNum = xe::load_and_swap<int32_t>(mem + this_ptr + 0x04);
+  uint64_t byteStart = xe::load_and_swap<uint64_t>(mem + this_ptr + 0x08);
+  int size = xe::load_and_swap<int32_t>(mem + this_ptr + 0x10);
+  int tell = xe::load_and_swap<int32_t>(mem + this_ptr + 0x20);
+  bool fail = *(mem + this_ptr + 0x24) != 0;
+
+  if (fail || tell >= size || requested <= 0) {
+    ppc_context->r[3] = 0;
+    return;
+  }
+
+  // Clamp to remaining file bytes.
+  int toRead = std::min(requested, size - tell);
+  if (toRead <= 0) {
+    ppc_context->r[3] = 0;
+    return;
+  }
+
+  // Read ark filename from TheArchive->mArkfileNames[arkfileNum].
+  // TheArchive is a guest pointer; mArkfileNames is a vector<String> at +0x10.
+  uint32_t archive_ptr = xe::load_and_swap<uint32_t>(mem + kAddr.the_archive);
+  if (!archive_ptr) {
+    XELOGW("DC3: ArkFile::Read — TheArchive is null");
+    *(mem + this_ptr + 0x24) = 1;
+    ppc_context->r[3] = 0;
+    return;
+  }
+  // vector<String>._Myfirst at Archive+0x10
+  uint32_t names_first =
+      xe::load_and_swap<uint32_t>(mem + archive_ptr + 0x10);
+  if (!names_first) {
+    XELOGW("DC3: ArkFile::Read — mArkfileNames._Myfirst is null");
+    *(mem + this_ptr + 0x24) = 1;
+    ppc_context->r[3] = 0;
+    return;
+  }
+  // String[arkfileNum].mStr — each String is 8 bytes [vtable, mStr].
+  // mStr is at offset +0x04 within each String object.
+  uint32_t str_ptr =
+      xe::load_and_swap<uint32_t>(mem + names_first + arkfileNum * 8 + 4);
+  if (!str_ptr) {
+    XELOGW("DC3: ArkFile::Read — ark name string pointer is null for idx {}",
+            arkfileNum);
+    *(mem + this_ptr + 0x24) = 1;
+    ppc_context->r[3] = 0;
+    return;
+  }
+  const char* ark_name = reinterpret_cast<const char*>(mem + str_ptr);
+
+  // Validate ark_name: check for reasonable length and ASCII.
+  size_t ark_name_len = 0;
+  bool ark_name_ok = true;
+  for (const char* p = ark_name; *p && ark_name_len < 512; ++p, ++ark_name_len) {
+    if (static_cast<unsigned char>(*p) > 127) {
+      ark_name_ok = false;
+      break;
+    }
+  }
+  if (!ark_name_ok || ark_name_len == 0 || ark_name_len >= 512) {
+    XELOGW("DC3: ArkFile::Read — invalid ark name for idx {} "
+            "(str_ptr={:08X}, len={})",
+            arkfileNum, str_ptr, ark_name_len);
+    *(mem + this_ptr + 0x24) = 1;
+    ppc_context->r[3] = 0;
+    return;
+  }
+
+  // Construct VFS path: "d:\\" + ark_name (with / → backslash).
+  std::string vfs_path = "d:\\";
+  for (const char* p = ark_name; *p; ++p) {
+    vfs_path += (*p == '/') ? '\\' : *p;
+  }
+
+  // Resolve VFS entry and open for read.
+  auto* fs = kernel_state->file_system();
+  auto* entry = fs->ResolvePath(vfs_path);
+  if (!entry) {
+    XELOGW("DC3: ArkFile::Read — VFS path not found: {}", vfs_path);
+    *(mem + this_ptr + 0x24) = 1;
+    ppc_context->r[3] = 0;
+    return;
+  }
+
+  vfs::File* vfs_file = nullptr;
+  auto status = entry->Open(
+      xe::filesystem::FileAccess::kFileReadData, &vfs_file);
+  if (XFAILED(status) || !vfs_file) {
+    XELOGW("DC3: ArkFile::Read — failed to open {}: {:08X}", vfs_path, status);
+    *(mem + this_ptr + 0x24) = 1;
+    ppc_context->r[3] = 0;
+    return;
+  }
+
+  // Read bytes at absolute file offset = byteStart + tell.
+  uint64_t file_offset = byteStart + static_cast<uint64_t>(tell);
+  void* host_buf = memory->TranslateVirtual(buf_addr);
+  size_t bytes_read = 0;
+  status = vfs_file->ReadSync(host_buf, toRead, file_offset, &bytes_read);
+  vfs_file->Destroy();
+
+  if (XFAILED(status)) {
+    XELOGW("DC3: ArkFile::Read — ReadSync failed at offset {}: {:08X}",
+            file_offset, status);
+    *(mem + this_ptr + 0x24) = 1;
+    ppc_context->r[3] = 0;
+    return;
+  }
+
+  // Update ArkFile fields: mBytesRead and mTell.
+  int ibr = static_cast<int>(bytes_read);
+  xe::store_and_swap<int32_t>(mem + this_ptr + 0x1C, ibr);       // mBytesRead
+  xe::store_and_swap<int32_t>(mem + this_ptr + 0x20, tell + ibr); // mTell
+
+  static int s_log_count = 0;
+  if (s_log_count < 20) {
+    XELOGI("DC3: ArkFile::Read(ark={}, {} bytes @ offset {}) -> {} from {}",
+           arkfileNum, toRead, file_offset, bytes_read, ark_name);
+    ++s_log_count;
+  }
+
+  ppc_context->r[3] = static_cast<uint64_t>(bytes_read);
+}
 
 // ============================================================================
 // Host-side ReadCacheStream diagnostic — decrypts DTB header on host
@@ -4727,6 +4898,58 @@ void ApplyCrtPatches(const Dc3HackContext& ctx,
     }
   }
 
+  // -----------------------------------------------------------------------
+  // ArkFile::Read host override — bypass noop'd BlockMgr.
+  //
+  // ArkFile::Read is called via vtable (bctrl).  Registering an override
+  // directly at ArkFile::Read's address causes a utf8::invalid_utf8 crash
+  // because SetupExtern() on the already-resolved function corrupts state.
+  //
+  // Workaround: PPC bytepatch + trampoline.  We rewrite ArkFile::Read's
+  // entry to:  mflr r0; bl STUB; mtlr r0; blr
+  // and place a `blr` stub 0x40 bytes into the function body.  The
+  // override is registered at the STUB address (not ArkFile::Read's entry),
+  // avoiding the crash.  When bctrl hits ArkFile::Read, the JIT compiles
+  // our patched PPC, sees the direct `bl` to an extern stub, and inlines
+  // CallExtern — firing our host handler.
+  // -----------------------------------------------------------------------
+  {
+    const uint32_t kArkFileRead = kAddr.arkfile_read;
+    if (kArkFileRead && ctx.processor && ctx.memory) {
+      auto* mem = ctx.memory->virtual_membase();
+      auto* heap = ctx.memory->LookupHeap(kArkFileRead);
+      if (heap) {
+        // Stub address: 0x40 bytes into ArkFile::Read body (unused after
+        // our bytepatch replaces the entry).
+        const uint32_t kStubAddr = kArkFileRead + 0x40;
+
+        // Protect both the entry (16 bytes) and the stub location (4 bytes).
+        heap->Protect(kArkFileRead, 0x44,
+                      kMemoryProtectRead | kMemoryProtectWrite);
+
+        // Bytepatch ArkFile::Read entry: mflr r0; bl STUB; mtlr r0; blr
+        const uint32_t bl_offset = kStubAddr - (kArkFileRead + 4);
+        const uint32_t bl_insn = 0x48000001 | (bl_offset & 0x03FFFFFC);
+        xe::store_and_swap<uint32_t>(mem + kArkFileRead + 0,  0x7C0802A6); // mflr r0
+        xe::store_and_swap<uint32_t>(mem + kArkFileRead + 4,  bl_insn);    // bl STUB
+        xe::store_and_swap<uint32_t>(mem + kArkFileRead + 8,  0x7C0803A6); // mtlr r0
+        xe::store_and_swap<uint32_t>(mem + kArkFileRead + 12, 0x4E800020); // blr
+
+        // Write blr at stub address (fallback if override not applied).
+        xe::store_and_swap<uint32_t>(mem + kStubAddr, 0x4E800020); // blr
+
+        // Register override at the STUB address, not ArkFile::Read's entry.
+        ctx.processor->RegisterGuestFunctionOverride(
+            kStubAddr, Dc3ArkFileReadHandler, "DC3:ArkFile::Read");
+
+        XELOGI("DC3: ArkFile::Read bytepatch at {:08X} → bl {:08X} (stub), "
+               "override registered at stub",
+               kArkFileRead, kStubAddr);
+        result.applied++;
+      }
+    }
+  }
+
   // CRT sanitizer + injection.
   {
     const uint32_t kCodeStart = 0x822C0000;
@@ -5412,6 +5635,7 @@ void Dc3PopulateAddressesFromCatalog(
   get("file_init", kAddr.file_init);
   get("archive_init", kAddr.archive_init);
   get("the_archive", kAddr.the_archive);
+  get("arkfile_read", kAddr.arkfile_read);
   get("system_pre_init_1", kAddr.system_pre_init_1);
   get("system_pre_init_2", kAddr.system_pre_init_2);
 
