@@ -65,196 +65,194 @@ namespace {
 //   3. Add a get() call in Dc3PopulateAddressesFromCatalog() at the bottom
 //      of this file
 struct Dc3Addresses {
-  // CRT sentinels
-  uint32_t xc_a = 0x83ADED98;
-  uint32_t xc_z = 0x83ADF3B0;
-  uint32_t xi_a = 0x83ADF3B4;
-  uint32_t xi_z = 0x83ADF3C0;
+  // CRT sentinels (from manifest crt_sentinels)
+  uint32_t xc_a = 0x83341580;
+  uint32_t xc_z = 0x83341B98;
+  uint32_t xi_a = 0x83341B9C;
+  uint32_t xi_z = 0x83341BA8;
   // Decomp .CRT$XCU section (separate from auto_08 __xc table)
-  uint32_t crt_xcu_start = 0x83635C00;
-  uint32_t crt_xcu_end = 0x83635F44;
+  uint32_t crt_xcu_start = 0x83627800;
+  uint32_t crt_xcu_end = 0x83627B44;
   // CRT functions
-  uint32_t ioinit = 0x8361EDBC;
-  uint32_t cinit = 0x8311B4B8;
-  uint32_t errno_fn = 0x83615620;
-  uint32_t invalid_parameter_noinfo = 0x8361C15C;
-  uint32_t call_reportfault = 0x8361C190;
-  uint32_t amsg_exit = 0x836118E4;
-  uint32_t report_gsfailure = 0x8361EFB4;
+  uint32_t ioinit = 0x82F4AF28;
+  uint32_t cinit = 0x82E43F08;
+  uint32_t errno_fn = 0x82F41EE0;
+  uint32_t invalid_parameter_noinfo = 0x82F484D0;
+  uint32_t call_reportfault = 0x82F48504;
+  uint32_t amsg_exit = 0x82F3E210;
+  uint32_t report_gsfailure = 0x82F4B09C;
   // CRT formatter
-  uint32_t output_l = 0x8361D2D0;
-  uint32_t woutput_l = 0x83622E44;
-  uint32_t hx_snprintf_vsnprintf_call = 0x83477FBC;  // STALE
+  uint32_t output_l = 0x82F4943C;
+  uint32_t woutput_l = 0x82F4ECAC;
+  uint32_t hx_snprintf_vsnprintf_call = 0x83477FBC;  // STALE — not in manifest
   // Debug subsystem
-  uint32_t debug_print = 0x835498E8;
-  uint32_t debug_fail = 0x8354ACD0;
-  uint32_t debug_do_crucible = 0x8354A114;
-  uint32_t datanode_print = 0x82551EF8;
+  uint32_t debug_print = 0x8297D380;
+  uint32_t debug_fail = 0x8297DD08;
+  uint32_t debug_do_crucible = 0x832A7F80;
+  uint32_t datanode_print = 0x8261A900;
   // Import/thunk
-  uint32_t xapi_call_thread_notify = 0x8311B60C;
+  uint32_t xapi_call_thread_notify = 0x82E4405C;
   uint32_t text_start = 0x82450000;
-  uint32_t text_size = 0x00E1BCE4;
-  uint32_t idata_start = 0x82447C00;
-  uint32_t idata_end = 0x82448034;
+  uint32_t text_size = 0x00E1B88C;
+  uint32_t idata_start = 0x82447400;
+  uint32_t idata_end = 0x82447A34;
   uint32_t thunk_area_start = 0x82450000;
-  uint32_t thunk_area_end = 0x8326BCE4;
+  uint32_t thunk_area_end = 0x8326B88C;
   // Locale
-  uint32_t get_system_language = 0x834099C8;
-  uint32_t get_system_locale = 0x83409E88;
-  uint32_t xget_locale = 0x8393ECAC;
-  uint32_t xtl_get_language = 0x8393B074;              // STALE
-  uint32_t debug_break = 0x8393EF54;
+  uint32_t get_system_language = 0x828307A0;
+  uint32_t get_system_locale = 0x82830E88;
+  uint32_t xget_locale = 0x83247A8C;
+  uint32_t xtl_get_language = 0x83247C94;
+  uint32_t debug_break = 0x83247D34;
   // ReadCacheStream probes
-  uint32_t rcs_read_cache_stream = 0x83116700;
-  uint32_t rcs_bufstream_read_impl = 0x82BC3A38;
-  uint32_t rcs_bufstream_seek_impl = 0x82BC3B38;
+  uint32_t rcs_read_cache_stream = 0x82569750;
+  uint32_t rcs_bufstream_read_impl = 0x82A5BCF8;
+  uint32_t rcs_bufstream_seek_impl = 0x82A5BDF8;
   // SystemConfig / FindArray / SetupFont
-  uint32_t system_config_2 = 0x835165F4;
-  uint32_t find_array = 0x83501AF0;
-  uint32_t setup_font_syscfg_return_lr = 0x8317FF14;       // STALE
-  uint32_t setup_font_ctor1_literal = 0x82027684;          // STALE
-  uint32_t setup_font_ctor2_literal = 0x82053BF8;          // STALE
-  uint32_t pooled_font_string = 0x82017684;                // STALE
-  uint32_t setup_font_node_source_lr = 0x8317FF40;
-  uint32_t setup_font_node_dest_lr = 0x8318001C;
+  uint32_t system_config_2 = 0x8294CEC8;
+  uint32_t find_array = 0x829776E0;
+  uint32_t setup_font_syscfg_return_lr = 0x8317FF14;       // STALE — not in manifest
+  uint32_t setup_font_ctor1_literal = 0x82027684;          // STALE — not in manifest
+  uint32_t setup_font_ctor2_literal = 0x82053BF8;          // STALE — not in manifest
+  uint32_t pooled_font_string = 0x82017684;                // STALE — not in manifest
+  uint32_t setup_font_node_source_lr = 0x8317FF40;         // STALE — not in manifest
+  uint32_t setup_font_node_dest_lr = 0x8318001C;           // STALE — not in manifest
   // Object / factory globals
-  uint32_t object_factories_map = 0x83AE1AB8;
-  uint32_t register_factory = 0x829B12A0;  // Hmx::Object::RegisterFactory(Symbol, ObjectFunc*)
-  uint32_t new_object = 0x829B1138;        // Hmx::Object::NewObject(Symbol) — static factory lookup
-  uint32_t rndmat_static_name_sym = 0x83AEAB2C;
-  uint32_t metamaterial_static_name_sym = 0x83AEBFA8;
-  uint32_t g_system_config = 0x83C7BAE8;
-  uint32_t read_system_config = 0;  // ReadSystemConfig(const char*) -> DataArray*
-  uint32_t g_string_table_global = 0x83AE01C0;
-  // NOTE: MAP says 0x83AED0FC (.bss) but code references 0x83AE01C4 (.data,
-  // right after gStringTable at 0x83AE01C0). /FORCE linker artifact.
-  uint32_t g_hash_table = 0x83AE01C4;
-  // CriticalSection (broken IAT import thunk bypass)
-  uint32_t critsec_ctor = 0x8287C060;   // ??0CriticalSection@@QAA@XZ (CritSec.obj)
-  uint32_t critsec_enter = 0x8287C0A0;  // ?Enter@CriticalSection@@QAAXXZ
-  uint32_t critsec_exit = 0x8287C0E0;   // ?Exit@CriticalSection@@QAAXXZ
-  // Memory / allocator probes
-  uint32_t mem_or_pool_alloc = 0x83406350;  // ?MemOrPoolAlloc@@YAPAXIHPBDH1@Z (MemMgr.obj)
-  uint32_t mem_alloc = 0x83405918;          // ?MemAlloc@@YAPAXHPBDH1H@Z (MemMgr.obj)
-  uint32_t pool_alloc = 0x835A445C;         // ?PoolAlloc@@YAPAXIHPBDH1@Z (PoolAlloc.obj)
-  uint32_t mem_free = 0x83404B98;        // ?MemFree@@YAXPAXPBDH1@Z (MemMgr.obj)
-  uint32_t pool_free = 0x835A4224;       // ?PoolFree@@YAXHPAXPBDH1@Z (PoolAlloc.obj)
-  uint32_t mem_or_pool_free = 0x83404F0C; // ?MemOrPoolFree@@YAXHPAXPBDH1@Z (MemMgr.obj)
-  uint32_t operator_new = 0x83406314;    // ??2@YAPAXI@Z (MemMgr.obj)
-  uint32_t operator_delete = 0x833F7DA4; // ??3@YAXPAX@Z (BinkMovieSys.obj)
-  uint32_t g_num_heaps = 0x83A8B380;     // gNumHeaps (MemMgr.obj BSS)
-  uint32_t string_reserve = 0x82A5BED0;
-  uint32_t string_reserve_memalloc_ret_lr = 0x82A5BC00;    // STALE
-  uint32_t g_chunk_alloc = 0x83CB8D08;
+  uint32_t object_factories_map = 0x833D9728;
+  uint32_t register_factory = 0x829308E0;
+  uint32_t new_object = 0x82930778;
+  uint32_t rndmat_static_name_sym = 0x8338F7F8;
+  uint32_t metamaterial_static_name_sym = 0x83394970;
+  uint32_t g_system_config = 0x833DE3B8;
+  uint32_t read_system_config = 0x8294D968;
+  uint32_t g_string_table_global = 0x833957E0;
+  uint32_t g_hash_table = 0x833957E4;
+  // CriticalSection
+  uint32_t critsec_ctor = 0x82778A68;
+  uint32_t critsec_enter = 0x82778AA8;
+  uint32_t critsec_exit = 0x82778AE8;
+  // Memory / allocator
+  uint32_t mem_or_pool_alloc = 0x82863120;
+  uint32_t mem_alloc = 0x828630F0;
+  uint32_t pool_alloc = 0x82A5B300;
+  uint32_t mem_free = 0x828628F8;
+  uint32_t pool_free = 0x82A5AFE8;
+  uint32_t mem_or_pool_free = 0x82862D00;
+  uint32_t operator_new = 0x828630F0;
+  uint32_t operator_delete = 0x82863108;
+  uint32_t g_num_heaps = 0x833D6260;
+  uint32_t string_reserve = 0x8298C378;
+  uint32_t string_reserve_memalloc_ret_lr = 0x82A5BC00;    // STALE — not in manifest
+  uint32_t g_chunk_alloc = 0x83543F90;
   // DataArray / DataNode
-  uint32_t merged_dataarray_node = 0x835420C8;
-  uint32_t string_table_add = 0x829C1180;
-  uint32_t symbol_preinit = 0x82556A78;
+  uint32_t merged_dataarray_node = 0x82976790;  // DataArray::Node (DataArray.obj)
+  uint32_t string_table_add = 0x828E2240;
+  uint32_t symbol_preinit = 0x8261CF08;
   // DTA text parser
-  uint32_t data_input = 0x8310C9F8;          // DataInput (DataFile.obj) — flex YY_INPUT
-  uint32_t data_read_stream = 0x8310E428;     // DataReadStream (DataFile.obj)
-  uint32_t parse_array = 0x8310E380;          // ParseArray (DataFile.obj)
+  uint32_t data_input = 0x826B0EF0;            // DataInput — noop stub (ALTERNATENAME)
+  uint32_t data_read_stream = 0x8256A278;       // DataReadStream (DataFile.obj)
+  uint32_t parse_array = 0x826B0EF0;            // ParseArray — noop stub (ALTERNATENAME)
   // TextStream
-  uint32_t textstream_op_const_char = 0x829A7D38;
+  uint32_t textstream_op_const_char = 0x8292A2C8;
   // String ops
-  uint32_t string_op_plus_eq = 0x82A5BF68;
+  uint32_t string_op_plus_eq = 0x8298C410;
   // XMP
-  uint32_t xmp_override_bg_music = 0x8365CDE0;
-  uint32_t xmp_restore_bg_music = 0x8365CEB8;
+  uint32_t xmp_override_bg_music = 0x82F866F8;
+  uint32_t xmp_restore_bg_music = 0x82F867D0;
   // Write bridges
-  uint32_t write_nolock = 0x83618444;
-  uint32_t write_fn = 0x83618684;
+  uint32_t write_nolock = 0x82F44888;
+  uint32_t write_fn = 0x82F44AC8;
   // FileIsLocal
-  uint32_t file_is_local = 0x82B64E38;
-  uint32_t file_is_local_assert_branch = 0x82B64E60;
+  uint32_t file_is_local = 0x82A04FF8;
+  uint32_t file_is_local_assert_branch = 0x82A05020;  // file_is_local + 0x28
   // File system globals
-  uint32_t g_using_cd = 0x83A93548;  // was 0x83C7BAF0 (wrong BSS address)
-  uint32_t check_for_archive = 0x83516A68;
-  uint32_t file_init = 0x83413CDC;
-  uint32_t archive_init = 0x834A41F8;
-  uint32_t the_archive = 0x83A9036C;
+  uint32_t g_using_cd = 0x833DE3B0;
+  uint32_t check_for_archive = 0x8294D868;
+  uint32_t file_init = 0x8283B448;
+  uint32_t archive_init = 0x829246E0;
+  uint32_t the_archive = 0x833D95F0;
   // ArkFile (BlockMgr bypass — all BlockMgr methods are noop'd via ALTERNATENAME)
-  uint32_t arkfile_read = 0x826820C0;  // ?Read@ArkFile@@UAAHPAXH@Z
+  uint32_t arkfile_read = 0x82680BB8;
   // Original binary addresses for globals (from symbols.txt).
   // When decomp code writes to the decomp address but original binary code
   // reads from the original address, we must sync both.
-  uint32_t g_using_cd_orig = 0x82F652E8;
-  uint32_t the_archive_orig = 0x82F679FC;
-  uint32_t system_pre_init_1 = 0x834D6D44;  // SystemPreInit(const char*)
-  uint32_t system_pre_init_2 = 0x834D6F94;  // SystemPreInit(const char*, const char*)
+  uint32_t g_using_cd_orig = 0x82F652E8;      // STALE — original binary addr
+  uint32_t the_archive_orig = 0x82F679FC;      // STALE — original binary addr
+  uint32_t system_pre_init_1 = 0x8294EFA0;
+  uint32_t system_pre_init_2 = 0x8294F218;
   // CRT functions that block the main thread
-  uint32_t mtinit = 0x835CBB2C;  // _mtinit (tidtable.obj)
-  uint32_t xregister_thread_notify = 0x830DCFEC;  // XRegisterThreadNotifyRoutine
+  uint32_t mtinit = 0x82F3E4F0;
+  uint32_t xregister_thread_notify = 0x82E440CC;
   // gConditional / gDataArrayConditional (BSS, not in MAP)
   // Addresses are extracted at runtime from their ctor functions' PPC code.
   uint32_t g_conditional = 0;
-  uint32_t g_conditional_ctor = 0;             // ??__EgConditional@@YAXXZ
+  uint32_t g_conditional_ctor = 0x832645B8;
   uint32_t g_data_array_conditional = 0;
-  uint32_t g_data_array_conditional_ctor = 0;  // ??__EgDataArrayConditional@@YAXXZ
+  uint32_t g_data_array_conditional_ctor = 0x83266548;
   // Object / factory (PPC patch targets)
-  uint32_t load_meta_materials = 0x831E5A84;   // RndMat::LoadMetaMaterials
-  uint32_t object_set_name = 0x82A252B8;       // Hmx::Object::SetName
+  uint32_t load_meta_materials = 0x82657520;
+  uint32_t object_set_name = 0x8292D288;
   // STL container globals (BSS, sentinel init from host)
-  uint32_t the_load_mgr = 0x83A8A8F0;
-  uint32_t auto_timer_stmrs = 0x83B0F1C8;
-  uint32_t rnd_overlay_soverlays = 0x83B0F764;
-  uint32_t synth_pollable_spollables = 0x83B0FAE4;
-  uint32_t midi_parser_sparsers = 0x83B0D9BC;
-  uint32_t rnd_multi_mesh_sproxy = 0x83B0F998;
-  uint32_t g_caches = 0x83966B0C;           // gCaches (FileCache.obj std::list<FileCache*>)
-  uint32_t g_decompression_queue = 0x8396b404; // gDecompressionQueue (ChunkStream.obj std::list<DecompressTask>)
+  uint32_t the_load_mgr = 0x833D5DE0;
+  uint32_t auto_timer_stmrs = 0x83510860;
+  uint32_t rnd_overlay_soverlays = 0x835118B0;
+  uint32_t synth_pollable_spollables = 0x83512698;
+  uint32_t midi_parser_sparsers = 0x833D8E48;
+  uint32_t rnd_multi_mesh_sproxy = 0x83511B90;
+  uint32_t g_caches = 0x833CF920;
+  uint32_t g_decompression_queue = 0x833D7478;
   // LoadMgr (async file I/O)
-  uint32_t poll_front_loader = 0x8341CE08;   // LoadMgr::PollFrontLoader (Loader.obj)
-  uint32_t poll_until_loaded = 0x8341D380;   // LoadMgr::PollUntilLoaded (Loader.obj)
+  uint32_t poll_front_loader = 0x826B0EF0;    // noop stub (ALTERNATENAME)
+  uint32_t poll_until_loaded = 0x82858D10;
   // Holmes trampoline target (reused as PPC code cave)
-  uint32_t protocol_debug_string = 0x831F0838;
+  uint32_t protocol_debug_string = 0x8262F6B8;
   // Wind (DC3-specific; RB3 stubs SetWind)
-  uint32_t set_wind = 0x8325AD38;  // SetWind(int,int,float,float,float)
+  uint32_t set_wind = 0x826C0A78;
   // RndTransformable
-  uint32_t set_dirty_force = 0x83494498;  // RndTransformable::SetDirty_Force
+  uint32_t set_dirty_force = 0x828B1F20;
   // Memory_Xbox
-  uint32_t alloc_type = 0x8311909C;  // AllocType (debug string from XMemAlloc flags)
+  uint32_t alloc_type = 0x83276C08;
   // Rnd
-  uint32_t rnd_create_defaults = 0x83181DE4;  // Rnd::CreateDefaults()
+  uint32_t rnd_create_defaults = 0x825CC550;
   // MetaMaterial
-  uint32_t create_and_set_meta_mat = 0x83193304;  // CreateAndSetMetaMat(RndMat*)
-  uint32_t s_meta_materials = 0x83AF0F60;          // RndMat::sMetaMaterials
-  // Post-processing / GPU init (decomp MAP, NOT original — /FORCE reorders)
-  uint32_t ng_postproc_rebuild_tex = 0x834F3724;   // NgPostProc::RebuildTex()
-  uint32_t ng_dofproc_init = 0x833F0BA4;           // NgDOFProc::Init()
-  uint32_t rnd_shadowmap_init = 0x83214B28;        // RndShadowMap::Init()
-  uint32_t dxrnd_suspend = 0x833A1E20;             // DxRnd::Suspend()
-  uint32_t occlusion_query_mgr_ctor = 0x8339F9F8;  // DxRndOcclusionQueryMgr::DxRndOcclusionQueryMgr()
-  uint32_t d3d_device_suspend = 0x837D92D8;         // D3DDevice_Suspend
-  uint32_t d3d_device_resume = 0x837D9378;          // D3DDevice_Resume
-  uint32_t dxrnd_init_buffers = 0x833A2D78;         // DxRnd::InitBuffers()
-  uint32_t dxrnd_create_post_textures = 0x833A3568; // DxRnd::CreatePostTextures()
-  // Audio / Synth (decomp MAP)
-  uint32_t synth360_preinit = 0x831DD284;  // Synth360::PreInit() — creates XAudio2 engine
-  uint32_t synth_init = 0x832F6B34;        // SynthInit() — calls Synth360::Init()
-  // Bink video (decomp MAP)
-  uint32_t bink_start_async_thread = 0x839BF4AC;  // BinkStartAsyncThread (Bink SDK)
-  uint32_t bink_platform_init = 0x8394F368;        // BinkMovieSys::PlatformInit()
+  uint32_t create_and_set_meta_mat = 0x825DC5E0;
+  uint32_t s_meta_materials = 0x83544BD8;
+  // Post-processing / GPU init
+  uint32_t ng_postproc_rebuild_tex = 0x8292A818;
+  uint32_t ng_dofproc_init = 0x82814A78;
+  uint32_t rnd_shadowmap_init = 0x8264D838;
+  uint32_t dxrnd_suspend = 0x827C7838;
+  uint32_t occlusion_query_mgr_ctor = 0x827C6048;
+  uint32_t d3d_device_suspend = 0x830F7A00;
+  uint32_t d3d_device_resume = 0x830F7AA0;
+  uint32_t dxrnd_init_buffers = 0x827C7F40;
+  uint32_t dxrnd_create_post_textures = 0x827C8C78;
+  // Audio / Synth
+  uint32_t synth360_preinit = 0x826B0EF0;    // noop stub (ALTERNATENAME, not in MAP)
+  uint32_t synth_init = 0x8271ADB8;
+  // Bink video
+  uint32_t bink_start_async_thread = 0x826B0EF0;  // noop stub (ALTERNATENAME)
+  uint32_t bink_platform_init = 0x826B0EF0;        // noop stub (ALTERNATENAME, not in MAP)
   // CRT RTTI
-  uint32_t rt_dynamic_cast = 0x83610900;  // __RTDynamicCast
+  uint32_t rt_dynamic_cast = 0x82F3D2B4;
   // String constants
-  uint32_t g_null_str = 0x83A95DD4;       // gNullStr (pointer to "")
+  uint32_t g_null_str = 0x832F2F18;
   // SkeletonIdentifier (Kinect player identification)
-  uint32_t skeleton_identifier_init = 0x836165CC;
-  uint32_t skeleton_identifier_poll = 0x8361669C;
+  uint32_t skeleton_identifier_init = 0x826B0EF0;  // noop stub (ALTERNATENAME)
+  uint32_t skeleton_identifier_poll = 0x826B0EF0;  // noop stub (ALTERNATENAME)
   // OSCMessenger (Holmes debug networking)
-  uint32_t osc_messenger_poll = 0x83614B60;
+  uint32_t osc_messenger_poll = 0x826B0EF0;        // noop stub (ALTERNATENAME)
   // BinStream::Read — Fail() check (beq to normal path)
-  uint32_t binstream_read_fail_check = 0x82583F40;
+  uint32_t binstream_read_fail_check = 0x8258EA50;  // binstream_read + 0x30
   // Rand2 (BinStream encryption PRNG)
-  uint32_t rand2_ctor = 0x82F4FDC0;   // Rand2::Rand2(int)
-  uint32_t rand2_int = 0x82F4FDE8;    // Rand2::Int()
+  uint32_t rand2_ctor = 0x82DD6FD8;
+  uint32_t rand2_int = 0x82DD7000;
   // BinStream::Read — full function
-  uint32_t binstream_read = 0x82583F10;
+  uint32_t binstream_read = 0x8258EA20;
   // BinStream::ReadEndian — called by all >> operators
-  uint32_t binstream_read_endian = 0x82584100;
+  uint32_t binstream_read_endian = 0x8258EC10;
   // operator>>(BinStream&, DataArray*&)
-  uint32_t bs_op_dataarray = 0x83502EE0;
+  uint32_t bs_op_dataarray = 0x82978E90;
 };
 Dc3Addresses kAddr;
 
@@ -721,9 +719,19 @@ void Dc3ArkFileReadHandler(cpu::ppc::PPCContext* ppc_context,
   xe::store_and_swap<int32_t>(mem + this_ptr + 0x20, tell + ibr); // mTell
 
   static int s_log_count = 0;
-  if (s_log_count < 20) {
-    XELOGI("DC3: ArkFile::Read(ark={}, {} bytes @ offset {}) -> {} from {}",
-           arkfileNum, toRead, file_offset, bytes_read, ark_name);
+  if (s_log_count < 40) {
+    // Hex dump first 16 bytes of returned data for verification.
+    auto* buf_host = reinterpret_cast<const uint8_t*>(host_buf);
+    std::string hex;
+    for (size_t i = 0; i < std::min<size_t>(bytes_read, 16); ++i) {
+      char tmp[4];
+      std::snprintf(tmp, sizeof(tmp), "%02X ", buf_host[i]);
+      hex += tmp;
+    }
+    XELOGI("DC3: ArkFile::Read(ark={}, {} bytes @ offset {}) -> {} from {} "
+           "[byteStart={} tell={}] data=[{}]",
+           arkfileNum, toRead, file_offset, bytes_read, ark_name,
+           byteStart, tell, hex);
     ++s_log_count;
   }
 
@@ -2081,81 +2089,17 @@ void RegisterDc3MemAllocBootstrap(const Dc3HackContext& ctx,
          kAddr.mem_or_pool_alloc, kAddr.mem_free, kAddr.pool_free,
          kAddr.mem_or_pool_free, kAddr.operator_delete);
 
-  // Rand2::Rand2(int) — host implementation + diagnostics.
-  // Ensures correct PRNG seeding for BinStream DTB decryption.
-  {
-    const uint32_t kRand2Ctor = kAddr.rand2_ctor;
-    auto handler = [](cpu::ppc::PPCContext* ppc_context,
-                      kernel::KernelState* kernel_state) {
-      if (!ppc_context || !kernel_state) return;
-      auto* memory = kernel_state->memory();
-      if (!memory) return;
+  // Rand2::Rand2(int) — NO host override.
+  // Native constructor and Int() both work correctly.
+  // Previous host override was at stale address (inside _woutput_s_l) and
+  // was suspected of corrupting text formatting, but removing it shows
+  // DTB garbling persists — root cause is elsewhere.
 
-      uint32_t this_ptr = static_cast<uint32_t>(ppc_context->r[3]);
-      int32_t seed = static_cast<int32_t>(ppc_context->r[4]);
-
-      // Rand2::Rand2(int i): mSeed = i; if (i==0) mSeed=1; if (i<0) mSeed=-i;
-      int32_t actual = seed;
-      if (actual == 0) actual = 1;
-      if (actual < 0) actual = -actual;
-
-      auto* obj = memory->TranslateVirtual<uint8_t*>(this_ptr);
-      if (obj) {
-        xe::store_and_swap<int32_t>(obj, actual);
-      }
-      XELOGI("DC3: Rand2::Rand2(seed={} → actual={}) at {:08X}",
-             seed, actual, this_ptr);
-
-      // MSVC constructor returns 'this'
-      ppc_context->r[3] = this_ptr;
-    };
-    ctx.processor->RegisterGuestFunctionOverride(kRand2Ctor, handler,
-                                                 "DC3:Rand2::Rand2(int)");
-    result.applied++;
-  }
-
-  // Rand2::Int() — host implementation + diagnostics.
-  // Park-Miller PRNG: test = (seed%127773)*16807 - (seed/127773)*2836
-  {
-    const uint32_t kRand2Int = kAddr.rand2_int;
-    auto handler = [](cpu::ppc::PPCContext* ppc_context,
-                      kernel::KernelState* kernel_state) {
-      if (!ppc_context || !kernel_state) return;
-      auto* memory = kernel_state->memory();
-      if (!memory) return;
-
-      uint32_t this_ptr = static_cast<uint32_t>(ppc_context->r[3]);
-      auto* obj = memory->TranslateVirtual<uint8_t*>(this_ptr);
-      if (!obj) {
-        ppc_context->r[3] = 0;
-        return;
-      }
-
-      int32_t seed = xe::load_and_swap<int32_t>(obj);
-      int32_t test = ((seed % 127773) * 0x41A7) - ((seed / 127773) * 0xB14);
-      int32_t new_seed;
-      if (test > 0)
-        new_seed = test;
-      else
-        new_seed = test + 0x7FFFFFFF;
-
-      xe::store_and_swap<int32_t>(obj, new_seed);
-
-      static uint32_t s_count = 0;
-      ++s_count;
-      // Log first 60 calls to capture both ARK header and config decryption.
-      if (s_count <= 60) {
-        XELOGI("DC3: Rand2::Int[{}] this={:08X} old_seed={} → new_seed={} "
-               "(byte: {:02X})",
-               s_count, this_ptr, seed, new_seed, new_seed & 0xFF);
-      }
-
-      ppc_context->r[3] = static_cast<uint32_t>(new_seed);
-    };
-    ctx.processor->RegisterGuestFunctionOverride(kRand2Int, handler,
-                                                 "DC3:Rand2::Int()");
-    result.applied++;
-  }
+  // Rand2::Int() — NO host override.
+  // Park-Miller PRNG is pure integer arithmetic; native JIT handles it fine.
+  // The host override was catastrophically slow (~350 calls/sec vs millions
+  // natively) due to JIT-to-host transition overhead per call.
+  // The .hdr file is 333KB = ~333K Rand2::Int calls for decryption.
 
   // BinStream::Read and ReadEndian overrides REMOVED.
   // The gDataArrayConditional sentinel fix (below) was the real fix for

@@ -437,7 +437,8 @@ bool MMIOHandler::ExceptionCallback(Exception* ex) {
     auto lock = global_critical_region_.Acquire();
     memory::PageAccess cur_access;
     size_t page_length = memory::page_size();
-    if (memory::QueryProtect(fault_host_address, page_length, cur_access) &&
+    bool protect_ok = memory::QueryProtect(fault_host_address, page_length, cur_access);
+    if (protect_ok &&
         cur_access != memory::PageAccess::kNoAccess &&
         (!is_write || cur_access != memory::PageAccess::kReadOnly)) {
       // Another thread has cleared this watch. Abort.
@@ -450,6 +451,28 @@ bool MMIOHandler::ExceptionCallback(Exception* ex) {
                                                 access_violation_callback_context_,
                                                 fault_host_address, is_write);
       if (handled) {
+        return true;
+      }
+    }
+    // DC3 workaround: write faults in the XEX DATA range caused by 64KB page
+    // granularity mismatch.  The game calls NtAllocateVirtualMemory /
+    // NtProtectVirtualMemory with READ_ONLY on a 4KB sub-range, which makes
+    // the entire 64KB heap page read-only.  Other addresses in the same 64KB
+    // page lose write access.  Fix: re-enable write on the host page.
+    if (is_write && cur_access == memory::PageAccess::kReadOnly) {
+      uint64_t fault_addr = ex->fault_address();
+      // XEX image DATA range: host base + 0x83320000 to host base + 0x836C0000
+      uint64_t data_start = reinterpret_cast<uint64_t>(virtual_membase_) + 0x83320000;
+      uint64_t data_end = reinterpret_cast<uint64_t>(virtual_membase_) + 0x836C0000;
+      if (fault_addr >= data_start && fault_addr < data_end) {
+        // Re-enable write on this host page
+        void* page_base = reinterpret_cast<void*>(
+            fault_addr & ~(static_cast<uint64_t>(memory::page_size()) - 1));
+        memory::Protect(page_base, memory::page_size(),
+                        memory::PageAccess::kReadWrite, nullptr);
+        XELOGW("DC3: Re-enabled write at host {:016X} (guest {:08X}) "
+               "after 64KB granularity conflict",
+               fault_addr, fault_guest_virtual_address);
         return true;
       }
     }
