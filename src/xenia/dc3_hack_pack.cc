@@ -4040,8 +4040,8 @@ void ApplyRuntimeStopgaps(const Dc3HackContext& ctx,
       const char* name;
     };
     const CdPatch cd_patches[] = {
-        {0x8285D3D8, 0x488907C9, "NgRnd::PreInit: 2nd CreateDefaults"},
-        {0x83272CB4, 0x4BE7AEED, "DxRnd::PreInit: 3rd CreateDefaults"},
+        {0x8275BCB8, 0x4BE704D9, "NgRnd::PreInit: 2nd CreateDefaults"},
+        {0x827C9544, 0x4BE02C4D, "DxRnd::PreInit: 3rd CreateDefaults"},
     };
     for (const auto& p : cd_patches) {
       if (PatchCheckedNop(memory, p.addr, p.expected, p.name)) {
@@ -4054,15 +4054,17 @@ void ApplyRuntimeStopgaps(const Dc3HackContext& ctx,
 
     // Patch GPU-dependent init functions to immediately return (blr).
     // These allocate GPU textures/surfaces that block on null GPU.
-    // NgPostProc::RebuildTex and NgDOFProc::Init are handled by JIT
-    // overrides in ApplyDebugStubs; RndShadowMap::Init creates shadow
-    // camera + texture with SetBitmap.
+    // NgPostProc::RebuildTex and NgDOFProc::Init also have JIT overrides
+    // in ApplyDebugStubs (decomp layout only); the blr patches here are
+    // the unconditional fallback for all layouts.
     constexpr uint32_t kPpcBlr = 0x4E800020;
     struct BlrPatch {
       uint32_t addr;
       const char* name;
     };
     const BlrPatch blr_patches[] = {
+        {kAddr.ng_postproc_rebuild_tex, "NgPostProc::RebuildTex"},
+        {kAddr.ng_dofproc_init, "NgDOFProc::Init"},
         {kAddr.rnd_shadowmap_init, "RndShadowMap::Init"},
         {kAddr.occlusion_query_mgr_ctor, "DxRndOcclusionQueryMgr::ctor"},
         {kAddr.dxrnd_init_buffers, "DxRnd::InitBuffers"},
