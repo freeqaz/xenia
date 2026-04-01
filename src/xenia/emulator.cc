@@ -4186,7 +4186,8 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
   // Non-NUI DC3 workarounds (CRT/imports/debug/decomp runtime stopgaps) are
   // extracted into the DC3 hack pack module to keep emulator.cc orchestration-
   // only and make retirement tracking manageable.
-  if (title_id_.has_value() && title_id_.value() == 0x373307D9) {
+  if (title_id_.has_value() && title_id_.value() == 0x373307D9 &&
+      dc3_is_decomp_layout) {
     Dc3HackContext dc3_hack_ctx;
     dc3_hack_ctx.memory = memory_.get();
     dc3_hack_ctx.processor = processor_.get();
@@ -4241,7 +4242,7 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
              ik_result.applied, ik_result.skipped, ik_result.failed);
     }
     Dc3RuntimeTelemetryRecordBootMilestone("dc3_hack_pack_apply_complete");
-    } else if (title_id_.has_value() && title_id_.value() == 0x373307D9) {
+  } else if (title_id_.has_value() && title_id_.value() == 0x373307D9) {
     XELOGI("DC3: Skipping hack pack for original XEX (NUI overrides already applied)");
     XELOGI("DC3: Original-XEX boot patch staging begins "
            "(fake_kinect_data={} decomp_layout={})",
