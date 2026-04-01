@@ -12,10 +12,15 @@
 
 #include <chrono>
 #include <deque>
+#include <mutex>
 #include <string>
 #include <vector>
 
 #include "xenia/hid/input_driver.h"
+
+namespace xe {
+class Memory;
+}
 
 namespace xe {
 namespace hid {
@@ -39,6 +44,23 @@ class NopInputDriver final : public InputDriver {
   // timed button presses. Input script format: "5s:A,7s:START,10s:A"
   void SetScriptedInput(const std::string& script);
 
+  // Enable screen-aware scripted input mode.
+  // Script file format (one directive per line):
+  //   wait_screen <screen_name>    — wait until UIManager.mCurrentScreen matches
+  //   +<frames> <button>           — after wait is satisfied, wait N frames then press button
+  //   +<frames> NONE              — after wait is satisfied, wait N frames with no button press
+  //   # comment                    — ignored
+  //
+  // Requires SetMemory() to be called first so we can read guest memory.
+  void LoadScriptFile(const std::string& path);
+
+  // Set guest memory pointer so screen-aware scripting can read TheUI.
+  void SetMemory(Memory* memory) { memory_ = memory; }
+
+  // Inject a one-shot button press from external code (e.g., NUI handler).
+  // Thread-safe. The press will be active for duration_ms.
+  void InjectButtonPress(uint16_t buttons, uint64_t duration_ms = 200);
+
  private:
   struct ScriptedEvent {
     uint64_t time_ms;      // Milliseconds after start
@@ -46,8 +68,30 @@ class NopInputDriver final : public InputDriver {
     uint64_t duration_ms;  // How long to hold (default 200ms)
   };
 
-  uint16_t GetCurrentButtons() const;
+  // Screen-aware script directive
+  struct ScriptDirective {
+    enum Type { kWaitScreen, kDelayedPress };
+    Type type;
+    std::string screen_name;  // For kWaitScreen
+    int delay_ms;             // For kDelayedPress: ms after wait satisfied
+    uint16_t buttons;         // For kDelayedPress
+  };
+
+  // Dynamic injection event
+  struct InjectedEvent {
+    std::chrono::steady_clock::time_point start;
+    uint64_t duration_ms;
+    uint16_t buttons;
+  };
+
+  uint16_t GetCurrentButtons();
   uint16_t ButtonToVK(uint16_t button) const;
+
+  // Read the current screen name from guest memory (TheUI->mCurrentScreen->mName)
+  std::string ReadCurrentScreenName() const;
+
+  // Process screen-aware script state machine
+  uint16_t GetScreenAwareButtons();
 
   bool scripted_mode_ = false;
   std::vector<ScriptedEvent> scripted_events_;
@@ -55,6 +99,22 @@ class NopInputDriver final : public InputDriver {
   uint32_t packet_number_ = 0;
   uint16_t prev_buttons_ = 0;  // For keystroke edge detection
   std::deque<X_INPUT_KEYSTROKE> keystroke_queue_;
+
+  // Screen-aware scripting state
+  bool screen_aware_mode_ = false;
+  std::vector<ScriptDirective> script_directives_;
+  size_t script_index_ = 0;           // Current directive index
+  bool wait_satisfied_ = false;       // Current wait_screen matched
+  std::chrono::steady_clock::time_point wait_satisfied_time_;  // When wait was satisfied
+  std::string last_screen_name_;      // Cache to avoid re-reading every call
+  std::chrono::steady_clock::time_point last_screen_read_time_;  // Throttle reads
+
+  // Guest memory access
+  Memory* memory_ = nullptr;
+
+  // Dynamic injection
+  std::mutex inject_mutex_;
+  std::vector<InjectedEvent> injected_events_;
 };
 
 }  // namespace nop

@@ -74,6 +74,14 @@ DEFINE_string(scripted_input, "",
               "Scripted controller input. Format: '5s:A,7s:START,10s:A'. "
               "Simulates a connected controller with timed button presses.",
               "HID");
+DEFINE_string(scripted_input_file, "",
+              "Path to a screen-aware input script file. Format:\n"
+              "  wait_screen <name>  -- wait for UIManager.mCurrentScreen\n"
+              "  +<frames> <button>  -- press button N frames after wait\n"
+              "  # comment           -- ignored\n"
+              "Reads the current screen name from guest memory (TheUI at "
+              "0x82F1A8E0). Requires --fake_kinect_data=true.",
+              "HID");
 DEFINE_int32(
     dc3_gdb_rsp_prelaunch_sleep_ms, 0,
     "DC3: optional sleep before starting the emulator thread (after headless "
@@ -82,6 +90,10 @@ DEFINE_int32(
 
 namespace xe {
 namespace app {
+
+// Keep a raw pointer to the NopInputDriver so we can wire up Memory and
+// load screen-aware scripts after emulator initialization.
+static hid::nop::NopInputDriver* g_nop_input_driver = nullptr;
 
 static std::unique_ptr<apu::AudioSystem> CreateHeadlessAudioSystem(
     cpu::Processor* processor) {
@@ -104,6 +116,14 @@ static std::vector<std::unique_ptr<hid::InputDriver>> CreateHeadlessInputDrivers
   if (!cvars::scripted_input.empty()) {
     driver->SetScriptedInput(cvars::scripted_input);
   }
+  // If a script file is specified, enable scripted mode (controller presence)
+  // but defer loading until Memory is available.
+  if (!cvars::scripted_input_file.empty()) {
+    // Enable scripted_mode_ so the controller appears connected immediately.
+    // We'll load the actual script directives after Memory is wired.
+    driver->SetScriptedInput("999999s:A");  // Dummy event for controller presence
+  }
+  g_nop_input_driver = driver.get();
   drivers.emplace_back(std::move(driver));
   return drivers;
 }
@@ -204,6 +224,14 @@ static int HeadlessMain(const std::vector<std::string>& args) {
         emulator->file_system()->RegisterSymbolicLink("cache:", "\\CACHE");
       }
     }
+  }
+
+  // Wire up screen-aware input scripting (needs Memory from emulator)
+  if (g_nop_input_driver && !cvars::scripted_input_file.empty()) {
+    g_nop_input_driver->SetMemory(emulator->memory());
+    g_nop_input_driver->LoadScriptFile(cvars::scripted_input_file);
+    XELOGI("Screen-aware input script loaded: {}",
+           cvars::scripted_input_file);
   }
 
   // Set up callbacks for boot status reporting
