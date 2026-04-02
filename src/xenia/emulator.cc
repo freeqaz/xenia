@@ -535,7 +535,7 @@ void Dc3NuiSequencerExtern(
         if (cur_screen_h && cur_name == "attract_screen") {
           target_name = "title_screen";
         } else if (cur_screen_h && cur_name == "title_screen") {
-          target_name = "main_screen";
+          target_name = "wait_main_after_saveload_screen";
         }
 
         if (!target_name.empty()) {
