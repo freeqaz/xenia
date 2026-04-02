@@ -549,7 +549,10 @@ void Dc3NuiSequencerExtern(
         // If the screen never leaves song select, fall back to the same
         // headless bridge chain used by older boot probes.
         nav_stable_threshold = 260;
-      } else if (cur_name == "multiuser_screen") {
+      } else if (cur_name == "multiuser_screen" ||
+                 cur_name == "loading_screen" ||
+                 cur_name == "preloading_screen" ||
+                 cur_name == "real_loading_screen") {
         nav_stable_threshold = 120;
       } else if (cur_name == "wait_main_after_saveload_screen") {
         // Save/load is stubbed in the original-XEX headless path, so if the
@@ -574,6 +577,12 @@ void Dc3NuiSequencerExtern(
           target_name = "multiuser_screen";
         } else if (cur_screen_h && cur_name == "multiuser_screen") {
           target_name = "loading_screen";
+        } else if (cur_screen_h && cur_name == "loading_screen") {
+          target_name = "preloading_screen";
+        } else if (cur_screen_h && cur_name == "preloading_screen") {
+          target_name = "real_loading_screen";
+        } else if (cur_screen_h && cur_name == "real_loading_screen") {
+          target_name = "game_screen";
         }
 
         if (!target_name.empty()) {

@@ -410,7 +410,13 @@ uint16_t NopInputDriver::GetScreenAwareButtons() {
                 (name_1c == "song_select_screen" &&
                  trans_name_1c == "multiuser_screen") ||
                 (name_1c == "multiuser_screen" &&
-                 trans_name_1c == "loading_screen");
+                 trans_name_1c == "loading_screen") ||
+                (name_1c == "loading_screen" &&
+                 trans_name_1c == "preloading_screen") ||
+                (name_1c == "preloading_screen" &&
+                 trans_name_1c == "real_loading_screen") ||
+                (name_1c == "real_loading_screen" &&
+                 trans_name_1c == "game_screen");
             if (should_force_complete && trans_screen && trans_state != 0) {
               if (s_last_stuck_transition != trans_screen) {
                 s_last_stuck_transition = trans_screen;
