@@ -581,7 +581,8 @@ void Dc3NuiSequencerExtern(
         // it's been idle for a few seconds.
         nav_stable_threshold = 180;
       } else if (cur_name == "main_screen" ||
-                 cur_name == "choose_mode_screen") {
+                 cur_name == "choose_mode_screen" ||
+                 cur_name == "ready_screen") {
         // Menu A-button input still flakes in the original-XEX path. Give the
         // scripted controller presses time to work before using the same
         // UIManager::GotoScreen bridge that gets us through the boot flow.
@@ -616,6 +617,11 @@ void Dc3NuiSequencerExtern(
         } else if (cur_screen_h && cur_name == "choose_mode_screen") {
           target_name = "song_select_screen";
         } else if (cur_screen_h && cur_name == "song_select_screen") {
+          // Quickplay normally routes through ready/seldiff before multiuser.
+          // Going straight to multiuser can leave gameplay globals half-set,
+          // which later crashes in Game::LoadSong().
+          target_name = "ready_screen";
+        } else if (cur_screen_h && cur_name == "ready_screen") {
           target_name = "multiuser_screen";
         } else if (cur_screen_h && cur_name == "multiuser_screen") {
           target_name = "loading_screen";
