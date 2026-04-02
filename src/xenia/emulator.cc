@@ -2496,6 +2496,16 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
                                kHamPanelFocusComponent, kUIPanelFocusComponent);
                       });
 
+    constexpr uint32_t kHamScreenIsEventDialogOnTop = 0x829626D8;
+    with_patch_target("HamScreen::IsEventDialogOnTop",
+                      kHamScreenIsEventDialogOnTop, 8, [&](uint8_t* ptr) {
+                        xe::store_and_swap<uint32_t>(ptr + 0, 0x38600000);
+                        xe::store_and_swap<uint32_t>(ptr + 4, 0x4E800020);
+                        XELOGI("DC3: UI fix: stubbed HamScreen::IsEventDialogOnTop "
+                               "at {:08X} to return false",
+                               kHamScreenIsEventDialogOnTop);
+                      });
+
     constexpr uint32_t kCDReadDone = 0x826026E0;
     with_patch_target("CDReadDone", kCDReadDone, 8, [&](uint8_t* cdr_ptr) {
       xe::store_and_swap<uint32_t>(cdr_ptr + 0, 0x38600001);
