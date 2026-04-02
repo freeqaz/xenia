@@ -392,11 +392,16 @@ uint16_t NopInputDriver::GetScreenAwareButtons() {
               trans_name_1c = "<unnamed>";
             }
 
-            // Original-XEX headless can get stuck before the first screen is
-            // promoted from mTransitionScreen into mCurrentScreen. If the same
-            // transition target sits active for several seconds, force-complete
-            // it so screen-aware automation can continue.
-            if (!cur_screen && trans_screen && trans_state != 0) {
+            // Original-XEX headless can get stuck before the transition target
+            // is promoted from mTransitionScreen into mCurrentScreen. This was
+            // first observed on the initial attract transition, but the same
+            // issue also appears on title -> wait_main_after_saveload_screen
+            // once the guest path is using real GotoScreen().
+            bool should_force_complete =
+                !cur_screen ||
+                (name_1c == "title_screen" &&
+                 trans_name_1c == "wait_main_after_saveload_screen");
+            if (should_force_complete && trans_screen && trans_state != 0) {
               if (s_last_stuck_transition != trans_screen) {
                 s_last_stuck_transition = trans_screen;
                 s_stuck_transition_start = now;
@@ -414,6 +419,7 @@ uint16_t NopInputDriver::GetScreenAwareButtons() {
                   trans_state = 0;
                   name_1c = trans_name_1c;
                   trans_name_1c.clear();
+                  last_screen_name_ = name_1c;
                   XELOGI("DC3 Script: force-completed stuck UI transition "
                          "to {:08X} ('{}') after {}ms",
                          cur_screen, name_1c, stuck_ms);
