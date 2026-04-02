@@ -636,9 +636,7 @@ void Dc3NuiSequencerExtern(
         }
       }
 
-      if (!s_gameplay_setup_done &&
-          (cur_name == "loading_screen" || cur_name == "preloading_screen" ||
-           cur_name == "real_loading_screen" || cur_name == "game_screen")) {
+      if (!s_gameplay_setup_done && cur_name == "game_screen") {
         constexpr uint32_t kTheHamDirector = 0x82F603A0;
         constexpr uint32_t kTheGamePanel = 0x83117410;
         auto* hd_ptr = memory->TranslateVirtual<uint8_t*>(kTheHamDirector);
