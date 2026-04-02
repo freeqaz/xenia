@@ -493,17 +493,27 @@ void Dc3NuiSequencerExtern(
         return "";
       };
 
-      auto read_name_at = [&](uint32_t screen_addr, uint32_t offset,
-                              bool strict_scan_range) -> std::string {
+      auto read_name_ptr_at = [&](uint32_t screen_addr, uint32_t offset,
+                                  bool strict_scan_range) -> uint32_t {
         if (!screen_addr || screen_addr >= 0xF0000000) {
-          return "";
+          return 0;
         }
         if (!is_guest_readable(screen_addr + offset, 4)) {
-          return "";
+          return 0;
         }
         auto* screen = memory->TranslateVirtual<uint8_t*>(screen_addr);
         uint32_t name_ptr = xe::load_and_swap<uint32_t>(screen + offset);
-        return read_guest_name(name_ptr, strict_scan_range);
+        if (read_guest_name(name_ptr, strict_scan_range).empty()) {
+          return 0;
+        }
+        return name_ptr;
+      };
+
+      auto read_name_at = [&](uint32_t screen_addr, uint32_t offset,
+                              bool strict_scan_range) -> std::string {
+        return read_guest_name(
+            read_name_ptr_at(screen_addr, offset, strict_scan_range),
+            strict_scan_range);
       };
 
       std::string raw_name = read_name_at(cur_screen_h, 0x1C, false);
@@ -540,6 +550,7 @@ void Dc3NuiSequencerExtern(
 
         if (!target_name.empty()) {
           uint32_t found_screen = 0;
+          uint32_t found_name_ptr = 0;
           for (int scan_pass = 0; scan_pass < 2 && !found_screen; ++scan_pass) {
             bool strict_scan_range = scan_pass == 0;
             if (scan_pass == 1) {
@@ -556,25 +567,43 @@ void Dc3NuiSequencerExtern(
                 if (!is_guest_readable(addr + 0x20, 4)) {
                   continue;
                 }
+                uint32_t candidate_name_ptr =
+                    read_name_ptr_at(addr, 0x1C, strict_scan_range);
                 std::string candidate =
-                    read_name_at(addr, 0x1C, strict_scan_range);
+                    read_guest_name(candidate_name_ptr, strict_scan_range);
                 if (candidate.empty()) {
-                  candidate = read_name_at(addr, 0x20, strict_scan_range);
+                  candidate_name_ptr =
+                      read_name_ptr_at(addr, 0x20, strict_scan_range);
+                  candidate =
+                      read_guest_name(candidate_name_ptr, strict_scan_range);
                 }
                 if (candidate == target_name) {
                   found_screen = addr;
+                  found_name_ptr = candidate_name_ptr;
                   break;
                 }
               }
             }
           }
-          if (found_screen) {
-            XELOGI("DC3: Nav jump: {} -> {} ({:08X})", cur_name, target_name,
-                   found_screen);
-            xe::store_and_swap<uint32_t>(ui_obj + 0x48, found_screen);
-            xe::store_and_swap<uint32_t>(ui_obj + 0x2c, 0);
-            xe::store_and_swap<uint32_t>(ui_obj + 0x4c, 0);
+          if (found_screen && found_name_ptr) {
+            auto* processor = kernel_state->processor();
+            auto* thread_state = ppc_context->thread_state;
+            if (processor && thread_state) {
+              constexpr uint32_t kUIManagerGotoScreenByName = 0x8277B378;
+              XELOGI("DC3: Nav goto: {} -> {} ({:08X}, name={:08X})",
+                     cur_name, target_name, found_screen, found_name_ptr);
+              uint64_t args[4] = {ui_addr, found_name_ptr, 0, 0};
+              processor->Execute(thread_state, kUIManagerGotoScreenByName,
+                                 args, 4);
+            } else {
+              XELOGW(
+                  "DC3: Nav goto skipped for '{}' (processor/thread_state missing)",
+                  target_name);
+            }
             s_screen_stable_count = 0;
+          } else if (found_screen) {
+            XELOGW("DC3: Nav target '{}' found at {:08X} without usable name ptr",
+                   target_name, found_screen);
           }
         }
       }
