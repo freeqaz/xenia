@@ -327,6 +327,9 @@ void Dc3NuiSequencerExtern(
   static bool s_gameplay_setup_done = false;
   static uint32_t s_fake_frame_number = 0;
   static bool s_nui_entry_logged = false;
+  static bool s_screen_name_scan_range_logged = false;
+  static uint32_t s_scan_name_min = 0;
+  static uint32_t s_scan_name_max = 0;
 
   if (ppc_context && ppc_context->scratch) {
     Dc3RuntimeTelemetryRecordNuiOverrideHit(
@@ -410,6 +413,28 @@ void Dc3NuiSequencerExtern(
     s_nui_entry_logged = true;
   }
 
+  if (!s_scan_name_max) {
+    if (auto module = kernel_state->GetExecutableModule()) {
+      if (auto* xex = module->xex_module()) {
+        if (auto* rdata = xex->GetPESection(".rdata")) {
+          s_scan_name_min = rdata->address;
+          s_scan_name_max = rdata->address + rdata->size;
+        }
+      }
+    }
+    if (!s_scan_name_max) {
+      // Original debug XEX strings live in low 0x82xxxxxx; keep the fallback
+      // tight so speculative scans don't treat arbitrary data as names.
+      s_scan_name_min = 0x82000000;
+      s_scan_name_max = 0x82400000;
+    }
+  }
+  if (!s_screen_name_scan_range_logged) {
+    XELOGI("DC3: screen-name scan range {:08X}-{:08X}", s_scan_name_min,
+           s_scan_name_max);
+    s_screen_name_scan_range_logged = true;
+  }
+
   constexpr uint32_t kTheUI = 0x82F1A8E0;
   auto* ui_ptr = memory->TranslateVirtual<uint8_t*>(kTheUI);
   uint32_t ui_addr = ui_ptr ? xe::load_and_swap<uint32_t>(ui_ptr) : 0;
@@ -421,8 +446,37 @@ void Dc3NuiSequencerExtern(
       if (cur_screen_h != s_last_screen) { s_last_screen = cur_screen_h; s_screen_stable_count = 0; }
       else if (trans_state_h == 0) s_screen_stable_count++;
 
-      auto read_name_at = [&](uint32_t screen_addr, uint32_t offset)
+      auto read_guest_name = [&](uint32_t name_ptr, bool scan_only)
           -> std::string {
+        if (!name_ptr || name_ptr >= 0xF0000000) {
+          return "";
+        }
+        if (scan_only &&
+            (name_ptr < s_scan_name_min || name_ptr >= s_scan_name_max)) {
+          return "";
+        }
+        std::string result;
+        result.reserve(32);
+        for (uint32_t i = 0; i < 64; ++i) {
+          auto* ch_ptr = memory->TranslateVirtual<uint8_t*>(name_ptr + i);
+          if (!ch_ptr) {
+            return "";
+          }
+          char ch = static_cast<char>(*ch_ptr);
+          if (!ch) {
+            return result;
+          }
+          unsigned char uch = static_cast<unsigned char>(ch);
+          if (!(std::isalnum(uch) || ch == '_')) {
+            return "";
+          }
+          result.push_back(ch);
+        }
+        return "";
+      };
+
+      auto read_name_at = [&](uint32_t screen_addr, uint32_t offset,
+                              bool scan_only) -> std::string {
         if (!screen_addr || screen_addr >= 0xF0000000) {
           return "";
         }
@@ -431,16 +485,12 @@ void Dc3NuiSequencerExtern(
           return "";
         }
         uint32_t name_ptr = xe::load_and_swap<uint32_t>(screen + offset);
-        if (!name_ptr || name_ptr >= 0xF0000000) {
-          return "";
-        }
-        auto* name_str = memory->TranslateVirtual<char*>(name_ptr);
-        return name_str ? std::string(name_str, strnlen(name_str, 64)) : "";
+        return read_guest_name(name_ptr, scan_only);
       };
 
-      std::string raw_name = read_name_at(cur_screen_h, 0x1C);
+      std::string raw_name = read_name_at(cur_screen_h, 0x1C, false);
       if (raw_name.empty()) {
-        raw_name = read_name_at(cur_screen_h, 0x20);
+        raw_name = read_name_at(cur_screen_h, 0x20, false);
       }
       auto* scr_obj = memory->TranslateVirtual<uint8_t*>(cur_screen_h);
       (void)scr_obj;
@@ -475,9 +525,9 @@ void Dc3NuiSequencerExtern(
               if (!obj) {
                 continue;
               }
-              std::string candidate = read_name_at(addr, 0x1C);
+              std::string candidate = read_name_at(addr, 0x1C, true);
               if (candidate.empty()) {
-                candidate = read_name_at(addr, 0x20);
+                candidate = read_name_at(addr, 0x20, true);
               }
               if (candidate == target_name) {
                 found_screen = addr;

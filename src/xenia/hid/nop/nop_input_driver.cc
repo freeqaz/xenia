@@ -10,6 +10,7 @@
 #include "xenia/hid/nop/nop_input_driver.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cstring>
 #include <fstream>
 #include <sstream>
@@ -24,6 +25,62 @@
 namespace xe {
 namespace hid {
 namespace nop {
+
+namespace {
+
+constexpr uint32_t kDc3OriginalXexNameMin = 0x82000000;
+constexpr uint32_t kDc3OriginalXexNameMax = 0x82400000;
+
+std::string ReadGuestScreenName(Memory* memory, uint32_t screen_ptr,
+                                bool scan_only) {
+  if (!memory || !screen_ptr || screen_ptr >= 0xF0000000) {
+    return "";
+  }
+  auto* scr_obj = memory->TranslateVirtual<uint8_t*>(screen_ptr);
+  if (!scr_obj) {
+    return "";
+  }
+
+  auto read_guest_name = [&](uint32_t name_ptr) -> std::string {
+    if (!name_ptr || name_ptr >= 0xF0000000) {
+      return "";
+    }
+    if (scan_only &&
+        (name_ptr < kDc3OriginalXexNameMin || name_ptr >= kDc3OriginalXexNameMax)) {
+      return "";
+    }
+
+    std::string result;
+    result.reserve(32);
+    for (uint32_t i = 0; i < 64; ++i) {
+      auto* ch_ptr = memory->TranslateVirtual<uint8_t*>(name_ptr + i);
+      if (!ch_ptr) {
+        return "";
+      }
+      char ch = static_cast<char>(*ch_ptr);
+      if (!ch) {
+        return result;
+      }
+      unsigned char uch = static_cast<unsigned char>(ch);
+      if (!(std::isalnum(uch) || ch == '_')) {
+        return "";
+      }
+      result.push_back(ch);
+    }
+    return "";
+  };
+
+  for (uint32_t offset : {0x1C, 0x20}) {
+    uint32_t name_ptr = xe::load_and_swap<uint32_t>(scr_obj + offset);
+    std::string name = read_guest_name(name_ptr);
+    if (!name.empty()) {
+      return name;
+    }
+  }
+  return "";
+}
+
+}  // namespace
 
 NopInputDriver::NopInputDriver(xe::ui::Window* window, size_t window_z_order)
     : InputDriver(window, window_z_order) {}
@@ -252,29 +309,10 @@ std::string NopInputDriver::ReadCurrentScreenName() const {
   uint32_t cur_screen = xe::load_and_swap<uint32_t>(ui_obj + 0x48);
   if (!cur_screen || cur_screen >= 0xF0000000) return "";
 
-  auto* scr_obj = memory_->TranslateVirtual<uint8_t*>(cur_screen);
-  if (!scr_obj) return "";
-
-  auto read_name_at = [&](uint32_t offset) -> std::string {
-    uint32_t name_ptr = xe::load_and_swap<uint32_t>(scr_obj + offset);
-    if (!name_ptr || name_ptr >= 0xF0000000) {
-      return "";
-    }
-    auto* name_str = memory_->TranslateVirtual<char*>(name_ptr);
-    if (!name_str) {
-      return "";
-    }
-    return std::string(name_str, strnlen(name_str, 64));
-  };
-
   // Original debug XEX screen objects have been observed with mName at +0x1C,
   // while some earlier experiments assumed +0x20. Try both to keep
   // screen-aware scripts working across layouts.
-  std::string name = read_name_at(0x1C);
-  if (!name.empty()) {
-    return name;
-  }
-  return read_name_at(0x20);
+  return ReadGuestScreenName(memory_, cur_screen, false);
 }
 
 uint16_t NopInputDriver::GetScreenAwareButtons() {
@@ -314,9 +352,7 @@ uint16_t NopInputDriver::GetScreenAwareButtons() {
       uint32_t trans_screen = 0;
       uint32_t trans_state = 0;
       std::string name_1c;
-      std::string name_20;
       std::string trans_name_1c;
-      std::string trans_name_20;
       if (memory_) {
         auto* ui_ptr = memory_->TranslateVirtual<uint8_t*>(kTheUI);
         ui_addr = ui_ptr ? xe::load_and_swap<uint32_t>(ui_ptr) : 0;
@@ -326,29 +362,14 @@ uint16_t NopInputDriver::GetScreenAwareButtons() {
             trans_state = xe::load_and_swap<uint32_t>(ui_obj + 0x2C);
             cur_screen = xe::load_and_swap<uint32_t>(ui_obj + 0x48);
             trans_screen = xe::load_and_swap<uint32_t>(ui_obj + 0x4C);
-            auto read_screen_name_at = [&](uint32_t screen_ptr,
-                                           uint32_t offset) -> std::string {
-              if (!screen_ptr || screen_ptr >= 0xF0000000) {
-                return "";
-              }
-              auto* scr_obj = memory_->TranslateVirtual<uint8_t*>(screen_ptr);
-              if (!scr_obj) {
-                return "";
-              }
-              uint32_t name_ptr = xe::load_and_swap<uint32_t>(scr_obj + offset);
-              if (!name_ptr || name_ptr >= 0xF0000000) {
-                return "";
-              }
-              auto* name_str = memory_->TranslateVirtual<char*>(name_ptr);
-              if (!name_str) {
-                return "";
-              }
-              return std::string(name_str, strnlen(name_str, 64));
-            };
-            name_1c = read_screen_name_at(cur_screen, 0x1C);
-            name_20 = read_screen_name_at(cur_screen, 0x20);
-            trans_name_1c = read_screen_name_at(trans_screen, 0x1C);
-            trans_name_20 = read_screen_name_at(trans_screen, 0x20);
+            name_1c = ReadGuestScreenName(memory_, cur_screen, false);
+            if (name_1c.empty() && cur_screen) {
+              name_1c = "<unnamed>";
+            }
+            trans_name_1c = ReadGuestScreenName(memory_, trans_screen, false);
+            if (trans_name_1c.empty() && trans_screen) {
+              trans_name_1c = "<unnamed>";
+            }
 
             // Original-XEX headless can get stuck before the first screen is
             // promoted from mTransitionScreen into mCurrentScreen. If the same
@@ -371,12 +392,10 @@ uint16_t NopInputDriver::GetScreenAwareButtons() {
                   trans_screen = 0;
                   trans_state = 0;
                   name_1c = trans_name_1c;
-                  name_20 = trans_name_20;
                   trans_name_1c.clear();
-                  trans_name_20.clear();
                   XELOGI("DC3 Script: force-completed stuck UI transition "
-                         "to {:08X} ('{}'/'{}') after {}ms",
-                         cur_screen, name_1c, name_20, stuck_ms);
+                         "to {:08X} ('{}') after {}ms",
+                         cur_screen, name_1c, stuck_ms);
                   s_last_stuck_transition = 0;
                   s_stuck_transition_start = std::chrono::steady_clock::time_point{};
                 }
@@ -390,10 +409,9 @@ uint16_t NopInputDriver::GetScreenAwareButtons() {
       }
       XELOGI("DC3 Script: waiting for '{}' current='{}' ui={:08X} "
              "cur={:08X} trans={:08X} transState={} "
-             "name@1C='{}' name@20='{}' trans@1C='{}' trans@20='{}'",
+             "name='{}' trans='{}'",
              dir.screen_name, last_screen_name_, ui_addr, cur_screen,
-             trans_screen, trans_state, name_1c, name_20,
-             trans_name_1c, trans_name_20);
+             trans_screen, trans_state, name_1c, trans_name_1c);
       s_last_wait_log = now;
     }
     if (!wait_satisfied_) {
@@ -429,28 +447,16 @@ uint16_t NopInputDriver::GetScreenAwareButtons() {
             if (!s_title_screen_addr) {
               for (uint32_t addr = 0x40C00000; addr < 0x41000000;
                    addr += 4) {
-                auto* obj = memory_->TranslateVirtual<uint8_t*>(addr);
-                if (!obj) {
+                if (!memory_->TranslateVirtual<uint8_t*>(addr)) {
                   continue;
                 }
-                for (uint32_t offset : {0x1C, 0x20}) {
-                  uint32_t name_ptr =
-                      xe::load_and_swap<uint32_t>(obj + offset);
-                  if (!name_ptr || name_ptr >= 0xF0000000) {
-                    continue;
-                  }
-                  auto* name_str = memory_->TranslateVirtual<char*>(name_ptr);
-                  if (!name_str) {
-                    continue;
-                  }
-                  std::string_view name(name_str, strnlen(name_str, 64));
-                  if (name == "title_screen" || name == "title") {
-                    s_title_screen_addr = addr;
-                    XELOGI("DC3 Script: resolved title screen object {:08X} "
-                           "via name '{}'",
-                           s_title_screen_addr, name);
-                    break;
-                  }
+                std::string name = ReadGuestScreenName(memory_, addr, true);
+                if (name == "title_screen" || name == "title") {
+                  s_title_screen_addr = addr;
+                  XELOGI("DC3 Script: resolved title screen object {:08X} "
+                         "via name '{}'",
+                         s_title_screen_addr, name);
+                  break;
                 }
                 if (s_title_screen_addr) {
                   break;
