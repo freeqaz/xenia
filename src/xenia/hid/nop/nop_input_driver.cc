@@ -413,10 +413,10 @@ uint16_t NopInputDriver::GetScreenAwareButtons() {
                       now - s_last_attract_press)
                       .count();
         if (attract_ms >= 1500 && since_last_press >= 3000) {
-          active |= X_INPUT_GAMEPAD_A | X_INPUT_GAMEPAD_START;
+          active |= X_INPUT_GAMEPAD_A;
           s_last_attract_press = now;
-          XELOGI("DC3 Script: attract-screen fallback press A+START while "
-                 "waiting for title_screen");
+          XELOGI("DC3 Script: attract-screen fallback press A while waiting "
+                 "for title_screen");
         }
         if (memory_ && attract_ms >= 5000) {
           constexpr uint32_t kTheUI = 0x82F1A8E0;

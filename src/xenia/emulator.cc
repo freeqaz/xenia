@@ -431,11 +431,11 @@ void Dc3NuiSequencerExtern(
           return "";
         }
         uint32_t name_ptr = xe::load_and_swap<uint32_t>(screen + offset);
-        if (name_ptr < 0x82000000 || name_ptr >= 0x83500000) {
+        if (!name_ptr || name_ptr >= 0xF0000000) {
           return "";
         }
         auto* name_str = memory->TranslateVirtual<char*>(name_ptr);
-        return name_str ? std::string(name_str) : "";
+        return name_str ? std::string(name_str, strnlen(name_str, 64)) : "";
       };
 
       std::string raw_name = read_name_at(cur_screen_h, 0x1C);
@@ -455,17 +455,14 @@ void Dc3NuiSequencerExtern(
                s_skel_calls);
       }
 
-      if (s_screen_stable_count >= 120 && trans_state_h == 0) {
-        uint32_t target_str_addr = 0;
-        if (cur_name == "attract_screen") {
-          target_str_addr = 0x82117D78;  // "title_screen"
-        } else if (cur_name == "title_screen") {
-          target_str_addr = 0x82112D70;  // "main_screen"
+      if (s_screen_stable_count >= 20 && trans_state_h == 0) {
+        std::string target_name;
+        if (cur_screen_h && cur_name == "attract_screen") {
+          target_name = "title_screen";
         }
 
-        if (target_str_addr != 0) {
+        if (!target_name.empty()) {
           uint32_t found_screen = 0;
-          auto* target_name = memory->TranslateVirtual<char*>(target_str_addr);
           for (uint32_t s_base = 0x40C00000;
                s_base < 0x41000000 && !found_screen; s_base += 0x10000) {
             auto* b_ptr = memory->TranslateVirtual<uint8_t*>(s_base);
@@ -478,24 +475,22 @@ void Dc3NuiSequencerExtern(
               if (!obj) {
                 continue;
               }
-              uint32_t vt = xe::load_and_swap<uint32_t>(obj);
-              if (vt == 0x82109774 || vt == 0x820CDBDC) {
-                std::string candidate = read_name_at(addr, 0x1C);
-                if (candidate.empty()) {
-                  candidate = read_name_at(addr, 0x20);
-                }
-                if (target_name && candidate == target_name) {
-                  found_screen = addr;
-                  break;
-                }
+              std::string candidate = read_name_at(addr, 0x1C);
+              if (candidate.empty()) {
+                candidate = read_name_at(addr, 0x20);
+              }
+              if (candidate == target_name) {
+                found_screen = addr;
+                break;
               }
             }
           }
           if (found_screen) {
-            XELOGI("DC3: Nav jump: {} -> {} ({:08X})", cur_name,
-                   target_name ? target_name : "?", found_screen);
-            xe::store_and_swap<uint32_t>(ui_obj + 0x2c, 1);
-            xe::store_and_swap<uint32_t>(ui_obj + 0x4c, found_screen);
+            XELOGI("DC3: Nav jump: {} -> {} ({:08X})", cur_name, target_name,
+                   found_screen);
+            xe::store_and_swap<uint32_t>(ui_obj + 0x48, found_screen);
+            xe::store_and_swap<uint32_t>(ui_obj + 0x2c, 0);
+            xe::store_and_swap<uint32_t>(ui_obj + 0x4c, 0);
             s_screen_stable_count = 0;
           }
         }
@@ -1469,7 +1464,8 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
     XELOGI("DC3: Stubbing NUI (Kinect SDK) functions in guest memory");
 
     // PPC instructions (big-endian)
-    const uint32_t kLiR3_0 = 0x38600000;   // li r3, 0  (return S_OK / 0)
+    const uint32_t kLiR3_0 = 0x38600000;    // li r3, 0  (return S_OK / 0)
+    const uint32_t kLiR3_1 = 0x38600001;    // li r3, 1
     const uint32_t kLiR3_Neg1 = 0x3860FFFF; // li r3, -1 (return E_UNEXPECTED)
     const uint32_t kBlr = 0x4E800020;       // blr
 
@@ -2426,6 +2422,15 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
                         XELOGI("DC3: Splash bypass: stubbed Splash::Resume "
                                "at {:08X} to blr",
                                kSplashResume);
+                      });
+
+    constexpr uint32_t kSpeechGrammarUnload = 0x82439F38;
+    with_patch_target("SpeechMgr::Grammar::Unload", kSpeechGrammarUnload, 4,
+                      [&](uint8_t* ptr) {
+                        xe::store_and_swap<uint32_t>(ptr, 0x4E800020);
+                        XELOGI("DC3: Speech fix: stubbed "
+                               "SpeechMgr::Grammar::Unload at {:08X} to blr",
+                               kSpeechGrammarUnload);
                       });
 
     constexpr uint32_t kMovieInit = 0x82555678;
