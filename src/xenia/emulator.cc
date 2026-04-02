@@ -544,6 +544,13 @@ void Dc3NuiSequencerExtern(
         // scripted controller presses time to work before using the same
         // UIManager::GotoScreen bridge that gets us through the boot flow.
         nav_stable_threshold = 160;
+      } else if (cur_name == "song_select_screen") {
+        // Let the scripted DOWN/A sequence try to select a real song first.
+        // If the screen never leaves song select, fall back to the same
+        // headless bridge chain used by older boot probes.
+        nav_stable_threshold = 260;
+      } else if (cur_name == "multiuser_screen") {
+        nav_stable_threshold = 120;
       } else if (cur_name == "wait_main_after_saveload_screen") {
         // Save/load is stubbed in the original-XEX headless path, so if the
         // screen settles without firing its completion handler, advance to the
@@ -563,6 +570,10 @@ void Dc3NuiSequencerExtern(
           target_name = "choose_mode_screen";
         } else if (cur_screen_h && cur_name == "choose_mode_screen") {
           target_name = "song_select_screen";
+        } else if (cur_screen_h && cur_name == "song_select_screen") {
+          target_name = "multiuser_screen";
+        } else if (cur_screen_h && cur_name == "multiuser_screen") {
+          target_name = "loading_screen";
         }
 
         if (!target_name.empty()) {
@@ -626,9 +637,8 @@ void Dc3NuiSequencerExtern(
       }
 
       if (!s_gameplay_setup_done &&
-          (cur_name == "multiuser_screen" || cur_name == "loading_screen" ||
-           cur_name == "preloading_screen" || cur_name == "real_loading_screen" ||
-           cur_name == "game_screen")) {
+          (cur_name == "loading_screen" || cur_name == "preloading_screen" ||
+           cur_name == "real_loading_screen" || cur_name == "game_screen")) {
         constexpr uint32_t kTheHamDirector = 0x82F603A0;
         constexpr uint32_t kTheGamePanel = 0x83117410;
         auto* hd_ptr = memory->TranslateVirtual<uint8_t*>(kTheHamDirector);
