@@ -728,6 +728,8 @@ void Dc3NuiSequencerExtern(
           constexpr uint32_t kTheGameMode = 0x83117710;
           constexpr uint32_t kContentMgrRefreshSynchronously = 0x825FEBA8;
           constexpr uint32_t kMetaPerformerCurrent = 0x828CB8A8;
+          constexpr uint32_t kDataReadFile = 0x825C1AD0;
+          constexpr uint32_t kHamSongMgrAddSongs = 0x828C5BC0;
           constexpr uint32_t kHamSongMgrData = 0x828C5AD8;
           constexpr uint32_t kHamSongMgrSongAudioData = 0x828C62D0;
           constexpr uint32_t kHamSongMgrGetShortNameFromSongID = 0x828C7CE8;
@@ -741,6 +743,57 @@ void Dc3NuiSequencerExtern(
                             ? memory->TranslateVirtual<uint8_t*>(guest_addr)
                             : nullptr;
             return ptr ? xe::load_and_swap<uint32_t>(ptr) : 0;
+          };
+          auto alloc_guest_cstr = [&](const char* text) -> uint32_t {
+            if (!text) {
+              return 0;
+            }
+            size_t len = std::strlen(text) + 1;
+            uint32_t guest_addr =
+                memory->SystemHeapAlloc(static_cast<uint32_t>(len), 4);
+            if (!guest_addr || !is_guest_readable(guest_addr,
+                                                  static_cast<uint32_t>(len))) {
+              return 0;
+            }
+            auto* dst = memory->TranslateVirtual<uint8_t*>(guest_addr);
+            if (!dst) {
+              return 0;
+            }
+            std::memcpy(dst, text, len);
+            return guest_addr;
+          };
+          auto try_direct_song_catalog_load = [&]() -> bool {
+            struct PathCandidate {
+              const char* path;
+              const char* label;
+            };
+            constexpr PathCandidate kCandidates[] = {
+                {"songs/songs.dta", "game_root"},
+                {"devkit:\\songs\\songs.dta", "devkit"},
+            };
+            for (const auto& candidate : kCandidates) {
+              uint32_t path_addr = alloc_guest_cstr(candidate.path);
+              if (!path_addr) {
+                XELOGW("DC3: LoadSong repair: failed to allocate guest path "
+                       "for {}", candidate.label);
+                continue;
+              }
+              uint64_t read_args[2] = {path_addr, 1};
+              uint32_t data_arr = static_cast<uint32_t>(
+                  processor->Execute(thread_state, kDataReadFile, read_args, 2));
+              XELOGI("DC3: LoadSong repair: DataReadFile('{}') [{}] -> {:08X}",
+                     candidate.path, candidate.label, data_arr);
+              if (!data_arr) {
+                continue;
+              }
+              uint64_t add_args[2] = {kTheHamSongMgr, data_arr};
+              processor->Execute(thread_state, kHamSongMgrAddSongs, add_args, 2);
+              XELOGI("DC3: LoadSong repair: HamSongMgr::AddSongs({:08X}) "
+                     "completed via {}",
+                     data_arr, candidate.label);
+              return true;
+            }
+            return false;
           };
 
           uint32_t gd_addr = load_u32(kTheGameData);
@@ -771,7 +824,8 @@ void Dc3NuiSequencerExtern(
           std::string song_name = read_guest_name(song_sym, false);
           if ((song_name.empty()) && !s_loadsong_repair_attempted && gd_addr) {
             s_loadsong_repair_attempted = true;
-            if (!s_content_refresh_forced) {
+            bool direct_song_load_ok = try_direct_song_catalog_load();
+            if (!direct_song_load_ok && !s_content_refresh_forced) {
               s_content_refresh_forced = true;
               XELOGI(
                   "DC3: LoadSong repair: forcing ContentMgr::RefreshSynchronously");
