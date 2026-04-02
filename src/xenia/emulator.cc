@@ -616,7 +616,9 @@ void Dc3NuiSequencerExtern(
       }
 
       if (!s_gameplay_setup_done &&
-          (cur_name == "main_screen" || cur_name == "loading_screen")) {
+          (cur_name == "multiuser_screen" || cur_name == "loading_screen" ||
+           cur_name == "preloading_screen" || cur_name == "real_loading_screen" ||
+           cur_name == "game_screen")) {
         constexpr uint32_t kTheHamDirector = 0x82F603A0;
         constexpr uint32_t kTheGamePanel = 0x83117410;
         auto* hd_ptr = memory->TranslateVirtual<uint8_t*>(kTheHamDirector);
@@ -627,6 +629,9 @@ void Dc3NuiSequencerExtern(
           auto* processor = kernel_state->processor();
           auto* thread_state = ppc_context->thread_state;
           if (processor && thread_state) {
+            XELOGI(
+                "DC3: Gameplay bootstrap on '{}' hd={:08X} gp={:08X}",
+                cur_name, hd_addr, gp_addr);
             auto exec_member = [&](uint32_t fn, uint32_t tp) {
               uint64_t args[1] = {tp};
               return processor->Execute(thread_state, fn, args, 1);
