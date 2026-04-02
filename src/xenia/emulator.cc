@@ -769,8 +769,8 @@ void Dc3NuiSequencerExtern(
             };
             constexpr PathCandidate kCandidates[] = {
                 {"d:\\songs\\songs.dta", "disc_root"},
-                {"songs/songs.dta", "game_root"},
-                {"devkit:\\songs\\songs.dta", "devkit"},
+                {"devkit:\\songs\\songs.dta", "devkit_dta"},
+                {"devkit:\\songs\\gen\\songs.dtb", "devkit_dtb"},
             };
             for (const auto& candidate : kCandidates) {
               XELOGI(
