@@ -63,6 +63,10 @@ DEFINE_transient_bool(portable, false,
                     "General");
 DEFINE_bool(mount_scratch, false, "Enable scratch mount", "Storage");
 DEFINE_bool(mount_cache, false, "Enable cache mount", "Storage");
+DEFINE_path(devkit_root, "",
+            "Optional host path to mount as devkit:. Useful for debug XEX "
+            "overlay files such as locale_keep.dta.",
+            "Storage");
 DEFINE_string(gpu, "null",
               "Graphics system. Use: [null, vulkan]", "GPU");
 DEFINE_bool(headless_report_boot, true,
@@ -222,6 +226,27 @@ static int HeadlessMain(const std::vector<std::string>& args) {
         XELOGE("Unable to register cache path");
       } else {
         emulator->file_system()->RegisterSymbolicLink("cache:", "\\CACHE");
+      }
+    }
+  }
+
+  if (!cvars::devkit_root.empty()) {
+    std::filesystem::path devkit_root = cvars::devkit_root;
+    if (!devkit_root.is_absolute()) {
+      devkit_root = std::filesystem::absolute(devkit_root);
+    }
+
+    auto devkit_device = std::make_unique<xe::vfs::HostPathDevice>(
+        "\\DEVKIT", xe::path_to_utf8(devkit_root), false);
+    if (!devkit_device->Initialize()) {
+      XELOGE("Unable to scan devkit path: {}", xe::path_to_utf8(devkit_root));
+    } else {
+      if (!emulator->file_system()->RegisterDevice(std::move(devkit_device))) {
+        XELOGE("Unable to register devkit path: {}",
+               xe::path_to_utf8(devkit_root));
+      } else {
+        emulator->file_system()->RegisterSymbolicLink("devkit:", "\\DEVKIT");
+        XELOGI("Mounted devkit: -> {}", xe::path_to_utf8(devkit_root));
       }
     }
   }
