@@ -723,30 +723,23 @@ void Dc3NuiSequencerExtern(
           constexpr uint32_t kTheMoveMgr = 0x82F60308;
           constexpr uint32_t kTheGameMode = 0x83117710;
           constexpr uint32_t kMetaPerformerCurrent = 0x828CB8A8;
-          constexpr uint32_t kMetaPerformerGetSong = 0x828CC360;
           constexpr uint32_t kHamGameDataPlayer = 0x82451CB8;
 
-          auto load_global = [&](uint32_t guest_addr) -> uint32_t {
+          auto load_u32 = [&](uint32_t guest_addr) -> uint32_t {
             auto* ptr = is_guest_readable(guest_addr, 4)
                             ? memory->TranslateVirtual<uint8_t*>(guest_addr)
                             : nullptr;
             return ptr ? xe::load_and_swap<uint32_t>(ptr) : 0;
           };
 
-          uint32_t gd_addr = load_global(kTheGameData);
-          uint32_t hp_addr = load_global(kTheHamProvider);
-          uint32_t mm_addr = load_global(kTheMoveMgr);
-          uint32_t gm_addr = load_global(kTheGameMode);
+          uint32_t gd_addr = load_u32(kTheGameData);
+          uint32_t hp_addr = load_u32(kTheHamProvider);
+          uint32_t mm_addr = load_u32(kTheMoveMgr);
+          uint32_t gm_addr = load_u32(kTheGameMode);
 
           uint64_t meta_ret =
               processor->Execute(thread_state, kMetaPerformerCurrent, nullptr, 0);
           uint32_t meta_addr = static_cast<uint32_t>(meta_ret);
-          uint32_t song_sym = 0;
-          if (meta_addr && meta_addr < 0xF0000000) {
-            uint64_t song_args[1] = {meta_addr};
-            song_sym = static_cast<uint32_t>(
-                processor->Execute(thread_state, kMetaPerformerGetSong, song_args, 1));
-          }
 
           uint32_t p0_addr = 0;
           uint32_t p1_addr = 0;
@@ -759,9 +752,43 @@ void Dc3NuiSequencerExtern(
                 processor->Execute(thread_state, kHamGameDataPlayer, p1_args, 2));
           }
 
+          uint32_t song_sym =
+              (gd_addr && is_guest_readable(gd_addr + 0x30, 4))
+                  ? load_u32(gd_addr + 0x30)
+                  : 0;
+          uint32_t p0_char =
+              (p0_addr && is_guest_readable(p0_addr + 0x44, 4))
+                  ? load_u32(p0_addr + 0x44)
+                  : 0;
+          uint32_t p1_char =
+              (p1_addr && is_guest_readable(p1_addr + 0x44, 4))
+                  ? load_u32(p1_addr + 0x44)
+                  : 0;
+          uint32_t p0_diff =
+              (p0_addr && is_guest_readable(p0_addr + 0x58, 4))
+                  ? load_u32(p0_addr + 0x58)
+                  : 0;
+          uint32_t p1_diff =
+              (p1_addr && is_guest_readable(p1_addr + 0x58, 4))
+                  ? load_u32(p1_addr + 0x58)
+                  : 0;
+          uint32_t p0_pad =
+              (p0_addr && is_guest_readable(p0_addr + 0x7C, 4))
+                  ? load_u32(p0_addr + 0x7C)
+                  : 0;
+          uint32_t p1_pad =
+              (p1_addr && is_guest_readable(p1_addr + 0x7C, 4))
+                  ? load_u32(p1_addr + 0x7C)
+                  : 0;
+
           XELOGI(
-              "DC3: LoadSong probe gd={:08X} gm={:08X} hp={:08X} mm={:08X} mp={:08X} p0={:08X} p1={:08X} song={:08X} '{}'",
-              gd_addr, gm_addr, hp_addr, mm_addr, meta_addr, p0_addr, p1_addr,
+              "DC3: LoadSong probe gd={:08X} gm={:08X} hp={:08X} mm={:08X} mp={:08X} "
+              "p0={:08X} char={:08X} '{}' diff={} pad={} "
+              "p1={:08X} char={:08X} '{}' diff={} pad={} "
+              "song={:08X} '{}'",
+              gd_addr, gm_addr, hp_addr, mm_addr, meta_addr,
+              p0_addr, p0_char, read_guest_name(p0_char, false), p0_diff, p0_pad,
+              p1_addr, p1_char, read_guest_name(p1_char, false), p1_diff, p1_pad,
               song_sym, read_guest_name(song_sym, false));
           s_loadsong_probe_logged = true;
         }
