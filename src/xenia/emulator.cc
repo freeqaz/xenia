@@ -768,13 +768,14 @@ void Dc3NuiSequencerExtern(
           if ((song_name.empty()) && !s_loadsong_repair_attempted && gd_addr) {
             s_loadsong_repair_attempted = true;
             constexpr uint32_t kYmcaSongId = 7011;
-            uint64_t short_name_args[3] = {kTheHamSongMgr, kYmcaSongId, 0};
-            song_sym = static_cast<uint32_t>(processor->Execute(
+            uint64_t short_name_args[4] = {gd_addr + 0x30, kTheHamSongMgr,
+                                           kYmcaSongId, 0};
+            processor->Execute(
                 thread_state, kHamSongMgrGetShortNameFromSongID,
-                short_name_args, 3));
-            if (song_sym && is_guest_readable(gd_addr + 0x30, 4)) {
+                short_name_args, 4);
+            if (is_guest_readable(gd_addr + 0x30, 4)) {
               auto* song_slot = memory->TranslateVirtual<uint8_t*>(gd_addr + 0x30);
-              xe::store_and_swap<uint32_t>(song_slot, song_sym);
+              song_sym = xe::load_and_swap<uint32_t>(song_slot);
               song_name = read_guest_name(song_sym, false);
               XELOGI(
                   "DC3: LoadSong repair: canonical song id {} -> {:08X} '{}'",
