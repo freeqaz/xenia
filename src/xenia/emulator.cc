@@ -446,12 +446,12 @@ void Dc3NuiSequencerExtern(
       if (cur_screen_h != s_last_screen) { s_last_screen = cur_screen_h; s_screen_stable_count = 0; }
       else if (trans_state_h == 0) s_screen_stable_count++;
 
-      auto read_guest_name = [&](uint32_t name_ptr, bool scan_only)
+      auto read_guest_name = [&](uint32_t name_ptr, bool strict_scan_range)
           -> std::string {
         if (!name_ptr || name_ptr >= 0xF0000000) {
           return "";
         }
-        if (scan_only &&
+        if (strict_scan_range &&
             (name_ptr < s_scan_name_min || name_ptr >= s_scan_name_max)) {
           return "";
         }
@@ -476,7 +476,7 @@ void Dc3NuiSequencerExtern(
       };
 
       auto read_name_at = [&](uint32_t screen_addr, uint32_t offset,
-                              bool scan_only) -> std::string {
+                              bool strict_scan_range) -> std::string {
         if (!screen_addr || screen_addr >= 0xF0000000) {
           return "";
         }
@@ -485,7 +485,7 @@ void Dc3NuiSequencerExtern(
           return "";
         }
         uint32_t name_ptr = xe::load_and_swap<uint32_t>(screen + offset);
-        return read_guest_name(name_ptr, scan_only);
+        return read_guest_name(name_ptr, strict_scan_range);
       };
 
       std::string raw_name = read_name_at(cur_screen_h, 0x1C, false);
@@ -513,25 +513,33 @@ void Dc3NuiSequencerExtern(
 
         if (!target_name.empty()) {
           uint32_t found_screen = 0;
-          for (uint32_t s_base = 0x40C00000;
-               s_base < 0x41000000 && !found_screen; s_base += 0x10000) {
-            auto* b_ptr = memory->TranslateVirtual<uint8_t*>(s_base);
-            if (!b_ptr) {
-              continue;
+          for (int scan_pass = 0; scan_pass < 2 && !found_screen; ++scan_pass) {
+            bool strict_scan_range = scan_pass == 0;
+            if (scan_pass == 1) {
+              XELOGI("DC3: Nav scan retrying '{}' without .rdata fence",
+                     target_name);
             }
-            for (uint32_t addr = s_base; addr < s_base + 0x10000 && !found_screen;
-                 addr += 4) {
-              auto* obj = memory->TranslateVirtual<uint8_t*>(addr);
-              if (!obj) {
+            for (uint32_t s_base = 0x40C00000;
+                 s_base < 0x41000000 && !found_screen; s_base += 0x10000) {
+              auto* b_ptr = memory->TranslateVirtual<uint8_t*>(s_base);
+              if (!b_ptr) {
                 continue;
               }
-              std::string candidate = read_name_at(addr, 0x1C, true);
-              if (candidate.empty()) {
-                candidate = read_name_at(addr, 0x20, true);
-              }
-              if (candidate == target_name) {
-                found_screen = addr;
-                break;
+              for (uint32_t addr = s_base;
+                   addr < s_base + 0x10000 && !found_screen; addr += 4) {
+                auto* obj = memory->TranslateVirtual<uint8_t*>(addr);
+                if (!obj) {
+                  continue;
+                }
+                std::string candidate =
+                    read_name_at(addr, 0x1C, strict_scan_range);
+                if (candidate.empty()) {
+                  candidate = read_name_at(addr, 0x20, strict_scan_range);
+                }
+                if (candidate == target_name) {
+                  found_screen = addr;
+                  break;
+                }
               }
             }
           }

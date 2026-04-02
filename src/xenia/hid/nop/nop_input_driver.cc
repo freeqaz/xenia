@@ -32,7 +32,7 @@ constexpr uint32_t kDc3OriginalXexNameMin = 0x82000000;
 constexpr uint32_t kDc3OriginalXexNameMax = 0x82400000;
 
 std::string ReadGuestScreenName(Memory* memory, uint32_t screen_ptr,
-                                bool scan_only) {
+                                bool strict_scan_range) {
   if (!memory || !screen_ptr || screen_ptr >= 0xF0000000) {
     return "";
   }
@@ -45,7 +45,7 @@ std::string ReadGuestScreenName(Memory* memory, uint32_t screen_ptr,
     if (!name_ptr || name_ptr >= 0xF0000000) {
       return "";
     }
-    if (scan_only &&
+    if (strict_scan_range &&
         (name_ptr < kDc3OriginalXexNameMin || name_ptr >= kDc3OriginalXexNameMax)) {
       return "";
     }
@@ -445,21 +445,27 @@ uint16_t NopInputDriver::GetScreenAwareButtons() {
                              : nullptr;
           if (ui_obj) {
             if (!s_title_screen_addr) {
-              for (uint32_t addr = 0x40C00000; addr < 0x41000000;
-                   addr += 4) {
-                if (!memory_->TranslateVirtual<uint8_t*>(addr)) {
-                  continue;
+              for (int scan_pass = 0; scan_pass < 2 && !s_title_screen_addr;
+                   ++scan_pass) {
+                bool strict_scan_range = scan_pass == 0;
+                if (scan_pass == 1) {
+                  XELOGI("DC3 Script: retrying title screen scan without "
+                         ".rdata fence");
                 }
-                std::string name = ReadGuestScreenName(memory_, addr, true);
-                if (name == "title_screen" || name == "title") {
-                  s_title_screen_addr = addr;
-                  XELOGI("DC3 Script: resolved title screen object {:08X} "
-                         "via name '{}'",
-                         s_title_screen_addr, name);
-                  break;
-                }
-                if (s_title_screen_addr) {
-                  break;
+                for (uint32_t addr = 0x40C00000; addr < 0x41000000;
+                     addr += 4) {
+                  if (!memory_->TranslateVirtual<uint8_t*>(addr)) {
+                    continue;
+                  }
+                  std::string name =
+                      ReadGuestScreenName(memory_, addr, strict_scan_range);
+                  if (name == "title_screen" || name == "title") {
+                    s_title_screen_addr = addr;
+                    XELOGI("DC3 Script: resolved title screen object {:08X} "
+                           "via name '{}'",
+                           s_title_screen_addr, name);
+                    break;
+                  }
                 }
               }
             }
