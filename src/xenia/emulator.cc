@@ -333,6 +333,7 @@ void Dc3NuiSequencerExtern(
   static std::unordered_map<std::string, uint32_t> s_name_literal_cache;
   static bool s_loadsong_probe_logged = false;
   static bool s_loadsong_repair_attempted = false;
+  static bool s_content_refresh_forced = false;
 
   if (ppc_context && ppc_context->scratch) {
     Dc3RuntimeTelemetryRecordNuiOverrideHit(
@@ -720,10 +721,12 @@ void Dc3NuiSequencerExtern(
         auto* thread_state = ppc_context->thread_state;
         if (processor && thread_state) {
           constexpr uint32_t kTheGameData = 0x82F60034;
+          constexpr uint32_t kTheContentMgr = 0x82F123BC;
           constexpr uint32_t kTheHamProvider = 0x82F601B4;
           constexpr uint32_t kTheHamSongMgr = 0x83118C6C;
           constexpr uint32_t kTheMoveMgr = 0x82F60308;
           constexpr uint32_t kTheGameMode = 0x83117710;
+          constexpr uint32_t kContentMgrRefreshSynchronously = 0x825FEBA8;
           constexpr uint32_t kMetaPerformerCurrent = 0x828CB8A8;
           constexpr uint32_t kHamSongMgrData = 0x828C5AD8;
           constexpr uint32_t kHamSongMgrSongAudioData = 0x828C62D0;
@@ -767,6 +770,14 @@ void Dc3NuiSequencerExtern(
           std::string song_name = read_guest_name(song_sym, false);
           if ((song_name.empty()) && !s_loadsong_repair_attempted && gd_addr) {
             s_loadsong_repair_attempted = true;
+            if (!s_content_refresh_forced) {
+              s_content_refresh_forced = true;
+              XELOGI(
+                  "DC3: LoadSong repair: forcing ContentMgr::RefreshSynchronously");
+              uint64_t refresh_args[1] = {kTheContentMgr};
+              processor->Execute(thread_state, kContentMgrRefreshSynchronously,
+                                 refresh_args, 1);
+            }
             constexpr uint32_t kYmcaSongId = 7011;
             uint64_t short_name_args[4] = {gd_addr + 0x30, kTheHamSongMgr,
                                            kYmcaSongId, 0};
