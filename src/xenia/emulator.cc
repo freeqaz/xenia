@@ -331,6 +331,7 @@ void Dc3NuiSequencerExtern(
   static uint32_t s_scan_name_min = 0;
   static uint32_t s_scan_name_max = 0;
   static std::unordered_map<std::string, uint32_t> s_name_literal_cache;
+  static bool s_loadsong_probe_logged = false;
 
   if (ppc_context && ppc_context->scratch) {
     Dc3RuntimeTelemetryRecordNuiOverrideHit(
@@ -581,8 +582,7 @@ void Dc3NuiSequencerExtern(
         // it's been idle for a few seconds.
         nav_stable_threshold = 180;
       } else if (cur_name == "main_screen" ||
-                 cur_name == "choose_mode_screen" ||
-                 cur_name == "ready_screen") {
+                 cur_name == "choose_mode_screen") {
         // Menu A-button input still flakes in the original-XEX path. Give the
         // scripted controller presses time to work before using the same
         // UIManager::GotoScreen bridge that gets us through the boot flow.
@@ -617,11 +617,6 @@ void Dc3NuiSequencerExtern(
         } else if (cur_screen_h && cur_name == "choose_mode_screen") {
           target_name = "song_select_screen";
         } else if (cur_screen_h && cur_name == "song_select_screen") {
-          // Quickplay normally routes through ready/seldiff before multiuser.
-          // Going straight to multiuser can leave gameplay globals half-set,
-          // which later crashes in Game::LoadSong().
-          target_name = "ready_screen";
-        } else if (cur_screen_h && cur_name == "ready_screen") {
           target_name = "multiuser_screen";
         } else if (cur_screen_h && cur_name == "multiuser_screen") {
           target_name = "loading_screen";
@@ -716,6 +711,59 @@ void Dc3NuiSequencerExtern(
             XELOGW("DC3: Nav target '{}' unresolved from '{}'", target_name,
                    cur_name);
           }
+        }
+      }
+
+      if (!s_loadsong_probe_logged && cur_name == "loading_screen") {
+        auto* processor = kernel_state->processor();
+        auto* thread_state = ppc_context->thread_state;
+        if (processor && thread_state) {
+          constexpr uint32_t kTheGameData = 0x82F60034;
+          constexpr uint32_t kTheHamProvider = 0x82F601B4;
+          constexpr uint32_t kTheMoveMgr = 0x82F60308;
+          constexpr uint32_t kTheGameMode = 0x83117710;
+          constexpr uint32_t kMetaPerformerCurrent = 0x828CB8A8;
+          constexpr uint32_t kMetaPerformerGetSong = 0x828CC360;
+          constexpr uint32_t kHamGameDataPlayer = 0x82451CB8;
+
+          auto load_global = [&](uint32_t guest_addr) -> uint32_t {
+            auto* ptr = is_guest_readable(guest_addr, 4)
+                            ? memory->TranslateVirtual<uint8_t*>(guest_addr)
+                            : nullptr;
+            return ptr ? xe::load_and_swap<uint32_t>(ptr) : 0;
+          };
+
+          uint32_t gd_addr = load_global(kTheGameData);
+          uint32_t hp_addr = load_global(kTheHamProvider);
+          uint32_t mm_addr = load_global(kTheMoveMgr);
+          uint32_t gm_addr = load_global(kTheGameMode);
+
+          uint64_t meta_ret =
+              processor->Execute(thread_state, kMetaPerformerCurrent, nullptr, 0);
+          uint32_t meta_addr = static_cast<uint32_t>(meta_ret);
+          uint32_t song_sym = 0;
+          if (meta_addr && meta_addr < 0xF0000000) {
+            uint64_t song_args[1] = {meta_addr};
+            song_sym = static_cast<uint32_t>(
+                processor->Execute(thread_state, kMetaPerformerGetSong, song_args, 1));
+          }
+
+          uint32_t p0_addr = 0;
+          uint32_t p1_addr = 0;
+          if (gd_addr && gd_addr < 0xF0000000) {
+            uint64_t p0_args[2] = {gd_addr, 0};
+            uint64_t p1_args[2] = {gd_addr, 1};
+            p0_addr = static_cast<uint32_t>(
+                processor->Execute(thread_state, kHamGameDataPlayer, p0_args, 2));
+            p1_addr = static_cast<uint32_t>(
+                processor->Execute(thread_state, kHamGameDataPlayer, p1_args, 2));
+          }
+
+          XELOGI(
+              "DC3: LoadSong probe gd={:08X} gm={:08X} hp={:08X} mm={:08X} mp={:08X} p0={:08X} p1={:08X} song={:08X} '{}'",
+              gd_addr, gm_addr, hp_addr, mm_addr, meta_addr, p0_addr, p1_addr,
+              song_sym, read_guest_name(song_sym, false));
+          s_loadsong_probe_logged = true;
         }
       }
 
