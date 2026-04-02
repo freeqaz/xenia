@@ -538,6 +538,12 @@ void Dc3NuiSequencerExtern(
         // Let the scripted A presses try first; only force past title after
         // it's been idle for a few seconds.
         nav_stable_threshold = 180;
+      } else if (cur_name == "main_screen" ||
+                 cur_name == "choose_mode_screen") {
+        // Menu A-button input still flakes in the original-XEX path. Give the
+        // scripted controller presses time to work before using the same
+        // UIManager::GotoScreen bridge that gets us through the boot flow.
+        nav_stable_threshold = 160;
       } else if (cur_name == "wait_main_after_saveload_screen") {
         // Save/load is stubbed in the original-XEX headless path, so if the
         // screen settles without firing its completion handler, advance to the
@@ -553,6 +559,10 @@ void Dc3NuiSequencerExtern(
           target_name = "wait_main_after_saveload_screen";
         } else if (cur_screen_h && cur_name == "wait_main_after_saveload_screen") {
           target_name = "main_screen";
+        } else if (cur_screen_h && cur_name == "main_screen") {
+          target_name = "choose_mode_screen";
+        } else if (cur_screen_h && cur_name == "choose_mode_screen") {
+          target_name = "song_select_screen";
         }
 
         if (!target_name.empty()) {
