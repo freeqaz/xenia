@@ -727,6 +727,7 @@ void Dc3NuiSequencerExtern(
           constexpr uint32_t kMetaPerformerCurrent = 0x828CB8A8;
           constexpr uint32_t kHamSongMgrData = 0x828C5AD8;
           constexpr uint32_t kHamSongMgrSongAudioData = 0x828C62D0;
+          constexpr uint32_t kHamSongMgrGetShortNameFromSongID = 0x828C7CE8;
           constexpr uint32_t kHamSongMgrGetSongIDFromShortName = 0x828C7DE0;
           constexpr uint32_t kHamGameDataSetAssociatedPadNum = 0x82452268;
           constexpr uint32_t kHamGameDataPlayer = 0x82451CB8;
@@ -766,8 +767,25 @@ void Dc3NuiSequencerExtern(
           std::string song_name = read_guest_name(song_sym, false);
           if ((song_name.empty()) && !s_loadsong_repair_attempted && gd_addr) {
             s_loadsong_repair_attempted = true;
-            uint32_t song_name_ptr = find_name_literal_ptr("ymca");
-            if (song_name_ptr) {
+            constexpr uint32_t kYmcaSongId = 7011;
+            uint64_t short_name_args[3] = {kTheHamSongMgr, kYmcaSongId, 0};
+            song_sym = static_cast<uint32_t>(processor->Execute(
+                thread_state, kHamSongMgrGetShortNameFromSongID,
+                short_name_args, 3));
+            if (song_sym && is_guest_readable(gd_addr + 0x30, 4)) {
+              auto* song_slot = memory->TranslateVirtual<uint8_t*>(gd_addr + 0x30);
+              xe::store_and_swap<uint32_t>(song_slot, song_sym);
+              song_name = read_guest_name(song_sym, false);
+              XELOGI(
+                  "DC3: LoadSong repair: canonical song id {} -> {:08X} '{}'",
+                  kYmcaSongId, song_sym, song_name);
+            }
+
+            uint32_t song_name_ptr = 0;
+            if (song_name.empty()) {
+              song_name_ptr = find_name_literal_ptr("ymca");
+            }
+            if (song_name.empty() && song_name_ptr) {
               XELOGI(
                   "DC3: LoadSong repair: constructing song symbol from {:08X}",
                   song_name_ptr);
