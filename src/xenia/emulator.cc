@@ -2481,6 +2481,21 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
                             kSaveLoadManagerActivate);
                       });
 
+    constexpr uint32_t kHamPanelFocusComponent = 0x828EFE90;
+    constexpr uint32_t kUIPanelFocusComponent = 0x827A6310;
+    with_patch_target("HamPanel::FocusComponent", kHamPanelFocusComponent, 4,
+                      [&](uint8_t* ptr) {
+                        constexpr uint32_t kBranchMask = 0x03FFFFFC;
+                        uint32_t branch =
+                            0x48000000 |
+                            ((kUIPanelFocusComponent - kHamPanelFocusComponent) &
+                             kBranchMask);
+                        xe::store_and_swap<uint32_t>(ptr, branch);
+                        XELOGI("DC3: UI fix: redirected HamPanel::FocusComponent "
+                               "at {:08X} to UIPanel::FocusComponent {:08X}",
+                               kHamPanelFocusComponent, kUIPanelFocusComponent);
+                      });
+
     constexpr uint32_t kCDReadDone = 0x826026E0;
     with_patch_target("CDReadDone", kCDReadDone, 8, [&](uint8_t* cdr_ptr) {
       xe::store_and_swap<uint32_t>(cdr_ptr + 0, 0x38600001);
