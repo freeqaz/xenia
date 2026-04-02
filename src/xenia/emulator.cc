@@ -435,10 +435,28 @@ void Dc3NuiSequencerExtern(
     s_screen_name_scan_range_logged = true;
   }
 
+  auto is_guest_readable = [&](uint32_t guest_addr, uint32_t size) -> bool {
+    if (!guest_addr || guest_addr >= 0xF0000000 || !size) {
+      return false;
+    }
+    uint32_t guest_end = guest_addr + size - 1;
+    if (guest_end < guest_addr) {
+      return false;
+    }
+    auto* heap = memory->LookupHeap(guest_addr);
+    if (!heap) {
+      return false;
+    }
+    return heap->QueryRangeAccess(guest_addr, guest_end) !=
+           xe::memory::PageAccess::kNoAccess;
+  };
+
   constexpr uint32_t kTheUI = 0x82F1A8E0;
-  auto* ui_ptr = memory->TranslateVirtual<uint8_t*>(kTheUI);
+  auto* ui_ptr = is_guest_readable(kTheUI, 4)
+                     ? memory->TranslateVirtual<uint8_t*>(kTheUI)
+                     : nullptr;
   uint32_t ui_addr = ui_ptr ? xe::load_and_swap<uint32_t>(ui_ptr) : 0;
-  if (ui_addr && ui_addr < 0xF0000000) {
+  if (is_guest_readable(ui_addr, 0x50)) {
     auto* ui_obj = memory->TranslateVirtual<uint8_t*>(ui_addr);
     if (ui_obj) {
       uint32_t cur_screen_h = xe::load_and_swap<uint32_t>(ui_obj + 0x48);
@@ -458,10 +476,10 @@ void Dc3NuiSequencerExtern(
         std::string result;
         result.reserve(32);
         for (uint32_t i = 0; i < 64; ++i) {
-          auto* ch_ptr = memory->TranslateVirtual<uint8_t*>(name_ptr + i);
-          if (!ch_ptr) {
+          if (!is_guest_readable(name_ptr + i, 1)) {
             return "";
           }
+          auto* ch_ptr = memory->TranslateVirtual<uint8_t*>(name_ptr + i);
           char ch = static_cast<char>(*ch_ptr);
           if (!ch) {
             return result;
@@ -480,10 +498,10 @@ void Dc3NuiSequencerExtern(
         if (!screen_addr || screen_addr >= 0xF0000000) {
           return "";
         }
-        auto* screen = memory->TranslateVirtual<uint8_t*>(screen_addr);
-        if (!screen) {
+        if (!is_guest_readable(screen_addr + offset, 4)) {
           return "";
         }
+        auto* screen = memory->TranslateVirtual<uint8_t*>(screen_addr);
         uint32_t name_ptr = xe::load_and_swap<uint32_t>(screen + offset);
         return read_guest_name(name_ptr, strict_scan_range);
       };
@@ -521,14 +539,12 @@ void Dc3NuiSequencerExtern(
             }
             for (uint32_t s_base = 0x40C00000;
                  s_base < 0x41000000 && !found_screen; s_base += 0x10000) {
-              auto* b_ptr = memory->TranslateVirtual<uint8_t*>(s_base);
-              if (!b_ptr) {
+              if (!is_guest_readable(s_base, 1)) {
                 continue;
               }
               for (uint32_t addr = s_base;
                    addr < s_base + 0x10000 && !found_screen; addr += 4) {
-                auto* obj = memory->TranslateVirtual<uint8_t*>(addr);
-                if (!obj) {
+                if (!is_guest_readable(addr + 0x20, 4)) {
                   continue;
                 }
                 std::string candidate =

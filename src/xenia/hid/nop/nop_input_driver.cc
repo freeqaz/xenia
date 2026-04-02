@@ -31,15 +31,31 @@ namespace {
 constexpr uint32_t kDc3OriginalXexNameMin = 0x82000000;
 constexpr uint32_t kDc3OriginalXexNameMax = 0x82400000;
 
+bool IsGuestReadable(Memory* memory, uint32_t guest_addr, uint32_t size) {
+  if (!memory || !guest_addr || guest_addr >= 0xF0000000 || !size) {
+    return false;
+  }
+  uint32_t guest_end = guest_addr + size - 1;
+  if (guest_end < guest_addr) {
+    return false;
+  }
+  auto* heap = memory->LookupHeap(guest_addr);
+  if (!heap) {
+    return false;
+  }
+  return heap->QueryRangeAccess(guest_addr, guest_end) !=
+         xe::memory::PageAccess::kNoAccess;
+}
+
 std::string ReadGuestScreenName(Memory* memory, uint32_t screen_ptr,
                                 bool strict_scan_range) {
   if (!memory || !screen_ptr || screen_ptr >= 0xF0000000) {
     return "";
   }
-  auto* scr_obj = memory->TranslateVirtual<uint8_t*>(screen_ptr);
-  if (!scr_obj) {
+  if (!IsGuestReadable(memory, screen_ptr + 0x20, 4)) {
     return "";
   }
+  auto* scr_obj = memory->TranslateVirtual<uint8_t*>(screen_ptr);
 
   auto read_guest_name = [&](uint32_t name_ptr) -> std::string {
     if (!name_ptr || name_ptr >= 0xF0000000) {
@@ -53,10 +69,10 @@ std::string ReadGuestScreenName(Memory* memory, uint32_t screen_ptr,
     std::string result;
     result.reserve(32);
     for (uint32_t i = 0; i < 64; ++i) {
-      auto* ch_ptr = memory->TranslateVirtual<uint8_t*>(name_ptr + i);
-      if (!ch_ptr) {
+      if (!IsGuestReadable(memory, name_ptr + i, 1)) {
         return "";
       }
+      auto* ch_ptr = memory->TranslateVirtual<uint8_t*>(name_ptr + i);
       char ch = static_cast<char>(*ch_ptr);
       if (!ch) {
         return result;
@@ -296,14 +312,16 @@ std::string NopInputDriver::ReadCurrentScreenName() const {
   if (!memory_) return "";
 
   constexpr uint32_t kTheUI = 0x82F1A8E0;
-  auto* ui_ptr = memory_->TranslateVirtual<uint8_t*>(kTheUI);
+  auto* ui_ptr =
+      IsGuestReadable(memory_, kTheUI, 4)
+          ? memory_->TranslateVirtual<uint8_t*>(kTheUI)
+          : nullptr;
   if (!ui_ptr) return "";
 
   uint32_t ui_addr = xe::load_and_swap<uint32_t>(ui_ptr);
-  if (!ui_addr || ui_addr >= 0xF0000000) return "";
+  if (!IsGuestReadable(memory_, ui_addr, 0x50)) return "";
 
   auto* ui_obj = memory_->TranslateVirtual<uint8_t*>(ui_addr);
-  if (!ui_obj) return "";
 
   // mCurrentScreen at offset 0x48
   uint32_t cur_screen = xe::load_and_swap<uint32_t>(ui_obj + 0x48);
@@ -354,9 +372,12 @@ uint16_t NopInputDriver::GetScreenAwareButtons() {
       std::string name_1c;
       std::string trans_name_1c;
       if (memory_) {
-        auto* ui_ptr = memory_->TranslateVirtual<uint8_t*>(kTheUI);
+        auto* ui_ptr =
+            IsGuestReadable(memory_, kTheUI, 4)
+                ? memory_->TranslateVirtual<uint8_t*>(kTheUI)
+                : nullptr;
         ui_addr = ui_ptr ? xe::load_and_swap<uint32_t>(ui_ptr) : 0;
-        if (ui_addr && ui_addr < 0xF0000000) {
+        if (IsGuestReadable(memory_, ui_addr, 0x50)) {
           auto* ui_obj = memory_->TranslateVirtual<uint8_t*>(ui_addr);
           if (ui_obj) {
             trans_state = xe::load_and_swap<uint32_t>(ui_obj + 0x2C);
@@ -438,9 +459,12 @@ uint16_t NopInputDriver::GetScreenAwareButtons() {
         }
         if (memory_ && attract_ms >= 5000) {
           constexpr uint32_t kTheUI = 0x82F1A8E0;
-          auto* ui_ptr = memory_->TranslateVirtual<uint8_t*>(kTheUI);
+          auto* ui_ptr =
+              IsGuestReadable(memory_, kTheUI, 4)
+                  ? memory_->TranslateVirtual<uint8_t*>(kTheUI)
+                  : nullptr;
           uint32_t ui_addr = ui_ptr ? xe::load_and_swap<uint32_t>(ui_ptr) : 0;
-          auto* ui_obj = (ui_addr && ui_addr < 0xF0000000)
+          auto* ui_obj = IsGuestReadable(memory_, ui_addr, 0x50)
                              ? memory_->TranslateVirtual<uint8_t*>(ui_addr)
                              : nullptr;
           if (ui_obj) {
@@ -454,7 +478,7 @@ uint16_t NopInputDriver::GetScreenAwareButtons() {
                 }
                 for (uint32_t addr = 0x40C00000; addr < 0x41000000;
                      addr += 4) {
-                  if (!memory_->TranslateVirtual<uint8_t*>(addr)) {
+                  if (!IsGuestReadable(memory_, addr + 0x20, 4)) {
                     continue;
                   }
                   std::string name =
