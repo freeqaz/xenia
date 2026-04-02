@@ -761,7 +761,8 @@ void Dc3NuiSequencerExtern(
               (gd_addr && is_guest_readable(gd_addr + 0x30, 4))
                   ? load_u32(gd_addr + 0x30)
                   : 0;
-          if (!song_sym && !s_loadsong_repair_attempted && gd_addr &&
+          std::string song_name = read_guest_name(song_sym, false);
+          if ((song_name.empty()) && !s_loadsong_repair_attempted && gd_addr &&
               meta_addr && meta_addr < 0xF0000000) {
             s_loadsong_repair_attempted = true;
             uint32_t song_name_ptr = find_name_literal_ptr("ymca");
@@ -772,14 +773,15 @@ void Dc3NuiSequencerExtern(
               uint64_t ctor_args[2] = {gd_addr + 0x30, song_name_ptr};
               processor->Execute(thread_state, kSymbolCtor, ctor_args, 2);
               song_sym = load_u32(gd_addr + 0x30);
+              song_name = read_guest_name(song_sym, false);
             } else {
               XELOGW("DC3: LoadSong repair: guest literal 'ymca' not found");
             }
 
-            if (song_sym) {
+            if (!song_name.empty()) {
               XELOGI(
                   "DC3: LoadSong repair: MetaPerformer::SetSong mp={:08X} song={:08X} '{}'",
-                  meta_addr, song_sym, read_guest_name(song_sym, false));
+                  meta_addr, song_sym, song_name);
               uint64_t set_song_args[2] = {meta_addr, song_sym};
               processor->Execute(thread_state, kMetaPerformerSetSong,
                                  set_song_args, 2);
@@ -837,7 +839,7 @@ void Dc3NuiSequencerExtern(
               gd_addr, gm_addr, hp_addr, mm_addr, meta_addr,
               p0_addr, p0_char, read_guest_name(p0_char, false), p0_diff, p0_pad,
               p1_addr, p1_char, read_guest_name(p1_char, false), p1_diff, p1_pad,
-              song_sym, read_guest_name(song_sym, false));
+              song_sym, song_name);
           s_loadsong_probe_logged = true;
         }
       }
