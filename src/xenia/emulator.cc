@@ -538,6 +538,11 @@ void Dc3NuiSequencerExtern(
         // Let the scripted A presses try first; only force past title after
         // it's been idle for a few seconds.
         nav_stable_threshold = 180;
+      } else if (cur_name == "wait_main_after_saveload_screen") {
+        // Save/load is stubbed in the original-XEX headless path, so if the
+        // screen settles without firing its completion handler, advance to the
+        // real menu flow after a short grace period.
+        nav_stable_threshold = 120;
       }
 
       if (s_screen_stable_count >= nav_stable_threshold && trans_state_h == 0) {
@@ -546,6 +551,8 @@ void Dc3NuiSequencerExtern(
           target_name = "title_screen";
         } else if (cur_screen_h && cur_name == "title_screen") {
           target_name = "wait_main_after_saveload_screen";
+        } else if (cur_screen_h && cur_name == "wait_main_after_saveload_screen") {
+          target_name = "main_screen";
         }
 
         if (!target_name.empty()) {
