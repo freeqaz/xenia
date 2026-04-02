@@ -334,6 +334,9 @@ void Dc3NuiSequencerExtern(
   static bool s_loadsong_probe_logged = false;
   static bool s_loadsong_repair_attempted = false;
   static bool s_content_refresh_forced = false;
+  static bool s_host_beat_drive_active = false;
+  static float s_host_song_seconds = 0.0f;
+  static float s_host_song_beat = 0.0f;
 
   if (ppc_context && ppc_context->scratch) {
     Dc3RuntimeTelemetryRecordNuiOverrideHit(
@@ -994,6 +997,90 @@ void Dc3NuiSequencerExtern(
             s_gameplay_setup_done = true;
           }
         }
+      }
+
+      if (cur_name == "game_screen") {
+        constexpr uint32_t kTheTaskMgr = 0x82F64A58;
+        auto load_u32 = [&](uint32_t guest_addr) -> uint32_t {
+          auto* ptr = is_guest_readable(guest_addr, 4)
+                          ? memory->TranslateVirtual<uint8_t*>(guest_addr)
+                          : nullptr;
+          return ptr ? xe::load_and_swap<uint32_t>(ptr) : 0;
+        };
+        auto store_float = [&](uint32_t guest_addr, float value) {
+          if (!is_guest_readable(guest_addr, 4)) {
+            return false;
+          }
+          auto* ptr = memory->TranslateVirtual<uint8_t*>(guest_addr);
+          if (!ptr) {
+            return false;
+          }
+          xe::store_and_swap<float>(ptr, value);
+          return true;
+        };
+        uint32_t timelines_addr = load_u32(kTheTaskMgr + 0x2C);
+        if (timelines_addr && is_guest_readable(timelines_addr + 0x54, 4) &&
+            is_guest_readable(kTheTaskMgr + 0x48, 1)) {
+          auto* auto_ptr =
+              memory->TranslateVirtual<uint8_t*>(kTheTaskMgr + 0x48);
+          if (auto_ptr) {
+            *auto_ptr = 0;
+          }
+
+          constexpr float kSecondsPerFrame = 1.0f / 30.0f;
+          constexpr float kBeatPerFrame = 120.0f / 60.0f * kSecondsPerFrame;
+          constexpr uint32_t kTimelineStride = 0x1C;
+          constexpr uint32_t kTimeOff = 0x10;
+          constexpr uint32_t kLastTimeOff = 0x14;
+
+          uint32_t seconds_time_addr = timelines_addr + 0 * kTimelineStride + kTimeOff;
+          uint32_t seconds_last_addr =
+              timelines_addr + 0 * kTimelineStride + kLastTimeOff;
+          uint32_t beats_time_addr = timelines_addr + 1 * kTimelineStride + kTimeOff;
+          uint32_t beats_last_addr =
+              timelines_addr + 1 * kTimelineStride + kLastTimeOff;
+          uint32_t ui_time_addr = timelines_addr + 2 * kTimelineStride + kTimeOff;
+          uint32_t ui_last_addr = timelines_addr + 2 * kTimelineStride + kLastTimeOff;
+
+          auto load_float = [&](uint32_t guest_addr) -> float {
+            auto* ptr = is_guest_readable(guest_addr, 4)
+                            ? memory->TranslateVirtual<uint8_t*>(guest_addr)
+                            : nullptr;
+            return ptr ? xe::load_and_swap<float>(ptr) : 0.0f;
+          };
+
+          float old_seconds = load_float(seconds_time_addr);
+          float old_beats = load_float(beats_time_addr);
+          float old_ui = load_float(ui_time_addr);
+          if (!s_host_beat_drive_active) {
+            s_host_song_seconds = old_seconds;
+            s_host_song_beat = old_beats;
+            XELOGI(
+                "DC3: Host-driven beat activated taskmgr={:08X} timelines={:08X} "
+                "sec={:.3f} beat={:.3f}",
+                kTheTaskMgr, timelines_addr, s_host_song_seconds,
+                s_host_song_beat);
+            s_host_beat_drive_active = true;
+          }
+
+          s_host_song_seconds += kSecondsPerFrame;
+          s_host_song_beat += kBeatPerFrame;
+
+          store_float(seconds_last_addr, old_seconds);
+          store_float(seconds_time_addr, s_host_song_seconds);
+          store_float(beats_last_addr, old_beats);
+          store_float(beats_time_addr, s_host_song_beat);
+          store_float(ui_last_addr, old_ui);
+          store_float(ui_time_addr, s_host_song_seconds);
+
+          if ((s_skel_calls % 120) == 0) {
+            XELOGI("DC3: Beat drive sec={:.3f} beat={:.3f} nui={}",
+                   s_host_song_seconds, s_host_song_beat, s_skel_calls);
+          }
+        }
+      } else if (s_host_beat_drive_active) {
+        XELOGI("DC3: Host-driven beat deactivated on '{}'", cur_name);
+        s_host_beat_drive_active = false;
       }
     }
   }
