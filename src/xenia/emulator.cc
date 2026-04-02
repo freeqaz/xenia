@@ -523,10 +523,19 @@ void Dc3NuiSequencerExtern(
                s_skel_calls);
       }
 
-      if (s_screen_stable_count >= 20 && trans_state_h == 0) {
+      int nav_stable_threshold = 20;
+      if (cur_name == "title_screen") {
+        // Let the scripted A presses try first; only force past title after
+        // it's been idle for a few seconds.
+        nav_stable_threshold = 180;
+      }
+
+      if (s_screen_stable_count >= nav_stable_threshold && trans_state_h == 0) {
         std::string target_name;
         if (cur_screen_h && cur_name == "attract_screen") {
           target_name = "title_screen";
+        } else if (cur_screen_h && cur_name == "title_screen") {
+          target_name = "main_screen";
         }
 
         if (!target_name.empty()) {
