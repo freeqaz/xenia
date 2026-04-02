@@ -307,6 +307,229 @@ void Dc3NuiReturnNeg1Extern(cpu::ppc::PPCContext* ppc_context,
   ppc_context->r[3] = UINT64_C(0xFFFFFFFFFFFFFFFF);
 }
 
+void Dc3NuiReturn1Extern(cpu::ppc::PPCContext* ppc_context,
+                         kernel::KernelState* kernel_state) {
+  (void)kernel_state;
+  if (ppc_context && ppc_context->scratch) {
+    Dc3RuntimeTelemetryRecordNuiOverrideHit(
+        static_cast<uint32_t>(ppc_context->scratch));
+  }
+  ppc_context->r[3] = 1;
+}
+
+void Dc3NuiSequencerExtern(
+    cpu::ppc::PPCContext* ppc_context, kernel::KernelState* kernel_state) {
+  uint32_t frame_guest_addr = static_cast<uint32_t>(ppc_context->r[4]);
+  Memory* memory = kernel_state->memory();
+  static int s_skel_calls = 0;
+  static uint32_t s_last_screen = 0;
+  static int s_screen_stable_count = 0;
+  static bool s_gameplay_setup_done = false;
+  static uint32_t s_fake_frame_number = 0;
+  static bool s_nui_entry_logged = false;
+
+  if (ppc_context && ppc_context->scratch) {
+    Dc3RuntimeTelemetryRecordNuiOverrideHit(
+        static_cast<uint32_t>(ppc_context->scratch));
+  }
+
+  if (!frame_guest_addr) {
+    ppc_context->r[3] = 0x80004003u;
+    return;
+  }
+
+  auto* frame = memory->TranslateVirtual<uint8_t*>(frame_guest_addr);
+  if (!frame) {
+    ppc_context->r[3] = 0x80004005u;
+    return;
+  }
+
+  auto write_u32 = [frame](uint32_t offset, uint32_t value) {
+    xe::store_and_swap<uint32_t>(frame + offset, value);
+  };
+  auto write_u64 = [frame](uint32_t offset, uint64_t value) {
+    xe::store_and_swap<uint64_t>(frame + offset, value);
+  };
+  auto write_float = [frame](uint32_t offset, float value) {
+    xe::store_and_swap<float>(frame + offset, value);
+  };
+
+  uint32_t frame_number = ++s_fake_frame_number;
+  constexpr uint32_t kFrameSize = 0x30 + 6 * 0x1B4;
+  std::memset(frame, 0, kFrameSize);
+
+  write_u64(0x00, static_cast<uint64_t>(frame_number) * 33333);
+  write_u32(0x08, frame_number);
+  write_float(0x10, 0.0f);
+  write_float(0x14, 1.0f);
+  write_float(0x18, 0.0f);
+  write_float(0x1C, 0.0f);
+  write_float(0x20, 0.0f);
+  write_float(0x24, 1.0f);
+  write_float(0x28, 0.0f);
+  write_float(0x2C, 0.0f);
+
+  constexpr uint32_t kSkel0 = 0x30;
+  write_u32(kSkel0 + 0x00, 2);
+  write_u32(kSkel0 + 0x04, 1);
+  write_float(kSkel0 + 0x10, 0.0f);
+  write_float(kSkel0 + 0x14, 0.9f);
+  write_float(kSkel0 + 0x18, 2.0f);
+  write_float(kSkel0 + 0x1C, 0.0f);
+
+  struct JointPos {
+    float x;
+    float y;
+    float z;
+  };
+  static constexpr JointPos kJoints[20] = {
+      {0.00f, 0.90f, 2.0f},  {0.00f, 1.10f, 2.0f},  {0.00f, 1.40f, 2.0f},
+      {0.00f, 1.60f, 2.0f},  {-0.20f, 1.40f, 2.0f}, {-0.30f, 1.10f, 2.0f},
+      {-0.25f, 0.90f, 2.0f}, {-0.20f, 0.80f, 2.0f}, {0.20f, 1.40f, 2.0f},
+      {0.30f, 1.10f, 2.0f},  {0.25f, 0.90f, 2.0f},  {0.20f, 0.80f, 2.0f},
+      {-0.10f, 0.90f, 2.0f}, {-0.10f, 0.50f, 2.0f}, {-0.10f, 0.10f, 2.0f},
+      {-0.10f, 0.00f, 2.0f}, {0.10f, 0.90f, 2.0f},  {0.10f, 0.50f, 2.0f},
+      {0.10f, 0.10f, 2.0f},  {0.10f, 0.00f, 2.0f},
+  };
+  constexpr uint32_t kJointsOff = kSkel0 + 0x20;
+  for (int j = 0; j < 20; ++j) {
+    uint32_t off = kJointsOff + j * 16;
+    write_float(off + 0, kJoints[j].x);
+    write_float(off + 4, kJoints[j].y);
+    write_float(off + 8, kJoints[j].z);
+    write_float(off + 12, 0.0f);
+  }
+
+  s_skel_calls++;
+  ppc_context->r[3] = 0;
+
+  if (!s_nui_entry_logged) {
+    XELOGI("DC3: NUI callback alive (original layout) frameBuf={:08X} "
+           "fakeFrame={} nuiFrame={}",
+           frame_guest_addr, frame_number, s_skel_calls);
+    s_nui_entry_logged = true;
+  }
+
+  constexpr uint32_t kTheUI = 0x82F1A8E0;
+  auto* ui_ptr = memory->TranslateVirtual<uint8_t*>(kTheUI);
+  uint32_t ui_addr = ui_ptr ? xe::load_and_swap<uint32_t>(ui_ptr) : 0;
+  if (ui_addr && ui_addr < 0xF0000000) {
+    auto* ui_obj = memory->TranslateVirtual<uint8_t*>(ui_addr);
+    if (ui_obj) {
+      uint32_t cur_screen_h = xe::load_and_swap<uint32_t>(ui_obj + 0x48);
+      uint32_t trans_state_h = xe::load_and_swap<uint32_t>(ui_obj + 0x2c);
+      if (cur_screen_h != s_last_screen) { s_last_screen = cur_screen_h; s_screen_stable_count = 0; }
+      else if (trans_state_h == 0) s_screen_stable_count++;
+
+      auto read_name_at = [&](uint32_t screen_addr, uint32_t offset)
+          -> std::string {
+        if (!screen_addr || screen_addr >= 0xF0000000) {
+          return "";
+        }
+        auto* screen = memory->TranslateVirtual<uint8_t*>(screen_addr);
+        if (!screen) {
+          return "";
+        }
+        uint32_t name_ptr = xe::load_and_swap<uint32_t>(screen + offset);
+        if (name_ptr < 0x82000000 || name_ptr >= 0x83500000) {
+          return "";
+        }
+        auto* name_str = memory->TranslateVirtual<char*>(name_ptr);
+        return name_str ? std::string(name_str) : "";
+      };
+
+      std::string raw_name = read_name_at(cur_screen_h, 0x1C);
+      if (raw_name.empty()) {
+        raw_name = read_name_at(cur_screen_h, 0x20);
+      }
+      auto* scr_obj = memory->TranslateVirtual<uint8_t*>(cur_screen_h);
+      (void)scr_obj;
+      std::string cur_name = raw_name;
+      if (cur_name.empty()) {
+        cur_name = "attract_screen";
+      }
+
+      if ((s_skel_calls % 60) == 0) {
+        XELOGI("DC3: Nav diag: scr={:08X} raw='{}' name='{}' stable={} nui={}",
+               cur_screen_h, raw_name, cur_name, s_screen_stable_count,
+               s_skel_calls);
+      }
+
+      if (s_screen_stable_count >= 120 && trans_state_h == 0) {
+        uint32_t target_str_addr = 0;
+        if (cur_name == "attract_screen") {
+          target_str_addr = 0x82117D78;  // "title_screen"
+        } else if (cur_name == "title_screen") {
+          target_str_addr = 0x82112D70;  // "main_screen"
+        }
+
+        if (target_str_addr != 0) {
+          uint32_t found_screen = 0;
+          auto* target_name = memory->TranslateVirtual<char*>(target_str_addr);
+          for (uint32_t s_base = 0x40C00000;
+               s_base < 0x41000000 && !found_screen; s_base += 0x10000) {
+            auto* b_ptr = memory->TranslateVirtual<uint8_t*>(s_base);
+            if (!b_ptr) {
+              continue;
+            }
+            for (uint32_t addr = s_base; addr < s_base + 0x10000 && !found_screen;
+                 addr += 4) {
+              auto* obj = memory->TranslateVirtual<uint8_t*>(addr);
+              if (!obj) {
+                continue;
+              }
+              uint32_t vt = xe::load_and_swap<uint32_t>(obj);
+              if (vt == 0x82109774 || vt == 0x820CDBDC) {
+                std::string candidate = read_name_at(addr, 0x1C);
+                if (candidate.empty()) {
+                  candidate = read_name_at(addr, 0x20);
+                }
+                if (target_name && candidate == target_name) {
+                  found_screen = addr;
+                  break;
+                }
+              }
+            }
+          }
+          if (found_screen) {
+            XELOGI("DC3: Nav jump: {} -> {} ({:08X})", cur_name,
+                   target_name ? target_name : "?", found_screen);
+            xe::store_and_swap<uint32_t>(ui_obj + 0x2c, 1);
+            xe::store_and_swap<uint32_t>(ui_obj + 0x4c, found_screen);
+            s_screen_stable_count = 0;
+          }
+        }
+      }
+
+      if (!s_gameplay_setup_done &&
+          (cur_name == "main_screen" || cur_name == "loading_screen")) {
+        constexpr uint32_t kTheHamDirector = 0x82F603A0;
+        constexpr uint32_t kTheGamePanel = 0x83117410;
+        auto* hd_ptr = memory->TranslateVirtual<uint8_t*>(kTheHamDirector);
+        auto* gp_ptr = memory->TranslateVirtual<uint8_t*>(kTheGamePanel);
+        uint32_t hd_addr = hd_ptr ? xe::load_and_swap<uint32_t>(hd_ptr) : 0;
+        uint32_t gp_addr = gp_ptr ? xe::load_and_swap<uint32_t>(gp_ptr) : 0;
+        if (hd_addr && gp_addr && hd_addr < 0xF0000000 && gp_addr < 0xF0000000) {
+          auto* processor = kernel_state->processor();
+          auto* thread_state = ppc_context->thread_state;
+          if (processor && thread_state) {
+            auto exec_member = [&](uint32_t fn, uint32_t tp) {
+              uint64_t args[1] = {tp};
+              return processor->Execute(thread_state, fn, args, 1);
+            };
+            exec_member(0x82474868, hd_addr); // SetupAnims
+            uint64_t sl_args[1] = {0x8311787C};
+            processor->Execute(thread_state, 0x8288BDF8, sl_args, 1); // OnSongLoaded
+            exec_member(0x8287AE28, gp_addr); // StartGame
+            s_gameplay_setup_done = true;
+          }
+        }
+      }
+    }
+  }
+}
+
+
 }  // namespace
 
 Emulator::GameConfigLoadCallback::GameConfigLoadCallback(Emulator& emulator)
@@ -1199,7 +1422,8 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
   // DC3 Title ID: 0x373307D9 (Dance Central 3)
   bool dc3_is_decomp_layout = false;
   std::optional<Dc3NuiPatchManifest> dc3_patch_manifest;
-  if (title_id_.has_value() && title_id_.value() == 0x373307D9) {
+  if (title_id_.has_value() && title_id_.value() == 0x373307D9 &&
+      dc3_is_decomp_layout) {
     Dc3MaybeCleanStaleContentCache(content_root_);
 
     // Load the patch manifest early so it's available for both NUI patching
@@ -1898,10 +2122,10 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
       if (!enable_guest_overrides) {
         return nullptr;
       }
-      // Preserve the fake skeleton PPC stub path when enabled.
+      // Preserve the original-layout fake skeleton path when enabled.
       if (cvars::fake_kinect_data && !is_decomp_layout &&
           std::string_view(patch.name) == "NuiSkeletonGetNextFrame") {
-        return nullptr;
+        return Dc3NuiSequencerExtern;
       }
       if (patch.insn1 != kBlr) {
         return nullptr;
@@ -1911,6 +2135,9 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
       }
       if (patch.insn0 == kLiR3_Neg1) {
         return Dc3NuiReturnNeg1Extern;
+      }
+      if (patch.insn0 == kLiR3_1) {
+        return Dc3NuiReturn1Extern;
       }
       return nullptr;
     };
@@ -1935,6 +2162,15 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
         continue;
       }
       const uint32_t patch_addr = resolved_patch.resolved_address;
+            if (std::string_view(patch.name) == "NuiSkeletonGetNextFrame") {
+        auto* h = guest_extern_handler_for_patch(patch);
+        if (h) {
+          processor_->RegisterGuestFunctionOverride(patch_addr, h, patch.name);
+          XELOGI("DC3: ULTRA FORCED registration of NUI sequencer at {:08X}", patch_addr);
+          override_registered++;
+          continue;
+        }
+      }
       auto handler = guest_extern_handler_for_patch(patch);
       if (!handler) {
         XELOGW(
@@ -2045,7 +2281,8 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
   // Non-NUI DC3 workarounds (CRT/imports/debug/decomp runtime stopgaps) are
   // extracted into the DC3 hack pack module to keep emulator.cc orchestration-
   // only and make retirement tracking manageable.
-  if (title_id_.has_value() && title_id_.value() == 0x373307D9) {
+  if (title_id_.has_value() && title_id_.value() == 0x373307D9 &&
+      dc3_is_decomp_layout) {
     Dc3HackContext dc3_hack_ctx;
     dc3_hack_ctx.memory = memory_.get();
     dc3_hack_ctx.processor = processor_.get();
@@ -2094,7 +2331,264 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
              Dc3HackCategoryName(result.category), result.applied,
              result.skipped, result.failed);
     }
+    if (cvars::dc3_ik_telemetry) {
+      auto ik_result = ApplyDc3IKTelemetry(dc3_hack_ctx);
+      XELOGI("DC3: IK telemetry: applied={} skipped={} failed={}",
+             ik_result.applied, ik_result.skipped, ik_result.failed);
+    }
     Dc3RuntimeTelemetryRecordBootMilestone("dc3_hack_pack_apply_complete");
+  } else if (title_id_.has_value() && title_id_.value() == 0x373307D9) {
+    XELOGI(
+        "DC3: Skipping hack pack for original XEX (NUI overrides already applied)");
+    XELOGI("DC3: Original-XEX boot patch staging begins "
+           "(fake_kinect_data={} decomp_layout={})",
+           cvars::fake_kinect_data, dc3_is_decomp_layout);
+    auto with_patch_target =
+        [&](const char* label, uint32_t addr, size_t size, auto&& apply) {
+          auto* ptr = memory_->TranslateVirtual<uint8_t*>(addr);
+          if (!ptr) {
+            XELOGW("DC3: Patch lookup failed: {} at {:08X} "
+                   "(TranslateVirtual returned null)",
+                   label, addr);
+            return false;
+          }
+          auto* heap = memory_->LookupHeap(addr);
+          if (!heap) {
+            XELOGW("DC3: Patch lookup failed: {} at {:08X} "
+                   "(LookupHeap returned null)",
+                   label, addr);
+            return false;
+          }
+          heap->Protect(addr, size, kMemoryProtectRead | kMemoryProtectWrite);
+          apply(ptr);
+          return true;
+        };
+
+    constexpr uint32_t kSaveLoadManagerActivate = 0x82894A10;
+    with_patch_target("SaveLoadManager::Activate", kSaveLoadManagerActivate, 4,
+                      [&](uint8_t* sla_ptr) {
+                        xe::store_and_swap<uint32_t>(sla_ptr, 0x4E800020);
+                        XELOGI(
+                            "DC3: Stubbed SaveLoadManager::Activate at {:08X} to blr",
+                            kSaveLoadManagerActivate);
+                      });
+
+    constexpr uint32_t kCDReadDone = 0x826026E0;
+    with_patch_target("CDReadDone", kCDReadDone, 8, [&](uint8_t* cdr_ptr) {
+      xe::store_and_swap<uint32_t>(cdr_ptr + 0, 0x38600001);
+      xe::store_and_swap<uint32_t>(cdr_ptr + 4, 0x4E800020);
+      XELOGI("DC3: Stubbed CDReadDone at {:08X} to return true",
+             kCDReadDone);
+    });
+
+    constexpr uint32_t kContentMgrRefreshDone = 0x825FEB48;
+    with_patch_target("ContentMgr::RefreshDone", kContentMgrRefreshDone, 8,
+                      [&](uint8_t* crd_ptr) {
+                        xe::store_and_swap<uint32_t>(crd_ptr + 0, 0x38600001);
+                        xe::store_and_swap<uint32_t>(crd_ptr + 4, 0x4E800020);
+                        XELOGI("DC3: Stubbed ContentMgr::RefreshDone at {:08X} "
+                               "to return true",
+                               kContentMgrRefreshDone);
+                      });
+
+    constexpr uint32_t kSplashPrepareNext = 0x82554388;
+    with_patch_target("Splash::PrepareNext", kSplashPrepareNext, 8,
+                      [&](uint8_t* ptr) {
+                        xe::store_and_swap<uint32_t>(ptr + 0, 0x38600000);
+                        xe::store_and_swap<uint32_t>(ptr + 4, 0x4E800020);
+                        XELOGI("DC3: Splash bypass: stubbed Splash::PrepareNext "
+                               "at {:08X} to return false",
+                               kSplashPrepareNext);
+                      });
+
+    constexpr uint32_t kSplashBeginSplasher = 0x825554C8;
+    with_patch_target("Splash::BeginSplasher", kSplashBeginSplasher, 4,
+                      [&](uint8_t* ptr) {
+                        xe::store_and_swap<uint32_t>(ptr, 0x4E800020);
+                        XELOGI("DC3: Splash bypass: stubbed Splash::BeginSplasher "
+                               "at {:08X} to blr",
+                               kSplashBeginSplasher);
+                      });
+
+    constexpr uint32_t kSplashSuspend = 0x82553BE0;
+    with_patch_target("Splash::Suspend", kSplashSuspend, 4,
+                      [&](uint8_t* ptr) {
+                        xe::store_and_swap<uint32_t>(ptr, 0x4E800020);
+                        XELOGI("DC3: Splash bypass: stubbed Splash::Suspend "
+                               "at {:08X} to blr",
+                               kSplashSuspend);
+                      });
+
+    constexpr uint32_t kSplashResume = 0x82553D68;
+    with_patch_target("Splash::Resume", kSplashResume, 4,
+                      [&](uint8_t* ptr) {
+                        xe::store_and_swap<uint32_t>(ptr, 0x4E800020);
+                        XELOGI("DC3: Splash bypass: stubbed Splash::Resume "
+                               "at {:08X} to blr",
+                               kSplashResume);
+                      });
+
+    constexpr uint32_t kMovieInit = 0x82555678;
+    with_patch_target("Movie::Init", kMovieInit, 4, [&](uint8_t* ptr) {
+      xe::store_and_swap<uint32_t>(ptr, 0x4E800020);
+      XELOGI("DC3: Movie bypass: stubbed Movie::Init at {:08X} to blr",
+             kMovieInit);
+    });
+
+    constexpr uint32_t kBinkMovieSysInit = 0x82E214A8;
+    with_patch_target("BinkMovieSys::Init", kBinkMovieSysInit, 4,
+                      [&](uint8_t* ptr) {
+                        xe::store_and_swap<uint32_t>(ptr, 0x4E800020);
+                        XELOGI("DC3: Movie bypass: stubbed BinkMovieSys::Init "
+                               "at {:08X} to blr",
+                               kBinkMovieSysInit);
+                      });
+
+    if (cvars::fake_kinect_data) {
+      XELOGI("DC3: Entering original-XEX fake Kinect patch block");
+
+      constexpr uint32_t kSetPlayerPresentGuard = 0x8290834C;
+      constexpr uint32_t kExpectedInsn = 0x4800001D;
+      auto* guard_ptr =
+          memory_->TranslateVirtual<uint8_t*>(kSetPlayerPresentGuard);
+      if (guard_ptr) {
+        uint32_t actual = xe::load_and_swap<uint32_t>(guard_ptr);
+        if (actual == kExpectedInsn) {
+          auto* heap = memory_->LookupHeap(kSetPlayerPresentGuard);
+          if (heap) {
+            heap->Protect(kSetPlayerPresentGuard, 4,
+                          kMemoryProtectRead | kMemoryProtectWrite);
+            xe::store_and_swap<uint32_t>(guard_ptr, 0x60000000);
+            XELOGI("DC3: Calibration bypass: NOP'd IsTrackingAllSkeletons "
+                   "guard in SetPlayerPresent at {:08X}",
+                   kSetPlayerPresentGuard);
+          }
+        } else {
+          XELOGW("DC3: Calibration bypass: unexpected insn at {:08X}: "
+                 "{:08X} (expected {:08X})",
+                 kSetPlayerPresentGuard, actual, kExpectedInsn);
+        }
+      }
+
+      constexpr uint32_t kChoosePlayerSides = 0x82909968;
+      with_patch_target("ChoosePlayerSides", kChoosePlayerSides, 4,
+                        [&](uint8_t* cps_ptr) {
+                          xe::store_and_swap<uint32_t>(cps_ptr, 0x4E800020);
+                          XELOGI("DC3: Calibration bypass: stubbed "
+                                 "ChoosePlayerSides at {:08X} to blr",
+                                 kChoosePlayerSides);
+                        });
+
+      constexpr uint32_t kSetPlayerSkeletonWarningData = 0x82907880;
+      with_patch_target("SetPlayerSkeletonWarningData",
+                        kSetPlayerSkeletonWarningData, 4,
+                        [&](uint8_t* spw_ptr) {
+                          xe::store_and_swap<uint32_t>(spw_ptr, 0x4E800020);
+                          XELOGI("DC3: Calibration bypass: stubbed "
+                                 "SetPlayerSkeletonWarningData at {:08X} to blr",
+                                 kSetPlayerSkeletonWarningData);
+                        });
+
+      constexpr uint32_t kSetPlayerSkeletonNavData = 0x82909340;
+      constexpr uint32_t kSetPlayerPresent = 0x82908320;
+      auto* nav_ptr =
+          memory_->TranslateVirtual<uint8_t*>(kSetPlayerSkeletonNavData);
+      if (nav_ptr) {
+        auto* heap = memory_->LookupHeap(kSetPlayerSkeletonNavData);
+        if (heap) {
+          heap->Protect(kSetPlayerSkeletonNavData, 64,
+                        kMemoryProtectRead | kMemoryProtectWrite);
+          auto w = [nav_ptr](int idx, uint32_t insn) {
+            xe::store_and_swap<uint32_t>(nav_ptr + idx * 4, insn);
+          };
+          int i = 0;
+          w(i++, 0x7C0802A6);
+          w(i++, 0x90010004);
+          w(i++, 0x9421FFC0);
+          w(i++, 0x38600000);
+          w(i++, 0x38800001);
+          w(i++, 0x48000001 | (kSetPlayerPresent - 0x82909350));
+          w(i++, 0x38600001);
+          w(i++, 0x38800001);
+          w(i++, 0x48000001 | (kSetPlayerPresent - 0x82909358));
+          w(i++, 0x38210040);
+          w(i++, 0x80010004);
+          w(i++, 0x7C0803A6);
+          w(i++, 0x4E800020);
+          XELOGI("DC3: Calibration bypass: replaced SetPlayerSkeletonNavData "
+                 "at {:08X} with SetPlayerPresent stub ({} instructions)",
+                 kSetPlayerSkeletonNavData, i);
+        }
+      }
+
+      constexpr uint32_t kShouldWaitForRecovery = 0x82904CD0;
+      with_patch_target("ShouldWaitForRecovery", kShouldWaitForRecovery, 8,
+                        [&](uint8_t* swr_ptr) {
+                          xe::store_and_swap<uint32_t>(swr_ptr + 0, 0x38600000);
+                          xe::store_and_swap<uint32_t>(swr_ptr + 4, 0x4E800020);
+                          XELOGI("DC3: Calibration bypass: stubbed "
+                                 "ShouldWaitForRecovery at {:08X} to return false",
+                                 kShouldWaitForRecovery);
+                        });
+
+      constexpr uint32_t kExitControllerMode = 0x82902748;
+      with_patch_target("ExitControllerMode", kExitControllerMode, 4,
+                        [&](uint8_t* ecm_ptr) {
+                          xe::store_and_swap<uint32_t>(ecm_ptr, 0x4E800020);
+                          XELOGI("DC3: Controller bypass: stubbed "
+                                 "ExitControllerMode at {:08X} to blr",
+                                 kExitControllerMode);
+                        });
+
+      constexpr uint32_t kMoviePoll = 0x82555CB8;
+      with_patch_target("Movie::Poll", kMoviePoll, 8,
+                        [&](uint8_t* mp_ptr) {
+                          xe::store_and_swap<uint32_t>(mp_ptr + 0, 0x38600000);
+                          xe::store_and_swap<uint32_t>(mp_ptr + 4, 0x4E800020);
+                          XELOGI("DC3: Movie bypass: stubbed Movie::Poll at "
+                                 "{:08X} to return false",
+                                 kMoviePoll);
+                        });
+
+      auto patch4 = [&](uint32_t addr, uint32_t val, const char* desc) {
+        auto* p = memory_->TranslateVirtual<uint8_t*>(addr);
+        if (!p) {
+          return;
+        }
+        auto* h = memory_->LookupHeap(addr);
+        if (!h) {
+          return;
+        }
+        h->Protect(addr, 4, kMemoryProtectRead | kMemoryProtectWrite);
+        xe::store_and_swap<uint32_t>(p, val);
+        XELOGI("DC3: Audio fix: {} at {:08X}", desc, addr);
+      };
+
+      constexpr uint32_t kXMAHALAlloc = 0x82E77250;
+      with_patch_target("XMAHALAllocateContexts", kXMAHALAlloc, 8,
+                        [&](uint8_t* p) {
+                          xe::store_and_swap<uint32_t>(p + 0, 0x38600000);
+                          xe::store_and_swap<uint32_t>(p + 4, 0x4E800020);
+                          XELOGI("DC3: Audio fix: stubbed XMAHALAllocateContexts "
+                                 "at {:08X} to return S_OK",
+                                 kXMAHALAlloc);
+                        });
+
+      patch4(0x82867288 + 0x90, 0x48000024,
+             "HandleWait+0x90: bne 40820024 -> b 48000024");
+      patch4(0x8252B9E0 + 0x70, 0x38600001,
+             "HamAudio::IsReady+0x70: bctrl -> li r3,1");
+
+      constexpr uint32_t kHamDirectorSongAnim = 0x82475578;
+      with_patch_target("HamDirector::SongAnim", kHamDirectorSongAnim, 8,
+                        [&](uint8_t* p) {
+                          xe::store_and_swap<uint32_t>(p + 0, 0x38800002);
+                          xe::store_and_swap<uint32_t>(p + 4, 0x4BFFE8E0);
+                          XELOGI("DC3: Anim fix: patched HamDirector::SongAnim "
+                                 "at {:08X} to return expert anim",
+                                 kHamDirectorSongAnim);
+                        });
+    }
   }
   auto main_thread = kernel_state_->LaunchModule(module);
   if (!main_thread) {

@@ -255,14 +255,26 @@ std::string NopInputDriver::ReadCurrentScreenName() const {
   auto* scr_obj = memory_->TranslateVirtual<uint8_t*>(cur_screen);
   if (!scr_obj) return "";
 
-  // mName (Hmx::Object) at offset 0x20
-  uint32_t name_ptr = xe::load_and_swap<uint32_t>(scr_obj + 0x20);
-  if (!name_ptr || name_ptr >= 0xF0000000) return "";
+  auto read_name_at = [&](uint32_t offset) -> std::string {
+    uint32_t name_ptr = xe::load_and_swap<uint32_t>(scr_obj + offset);
+    if (!name_ptr || name_ptr >= 0xF0000000) {
+      return "";
+    }
+    auto* name_str = memory_->TranslateVirtual<char*>(name_ptr);
+    if (!name_str) {
+      return "";
+    }
+    return std::string(name_str, strnlen(name_str, 64));
+  };
 
-  auto* name_str = memory_->TranslateVirtual<char*>(name_ptr);
-  if (!name_str) return "";
-
-  return std::string(name_str, strnlen(name_str, 64));
+  // Original debug XEX screen objects have been observed with mName at +0x1C,
+  // while some earlier experiments assumed +0x20. Try both to keep
+  // screen-aware scripts working across layouts.
+  std::string name = read_name_at(0x1C);
+  if (!name.empty()) {
+    return name;
+  }
+  return read_name_at(0x20);
 }
 
 uint16_t NopInputDriver::GetScreenAwareButtons() {
@@ -285,7 +297,180 @@ uint16_t NopInputDriver::GetScreenAwareButtons() {
   auto& dir = script_directives_[script_index_];
 
   if (dir.type == ScriptDirective::kWaitScreen) {
+    static auto s_last_wait_log = std::chrono::steady_clock::time_point{};
+    static uint32_t s_last_stuck_transition = 0;
+    static auto s_stuck_transition_start = std::chrono::steady_clock::time_point{};
+    static auto s_attract_seen_since = std::chrono::steady_clock::time_point{};
+    static auto s_last_attract_press = std::chrono::steady_clock::time_point{};
+    static uint32_t s_title_screen_addr = 0;
+    auto since_last_wait_log =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            now - s_last_wait_log)
+            .count();
+    if (since_last_wait_log >= 2000) {
+      constexpr uint32_t kTheUI = 0x82F1A8E0;
+      uint32_t ui_addr = 0;
+      uint32_t cur_screen = 0;
+      uint32_t trans_screen = 0;
+      uint32_t trans_state = 0;
+      std::string name_1c;
+      std::string name_20;
+      std::string trans_name_1c;
+      std::string trans_name_20;
+      if (memory_) {
+        auto* ui_ptr = memory_->TranslateVirtual<uint8_t*>(kTheUI);
+        ui_addr = ui_ptr ? xe::load_and_swap<uint32_t>(ui_ptr) : 0;
+        if (ui_addr && ui_addr < 0xF0000000) {
+          auto* ui_obj = memory_->TranslateVirtual<uint8_t*>(ui_addr);
+          if (ui_obj) {
+            trans_state = xe::load_and_swap<uint32_t>(ui_obj + 0x2C);
+            cur_screen = xe::load_and_swap<uint32_t>(ui_obj + 0x48);
+            trans_screen = xe::load_and_swap<uint32_t>(ui_obj + 0x4C);
+            auto read_screen_name_at = [&](uint32_t screen_ptr,
+                                           uint32_t offset) -> std::string {
+              if (!screen_ptr || screen_ptr >= 0xF0000000) {
+                return "";
+              }
+              auto* scr_obj = memory_->TranslateVirtual<uint8_t*>(screen_ptr);
+              if (!scr_obj) {
+                return "";
+              }
+              uint32_t name_ptr = xe::load_and_swap<uint32_t>(scr_obj + offset);
+              if (!name_ptr || name_ptr >= 0xF0000000) {
+                return "";
+              }
+              auto* name_str = memory_->TranslateVirtual<char*>(name_ptr);
+              if (!name_str) {
+                return "";
+              }
+              return std::string(name_str, strnlen(name_str, 64));
+            };
+            name_1c = read_screen_name_at(cur_screen, 0x1C);
+            name_20 = read_screen_name_at(cur_screen, 0x20);
+            trans_name_1c = read_screen_name_at(trans_screen, 0x1C);
+            trans_name_20 = read_screen_name_at(trans_screen, 0x20);
+
+            // Original-XEX headless can get stuck before the first screen is
+            // promoted from mTransitionScreen into mCurrentScreen. If the same
+            // transition target sits active for several seconds, force-complete
+            // it so screen-aware automation can continue.
+            if (!cur_screen && trans_screen && trans_state != 0) {
+              if (s_last_stuck_transition != trans_screen) {
+                s_last_stuck_transition = trans_screen;
+                s_stuck_transition_start = now;
+              } else {
+                auto stuck_ms =
+                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                        now - s_stuck_transition_start)
+                        .count();
+                if (stuck_ms >= 4000) {
+                  xe::store_and_swap<uint32_t>(ui_obj + 0x48, trans_screen);
+                  xe::store_and_swap<uint32_t>(ui_obj + 0x4C, 0);
+                  xe::store_and_swap<uint32_t>(ui_obj + 0x2C, 0);
+                  cur_screen = trans_screen;
+                  trans_screen = 0;
+                  trans_state = 0;
+                  name_1c = trans_name_1c;
+                  name_20 = trans_name_20;
+                  trans_name_1c.clear();
+                  trans_name_20.clear();
+                  XELOGI("DC3 Script: force-completed stuck UI transition "
+                         "to {:08X} ('{}'/'{}') after {}ms",
+                         cur_screen, name_1c, name_20, stuck_ms);
+                  s_last_stuck_transition = 0;
+                  s_stuck_transition_start = std::chrono::steady_clock::time_point{};
+                }
+              }
+            } else {
+              s_last_stuck_transition = 0;
+              s_stuck_transition_start = std::chrono::steady_clock::time_point{};
+            }
+          }
+        }
+      }
+      XELOGI("DC3 Script: waiting for '{}' current='{}' ui={:08X} "
+             "cur={:08X} trans={:08X} transState={} "
+             "name@1C='{}' name@20='{}' trans@1C='{}' trans@20='{}'",
+             dir.screen_name, last_screen_name_, ui_addr, cur_screen,
+             trans_screen, trans_state, name_1c, name_20,
+             trans_name_1c, trans_name_20);
+      s_last_wait_log = now;
+    }
     if (!wait_satisfied_) {
+      if (dir.screen_name == "title_screen" &&
+          last_screen_name_ == "attract_screen") {
+        if (s_attract_seen_since == std::chrono::steady_clock::time_point{}) {
+          s_attract_seen_since = now;
+        }
+        auto attract_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                now - s_attract_seen_since)
+                .count();
+        auto since_last_press =
+            s_last_attract_press == std::chrono::steady_clock::time_point{}
+                ? INT64_MAX
+                : std::chrono::duration_cast<std::chrono::milliseconds>(
+                      now - s_last_attract_press)
+                      .count();
+        if (attract_ms >= 1500 && since_last_press >= 3000) {
+          active |= X_INPUT_GAMEPAD_A | X_INPUT_GAMEPAD_START;
+          s_last_attract_press = now;
+          XELOGI("DC3 Script: attract-screen fallback press A+START while "
+                 "waiting for title_screen");
+        }
+        if (memory_ && attract_ms >= 5000) {
+          constexpr uint32_t kTheUI = 0x82F1A8E0;
+          auto* ui_ptr = memory_->TranslateVirtual<uint8_t*>(kTheUI);
+          uint32_t ui_addr = ui_ptr ? xe::load_and_swap<uint32_t>(ui_ptr) : 0;
+          auto* ui_obj = (ui_addr && ui_addr < 0xF0000000)
+                             ? memory_->TranslateVirtual<uint8_t*>(ui_addr)
+                             : nullptr;
+          if (ui_obj) {
+            if (!s_title_screen_addr) {
+              for (uint32_t addr = 0x40C00000; addr < 0x41000000;
+                   addr += 4) {
+                auto* obj = memory_->TranslateVirtual<uint8_t*>(addr);
+                if (!obj) {
+                  continue;
+                }
+                for (uint32_t offset : {0x1C, 0x20}) {
+                  uint32_t name_ptr =
+                      xe::load_and_swap<uint32_t>(obj + offset);
+                  if (!name_ptr || name_ptr >= 0xF0000000) {
+                    continue;
+                  }
+                  auto* name_str = memory_->TranslateVirtual<char*>(name_ptr);
+                  if (!name_str) {
+                    continue;
+                  }
+                  std::string_view name(name_str, strnlen(name_str, 64));
+                  if (name == "title_screen" || name == "title") {
+                    s_title_screen_addr = addr;
+                    XELOGI("DC3 Script: resolved title screen object {:08X} "
+                           "via name '{}'",
+                           s_title_screen_addr, name);
+                    break;
+                  }
+                }
+                if (s_title_screen_addr) {
+                  break;
+                }
+              }
+            }
+            if (s_title_screen_addr) {
+              xe::store_and_swap<uint32_t>(ui_obj + 0x48, s_title_screen_addr);
+              xe::store_and_swap<uint32_t>(ui_obj + 0x4C, 0);
+              xe::store_and_swap<uint32_t>(ui_obj + 0x2C, 0);
+              last_screen_name_ = "title_screen";
+              XELOGI("DC3 Script: forced UI jump attract_screen -> title_screen "
+                     "({:08X})", s_title_screen_addr);
+            }
+          }
+        }
+      } else {
+        s_attract_seen_since = std::chrono::steady_clock::time_point{};
+      }
+
       // Check if current screen matches
       if (!last_screen_name_.empty() && last_screen_name_ == dir.screen_name) {
         wait_satisfied_ = true;
