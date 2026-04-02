@@ -744,6 +744,7 @@ void Dc3NuiSequencerExtern(
           };
 
           uint32_t gd_addr = load_u32(kTheGameData);
+          uint32_t content_mgr_addr = load_u32(kTheContentMgr);
           uint32_t hp_addr = load_u32(kTheHamProvider);
           uint32_t mm_addr = load_u32(kTheMoveMgr);
           uint32_t gm_addr = load_u32(kTheGameMode);
@@ -774,9 +775,15 @@ void Dc3NuiSequencerExtern(
               s_content_refresh_forced = true;
               XELOGI(
                   "DC3: LoadSong repair: forcing ContentMgr::RefreshSynchronously");
-              uint64_t refresh_args[1] = {kTheContentMgr};
-              processor->Execute(thread_state, kContentMgrRefreshSynchronously,
-                                 refresh_args, 1);
+              if (content_mgr_addr) {
+                uint64_t refresh_args[1] = {content_mgr_addr};
+                processor->Execute(thread_state, kContentMgrRefreshSynchronously,
+                                   refresh_args, 1);
+              } else {
+                XELOGW(
+                    "DC3: LoadSong repair: TheContentMgr slot {:08X} was null",
+                    kTheContentMgr);
+              }
             }
             constexpr uint32_t kYmcaSongId = 7011;
             uint64_t short_name_args[4] = {gd_addr + 0x30, kTheHamSongMgr,
@@ -881,11 +888,12 @@ void Dc3NuiSequencerExtern(
 
           XELOGI(
               "DC3: LoadSong probe gd={:08X} gm={:08X} hp={:08X} mm={:08X} mp={:08X} "
+              "cm={:08X} "
               "p0={:08X} char={:08X} '{}' diff={} pad={} "
               "p1={:08X} char={:08X} '{}' diff={} pad={} "
               "song={:08X} '{}' id={} data={:08X} audio={:08X} "
               "default_outfit={:08X} '{}' venue={:08X} '{}'",
-              gd_addr, gm_addr, hp_addr, mm_addr, meta_addr,
+              gd_addr, gm_addr, hp_addr, mm_addr, meta_addr, content_mgr_addr,
               p0_addr, p0_char, read_guest_name(p0_char, false), p0_diff, p0_pad,
               p1_addr, p1_char, read_guest_name(p1_char, false), p1_diff, p1_pad,
               song_sym, song_name, song_id, song_data, song_audio,
