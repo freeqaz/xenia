@@ -332,6 +332,7 @@ void Dc3NuiSequencerExtern(
   static uint32_t s_scan_name_max = 0;
   static std::unordered_map<std::string, uint32_t> s_name_literal_cache;
   static bool s_loadsong_probe_logged = false;
+  static bool s_loadsong_repair_attempted = false;
 
   if (ppc_context && ppc_context->scratch) {
     Dc3RuntimeTelemetryRecordNuiOverrideHit(
@@ -723,7 +724,11 @@ void Dc3NuiSequencerExtern(
           constexpr uint32_t kTheMoveMgr = 0x82F60308;
           constexpr uint32_t kTheGameMode = 0x83117710;
           constexpr uint32_t kMetaPerformerCurrent = 0x828CB8A8;
+          constexpr uint32_t kMetaPerformerSetSong = 0x828CB948;
+          constexpr uint32_t kMetaPerformerSetupCharacters = 0x828CD030;
+          constexpr uint32_t kHamGameDataSetAssociatedPadNum = 0x82452268;
           constexpr uint32_t kHamGameDataPlayer = 0x82451CB8;
+          constexpr uint32_t kSymbolCtor = 0x827D37C8;
 
           auto load_u32 = [&](uint32_t guest_addr) -> uint32_t {
             auto* ptr = is_guest_readable(guest_addr, 4)
@@ -756,6 +761,49 @@ void Dc3NuiSequencerExtern(
               (gd_addr && is_guest_readable(gd_addr + 0x30, 4))
                   ? load_u32(gd_addr + 0x30)
                   : 0;
+          if (!song_sym && !s_loadsong_repair_attempted && gd_addr &&
+              meta_addr && meta_addr < 0xF0000000) {
+            s_loadsong_repair_attempted = true;
+            uint32_t song_name_ptr = find_name_literal_ptr("ymca");
+            if (song_name_ptr) {
+              XELOGI(
+                  "DC3: LoadSong repair: constructing song symbol from {:08X}",
+                  song_name_ptr);
+              uint64_t ctor_args[2] = {gd_addr + 0x30, song_name_ptr};
+              processor->Execute(thread_state, kSymbolCtor, ctor_args, 2);
+              song_sym = load_u32(gd_addr + 0x30);
+            } else {
+              XELOGW("DC3: LoadSong repair: guest literal 'ymca' not found");
+            }
+
+            if (song_sym) {
+              XELOGI(
+                  "DC3: LoadSong repair: MetaPerformer::SetSong mp={:08X} song={:08X} '{}'",
+                  meta_addr, song_sym, read_guest_name(song_sym, false));
+              uint64_t set_song_args[2] = {meta_addr, song_sym};
+              processor->Execute(thread_state, kMetaPerformerSetSong,
+                                 set_song_args, 2);
+              uint64_t setup_chars_args[1] = {meta_addr};
+              processor->Execute(thread_state, kMetaPerformerSetupCharacters,
+                                 setup_chars_args, 1);
+
+              uint64_t pad0_args[3] = {gd_addr, 0, 0};
+              uint64_t pad1_args[3] = {gd_addr, 1, 1};
+              processor->Execute(thread_state, kHamGameDataSetAssociatedPadNum,
+                                 pad0_args, 3);
+              processor->Execute(thread_state, kHamGameDataSetAssociatedPadNum,
+                                 pad1_args, 3);
+
+              if (gd_addr && gd_addr < 0xF0000000) {
+                uint64_t p0_args[2] = {gd_addr, 0};
+                uint64_t p1_args[2] = {gd_addr, 1};
+                p0_addr = static_cast<uint32_t>(processor->Execute(
+                    thread_state, kHamGameDataPlayer, p0_args, 2));
+                p1_addr = static_cast<uint32_t>(processor->Execute(
+                    thread_state, kHamGameDataPlayer, p1_args, 2));
+              }
+            }
+          }
           uint32_t p0_char =
               (p0_addr && is_guest_readable(p0_addr + 0x44, 4))
                   ? load_u32(p0_addr + 0x44)
