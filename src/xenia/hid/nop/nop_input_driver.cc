@@ -402,7 +402,11 @@ uint16_t NopInputDriver::GetScreenAwareButtons() {
                 (name_1c == "title_screen" &&
                  trans_name_1c == "wait_main_after_saveload_screen") ||
                 (name_1c == "wait_main_after_saveload_screen" &&
-                 trans_name_1c == "main_screen");
+                 trans_name_1c == "main_screen") ||
+                (name_1c == "main_screen" &&
+                 trans_name_1c == "choose_mode_screen") ||
+                (name_1c == "choose_mode_screen" &&
+                 trans_name_1c == "song_select_screen");
             if (should_force_complete && trans_screen && trans_state != 0) {
               if (s_last_stuck_transition != trans_screen) {
                 s_last_stuck_transition = trans_screen;
