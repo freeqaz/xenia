@@ -724,8 +724,6 @@ void Dc3NuiSequencerExtern(
           constexpr uint32_t kTheMoveMgr = 0x82F60308;
           constexpr uint32_t kTheGameMode = 0x83117710;
           constexpr uint32_t kMetaPerformerCurrent = 0x828CB8A8;
-          constexpr uint32_t kMetaPerformerSetSong = 0x828CB948;
-          constexpr uint32_t kMetaPerformerSetupCharacters = 0x828CD030;
           constexpr uint32_t kHamGameDataSetAssociatedPadNum = 0x82452268;
           constexpr uint32_t kHamGameDataPlayer = 0x82451CB8;
           constexpr uint32_t kSymbolCtor = 0x827D37C8;
@@ -762,8 +760,7 @@ void Dc3NuiSequencerExtern(
                   ? load_u32(gd_addr + 0x30)
                   : 0;
           std::string song_name = read_guest_name(song_sym, false);
-          if ((song_name.empty()) && !s_loadsong_repair_attempted && gd_addr &&
-              meta_addr && meta_addr < 0xF0000000) {
+          if ((song_name.empty()) && !s_loadsong_repair_attempted && gd_addr) {
             s_loadsong_repair_attempted = true;
             uint32_t song_name_ptr = find_name_literal_ptr("ymca");
             if (song_name_ptr) {
@@ -780,15 +777,8 @@ void Dc3NuiSequencerExtern(
 
             if (!song_name.empty()) {
               XELOGI(
-                  "DC3: LoadSong repair: MetaPerformer::SetSong mp={:08X} song={:08X} '{}'",
-                  meta_addr, song_sym, song_name);
-              uint64_t set_song_args[2] = {meta_addr, song_sym};
-              processor->Execute(thread_state, kMetaPerformerSetSong,
-                                 set_song_args, 2);
-              uint64_t setup_chars_args[1] = {meta_addr};
-              processor->Execute(thread_state, kMetaPerformerSetupCharacters,
-                                 setup_chars_args, 1);
-
+                  "DC3: LoadSong repair: injected song={:08X} '{}'", song_sym,
+                  song_name);
               uint64_t pad0_args[3] = {gd_addr, 0, 0};
               uint64_t pad1_args[3] = {gd_addr, 1, 1};
               processor->Execute(thread_state, kHamGameDataSetAssociatedPadNum,
