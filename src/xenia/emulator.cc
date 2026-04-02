@@ -751,12 +751,12 @@ void Dc3NuiSequencerExtern(
             size_t len = std::strlen(text) + 1;
             uint32_t guest_addr =
                 memory->SystemHeapAlloc(static_cast<uint32_t>(len), 4);
-            if (!guest_addr || !is_guest_readable(guest_addr,
-                                                  static_cast<uint32_t>(len))) {
+            if (!guest_addr) {
               return 0;
             }
             auto* dst = memory->TranslateVirtual<uint8_t*>(guest_addr);
             if (!dst) {
+              memory->SystemHeapFree(guest_addr);
               return 0;
             }
             std::memcpy(dst, text, len);
@@ -768,10 +768,14 @@ void Dc3NuiSequencerExtern(
               const char* label;
             };
             constexpr PathCandidate kCandidates[] = {
+                {"d:\\songs\\songs.dta", "disc_root"},
                 {"songs/songs.dta", "game_root"},
                 {"devkit:\\songs\\songs.dta", "devkit"},
             };
             for (const auto& candidate : kCandidates) {
+              XELOGI(
+                  "DC3: LoadSong repair: probing song catalog '{}' [{}]",
+                  candidate.path, candidate.label);
               uint32_t path_addr = alloc_guest_cstr(candidate.path);
               if (!path_addr) {
                 XELOGW("DC3: LoadSong repair: failed to allocate guest path "
@@ -783,6 +787,7 @@ void Dc3NuiSequencerExtern(
                   processor->Execute(thread_state, kDataReadFile, read_args, 2));
               XELOGI("DC3: LoadSong repair: DataReadFile('{}') [{}] -> {:08X}",
                      candidate.path, candidate.label, data_arr);
+              memory->SystemHeapFree(path_addr);
               if (!data_arr) {
                 continue;
               }
@@ -824,9 +829,15 @@ void Dc3NuiSequencerExtern(
           std::string song_name = read_guest_name(song_sym, false);
           if ((song_name.empty()) && !s_loadsong_repair_attempted && gd_addr) {
             s_loadsong_repair_attempted = true;
+            XELOGI(
+                "DC3: LoadSong repair: trying direct song catalog load "
+                "(gd={:08X} content={:08X} ham_song_mgr={:08X})",
+                gd_addr, content_mgr_addr, kTheHamSongMgr);
             bool direct_song_load_ok = try_direct_song_catalog_load();
             if (!direct_song_load_ok && !s_content_refresh_forced) {
               s_content_refresh_forced = true;
+              XELOGW("DC3: LoadSong repair: direct song catalog load failed; "
+                     "falling back to ContentMgr refresh");
               XELOGI(
                   "DC3: LoadSong repair: forcing ContentMgr::RefreshSynchronously");
               if (content_mgr_addr) {
@@ -858,18 +869,19 @@ void Dc3NuiSequencerExtern(
             if (song_name.empty()) {
               song_name_ptr = find_name_literal_ptr("ymca");
             }
-            if (song_name.empty() && song_name_ptr) {
-              XELOGI(
-                  "DC3: LoadSong repair: constructing song symbol from {:08X}",
-                  song_name_ptr);
-              uint64_t ctor_args[2] = {gd_addr + 0x30, song_name_ptr};
-              processor->Execute(thread_state, kSymbolCtor, ctor_args, 2);
-              song_sym = load_u32(gd_addr + 0x30);
-              song_name = read_guest_name(song_sym, false);
-            } else {
-              XELOGW("DC3: LoadSong repair: guest literal 'ymca' not found");
+            if (song_name.empty()) {
+              if (song_name_ptr) {
+                XELOGI(
+                    "DC3: LoadSong repair: constructing song symbol from {:08X}",
+                    song_name_ptr);
+                uint64_t ctor_args[2] = {gd_addr + 0x30, song_name_ptr};
+                processor->Execute(thread_state, kSymbolCtor, ctor_args, 2);
+                song_sym = load_u32(gd_addr + 0x30);
+                song_name = read_guest_name(song_sym, false);
+              } else {
+                XELOGW("DC3: LoadSong repair: guest literal 'ymca' not found");
+              }
             }
-
             if (!song_name.empty()) {
               XELOGI(
                   "DC3: LoadSong repair: injected song={:08X} '{}'", song_sym,
