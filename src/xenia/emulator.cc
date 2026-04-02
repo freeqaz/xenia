@@ -330,6 +330,7 @@ void Dc3NuiSequencerExtern(
   static bool s_screen_name_scan_range_logged = false;
   static uint32_t s_scan_name_min = 0;
   static uint32_t s_scan_name_max = 0;
+  static std::unordered_map<std::string, uint32_t> s_name_literal_cache;
 
   if (ppc_context && ppc_context->scratch) {
     Dc3RuntimeTelemetryRecordNuiOverrideHit(
@@ -515,6 +516,47 @@ void Dc3NuiSequencerExtern(
             read_name_ptr_at(screen_addr, offset, strict_scan_range),
             strict_scan_range);
       };
+      auto find_name_literal_ptr = [&](const std::string& target_name)
+          -> uint32_t {
+        auto it = s_name_literal_cache.find(target_name);
+        if (it != s_name_literal_cache.end() &&
+            read_guest_name(it->second, false) == target_name) {
+          return it->second;
+        }
+
+        auto scan_for_literal = [&](uint32_t range_min,
+                                    uint32_t range_max) -> uint32_t {
+          if (!range_min || range_min >= range_max) {
+            return 0;
+          }
+          const size_t target_len = target_name.size();
+          for (uint32_t addr = range_min; addr + target_len < range_max;
+               ++addr) {
+            if (!is_guest_readable(addr, static_cast<uint32_t>(target_len + 1))) {
+              continue;
+            }
+            auto* candidate = memory->TranslateVirtual<uint8_t*>(addr);
+            if (!candidate) {
+              continue;
+            }
+            if (std::memcmp(candidate, target_name.data(), target_len) == 0 &&
+                candidate[target_len] == 0) {
+              s_name_literal_cache[target_name] = addr;
+              return addr;
+            }
+          }
+          return 0;
+        };
+
+        uint32_t literal_ptr = 0;
+        if (s_scan_name_min && s_scan_name_max && s_scan_name_min < s_scan_name_max) {
+          literal_ptr = scan_for_literal(s_scan_name_min, s_scan_name_max);
+        }
+        if (!literal_ptr) {
+          literal_ptr = scan_for_literal(0x82000000, 0x82400000);
+        }
+        return literal_ptr;
+      };
 
       std::string raw_name = read_name_at(cur_screen_h, 0x1C, false);
       if (raw_name.empty()) {
@@ -622,6 +664,13 @@ void Dc3NuiSequencerExtern(
               }
             }
           }
+          if (!found_name_ptr) {
+            found_name_ptr = find_name_literal_ptr(target_name);
+            if (found_name_ptr) {
+              XELOGI("DC3: Nav literal: {} -> {} (name={:08X})", cur_name,
+                     target_name, found_name_ptr);
+            }
+          }
           if (found_screen && found_name_ptr) {
             auto* processor = kernel_state->processor();
             auto* thread_state = ppc_context->thread_state;
@@ -638,9 +687,28 @@ void Dc3NuiSequencerExtern(
                   target_name);
             }
             s_screen_stable_count = 0;
+          } else if (found_name_ptr) {
+            auto* processor = kernel_state->processor();
+            auto* thread_state = ppc_context->thread_state;
+            if (processor && thread_state) {
+              constexpr uint32_t kUIManagerGotoScreenByName = 0x8277B378;
+              XELOGI("DC3: Nav goto by literal: {} -> {} (name={:08X})",
+                     cur_name, target_name, found_name_ptr);
+              uint64_t args[4] = {ui_addr, found_name_ptr, 0, 0};
+              processor->Execute(thread_state, kUIManagerGotoScreenByName,
+                                 args, 4);
+              s_screen_stable_count = 0;
+            } else {
+              XELOGW(
+                  "DC3: Nav goto-by-literal skipped for '{}' (processor/thread_state missing)",
+                  target_name);
+            }
           } else if (found_screen) {
             XELOGW("DC3: Nav target '{}' found at {:08X} without usable name ptr",
                    target_name, found_screen);
+          } else {
+            XELOGW("DC3: Nav target '{}' unresolved from '{}'", target_name,
+                   cur_name);
           }
         }
       }
