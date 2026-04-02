@@ -721,9 +721,13 @@ void Dc3NuiSequencerExtern(
         if (processor && thread_state) {
           constexpr uint32_t kTheGameData = 0x82F60034;
           constexpr uint32_t kTheHamProvider = 0x82F601B4;
+          constexpr uint32_t kTheHamSongMgr = 0x83118C6C;
           constexpr uint32_t kTheMoveMgr = 0x82F60308;
           constexpr uint32_t kTheGameMode = 0x83117710;
           constexpr uint32_t kMetaPerformerCurrent = 0x828CB8A8;
+          constexpr uint32_t kHamSongMgrData = 0x828C5AD8;
+          constexpr uint32_t kHamSongMgrSongAudioData = 0x828C62D0;
+          constexpr uint32_t kHamSongMgrGetSongIDFromShortName = 0x828C7DE0;
           constexpr uint32_t kHamGameDataSetAssociatedPadNum = 0x82452268;
           constexpr uint32_t kHamGameDataPlayer = 0x82451CB8;
           constexpr uint32_t kSymbolCtor = 0x827D37C8;
@@ -820,16 +824,43 @@ void Dc3NuiSequencerExtern(
               (p1_addr && is_guest_readable(p1_addr + 0x7C, 4))
                   ? load_u32(p1_addr + 0x7C)
                   : 0;
+          uint32_t song_id = 0;
+          uint32_t song_data = 0;
+          uint32_t song_audio = 0;
+          uint32_t default_outfit = 0;
+          uint32_t default_venue = 0;
+          if (!song_name.empty()) {
+            uint64_t song_id_args[3] = {kTheHamSongMgr, song_sym, 0};
+            song_id = static_cast<uint32_t>(processor->Execute(
+                thread_state, kHamSongMgrGetSongIDFromShortName, song_id_args,
+                3));
+            if (song_id) {
+              uint64_t data_args[2] = {kTheHamSongMgr, song_id};
+              song_data = static_cast<uint32_t>(processor->Execute(
+                  thread_state, kHamSongMgrData, data_args, 2));
+              song_audio = static_cast<uint32_t>(processor->Execute(
+                  thread_state, kHamSongMgrSongAudioData, data_args, 2));
+              if (song_data && is_guest_readable(song_data + 0xC0, 4)) {
+                default_outfit = load_u32(song_data + 0xC0);
+              }
+              if (song_data && is_guest_readable(song_data + 0xD0, 4)) {
+                default_venue = load_u32(song_data + 0xD0);
+              }
+            }
+          }
 
           XELOGI(
               "DC3: LoadSong probe gd={:08X} gm={:08X} hp={:08X} mm={:08X} mp={:08X} "
               "p0={:08X} char={:08X} '{}' diff={} pad={} "
               "p1={:08X} char={:08X} '{}' diff={} pad={} "
-              "song={:08X} '{}'",
+              "song={:08X} '{}' id={} data={:08X} audio={:08X} "
+              "default_outfit={:08X} '{}' venue={:08X} '{}'",
               gd_addr, gm_addr, hp_addr, mm_addr, meta_addr,
               p0_addr, p0_char, read_guest_name(p0_char, false), p0_diff, p0_pad,
               p1_addr, p1_char, read_guest_name(p1_char, false), p1_diff, p1_pad,
-              song_sym, song_name);
+              song_sym, song_name, song_id, song_data, song_audio,
+              default_outfit, read_guest_name(default_outfit, false), default_venue,
+              read_guest_name(default_venue, false));
           s_loadsong_probe_logged = true;
         }
       }
