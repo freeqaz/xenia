@@ -581,6 +581,68 @@ void Dc3NuiSequencerExtern(
       }
       std::string trans_name = raw_trans_name;
 
+      auto try_bootstrap_gameplay = [&](const std::string& cur_name_for_log,
+                                        const std::string& trans_name_for_log) {
+        if (s_gameplay_setup_done) {
+          return;
+        }
+        constexpr uint32_t kTheHamDirector = 0x82F603A0;
+        constexpr uint32_t kTheGamePanel = 0x83117410;
+        constexpr uint32_t kGamePanelCreateGame = 0x8287ACD0;
+        constexpr uint32_t kHamDirectorSetupAnims = 0x82474868;
+        constexpr uint32_t kSongSequenceOnSongLoaded = 0x8288BDF8;
+        constexpr uint32_t kGamePanelStartGame = 0x8287AE28;
+        constexpr uint32_t kSongSequenceSingleton = 0x8311787C;
+
+        auto* hd_ptr = memory->TranslateVirtual<uint8_t*>(kTheHamDirector);
+        auto* gp_ptr = memory->TranslateVirtual<uint8_t*>(kTheGamePanel);
+        uint32_t hd_addr = hd_ptr ? xe::load_and_swap<uint32_t>(hd_ptr) : 0;
+        uint32_t gp_addr = gp_ptr ? xe::load_and_swap<uint32_t>(gp_ptr) : 0;
+        if (!hd_addr || !gp_addr || hd_addr >= 0xF0000000 ||
+            gp_addr >= 0xF0000000) {
+          return;
+        }
+
+        auto* processor = kernel_state->processor();
+        auto* thread_state = ppc_context->thread_state;
+        if (!processor || !thread_state) {
+          return;
+        }
+
+        auto load_u32 = [&](uint32_t guest_addr) -> uint32_t {
+          auto* ptr = is_guest_readable(guest_addr, 4)
+                          ? memory->TranslateVirtual<uint8_t*>(guest_addr)
+                          : nullptr;
+          return ptr ? xe::load_and_swap<uint32_t>(ptr) : 0;
+        };
+        uint32_t game_addr =
+            is_guest_readable(gp_addr + 0x38, 4) ? load_u32(gp_addr + 0x38) : 0;
+        uint32_t gp_state =
+            is_guest_readable(gp_addr + 0x80, 4) ? load_u32(gp_addr + 0x80) : 0;
+        XELOGI(
+            "DC3: Gameplay bootstrap cur='{}' trans='{}' hd={:08X} "
+            "gp={:08X} game={:08X} gpState={}",
+            cur_name_for_log, trans_name_for_log, hd_addr, gp_addr, game_addr,
+            gp_state);
+        auto exec_member = [&](uint32_t fn, uint32_t tp) {
+          uint64_t args[1] = {tp};
+          return processor->Execute(thread_state, fn, args, 1);
+        };
+        if (!game_addr) {
+          exec_member(kGamePanelCreateGame, gp_addr);
+          game_addr =
+              is_guest_readable(gp_addr + 0x38, 4) ? load_u32(gp_addr + 0x38)
+                                                   : 0;
+          XELOGI("DC3: Gameplay bootstrap CreateGame -> game={:08X}",
+                 game_addr);
+        }
+        exec_member(kHamDirectorSetupAnims, hd_addr);
+        uint64_t sl_args[1] = {kSongSequenceSingleton};
+        processor->Execute(thread_state, kSongSequenceOnSongLoaded, sl_args, 1);
+        exec_member(kGamePanelStartGame, gp_addr);
+        s_gameplay_setup_done = true;
+      };
+
       if ((s_skel_calls % 60) == 0) {
         XELOGI("DC3: Nav diag: scr={:08X} raw='{}' name='{}' stable={} nui={}",
                cur_screen_h, raw_name, cur_name, s_screen_stable_count,
@@ -688,6 +750,9 @@ void Dc3NuiSequencerExtern(
             auto* thread_state = ppc_context->thread_state;
             if (processor && thread_state) {
               constexpr uint32_t kUIManagerGotoScreenByName = 0x8277B378;
+              if (target_name == "game_screen") {
+                try_bootstrap_gameplay(cur_name, target_name);
+              }
               XELOGI("DC3: Nav goto: {} -> {} ({:08X}, name={:08X})",
                      cur_name, target_name, found_screen, found_name_ptr);
               uint64_t args[4] = {ui_addr, found_name_ptr, 0, 0};
@@ -704,6 +769,9 @@ void Dc3NuiSequencerExtern(
             auto* thread_state = ppc_context->thread_state;
             if (processor && thread_state) {
               constexpr uint32_t kUIManagerGotoScreenByName = 0x8277B378;
+              if (target_name == "game_screen") {
+                try_bootstrap_gameplay(cur_name, target_name);
+              }
               XELOGI("DC3: Nav goto by literal: {} -> {} (name={:08X})",
                      cur_name, target_name, found_name_ptr);
               uint64_t args[4] = {ui_addr, found_name_ptr, 0, 0};
@@ -982,57 +1050,7 @@ void Dc3NuiSequencerExtern(
           cur_name == "game_screen" ||
           (cur_name == "real_loading_screen" && trans_name == "game_screen");
       if (!s_gameplay_setup_done && gameplay_bootstrap_window) {
-        constexpr uint32_t kTheHamDirector = 0x82F603A0;
-        constexpr uint32_t kTheGamePanel = 0x83117410;
-        constexpr uint32_t kGamePanelCreateGame = 0x8287ACD0;
-        constexpr uint32_t kHamDirectorSetupAnims = 0x82474868;
-        constexpr uint32_t kSongSequenceOnSongLoaded = 0x8288BDF8;
-        constexpr uint32_t kGamePanelStartGame = 0x8287AE28;
-        constexpr uint32_t kSongSequenceSingleton = 0x8311787C;
-        auto* hd_ptr = memory->TranslateVirtual<uint8_t*>(kTheHamDirector);
-        auto* gp_ptr = memory->TranslateVirtual<uint8_t*>(kTheGamePanel);
-        uint32_t hd_addr = hd_ptr ? xe::load_and_swap<uint32_t>(hd_ptr) : 0;
-        uint32_t gp_addr = gp_ptr ? xe::load_and_swap<uint32_t>(gp_ptr) : 0;
-        if (hd_addr && gp_addr && hd_addr < 0xF0000000 && gp_addr < 0xF0000000) {
-          auto* processor = kernel_state->processor();
-          auto* thread_state = ppc_context->thread_state;
-          if (processor && thread_state) {
-            auto load_u32 = [&](uint32_t guest_addr) -> uint32_t {
-              auto* ptr = is_guest_readable(guest_addr, 4)
-                              ? memory->TranslateVirtual<uint8_t*>(guest_addr)
-                              : nullptr;
-              return ptr ? xe::load_and_swap<uint32_t>(ptr) : 0;
-            };
-            uint32_t game_addr =
-                is_guest_readable(gp_addr + 0x38, 4) ? load_u32(gp_addr + 0x38)
-                                                     : 0;
-            uint32_t gp_state =
-                is_guest_readable(gp_addr + 0x80, 4) ? load_u32(gp_addr + 0x80)
-                                                     : 0;
-            XELOGI(
-                "DC3: Gameplay bootstrap cur='{}' trans='{}' hd={:08X} "
-                "gp={:08X} game={:08X} gpState={}",
-                cur_name, trans_name, hd_addr, gp_addr, game_addr, gp_state);
-            auto exec_member = [&](uint32_t fn, uint32_t tp) {
-              uint64_t args[1] = {tp};
-              return processor->Execute(thread_state, fn, args, 1);
-            };
-            if (!game_addr) {
-              exec_member(kGamePanelCreateGame, gp_addr);
-              game_addr =
-                  is_guest_readable(gp_addr + 0x38, 4) ? load_u32(gp_addr + 0x38)
-                                                       : 0;
-              XELOGI("DC3: Gameplay bootstrap CreateGame -> game={:08X}",
-                     game_addr);
-            }
-            exec_member(kHamDirectorSetupAnims, hd_addr);
-            uint64_t sl_args[1] = {kSongSequenceSingleton};
-            processor->Execute(thread_state, kSongSequenceOnSongLoaded, sl_args,
-                               1);
-            exec_member(kGamePanelStartGame, gp_addr);
-            s_gameplay_setup_done = true;
-          }
-        }
+        try_bootstrap_gameplay(cur_name, trans_name);
       }
 
       if (cur_name == "game_screen") {
