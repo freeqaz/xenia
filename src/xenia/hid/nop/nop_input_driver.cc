@@ -333,6 +333,133 @@ std::string NopInputDriver::ReadCurrentScreenName() const {
   return ReadGuestScreenName(memory_, cur_screen, false);
 }
 
+void NopInputDriver::UpdateDc3HostBeatDrive() {
+  if (!memory_) {
+    return;
+  }
+
+  auto now = std::chrono::steady_clock::now();
+  auto since_last_read = std::chrono::duration_cast<std::chrono::milliseconds>(
+                             now - last_screen_read_time_)
+                             .count();
+  if (since_last_read >= 100 || last_screen_name_.empty()) {
+    std::string current_screen = ReadCurrentScreenName();
+    if (!current_screen.empty()) {
+      last_screen_name_ = current_screen;
+    }
+    last_screen_read_time_ = now;
+  }
+
+  if (last_screen_name_ != "game_screen") {
+    if (dc3_host_beat_drive_active_) {
+      XELOGI("DC3 Script: host beat drive deactivated on '{}'",
+             last_screen_name_);
+      dc3_host_beat_drive_active_ = false;
+    }
+    return;
+  }
+
+  constexpr uint32_t kTheTaskMgr = 0x82F64A58;
+  constexpr uint32_t kTimelineStride = 0x1C;
+  constexpr uint32_t kTimeOff = 0x10;
+  constexpr uint32_t kLastTimeOff = 0x14;
+
+  auto load_u32 = [&](uint32_t guest_addr) -> uint32_t {
+    auto* ptr = IsGuestReadable(memory_, guest_addr, 4)
+                    ? memory_->TranslateVirtual<uint8_t*>(guest_addr)
+                    : nullptr;
+    return ptr ? xe::load_and_swap<uint32_t>(ptr) : 0;
+  };
+  auto load_float = [&](uint32_t guest_addr) -> float {
+    auto* ptr = IsGuestReadable(memory_, guest_addr, 4)
+                    ? memory_->TranslateVirtual<uint8_t*>(guest_addr)
+                    : nullptr;
+    return ptr ? xe::load_and_swap<float>(ptr) : 0.0f;
+  };
+  auto store_float = [&](uint32_t guest_addr, float value) -> bool {
+    if (!IsGuestReadable(memory_, guest_addr, 4)) {
+      return false;
+    }
+    auto* ptr = memory_->TranslateVirtual<uint8_t*>(guest_addr);
+    if (!ptr) {
+      return false;
+    }
+    xe::store_and_swap<float>(ptr, value);
+    return true;
+  };
+
+  uint32_t timelines_addr = load_u32(kTheTaskMgr + 0x2C);
+  if (!timelines_addr || !IsGuestReadable(memory_, timelines_addr + 0x54, 4) ||
+      !IsGuestReadable(memory_, kTheTaskMgr + 0x48, 1)) {
+    return;
+  }
+
+  auto* auto_ptr = memory_->TranslateVirtual<uint8_t*>(kTheTaskMgr + 0x48);
+  if (auto_ptr) {
+    *auto_ptr = 0;
+  }
+
+  uint32_t seconds_time_addr = timelines_addr + 0 * kTimelineStride + kTimeOff;
+  uint32_t seconds_last_addr =
+      timelines_addr + 0 * kTimelineStride + kLastTimeOff;
+  uint32_t beats_time_addr = timelines_addr + 1 * kTimelineStride + kTimeOff;
+  uint32_t beats_last_addr =
+      timelines_addr + 1 * kTimelineStride + kLastTimeOff;
+  uint32_t ui_time_addr = timelines_addr + 2 * kTimelineStride + kTimeOff;
+  uint32_t ui_last_addr =
+      timelines_addr + 2 * kTimelineStride + kLastTimeOff;
+
+  float old_seconds = load_float(seconds_time_addr);
+  float old_beats = load_float(beats_time_addr);
+  float old_ui = load_float(ui_time_addr);
+
+  if (!dc3_host_beat_drive_active_) {
+    dc3_host_song_seconds_ = old_seconds;
+    dc3_host_song_beat_ = old_beats;
+    dc3_host_last_update_time_ = now;
+    dc3_host_last_log_time_ = now;
+    dc3_host_beat_drive_active_ = true;
+    XELOGI(
+        "DC3 Script: host beat drive activated taskmgr={:08X} timelines={:08X} "
+        "sec={:.3f} beat={:.3f}",
+        kTheTaskMgr, timelines_addr, dc3_host_song_seconds_,
+        dc3_host_song_beat_);
+    return;
+  }
+
+  auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        now - dc3_host_last_update_time_)
+                        .count();
+  if (elapsed_ms <= 0) {
+    return;
+  }
+  if (elapsed_ms > 100) {
+    elapsed_ms = 33;
+  }
+  dc3_host_last_update_time_ = now;
+
+  float delta_seconds = static_cast<float>(elapsed_ms) / 1000.0f;
+  float delta_beats = delta_seconds * (120.0f / 60.0f);
+  dc3_host_song_seconds_ += delta_seconds;
+  dc3_host_song_beat_ += delta_beats;
+
+  store_float(seconds_last_addr, old_seconds);
+  store_float(seconds_time_addr, dc3_host_song_seconds_);
+  store_float(beats_last_addr, old_beats);
+  store_float(beats_time_addr, dc3_host_song_beat_);
+  store_float(ui_last_addr, old_ui);
+  store_float(ui_time_addr, dc3_host_song_seconds_);
+
+  auto since_last_log = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            now - dc3_host_last_log_time_)
+                            .count();
+  if (since_last_log >= 2000) {
+    dc3_host_last_log_time_ = now;
+    XELOGI("DC3 Script: host beat drive sec={:.3f} beat={:.3f}",
+           dc3_host_song_seconds_, dc3_host_song_beat_);
+  }
+}
+
 uint16_t NopInputDriver::GetScreenAwareButtons() {
   if (!screen_aware_mode_ || script_index_ >= script_directives_.size()) {
     return 0;
@@ -631,6 +758,8 @@ X_RESULT NopInputDriver::GetCapabilities(uint32_t user_index, uint32_t flags,
 }
 
 uint16_t NopInputDriver::GetCurrentButtons() {
+  UpdateDc3HostBeatDrive();
+
   uint16_t active_buttons = 0;
 
   // Time-based scripted events

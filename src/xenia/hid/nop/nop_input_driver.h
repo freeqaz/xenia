@@ -90,6 +90,10 @@ class NopInputDriver final : public InputDriver {
   // Read the current screen name from guest memory (TheUI->mCurrentScreen->mName)
   std::string ReadCurrentScreenName() const;
 
+  // Drive DC3 gameplay timelines from a callback that survives past
+  // the final menu transition.
+  void UpdateDc3HostBeatDrive();
+
   // Process screen-aware script state machine
   uint16_t GetScreenAwareButtons();
 
@@ -108,6 +112,11 @@ class NopInputDriver final : public InputDriver {
   std::chrono::steady_clock::time_point wait_satisfied_time_;  // When wait was satisfied
   std::string last_screen_name_;      // Cache to avoid re-reading every call
   std::chrono::steady_clock::time_point last_screen_read_time_;  // Throttle reads
+  bool dc3_host_beat_drive_active_ = false;
+  float dc3_host_song_seconds_ = 0.0f;
+  float dc3_host_song_beat_ = 0.0f;
+  std::chrono::steady_clock::time_point dc3_host_last_update_time_;
+  std::chrono::steady_clock::time_point dc3_host_last_log_time_;
 
   // Guest memory access
   Memory* memory_ = nullptr;
