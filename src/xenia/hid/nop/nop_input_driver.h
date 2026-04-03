@@ -93,6 +93,7 @@ class NopInputDriver final : public InputDriver {
   // Drive DC3 gameplay timelines from a callback that survives past
   // the final menu transition.
   void UpdateDc3HostBeatDrive();
+  void ProbeDc3GameplayState();
 
   // Process screen-aware script state machine
   uint16_t GetScreenAwareButtons();
@@ -117,6 +118,16 @@ class NopInputDriver final : public InputDriver {
   float dc3_host_song_beat_ = 0.0f;
   std::chrono::steady_clock::time_point dc3_host_last_update_time_;
   std::chrono::steady_clock::time_point dc3_host_last_log_time_;
+  std::chrono::steady_clock::time_point dc3_gameplay_probe_last_log_time_;
+  uint32_t dc3_last_game_panel_addr_ = 0;
+  uint32_t dc3_last_game_addr_ = 0;
+  int dc3_last_game_panel_state_ = -1;
+  int dc3_last_game_load_state_ = -1;
+  int dc3_last_game_wait_state_ = -1;
+  bool dc3_last_game_paused_ = false;
+  bool dc3_last_game_time_paused_ = false;
+  bool dc3_last_game_real_time_ = false;
+  bool dc3_last_game_has_intro_ = false;
 
   // Guest memory access
   Memory* memory_ = nullptr;

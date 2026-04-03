@@ -424,6 +424,7 @@ void NopInputDriver::UpdateDc3HostBeatDrive() {
         "sec={:.3f} beat={:.3f}",
         kTheTaskMgr, timelines_addr, dc3_host_song_seconds_,
         dc3_host_song_beat_);
+    ProbeDc3GameplayState();
     return;
   }
 
@@ -458,6 +459,88 @@ void NopInputDriver::UpdateDc3HostBeatDrive() {
     XELOGI("DC3 Script: host beat drive sec={:.3f} beat={:.3f}",
            dc3_host_song_seconds_, dc3_host_song_beat_);
   }
+
+  ProbeDc3GameplayState();
+}
+
+void NopInputDriver::ProbeDc3GameplayState() {
+  if (!memory_ || last_screen_name_ != "game_screen") {
+    return;
+  }
+
+  auto now = std::chrono::steady_clock::now();
+  auto load_u32 = [&](uint32_t guest_addr) -> uint32_t {
+    auto* ptr = IsGuestReadable(memory_, guest_addr, 4)
+                    ? memory_->TranslateVirtual<uint8_t*>(guest_addr)
+                    : nullptr;
+    return ptr ? xe::load_and_swap<uint32_t>(ptr) : 0;
+  };
+  auto load_u8 = [&](uint32_t guest_addr) -> uint8_t {
+    auto* ptr = IsGuestReadable(memory_, guest_addr, 1)
+                    ? memory_->TranslateVirtual<uint8_t*>(guest_addr)
+                    : nullptr;
+    return ptr ? *ptr : 0;
+  };
+
+  constexpr uint32_t kTheGamePanel = 0x83117410;
+  uint32_t game_panel_addr = load_u32(kTheGamePanel);
+  uint32_t game_addr = 0;
+  int game_panel_state = -1;
+  int game_load_state = -1;
+  int game_wait_state = -1;
+  bool game_paused = false;
+  bool game_time_paused = false;
+  bool game_real_time = false;
+  bool game_has_intro = false;
+
+  if (game_panel_addr && IsGuestReadable(memory_, game_panel_addr + 0x83, 1)) {
+    game_addr = load_u32(game_panel_addr + 0x38);
+    game_panel_state =
+        static_cast<int>(load_u32(game_panel_addr + 0x80));
+  }
+
+  if (game_addr && IsGuestReadable(memory_, game_addr + 0xA7, 1)) {
+    game_paused = load_u8(game_addr + 0x5E) != 0;
+    game_time_paused = load_u8(game_addr + 0x5F) != 0;
+    game_real_time = load_u8(game_addr + 0x60) != 0;
+    game_has_intro = load_u8(game_addr + 0x62) != 0;
+    game_load_state = static_cast<int>(load_u32(game_addr + 0x90));
+    game_wait_state = static_cast<int>(load_u32(game_addr + 0xA4));
+  }
+
+  bool state_changed = game_panel_addr != dc3_last_game_panel_addr_ ||
+                       game_addr != dc3_last_game_addr_ ||
+                       game_panel_state != dc3_last_game_panel_state_ ||
+                       game_load_state != dc3_last_game_load_state_ ||
+                       game_wait_state != dc3_last_game_wait_state_ ||
+                       game_paused != dc3_last_game_paused_ ||
+                       game_time_paused != dc3_last_game_time_paused_ ||
+                       game_real_time != dc3_last_game_real_time_ ||
+                       game_has_intro != dc3_last_game_has_intro_;
+
+  auto since_last_log =
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          now - dc3_gameplay_probe_last_log_time_)
+          .count();
+  if (state_changed || since_last_log >= 2000) {
+    dc3_gameplay_probe_last_log_time_ = now;
+    XELOGI(
+        "DC3 Script: gameplay gp={:08X} gpState={} game={:08X} load={} "
+        "wait={} paused={} timePaused={} realTime={} hasIntro={}",
+        game_panel_addr, game_panel_state, game_addr, game_load_state,
+        game_wait_state, game_paused ? 1 : 0, game_time_paused ? 1 : 0,
+        game_real_time ? 1 : 0, game_has_intro ? 1 : 0);
+  }
+
+  dc3_last_game_panel_addr_ = game_panel_addr;
+  dc3_last_game_addr_ = game_addr;
+  dc3_last_game_panel_state_ = game_panel_state;
+  dc3_last_game_load_state_ = game_load_state;
+  dc3_last_game_wait_state_ = game_wait_state;
+  dc3_last_game_paused_ = game_paused;
+  dc3_last_game_time_paused_ = game_time_paused;
+  dc3_last_game_real_time_ = game_real_time;
+  dc3_last_game_has_intro_ = game_has_intro;
 }
 
 uint16_t NopInputDriver::GetScreenAwareButtons() {
