@@ -605,6 +605,21 @@ void Dc3NuiSequencerExtern(
 
         auto* processor = kernel_state->processor();
         auto* thread_state = ppc_context->thread_state;
+        uint32_t execute_thread_id = 0;
+        auto threads =
+            kernel_state->object_table()->GetObjectsByType<kernel::XThread>(
+                kernel::XObject::Type::Thread);
+        for (auto thread : threads) {
+          if (thread->main_thread() && thread->thread_state()) {
+            thread_state = thread->thread_state();
+            execute_thread_id = thread->thread_id();
+            break;
+          }
+        }
+        if (!execute_thread_id && kernel::XThread::IsInThread() &&
+            thread_state) {
+          execute_thread_id = kernel::XThread::GetCurrentThread()->thread_id();
+        }
         if (!processor || !thread_state) {
           return;
         }
@@ -621,9 +636,9 @@ void Dc3NuiSequencerExtern(
             is_guest_readable(gp_addr + 0x80, 4) ? load_u32(gp_addr + 0x80) : 0;
         XELOGI(
             "DC3: Gameplay bootstrap cur='{}' trans='{}' hd={:08X} "
-            "gp={:08X} game={:08X} gpState={}",
+            "gp={:08X} game={:08X} gpState={} execThread={}",
             cur_name_for_log, trans_name_for_log, hd_addr, gp_addr, game_addr,
-            gp_state);
+            gp_state, execute_thread_id);
         auto exec_member = [&](uint32_t fn, uint32_t tp) {
           uint64_t args[1] = {tp};
           return processor->Execute(thread_state, fn, args, 1);
