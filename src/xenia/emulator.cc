@@ -689,7 +689,7 @@ void Dc3NuiSequencerExtern(
           }
           cur_name = trans_name;
           trans_name = raw_trans_name;
-        } else if (!trans_loaded && s_stuck_transition_count >= 180 &&
+        } else if (!trans_loaded && s_stuck_transition_count >= 120 &&
                    trans_name != "game_screen") {
           xe::store_and_swap<uint32_t>(ui_obj + 0x48, trans_screen_h);
           xe::store_and_swap<uint32_t>(ui_obj + 0x4C, 0);
@@ -714,7 +714,7 @@ void Dc3NuiSequencerExtern(
       }
 
       if (trans_state_h == 2 && cur_screen_h && processor && thread_state &&
-          s_stuck_transition_count >= 180) {
+          s_stuck_transition_count >= 120) {
         constexpr uint32_t kUIScreenEntering = 0x827A34F8;
         bool cur_entering = exec_guest_bool(kUIScreenEntering, cur_screen_h);
         if (cur_entering) {
