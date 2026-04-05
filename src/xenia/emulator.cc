@@ -689,6 +689,27 @@ void Dc3NuiSequencerExtern(
           }
           cur_name = trans_name;
           trans_name = raw_trans_name;
+        } else if (!trans_loaded && s_stuck_transition_count >= 180 &&
+                   trans_name != "game_screen") {
+          xe::store_and_swap<uint32_t>(ui_obj + 0x48, trans_screen_h);
+          xe::store_and_swap<uint32_t>(ui_obj + 0x4C, 0);
+          xe::store_and_swap<uint32_t>(ui_obj + 0x2C, 0);
+          XELOGI(
+              "DC3: Force-completed unloaded menu transition '{}' -> '{}' after {} NUI frames",
+              cur_name, trans_name, s_stuck_transition_count);
+          s_last_screen = trans_screen_h;
+          s_screen_stable_count = 0;
+          s_last_stuck_cur_screen = 0;
+          s_last_stuck_trans_screen = 0;
+          s_last_stuck_trans_state = 0;
+          s_stuck_transition_count = 0;
+          cur_screen_h = trans_screen_h;
+          trans_state_h = 0;
+          trans_screen_h = 0;
+          raw_name = raw_trans_name;
+          raw_trans_name.clear();
+          cur_name = trans_name;
+          trans_name.clear();
         }
       }
 
