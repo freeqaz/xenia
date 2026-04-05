@@ -692,6 +692,29 @@ void Dc3NuiSequencerExtern(
         }
       }
 
+      if (trans_state_h == 2 && cur_screen_h && processor && thread_state &&
+          s_stuck_transition_count >= 180) {
+        constexpr uint32_t kUIScreenEntering = 0x827A34F8;
+        bool cur_entering = exec_guest_bool(kUIScreenEntering, cur_screen_h);
+        if (cur_entering) {
+          xe::store_and_swap<uint32_t>(ui_obj + 0x2C, 0);
+          xe::store_and_swap<uint32_t>(ui_obj + 0x4C, 0);
+          XELOGI(
+              "DC3: Force-completed stuck enter for '{}' after {} NUI frames",
+              cur_name, s_stuck_transition_count);
+          s_last_screen = cur_screen_h;
+          s_screen_stable_count = 0;
+          s_last_stuck_cur_screen = 0;
+          s_last_stuck_trans_screen = 0;
+          s_last_stuck_trans_state = 0;
+          s_stuck_transition_count = 0;
+          trans_state_h = 0;
+          trans_screen_h = 0;
+          raw_trans_name.clear();
+          trans_name.clear();
+        }
+      }
+
       auto try_bootstrap_gameplay = [&](const std::string& cur_name_for_log,
                                         const std::string& trans_name_for_log) {
         if (s_gameplay_setup_done || !cvars::dc3_enable_gameplay_bootstrap) {
