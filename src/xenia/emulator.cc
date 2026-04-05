@@ -647,7 +647,9 @@ void Dc3NuiSequencerExtern(
         bool trans_loaded = exec_guest_bool(kUIScreenCheckIsLoaded, trans_screen_h);
         bool cur_exiting =
             cur_screen_h ? exec_guest_bool(kUIScreenExiting, cur_screen_h) : false;
-        if (trans_loaded && !cur_exiting) {
+        bool allow_force_enter =
+            trans_loaded && (!cur_exiting || s_stuck_transition_count >= 180);
+        if (allow_force_enter) {
           uint32_t old_cur_screen = cur_screen_h;
           xe::store_and_swap<uint32_t>(ui_obj + 0x2C, 2);
           xe::store_and_swap<uint32_t>(ui_obj + 0x48, trans_screen_h);
@@ -655,8 +657,10 @@ void Dc3NuiSequencerExtern(
           uint64_t enter_args[2] = {trans_screen_h, old_cur_screen};
           processor->Execute(thread_state, kUIScreenEnter, enter_args, 2);
           XELOGI(
-              "DC3: Force-entered stuck transition '{}' -> '{}' after {} NUI frames",
-              cur_name, trans_name, s_stuck_transition_count);
+              "DC3: Force-entered stuck transition '{}' -> '{}' after {} NUI frames "
+              "(loaded={} curExiting={})",
+              cur_name, trans_name, s_stuck_transition_count,
+              trans_loaded ? 1 : 0, cur_exiting ? 1 : 0);
           s_last_screen = trans_screen_h;
           s_screen_stable_count = 0;
           s_last_stuck_cur_screen = 0;
