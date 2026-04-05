@@ -612,7 +612,7 @@ void Dc3NuiSequencerExtern(
                 kernel::XObject::Type::Thread);
         for (auto thread : threads) {
           if (thread->main_thread() && thread->thread_state()) {
-            execute_thread = thread;
+            execute_thread = thread.get();
             thread_state = thread->thread_state();
             execute_thread_id = thread->thread_id();
             break;
