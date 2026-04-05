@@ -342,6 +342,10 @@ void Dc3NuiSequencerExtern(
   static bool s_host_beat_drive_active = false;
   static float s_host_song_seconds = 0.0f;
   static float s_host_song_beat = 0.0f;
+  static uint32_t s_last_stuck_cur_screen = 0;
+  static uint32_t s_last_stuck_trans_screen = 0;
+  static uint32_t s_last_stuck_trans_state = 0;
+  static int s_stuck_transition_count = 0;
 
   if (ppc_context && ppc_context->scratch) {
     Dc3RuntimeTelemetryRecordNuiOverrideHit(
@@ -586,6 +590,92 @@ void Dc3NuiSequencerExtern(
       }
       std::string trans_name = raw_trans_name;
 
+      auto* processor = kernel_state->processor();
+      auto* thread_state = ppc_context->thread_state;
+      auto exec_guest_bool = [&](uint32_t fn, uint64_t arg0,
+                                 uint64_t arg1 = 0) -> bool {
+        if (!processor || !thread_state || !fn) {
+          return false;
+        }
+        uint64_t args[2] = {arg0, arg1};
+        return static_cast<uint32_t>(processor->Execute(thread_state, fn, args,
+                                                        arg1 ? 2 : 1)) != 0;
+      };
+
+      if (trans_state_h != 0 && trans_screen_h) {
+        if (cur_screen_h == s_last_stuck_cur_screen &&
+            trans_screen_h == s_last_stuck_trans_screen &&
+            trans_state_h == s_last_stuck_trans_state) {
+          ++s_stuck_transition_count;
+        } else {
+          s_last_stuck_cur_screen = cur_screen_h;
+          s_last_stuck_trans_screen = trans_screen_h;
+          s_last_stuck_trans_state = trans_state_h;
+          s_stuck_transition_count = 1;
+        }
+      } else {
+        s_last_stuck_cur_screen = 0;
+        s_last_stuck_trans_screen = 0;
+        s_last_stuck_trans_state = 0;
+        s_stuck_transition_count = 0;
+      }
+
+      if (trans_state_h != 0 && trans_screen_h && processor && thread_state &&
+          (s_stuck_transition_count == 1 ||
+           (s_stuck_transition_count % 60) == 0)) {
+        constexpr uint32_t kUIScreenEntering = 0x827A34F8;
+        constexpr uint32_t kUIScreenExiting = 0x827A35C0;
+        constexpr uint32_t kUIScreenCheckIsLoaded = 0x827A3A00;
+        bool trans_loaded = exec_guest_bool(kUIScreenCheckIsLoaded, trans_screen_h);
+        bool cur_exiting =
+            cur_screen_h ? exec_guest_bool(kUIScreenExiting, cur_screen_h) : false;
+        bool trans_entering =
+            exec_guest_bool(kUIScreenEntering, trans_screen_h);
+        XELOGI(
+            "DC3: Transition diag cur='{}' trans='{}' state={} stable={} "
+            "loaded={} curExiting={} transEntering={}",
+            cur_name, trans_name, trans_state_h, s_stuck_transition_count,
+            trans_loaded ? 1 : 0, cur_exiting ? 1 : 0,
+            trans_entering ? 1 : 0);
+      }
+
+      if (trans_state_h == 1 && trans_screen_h && processor && thread_state &&
+          s_stuck_transition_count >= 120) {
+        constexpr uint32_t kUIScreenExiting = 0x827A35C0;
+        constexpr uint32_t kUIScreenCheckIsLoaded = 0x827A3A00;
+        constexpr uint32_t kUIScreenEnter = 0x827A51E0;
+        bool trans_loaded = exec_guest_bool(kUIScreenCheckIsLoaded, trans_screen_h);
+        bool cur_exiting =
+            cur_screen_h ? exec_guest_bool(kUIScreenExiting, cur_screen_h) : false;
+        if (trans_loaded && !cur_exiting) {
+          uint32_t old_cur_screen = cur_screen_h;
+          xe::store_and_swap<uint32_t>(ui_obj + 0x2C, 2);
+          xe::store_and_swap<uint32_t>(ui_obj + 0x48, trans_screen_h);
+          xe::store_and_swap<uint32_t>(ui_obj + 0x4C, old_cur_screen);
+          uint64_t enter_args[2] = {trans_screen_h, old_cur_screen};
+          processor->Execute(thread_state, kUIScreenEnter, enter_args, 2);
+          XELOGI(
+              "DC3: Force-entered stuck transition '{}' -> '{}' after {} NUI frames",
+              cur_name, trans_name, s_stuck_transition_count);
+          s_last_screen = trans_screen_h;
+          s_screen_stable_count = 0;
+          s_last_stuck_cur_screen = 0;
+          s_last_stuck_trans_screen = 0;
+          s_last_stuck_trans_state = 0;
+          s_stuck_transition_count = 0;
+          cur_screen_h = trans_screen_h;
+          trans_state_h = 2;
+          trans_screen_h = old_cur_screen;
+          raw_name = raw_trans_name;
+          raw_trans_name = read_name_at(old_cur_screen, 0x1C, false);
+          if (raw_trans_name.empty()) {
+            raw_trans_name = read_name_at(old_cur_screen, 0x20, false);
+          }
+          cur_name = trans_name;
+          trans_name = raw_trans_name;
+        }
+      }
+
       auto try_bootstrap_gameplay = [&](const std::string& cur_name_for_log,
                                         const std::string& trans_name_for_log) {
         if (s_gameplay_setup_done || !cvars::dc3_enable_gameplay_bootstrap) {
@@ -767,8 +857,6 @@ void Dc3NuiSequencerExtern(
             }
           }
           if (found_screen && found_name_ptr) {
-            auto* processor = kernel_state->processor();
-            auto* thread_state = ppc_context->thread_state;
             if (processor && thread_state) {
               constexpr uint32_t kUIManagerGotoScreenByName = 0x8277B378;
               if (target_name == "game_screen") {
@@ -786,8 +874,6 @@ void Dc3NuiSequencerExtern(
             }
             s_screen_stable_count = 0;
           } else if (found_name_ptr) {
-            auto* processor = kernel_state->processor();
-            auto* thread_state = ppc_context->thread_state;
             if (processor && thread_state) {
               constexpr uint32_t kUIManagerGotoScreenByName = 0x8277B378;
               if (target_name == "game_screen") {

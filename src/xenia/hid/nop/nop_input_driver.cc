@@ -637,20 +637,10 @@ uint16_t NopInputDriver::GetScreenAwareButtons() {
                         now - s_stuck_transition_start)
                         .count();
                 if (stuck_ms >= 4000) {
-                  xe::store_and_swap<uint32_t>(ui_obj + 0x48, trans_screen);
-                  xe::store_and_swap<uint32_t>(ui_obj + 0x4C, 0);
-                  xe::store_and_swap<uint32_t>(ui_obj + 0x2C, 0);
-                  cur_screen = trans_screen;
-                  trans_screen = 0;
-                  trans_state = 0;
-                  name_1c = trans_name_1c;
-                  trans_name_1c.clear();
-                  last_screen_name_ = name_1c;
-                  XELOGI("DC3 Script: force-completed stuck UI transition "
-                         "to {:08X} ('{}') after {}ms",
-                         cur_screen, name_1c, stuck_ms);
-                  s_last_stuck_transition = 0;
-                  s_stuck_transition_start = std::chrono::steady_clock::time_point{};
+                  XELOGI("DC3 Script: observed stuck UI transition cur={:08X} "
+                         "trans={:08X} state={} name='{}' trans='{}' after {}ms",
+                         cur_screen, trans_screen, trans_state, name_1c,
+                         trans_name_1c, stuck_ms);
                 }
               }
             } else {
