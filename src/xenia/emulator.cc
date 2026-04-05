@@ -99,6 +99,11 @@ DEFINE_string(dc3_crt_skip_indices, "",
               "Default empty = use dc3_crt_skip_nui.",
               "DC3");
 DEFINE_bool(dc3_ik_telemetry, false, "DC3: enable IK telemetry", "DC3");
+DEFINE_bool(dc3_enable_gameplay_bootstrap, false,
+            "DC3: experimental host-driven guest bootstrap for CreateGame/"
+            "SetupAnims/OnSongLoaded/StartGame. Disabled by default because "
+            "current call sites are unstable.",
+            "DC3");
 DEFINE_bool(dc3_null_read_cache_stream, false, "DC3: null read cache", "DC3");
 DEFINE_bool(dc3_crt_skip_nui, true,
             "DC3: auto-nullify NUI/Kinect SDK CRT constructors (indices "
@@ -583,7 +588,7 @@ void Dc3NuiSequencerExtern(
 
       auto try_bootstrap_gameplay = [&](const std::string& cur_name_for_log,
                                         const std::string& trans_name_for_log) {
-        if (s_gameplay_setup_done) {
+        if (s_gameplay_setup_done || !cvars::dc3_enable_gameplay_bootstrap) {
           return;
         }
         constexpr uint32_t kTheHamDirector = 0x82F603A0;
