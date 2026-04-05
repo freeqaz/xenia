@@ -605,12 +605,14 @@ void Dc3NuiSequencerExtern(
 
         auto* processor = kernel_state->processor();
         auto* thread_state = ppc_context->thread_state;
+        kernel::XThread* execute_thread = nullptr;
         uint32_t execute_thread_id = 0;
         auto threads =
             kernel_state->object_table()->GetObjectsByType<kernel::XThread>(
                 kernel::XObject::Type::Thread);
         for (auto thread : threads) {
           if (thread->main_thread() && thread->thread_state()) {
+            execute_thread = thread;
             thread_state = thread->thread_state();
             execute_thread_id = thread->thread_id();
             break;
@@ -618,9 +620,10 @@ void Dc3NuiSequencerExtern(
         }
         if (!execute_thread_id && kernel::XThread::IsInThread() &&
             thread_state) {
+          execute_thread = kernel::XThread::GetCurrentThread();
           execute_thread_id = kernel::XThread::GetCurrentThread()->thread_id();
         }
-        if (!processor || !thread_state) {
+        if (!processor || !thread_state || !execute_thread) {
           return;
         }
 
@@ -639,22 +642,20 @@ void Dc3NuiSequencerExtern(
             "gp={:08X} game={:08X} gpState={} execThread={}",
             cur_name_for_log, trans_name_for_log, hd_addr, gp_addr, game_addr,
             gp_state, execute_thread_id);
-        auto exec_member = [&](uint32_t fn, uint32_t tp) {
-          uint64_t args[1] = {tp};
-          return processor->Execute(thread_state, fn, args, 1);
+        auto queue_member_apc = [&](uint32_t fn, uint32_t tp) {
+          execute_thread->EnqueueApc(fn, tp, 0, 0);
         };
+        // APC queue is LIFO, so insert the desired call chain in reverse.
+        queue_member_apc(kGamePanelStartGame, gp_addr);
+        queue_member_apc(kSongSequenceOnSongLoaded, kSongSequenceSingleton);
+        queue_member_apc(kHamDirectorSetupAnims, hd_addr);
         if (!game_addr) {
-          exec_member(kGamePanelCreateGame, gp_addr);
-          game_addr =
-              is_guest_readable(gp_addr + 0x38, 4) ? load_u32(gp_addr + 0x38)
-                                                   : 0;
-          XELOGI("DC3: Gameplay bootstrap CreateGame -> game={:08X}",
-                 game_addr);
+          queue_member_apc(kGamePanelCreateGame, gp_addr);
         }
-        exec_member(kHamDirectorSetupAnims, hd_addr);
-        uint64_t sl_args[1] = {kSongSequenceSingleton};
-        processor->Execute(thread_state, kSongSequenceOnSongLoaded, sl_args, 1);
-        exec_member(kGamePanelStartGame, gp_addr);
+        XELOGI(
+            "DC3: Gameplay bootstrap queued APC chain on thread {} "
+            "(createGame={} setupAnims=1 onSongLoaded=1 startGame=1)",
+            execute_thread_id, game_addr ? 0 : 1);
         s_gameplay_setup_done = true;
       };
 
