@@ -626,17 +626,29 @@ void Dc3NuiSequencerExtern(
         constexpr uint32_t kUIScreenEntering = 0x827A34F8;
         constexpr uint32_t kUIScreenExiting = 0x827A35C0;
         constexpr uint32_t kUIScreenCheckIsLoaded = 0x827A3A00;
-        bool trans_loaded = exec_guest_bool(kUIScreenCheckIsLoaded, trans_screen_h);
-        bool cur_exiting =
-            cur_screen_h ? exec_guest_bool(kUIScreenExiting, cur_screen_h) : false;
-        bool trans_entering =
-            exec_guest_bool(kUIScreenEntering, trans_screen_h);
+        int trans_loaded = -1;
+        int cur_exiting = -1;
+        int cur_entering = -1;
+        if (trans_state_h == 1) {
+          trans_loaded =
+              exec_guest_bool(kUIScreenCheckIsLoaded, trans_screen_h) ? 1 : 0;
+          cur_exiting = cur_screen_h
+                            ? (exec_guest_bool(kUIScreenExiting, cur_screen_h) ? 1
+                                                                                : 0)
+                            : 0;
+          cur_entering =
+              exec_guest_bool(kUIScreenEntering, trans_screen_h) ? 1 : 0;
+        } else if (trans_state_h == 2) {
+          cur_entering = cur_screen_h
+                             ? (exec_guest_bool(kUIScreenEntering, cur_screen_h) ? 1
+                                                                                 : 0)
+                             : 0;
+        }
         XELOGI(
             "DC3: Transition diag cur='{}' trans='{}' state={} stable={} "
-            "loaded={} curExiting={} transEntering={}",
+            "loaded={} curExiting={} curEntering={}",
             cur_name, trans_name, trans_state_h, s_stuck_transition_count,
-            trans_loaded ? 1 : 0, cur_exiting ? 1 : 0,
-            trans_entering ? 1 : 0);
+            trans_loaded, cur_exiting, cur_entering);
       }
 
       if (trans_state_h == 1 && trans_screen_h && processor && thread_state &&
