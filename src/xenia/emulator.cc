@@ -339,6 +339,13 @@ void Dc3NuiSequencerExtern(
   static bool s_loadsong_probe_logged = false;
   static bool s_loadsong_repair_attempted = false;
   static bool s_content_refresh_forced = false;
+  // Auto-enable gameplay bootstrap when IK telemetry wants to reach game_screen
+  static bool s_ik_bootstrap_override_applied = false;
+  if (cvars::dc3_ik_telemetry && !s_ik_bootstrap_override_applied) {
+    cvars::dc3_enable_gameplay_bootstrap = true;
+    s_ik_bootstrap_override_applied = true;
+    XELOGI("DC3: IK telemetry auto-enabled gameplay bootstrap");
+  }
   static bool s_host_beat_drive_active = false;
   static float s_host_song_seconds = 0.0f;
   static float s_host_song_beat = 0.0f;
@@ -449,6 +456,23 @@ void Dc3NuiSequencerExtern(
     XELOGI("DC3: screen-name scan range {:08X}-{:08X}", s_scan_name_min,
            s_scan_name_max);
     s_screen_name_scan_range_logged = true;
+  }
+
+  // Force GestureMgr.mInControllerMode=true so the game processes
+  // XInput button presses for menu navigation (DC3 normally uses Kinect).
+  {
+    constexpr uint32_t kTheGestureMgr = 0x82F5F7B4;
+    constexpr uint32_t kInControllerModeOff = 0x426D;
+    auto* gm_slot = memory->TranslateVirtual<uint8_t*>(kTheGestureMgr);
+    if (gm_slot) {
+      uint32_t gm_addr = xe::load_and_swap<uint32_t>(gm_slot);
+      if (gm_addr && gm_addr < 0xF0000000) {
+        auto* gm = memory->TranslateVirtual<uint8_t*>(gm_addr);
+        if (gm) {
+          gm[kInControllerModeOff] = 1;
+        }
+      }
+    }
   }
 
   auto is_guest_readable = [&](uint32_t guest_addr, uint32_t size) -> bool {
@@ -690,7 +714,7 @@ void Dc3NuiSequencerExtern(
           cur_name = trans_name;
           trans_name = raw_trans_name;
         } else if (!trans_loaded && s_stuck_transition_count >= 120 &&
-                   trans_name != "game_screen") {
+                   (trans_name != "game_screen" || cvars::dc3_ik_telemetry)) {
           xe::store_and_swap<uint32_t>(ui_obj + 0x48, trans_screen_h);
           xe::store_and_swap<uint32_t>(ui_obj + 0x4C, 0);
           xe::store_and_swap<uint32_t>(ui_obj + 0x2C, 0);
@@ -821,6 +845,9 @@ void Dc3NuiSequencerExtern(
       }
 
       int nav_stable_threshold = 20;
+      // IK telemetry: use default thresholds, the nav bridge is needed
+      // because scripted input A-presses don't trigger game transitions
+      // (DC3 uses Kinect, not standard XInput for menu navigation).
       if (cur_name == "title_screen") {
         // Let the scripted A presses try first; only force past title after
         // it's been idle for a few seconds.
@@ -864,11 +891,13 @@ void Dc3NuiSequencerExtern(
           target_name = "multiuser_screen";
         } else if (cur_screen_h && cur_name == "multiuser_screen") {
           target_name = "loading_screen";
-        } else if (cur_screen_h && cur_name == "loading_screen") {
-          target_name = "preloading_screen";
-        } else if (cur_screen_h && cur_name == "preloading_screen") {
-          target_name = "real_loading_screen";
-        } else if (cur_screen_h && cur_name == "real_loading_screen") {
+        } else if (cur_screen_h &&
+                   (cur_name == "loading_screen" ||
+                    cur_name == "preloading_screen" ||
+                    cur_name == "real_loading_screen")) {
+          // Skip intermediate loading screens — go straight to game_screen.
+          // The intermediate screens depend on async song loading which may
+          // not complete under Xenia.
           target_name = "game_screen";
         }
 
@@ -918,15 +947,31 @@ void Dc3NuiSequencerExtern(
           }
           if (found_screen && found_name_ptr) {
             if (processor && thread_state) {
-              constexpr uint32_t kUIManagerGotoScreenByName = 0x8277B378;
               if (target_name == "game_screen") {
-                try_bootstrap_gameplay(cur_name, target_name);
+                // For game_screen, skip GotoScreen (it blocks on resource
+                // loading). Instead, directly set UIManager state.
+                // Do NOT call try_bootstrap_gameplay here — the APC chain
+                // was causing the NUI callback thread to stall.
+                xe::store_and_swap<uint32_t>(ui_obj + 0x48, found_screen);
+                xe::store_and_swap<uint32_t>(ui_obj + 0x4C, 0);
+                xe::store_and_swap<uint32_t>(ui_obj + 0x2C, 0);
+                XELOGI("DC3: Nav force-set: {} -> {} ({:08X}, name={:08X})",
+                       cur_name, target_name, found_screen, found_name_ptr);
+                cur_screen_h = found_screen;
+                trans_state_h = 0;
+                trans_screen_h = 0;
+                cur_name = target_name;
+                raw_name = target_name;
+                trans_name.clear();
+                raw_trans_name.clear();
+              } else {
+                constexpr uint32_t kUIManagerGotoScreenByName = 0x8277B378;
+                XELOGI("DC3: Nav goto: {} -> {} ({:08X}, name={:08X})",
+                       cur_name, target_name, found_screen, found_name_ptr);
+                uint64_t args[4] = {ui_addr, found_name_ptr, 0, 0};
+                processor->Execute(thread_state, kUIManagerGotoScreenByName,
+                                   args, 4);
               }
-              XELOGI("DC3: Nav goto: {} -> {} ({:08X}, name={:08X})",
-                     cur_name, target_name, found_screen, found_name_ptr);
-              uint64_t args[4] = {ui_addr, found_name_ptr, 0, 0};
-              processor->Execute(thread_state, kUIManagerGotoScreenByName,
-                                 args, 4);
             } else {
               XELOGW(
                   "DC3: Nav goto skipped for '{}' (processor/thread_state missing)",
@@ -935,15 +980,18 @@ void Dc3NuiSequencerExtern(
             s_screen_stable_count = 0;
           } else if (found_name_ptr) {
             if (processor && thread_state) {
-              constexpr uint32_t kUIManagerGotoScreenByName = 0x8277B378;
               if (target_name == "game_screen") {
-                try_bootstrap_gameplay(cur_name, target_name);
+                XELOGI("DC3: Nav force-set by literal: {} -> {} (name={:08X})",
+                       cur_name, target_name, found_name_ptr);
+                // Can't force-set without found_screen, fall through
+              } else {
+                constexpr uint32_t kUIManagerGotoScreenByName = 0x8277B378;
+                XELOGI("DC3: Nav goto by literal: {} -> {} (name={:08X})",
+                       cur_name, target_name, found_name_ptr);
+                uint64_t args[4] = {ui_addr, found_name_ptr, 0, 0};
+                processor->Execute(thread_state, kUIManagerGotoScreenByName,
+                                   args, 4);
               }
-              XELOGI("DC3: Nav goto by literal: {} -> {} (name={:08X})",
-                     cur_name, target_name, found_name_ptr);
-              uint64_t args[4] = {ui_addr, found_name_ptr, 0, 0};
-              processor->Execute(thread_state, kUIManagerGotoScreenByName,
-                                 args, 4);
               s_screen_stable_count = 0;
             } else {
               XELOGW(
@@ -1080,19 +1128,12 @@ void Dc3NuiSequencerExtern(
             bool direct_song_load_ok = try_direct_song_catalog_load();
             if (!direct_song_load_ok && !s_content_refresh_forced) {
               s_content_refresh_forced = true;
+              // NOTE: ContentMgr::RefreshSynchronously blocks forever under
+              // Xenia because content enumeration never completes. Skip it
+              // and let the nav bridge force-advance through the loading
+              // screens instead.
               XELOGW("DC3: LoadSong repair: direct song catalog load failed; "
-                     "falling back to ContentMgr refresh");
-              XELOGI(
-                  "DC3: LoadSong repair: forcing ContentMgr::RefreshSynchronously");
-              if (content_mgr_addr) {
-                uint64_t refresh_args[1] = {content_mgr_addr};
-                processor->Execute(thread_state, kContentMgrRefreshSynchronously,
-                                   refresh_args, 1);
-              } else {
-                XELOGW(
-                    "DC3: LoadSong repair: TheContentMgr slot {:08X} was null",
-                    kTheContentMgr);
-              }
+                     "skipping ContentMgr::RefreshSynchronously (blocks forever)");
             }
             constexpr uint32_t kYmcaSongId = 7011;
             uint64_t short_name_args[4] = {gd_addr + 0x30, kTheHamSongMgr,
@@ -1213,12 +1254,11 @@ void Dc3NuiSequencerExtern(
         }
       }
 
-      bool gameplay_bootstrap_window =
-          cur_name == "game_screen" ||
-          (cur_name == "real_loading_screen" && trans_name == "game_screen");
-      if (!s_gameplay_setup_done && gameplay_bootstrap_window) {
-        try_bootstrap_gameplay(cur_name, trans_name);
-      }
+      // Gameplay bootstrap is disabled — GamePanel::CreateGame blocks
+      // because it tries to load song/character resources via async I/O
+      // that depend on ARK file content not fully accessible in Xenia.
+      // IK telemetry capture requires the full gameplay pipeline running,
+      // which in turn requires working ARK loading for all game assets.
 
       if (cur_name == "game_screen") {
         constexpr uint32_t kTheTaskMgr = 0x82F64A58;
@@ -3401,6 +3441,18 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
                                  "at {:08X} to return expert anim",
                                  kHamDirectorSongAnim);
                         });
+    }
+
+    // Apply IK telemetry instrumentation to the original XEX if requested.
+    if (cvars::dc3_ik_telemetry) {
+      Dc3HackContext ik_ctx;
+      ik_ctx.memory = memory_.get();
+      ik_ctx.processor = processor_.get();
+      ik_ctx.module = module.get();
+      ik_ctx.is_decomp_layout = false;
+      auto ik_result = ApplyDc3IKTelemetry(ik_ctx);
+      XELOGI("DC3: IK telemetry (original XEX): applied={} skipped={} failed={}",
+             ik_result.applied, ik_result.skipped, ik_result.failed);
     }
   }
   auto main_thread = kernel_state_->LaunchModule(module);
