@@ -3282,18 +3282,33 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
                       });
 
     constexpr uint32_t kMovieInit = 0x82555678;
-    with_patch_target("Movie::Init", kMovieInit, 4, [&](uint8_t* ptr) {
-      xe::store_and_swap<uint32_t>(ptr, 0x4E800020);
-      XELOGI("DC3: Movie bypass: stubbed Movie::Init at {:08X} to blr",
-             kMovieInit);
-    });
+    // Intentionally NOT stubbed. Movie::Init() is just `{ TheMovieSys.Init(); }`,
+    // the boot's entry into movie-system init. The old `blr` stub here was the
+    // root of the regression: it skipped TheMovieSys.Init() entirely, so
+    // BinkMovieSys::Init never ran, isInitalized stayed false, and the guest's
+    // MILO_ASSERT(TheMovieSys.IsInitialized()) in Movie::BeginFromFile (line 220)
+    // fired fatally on the attract movie. Letting Movie::Init run now dispatches
+    // to BinkMovieSys::Init (patched below to set isInitalized=1 and return
+    // before the hanging BinkStartAsyncThread), which is the whole point.
+    XELOGI("DC3: Movie bypass: leaving Movie::Init at {:08X} intact so it "
+           "calls TheMovieSys.Init() (BinkMovieSys::Init patched to set flag)",
+           kMovieInit);
 
     constexpr uint32_t kBinkMovieSysInit = 0x82E214A8;
-    with_patch_target("BinkMovieSys::Init", kBinkMovieSysInit, 4,
+    // Set TheMovieSys.isInitalized = true instead of a bare blr. The old blr
+    // stub skipped MovieSys::Init() entirely, so isInitalized stayed false and
+    // the guest's MILO_ASSERT(TheMovieSys.IsInitialized()) (Movie.cpp:220)
+    // fired fatally at boot, freezing the whole game on the debug error screen.
+    // MovieSys layout: vptr @0, isInitalized(bool) @4; r3 == this (BinkMovieSys
+    // base coincides with the MovieSys base). We still skip BinkStartAsyncThread
+    // (the part that hangs headless and the reason Init was stubbed at all).
+    with_patch_target("BinkMovieSys::Init", kBinkMovieSysInit, 12,
                       [&](uint8_t* ptr) {
-                        xe::store_and_swap<uint32_t>(ptr, 0x4E800020);
-                        XELOGI("DC3: Movie bypass: stubbed BinkMovieSys::Init "
-                               "at {:08X} to blr",
+                        xe::store_and_swap<uint32_t>(ptr + 0, 0x38000001);  // li  r0, 1
+                        xe::store_and_swap<uint32_t>(ptr + 4, 0x98030004);  // stb r0, 4(r3)
+                        xe::store_and_swap<uint32_t>(ptr + 8, 0x4E800020);  // blr
+                        XELOGI("DC3: Movie bypass: BinkMovieSys::Init at {:08X} "
+                               "now sets isInitalized=1 (was blr)",
                                kBinkMovieSysInit);
                       });
 
