@@ -17,6 +17,7 @@
 #include <pthread.h>
 #include <sched.h>
 #include <signal.h>
+#include <poll.h>
 #include <sys/eventfd.h>
 #include <sys/syscall.h>
 #include <sys/time.h>
@@ -24,8 +25,10 @@
 #include <unistd.h>
 #include <ucontext.h>
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <ctime>
+#include <deque>
 #include <memory>
 
 #if XE_PLATFORM_ANDROID
@@ -169,10 +172,107 @@ void Sleep(std::chrono::microseconds duration) {
 
 // TODO(bwrsandman) Implement by allowing alert interrupts from IO operations
 thread_local bool alertable_state_ = false;
+
+// Per-thread alertable interrupt state. Like alertable_state_, these are
+// read/written from the signal handler running ON this thread, so they need no
+// signal-time locking. apc_pending_ is the durable "a user-mode callback is
+// queued for me" flag: it survives even if the thread was not in an alertable
+// wait at queue time (NT durability) and is drained at the next alertable
+// entry. alertable_eventfd_ breaks AlertableSleep's ppoll() when an APC lands.
+thread_local std::atomic<bool> apc_pending_{false};
+thread_local int alertable_eventfd_ = -1;
+
+// Upper bound on how long an alertable condvar wait parks before re-checking
+// apc_pending_, as belt-and-suspenders against a lost cond_.notify_all(). The
+// normal, prompt wake is the notify issued from QueueUserCallback.
+static constexpr std::chrono::milliseconds kAlertablePollInterval{20};
+
+// Runs (drains) all user-mode callbacks queued to the CURRENT thread, FIFO,
+// from a NORMAL (non-signal) context. Returns true if at least one ran.
+// Defined after PosixCondition<Thread>/current_thread_ are in scope.
+static bool DrainCurrentThreadAPCs();
+
+// Lazily create this thread's alertable eventfd. Called only on the normal
+// (non-signal) alertable path.
+static void EnsureAlertableEventfd() {
+  if (alertable_eventfd_ < 0) {
+    alertable_eventfd_ = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    // If creation fails we fall back to timeout-only behavior; the predicate
+    // re-check still guarantees correctness, just without early ppoll wakeup.
+  }
+}
+
+// Drain any pending counter on the alertable eventfd so the next ppoll is
+// edge-clean. Safe to call when the fd is -1.
+static void DrainAlertableEventfd() {
+  if (alertable_eventfd_ >= 0) {
+    uint64_t sink;
+    while (read(alertable_eventfd_, &sink, sizeof(sink)) == sizeof(sink)) {
+    }
+  }
+}
+
 SleepResult AlertableSleep(std::chrono::microseconds duration) {
+  EnsureAlertableEventfd();
+  DrainAlertableEventfd();
+
   alertable_state_ = true;
-  Sleep(duration);
+
+  // Durability: an APC may have been queued (apc_pending_ set by the handler)
+  // before we entered the alertable state. Drain it first and return kAlerted
+  // without sleeping, matching Win32 SleepEx returning WAIT_IO_COMPLETION.
+  if (apc_pending_.exchange(false)) {
+    bool ran = DrainCurrentThreadAPCs();
+    DrainAlertableEventfd();
+    if (ran) {
+      alertable_state_ = false;
+      return SleepResult::kAlerted;
+    }
+  }
+
+  using clock = std::chrono::steady_clock;
+  const auto deadline = clock::now() + duration;
+  bool alerted = false;
+  for (;;) {
+    auto now = clock::now();
+    if (now >= deadline) {
+      break;  // Full duration elapsed with no APC.
+    }
+    auto remaining =
+        std::chrono::duration_cast<std::chrono::microseconds>(deadline - now);
+    timespec to = DurationToTimeSpec(remaining);
+    struct pollfd pfd {};
+    pfd.fd = alertable_eventfd_;  // may be -1 if eventfd creation failed
+    pfd.events = POLLIN;
+    // ppoll with nfds==0 (fd invalid) simply waits out the timeout, so this
+    // still functions as a sleep if the eventfd could not be created.
+    int n = ppoll(&pfd, alertable_eventfd_ >= 0 ? 1u : 0u, &to, nullptr);
+
+    // A delivered APC sets apc_pending_ and (if the fd is valid) makes ppoll
+    // return readable.
+    if (apc_pending_.load(std::memory_order_acquire)) {
+      alerted = true;
+      break;
+    }
+    if (n == 0) {
+      break;  // Timed out with no APC -> normal sleep completion.
+    }
+    if (n < 0 && errno != EINTR) {
+      break;  // Unexpected error; avoid a busy spin.
+    }
+    // EINTR (e.g. a suspend signal) or a stale eventfd readiness with no APC:
+    // drain the fd and re-park for the remaining time, preserving the
+    // full-duration sleep contract.
+    DrainAlertableEventfd();
+  }
+
   alertable_state_ = false;
+  if (alerted) {
+    apc_pending_.store(false, std::memory_order_release);
+    DrainAlertableEventfd();
+    DrainCurrentThreadAPCs();
+    return SleepResult::kAlerted;
+  }
   return SleepResult::kSuccess;
 }
 
@@ -272,6 +372,108 @@ class PosixConditionBase {
       return std::make_pair(WaitResult::kSuccess, first_signaled);
     } else {
       return std::make_pair<WaitResult, size_t>(WaitResult::kTimeout, 0);
+    }
+  }
+
+  // Alertable variant of Wait(). Identical to Wait() except the predicate also
+  // breaks when this thread has a pending user-mode callback (APC), and each
+  // condvar park is capped at kAlertablePollInterval so a lost notify is
+  // re-checked within bounded time. Returns kUserCallback when an APC
+  // interrupted the wait (object NOT consumed in that case).
+  WaitResult WaitAlertable(std::chrono::milliseconds timeout) {
+    auto predicate = [this] {
+      return this->signaled() ||
+             apc_pending_.load(std::memory_order_acquire);
+    };
+    auto lock = std::unique_lock<std::mutex>(mutex_);
+    using clock = std::chrono::steady_clock;
+    const bool infinite = (timeout == std::chrono::milliseconds::max());
+    const auto deadline =
+        infinite ? clock::time_point::max() : clock::now() + timeout;
+    for (;;) {
+      // Prefer APC delivery over object consumption (NT alertable semantics):
+      // check the pending flag BEFORE signaled() so we never run
+      // post_execution() when we are going to report kUserCallback.
+      if (apc_pending_.load(std::memory_order_acquire)) {
+        return WaitResult::kUserCallback;
+      }
+      if (this->signaled()) {
+        post_execution();
+        return WaitResult::kSuccess;
+      }
+      auto now = clock::now();
+      if (!infinite && now >= deadline) {
+        return WaitResult::kTimeout;
+      }
+      auto step = kAlertablePollInterval;
+      if (!infinite) {
+        auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
+            deadline - now);
+        if (left < step) {
+          step = left;
+        }
+      }
+      // Bounded park: returns on a notify (signaled()/apc_pending_ via
+      // QueueUserCallback's cond_.notify_all()), or after `step` for the
+      // periodic re-check. Spurious wakeups simply loop.
+      cond_.wait_for(lock, step, predicate);
+    }
+  }
+
+  // Alertable variant of WaitMultiple(). Same semantics; returns
+  // {kUserCallback, 0} when an APC interrupted the wait.
+  static std::pair<WaitResult, size_t> WaitMultipleAlertable(
+      std::vector<PosixConditionBase*>&& handles, bool wait_all,
+      std::chrono::milliseconds timeout) {
+    assert_true(handles.size() > 0);
+    using iter_t = std::vector<PosixConditionBase*>::const_iterator;
+    const auto predicate_inner = [](auto h) { return h->signaled(); };
+    const auto operation =
+        wait_all ? std::all_of<iter_t, decltype(predicate_inner)>
+                 : std::any_of<iter_t, decltype(predicate_inner)>;
+    auto all_ready = [&handles, operation, predicate_inner] {
+      return operation(handles.cbegin(), handles.cend(), predicate_inner);
+    };
+    auto predicate = [&all_ready] {
+      return all_ready() || apc_pending_.load(std::memory_order_acquire);
+    };
+
+    std::unique_lock<std::mutex> lock(PosixConditionBase::mutex_);
+    using clock = std::chrono::steady_clock;
+    const bool infinite = (timeout == std::chrono::milliseconds::max());
+    const auto deadline =
+        infinite ? clock::time_point::max() : clock::now() + timeout;
+    for (;;) {
+      if (apc_pending_.load(std::memory_order_acquire)) {
+        return std::make_pair(WaitResult::kUserCallback, size_t(0));
+      }
+      if (all_ready()) {
+        auto first_signaled = std::numeric_limits<size_t>::max();
+        for (auto i = 0u; i < handles.size(); ++i) {
+          if (handles[i]->signaled()) {
+            if (first_signaled > i) {
+              first_signaled = i;
+            }
+            handles[i]->post_execution();
+            if (!wait_all) break;
+          }
+        }
+        assert_true(std::numeric_limits<size_t>::max() != first_signaled);
+        return std::make_pair(WaitResult::kSuccess, first_signaled);
+      }
+      auto now = clock::now();
+      if (!infinite && now >= deadline) {
+        return std::make_pair<WaitResult, size_t>(WaitResult::kTimeout, 0);
+      }
+      auto step = kAlertablePollInterval;
+      if (!infinite) {
+        auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
+            deadline - now);
+        if (left < step) {
+          step = left;
+        }
+      }
+      PosixConditionBase::cond_.wait_for(lock, step, predicate);
     }
   }
 
@@ -674,8 +876,11 @@ class PosixCondition<Thread> : public PosixConditionBase {
 
   void QueueUserCallback(std::function<void()> callback) {
     WaitStarted();
-    std::unique_lock<std::mutex> lock(callback_mutex_);
-    user_callback_ = std::move(callback);
+    {
+      std::unique_lock<std::mutex> lock(callback_mutex_);
+      // Durable FIFO: never overwrite a previously-queued-but-not-yet-run APC.
+      user_callbacks_.push_back(std::move(callback));
+    }
     sigval value{};
     value.sival_ptr = this;
 #if XE_PLATFORM_ANDROID
@@ -685,11 +890,35 @@ class PosixCondition<Thread> : public PosixConditionBase {
     pthread_sigqueue(thread_, GetSystemSignal(SignalType::kThreadUserCallback),
                      value);
 #endif
+    // Signal-SAFE wake: this runs on a NORMAL thread (not the handler), so it
+    // is safe to notify the shared condition variable. It forces any alertable
+    // condvar waiter to re-evaluate its predicate (which now also tests
+    // apc_pending_) promptly, rather than waiting for the periodic re-check.
+    PosixConditionBase::cond_.notify_all();
   }
 
-  void CallUserCallback() {
-    std::unique_lock<std::mutex> lock(callback_mutex_);
-    user_callback_();
+  // Drains and runs every queued callback FIFO, from a NORMAL (non-signal)
+  // context. Returns true if at least one callback ran. Each callback is moved
+  // out from under the lock and invoked WITHOUT the lock held, so a callback
+  // may safely re-enter QueueUserCallback on this same thread.
+  bool DrainUserCallbacks() {
+    bool ran_any = false;
+    for (;;) {
+      std::function<void()> cb;
+      {
+        std::unique_lock<std::mutex> lock(callback_mutex_);
+        if (user_callbacks_.empty()) {
+          break;
+        }
+        cb = std::move(user_callbacks_.front());
+        user_callbacks_.pop_front();
+      }
+      if (cb) {
+        cb();
+        ran_any = true;
+      }
+    }
+    return ran_any;
   }
 
   bool Resume(uint32_t* out_previous_suspend_count = nullptr) {
@@ -798,7 +1027,7 @@ class PosixCondition<Thread> : public PosixConditionBase {
   mutable std::mutex state_mutex_;
   mutable std::mutex callback_mutex_;
   mutable std::condition_variable state_signal_;
-  std::function<void()> user_callback_;
+  std::deque<std::function<void()>> user_callbacks_;
 #if XE_PLATFORM_ANDROID
   // Name accessible via name() on Android before API 26 which added
   // pthread_getname_np.
@@ -860,9 +1089,28 @@ WaitResult Wait(WaitHandle* wait_handle, bool is_alertable,
   if (posix_wait_handle == nullptr) {
     return WaitResult::kFailed;
   }
-  if (is_alertable) alertable_state_ = true;
-  auto result = posix_wait_handle->condition().Wait(timeout);
-  if (is_alertable) alertable_state_ = false;
+  if (!is_alertable) {
+    // Unchanged non-alertable path.
+    return posix_wait_handle->condition().Wait(timeout);
+  }
+  EnsureAlertableEventfd();
+  alertable_state_ = true;
+  // Durability: run any APC queued before we entered the alertable wait.
+  if (apc_pending_.exchange(false)) {
+    DrainAlertableEventfd();
+    if (DrainCurrentThreadAPCs()) {
+      alertable_state_ = false;
+      return WaitResult::kUserCallback;
+    }
+    // Flag was set but nothing to run (already drained); fall through to wait.
+  }
+  auto result = posix_wait_handle->condition().WaitAlertable(timeout);
+  if (result == WaitResult::kUserCallback) {
+    apc_pending_.store(false, std::memory_order_release);
+    DrainAlertableEventfd();
+    DrainCurrentThreadAPCs();
+  }
+  alertable_state_ = false;
   return result;
 }
 
@@ -878,11 +1126,31 @@ WaitResult SignalAndWait(WaitHandle* wait_handle_to_signal,
       posix_wait_handle_to_wait_on == nullptr) {
     return WaitResult::kFailed;
   }
-  if (is_alertable) alertable_state_ = true;
-  if (posix_wait_handle_to_signal->condition().Signal()) {
-    result = posix_wait_handle_to_wait_on->condition().Wait(timeout);
+  if (!is_alertable) {
+    // Unchanged non-alertable path.
+    if (posix_wait_handle_to_signal->condition().Signal()) {
+      result = posix_wait_handle_to_wait_on->condition().Wait(timeout);
+    }
+    return result;
   }
-  if (is_alertable) alertable_state_ = false;
+  EnsureAlertableEventfd();
+  alertable_state_ = true;
+  if (posix_wait_handle_to_signal->condition().Signal()) {
+    if (apc_pending_.exchange(false)) {
+      DrainAlertableEventfd();
+      if (DrainCurrentThreadAPCs()) {
+        alertable_state_ = false;
+        return WaitResult::kUserCallback;
+      }
+    }
+    result = posix_wait_handle_to_wait_on->condition().WaitAlertable(timeout);
+    if (result == WaitResult::kUserCallback) {
+      apc_pending_.store(false, std::memory_order_release);
+      DrainAlertableEventfd();
+      DrainCurrentThreadAPCs();
+    }
+  }
+  alertable_state_ = false;
   return result;
 }
 
@@ -899,10 +1167,28 @@ std::pair<WaitResult, size_t> WaitMultiple(WaitHandle* wait_handles[],
     }
     conditions.push_back(&handle->condition());
   }
-  if (is_alertable) alertable_state_ = true;
-  auto result = PosixConditionBase::WaitMultiple(std::move(conditions),
-                                                 wait_all, timeout);
-  if (is_alertable) alertable_state_ = false;
+  if (!is_alertable) {
+    // Unchanged non-alertable path.
+    return PosixConditionBase::WaitMultiple(std::move(conditions), wait_all,
+                                            timeout);
+  }
+  EnsureAlertableEventfd();
+  alertable_state_ = true;
+  if (apc_pending_.exchange(false)) {
+    DrainAlertableEventfd();
+    if (DrainCurrentThreadAPCs()) {
+      alertable_state_ = false;
+      return std::make_pair(WaitResult::kUserCallback, size_t(0));
+    }
+  }
+  auto result = PosixConditionBase::WaitMultipleAlertable(std::move(conditions),
+                                                          wait_all, timeout);
+  if (result.first == WaitResult::kUserCallback) {
+    apc_pending_.store(false, std::memory_order_release);
+    DrainAlertableEventfd();
+    DrainCurrentThreadAPCs();
+  }
+  alertable_state_ = false;
   return result;
 }
 
@@ -1074,6 +1360,15 @@ class PosixThread : public PosixConditionHandle<Thread> {
 
 thread_local PosixThread* current_thread_ = nullptr;
 
+static bool DrainCurrentThreadAPCs() {
+  if (!current_thread_) {
+    return false;
+  }
+  // condition() on a PosixThread* returns PosixCondition<Thread>& (covariant
+  // override in PosixConditionHandle<Thread>), which exposes DrainUserCallbacks.
+  return current_thread_->condition().DrainUserCallbacks();
+}
+
 void* PosixCondition<Thread>::ThreadStartRoutine(void* parameter) {
 #if !XE_PLATFORM_ANDROID
   if (pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS, nullptr) != 0) {
@@ -1187,11 +1482,20 @@ static void signal_handler(int signal, siginfo_t* info, void* context) {
       current_thread_->WaitSuspended();
     } break;
     case SignalType::kThreadUserCallback: {
-      assert_not_null(info->si_value.sival_ptr);
-      auto p_thread =
-          static_cast<PosixCondition<Thread>*>(info->si_value.sival_ptr);
-      if (alertable_state_) {
-        p_thread->CallUserCallback();
+      // Async-signal-safe ONLY: record that a user-mode callback (APC) is
+      // pending for this thread and kick any parked alertable ppoll(). The
+      // callback itself is NOT run here (that would require taking a std::mutex
+      // and invoking arbitrary std::function from signal context). It is drained
+      // OUTSIDE the handler by the next alertable Wait/Sleep, which also returns
+      // kUserCallback / kAlerted. The flag is durable: it is set even if
+      // alertable_state_ is false right now, so the APC is delivered at the next
+      // alertable entry (NT durability) instead of being dropped.
+      apc_pending_.store(true, std::memory_order_release);
+      if (alertable_eventfd_ >= 0) {
+        const uint64_t one = 1;
+        // write() to an eventfd is on the async-signal-safe list (write(2)).
+        ssize_t w = write(alertable_eventfd_, &one, sizeof(one));
+        (void)w;  // best-effort; EAGAIN just means a wake is already queued.
       }
     } break;
 #if XE_PLATFORM_ANDROID
