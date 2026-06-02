@@ -141,6 +141,20 @@ Dc3HackApplyResult ApplyDc3SkeletonHackPack(const Dc3HackContext& ctx) {
       {0x8242E74C, 0x3B800021,
        "SkeletonUpdateThread: timeout INFINITE -> 33ms"},
       {0x8242E1B0, 0x60000000, "SkeletonUpdate::Update: NOP IsOverride branch"},
+      // Debug::Fail (0x825CE1D0) non-main-thread path: the original Xbox build
+      // parks any failing worker thread in an infinite spin
+      //   while (true) { Timer::Sleep(200); PlatformDebugBreak(); }   (@0x825CE2D0)
+      // so a real devkit debugger can attach.  Under headless Xenia nothing
+      // attaches, so the SkeletonUpdate worker (thread start 0x8242E6A8) hits a
+      // benign assert inside Update() after attract->title teardown, parks in
+      // this spin forever, stops calling NuiSkeletonGetNextFrame, and freezes
+      // the whole NUI poll (s_skel_calls stuck -> nav bridge never advances ->
+      // all-black).  Patch the spin's loop-back branch (b -0xC @0x825CE2DC) to
+      // jump to the function epilogue (b +0x90 -> 0x825CE36C) so the worker
+      // returns and continues polling after one assert -- matching the native
+      // port's "FAIL is non-fatal, continue" semantics (Debug.cpp HX_NATIVE).
+      {0x825CE2DC, 0x48000090,
+       "Debug::Fail: thread-fail spin -> return (worker survives assert)"},
   };
   for (const auto& p : skel_patches) {
     auto* h = memory->LookupHeap(p.address);
