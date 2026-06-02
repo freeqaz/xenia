@@ -22,6 +22,7 @@
 #ifdef __linux__
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <signal.h>
 #include <sys/socket.h>
 #include <ucontext.h>
@@ -222,7 +223,12 @@ class Dc3GdbRspHeadlessListener final : public cpu::DebugListener {
     xml += "<?xml version=\"1.0\"?>\n";
     xml += "<!DOCTYPE target SYSTEM \"gdb-target.dtd\">\n";
     xml += "<target version=\"1.0\">\n";
-    xml += "  <architecture>powerpc:common</architecture>\n";
+    // NOTE: Deliberately omit a <architecture> element. Host gdb (17.2) crashes
+    // (SIGABRT inside rs6000 tdep) when a PPC <architecture> is combined with
+    // the standard org.gnu.gdb.power.core feature served over qXfer. With the
+    // architecture left out, the client selects it via
+    // `set architecture powerpc:common[64]; set endian big` and the standard
+    // power.core feature is accepted cleanly. See docs/dc3_gdb_debugging.md.
     xml += "  <feature name=\"org.gnu.gdb.power.core\">\n";
     int regnum = 0;
     for (int i = 0; i < 32; ++i, ++regnum) {
@@ -305,6 +311,17 @@ class Dc3GdbRspHeadlessListener final : public cpu::DebugListener {
         client_fd_ = fd;
         no_ack_mode_ = false;
       }
+      // Enable TCP keepalive so a client that crashes/disconnects without a
+      // clean D/k is eventually detected and the single-client slot is freed
+      // for reconnect (host gdb 17.2 can crash mid-handshake on this target).
+      {
+        int ka = 1;
+        setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &ka, sizeof(ka));
+        int idle = 2, intvl = 2, cnt = 2;
+        setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof(idle));
+        setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof(intvl));
+        setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT, &cnt, sizeof(cnt));
+      }
       char ip_buf[64] = {};
       inet_ntop(AF_INET, &client_addr.sin_addr, ip_buf, sizeof(ip_buf));
       XELOGI("dc3_gdb_rsp_stub: client connected {}:{}", ip_buf,
@@ -331,6 +348,16 @@ class Dc3GdbRspHeadlessListener final : public cpu::DebugListener {
       {
         std::lock_guard<std::mutex> lock(state_mutex_);
         CloseSocketLocked(client_fd_);
+      }
+      // If the client vanished while the target was paused (e.g. a crashed gdb
+      // that never sent a clean detach), resume execution so the game is not
+      // frozen and a fresh client can attach to a live target.
+      if (!stop_requested_ && !detached_ && CanUsePauseDebugOps() &&
+          processor_->execution_state() == cpu::ExecutionState::kPaused) {
+        ClearAllBreakpoints();
+        processor_->Continue();
+        XELOGI("dc3_gdb_rsp_stub: client gone while paused; auto-continued "
+               "target and cleared breakpoints");
       }
       XELOGI("dc3_gdb_rsp_stub: client disconnected");
     }
@@ -715,8 +742,27 @@ class Dc3GdbRspHeadlessListener final : public cpu::DebugListener {
     if (!size) return true;
     uint64_t end = uint64_t(addr) + uint64_t(size) - 1;
     if (end > 0xFFFFFFFFull) return false;
-    // Memory page protection isn't exposed via xe::Memory; MVP only bounds
-    // checks the range and relies on expected code/data accesses from GDB.
+    // Validate every touched page against the guest heap protections. Returning
+    // an error for unmapped/no-access pages is important: gdb's PPC frame
+    // unwinder walks the back-chain by reading memory, and it terminates the
+    // walk cleanly when a read fails. Without this it can follow garbage
+    // pointers into unmapped space and crash.
+    auto* memory = processor_->memory();
+    if (!memory) return false;
+    constexpr uint32_t kPageMask = 0xFFFu;
+    for (uint64_t a = addr & ~uint64_t(kPageMask); a <= end;
+         a += (kPageMask + 1)) {
+      uint32_t page_addr = static_cast<uint32_t>(a);
+      const auto* heap = memory->LookupHeap(page_addr);
+      if (!heap) return false;
+      uint32_t protect = 0;
+      if (!const_cast<xe::BaseHeap*>(heap)->QueryProtect(page_addr, &protect)) {
+        return false;
+      }
+      if (!(protect & xe::kMemoryProtectRead)) {
+        return false;
+      }
+    }
     return true;
   }
 
@@ -771,7 +817,9 @@ class Dc3GdbRspHeadlessListener final : public cpu::DebugListener {
     auto bp = std::make_unique<cpu::Breakpoint>(
         processor_, cpu::Breakpoint::AddressType::kGuest, addr,
         [this](cpu::Breakpoint* breakpoint, cpu::ThreadDebugInfo* thread_info,
-               uint64_t /*host_pc*/) {
+               uint64_t host_pc) {
+          XELOGI("dc3_gdb_rsp_stub: breakpoint hit guest_pc={:08X} host_pc={:X}",
+                 breakpoint ? breakpoint->guest_address() : 0, host_pc);
           std::lock_guard<std::mutex> state_lock(state_mutex_);
           if (thread_info) {
             selected_thread_id_ = thread_info->thread_id;
@@ -782,6 +830,8 @@ class Dc3GdbRspHeadlessListener final : public cpu::DebugListener {
           last_signal_ = "S05";
         });
     processor_->AddBreakpoint(bp.get());
+    XELOGI("dc3_gdb_rsp_stub: added guest breakpoint @{:08X} (exec_state={})",
+           addr, static_cast<int>(processor_->execution_state()));
     guest_breakpoints_.emplace(addr, std::move(bp));
     return true;
   }
