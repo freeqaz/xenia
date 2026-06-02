@@ -4,6 +4,9 @@
 
 #include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
+#include "xenia/cpu/ppc/ppc_context.h"
+#include "xenia/cpu/processor.h"
+#include "xenia/kernel/kernel_state.h"
 #include "xenia/memory.h"
 
 DECLARE_bool(fake_kinect_data);
@@ -160,6 +163,31 @@ Dc3HackApplyResult ApplyDc3SkeletonHackPack(const Dc3HackContext& ctx) {
          "PPC stub at {:08X}, counter at {:08X}",
          kSkeletonDataAddr, kSkeletonFrameSize, kGetNextFrameAddr, kCounterAddr);
   result.applied++;
+
+  // Attract->title boot gate (headless original layout): the attract movie's
+  // async file read never completes, so BinkMovieImpl::Ready() (retail/debug.xex
+  // VA 0x82E221C8) returns false forever. That keeps MoviePanel::IsLoaded ->
+  // UIScreen::CheckIsLoaded false, so the attract_screen->title_screen
+  // transition never fires and TheUI->Draw() emits zero draws (all-black).
+  // Force Ready()=true so the load-gate clears and the proper UIScreen::Enter
+  // path runs (game-driven UIManager::Update, and emulator.cc's force-ENTER
+  // fallback which is gated on CheckIsLoaded==true).
+  if (ctx.processor) {
+    const uint32_t kBinkMovieImplReady = 0x82E221C8;
+    ctx.processor->RegisterGuestFunctionOverride(
+        kBinkMovieImplReady,
+        [](cpu::ppc::PPCContext* ppc_context,
+           kernel::KernelState* kernel_state) {
+          ppc_context->r[3] = 1;  // BinkMovieImpl::Ready() -> true
+        },
+        "DC3:BinkMovieImpl::Ready");
+    XELOGI("DC3: Registered BinkMovieImpl::Ready=true override at {:08X}",
+           kBinkMovieImplReady);
+    result.applied++;
+  } else {
+    result.skipped++;
+  }
+
   return result;
 }
 
