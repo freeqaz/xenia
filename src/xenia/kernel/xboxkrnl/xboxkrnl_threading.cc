@@ -133,6 +133,20 @@ dword_result_t ExCreateThread_entry(lpdword_t handle_ptr, dword_t stack_size,
   actual_stack_size =
       std::max((uint32_t)0x4000, ((actual_stack_size + 0xFFF) & 0xFFFFF000));
 
+  // === DC3 songpush: worker thread minimum stack clamp (BEGIN) ===
+  // DC3 (title 0x373307D9) creates its SkeletonUpdate / gameplay worker
+  // threads with an explicit 256KB guest stack.  Under headless Xenia these
+  // workers can run deep call chains over partially-initialized song/gesture
+  // object graphs (uninitialized fields read as 0xBCBCBCBC) during the
+  // attract->gameplay transition, overflowing the 256KB guest stack and
+  // faulting in JIT'd code.  Clamp the minimum to 4MB for DC3 only so a
+  // deep-but-finite chain has room to complete; non-DC3 titles are unaffected.
+  if (kernel_state()->title_id() == 0x373307D9 &&
+      actual_stack_size < 4u * 1024u * 1024u) {
+    actual_stack_size = 4u * 1024u * 1024u;
+  }
+  // === DC3 songpush: worker thread minimum stack clamp (END) ===
+
   auto thread = object_ref<XThread>(
       new XThread(kernel_state(), actual_stack_size, xapi_thread_startup,
                   start_address.guest_address(), start_context.guest_address(),
