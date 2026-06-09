@@ -104,6 +104,20 @@ DEFINE_bool(dc3_enable_gameplay_bootstrap, false,
             "SetupAnims/OnSongLoaded/StartGame. Disabled by default because "
             "current call sites are unstable.",
             "DC3");
+DEFINE_bool(dc3_game_screen_real_goto, true,
+            "DC3: drive loading->game_screen via the real UIManager::GotoScreen "
+            "(runs game_panel Load()->CreateGame() and the per-frame Poll state "
+            "machine that creates the Game and sets up dancer anims). Only safe "
+            "once the song FileMerger merge has completed (gated on merge_busy). "
+            "Set false to fall back to the old host force-set (no Game created).",
+            "DC3");
+DEFINE_bool(dc3_gameplay_probe, false,
+            "DC3: enable the host-side GATE PROBE / PKPROBE gameplay diagnostics "
+            "(reads HamDirector anim state + walks mSongAnims/mPropKeys from the "
+            "NUI thread). Off by default — it executes guest helper fns each "
+            "game_screen frame, which perturbs timing. Was used to diagnose the "
+            "RndPropAnim::GetKeys wrong-receiver hang; keep for recurrence.",
+            "DC3");
 DEFINE_bool(dc3_null_read_cache_stream, false, "DC3: null read cache", "DC3");
 DEFINE_bool(dc3_crt_skip_nui, true,
             "DC3: auto-nullify NUI/Kinect SDK CRT constructors (indices "
@@ -505,6 +519,37 @@ void Dc3NuiSequencerExtern(
       if (cur_screen_h != s_last_screen) { s_last_screen = cur_screen_h; s_screen_stable_count = 0; }
       else if (trans_state_h == 0) s_screen_stable_count++;
 
+      // Blocker 2 (song content not ready): the song .milo / RndPropAnim
+      // FileMerger merge runs ASYNC, driven by the MAIN thread's LoadMgr::Poll.
+      // We must NOT force the loading->game_screen transition until that merge
+      // completes, or HamDirector::Enter reads a half-built anim (corrupt
+      // mSongAnims/mPropKeys -> operator[] crash + GetKeys hang). The merge is
+      // in flight while TheFileMergerOrganizer(*0x82f5ef44)->mActiveOrg(+0x38)
+      // is non-null. We canNOT pump LoadMgr ourselves (races the main thread ->
+      // crash); we just HOLD the transition so the main thread can finish, then
+      // release. (mActiveOrg per src/system/char/FileMergerOrganizer.h:67.)
+      bool merge_busy = false;
+      {
+        uint32_t org = is_guest_readable(0x82f5ef44, 4)
+                           ? xe::load_and_swap<uint32_t>(
+                                 memory->TranslateVirtual<uint8_t*>(0x82f5ef44))
+                           : 0;
+        if (org && is_guest_readable(org + 0x38, 4)) {
+          merge_busy = xe::load_and_swap<uint32_t>(
+                           memory->TranslateVirtual<uint8_t*>(org + 0x38)) != 0;
+        }
+        static bool s_merge_seen_busy = false;
+        if (merge_busy) s_merge_seen_busy = true;
+        // Only gate once we've actually observed a merge start (avoids holding
+        // forever if the organizer is idle for unrelated reasons before the
+        // song load is even queued).
+        if (!s_merge_seen_busy) merge_busy = false;
+        if ((s_skel_calls % 120) == 0) {
+          XELOGI("DC3: merge_busy={} org={:08X} seenBusy={}", merge_busy ? 1 : 0,
+                 org, s_merge_seen_busy ? 1 : 0);
+        }
+      }
+
       auto read_guest_name = [&](uint32_t name_ptr, bool strict_scan_range)
           -> std::string {
         if (!name_ptr || name_ptr >= 0xF0000000) {
@@ -684,7 +729,8 @@ void Dc3NuiSequencerExtern(
         bool cur_exiting =
             cur_screen_h ? exec_guest_bool(kUIScreenExiting, cur_screen_h) : false;
         bool allow_force_enter =
-            trans_loaded && (!cur_exiting || s_stuck_transition_count >= 180);
+            trans_loaded && (!cur_exiting || s_stuck_transition_count >= 180) &&
+            !(trans_name == "game_screen" && merge_busy);
         if (allow_force_enter) {
           uint32_t old_cur_screen = cur_screen_h;
           xe::store_and_swap<uint32_t>(ui_obj + 0x2C, 2);
@@ -714,7 +760,8 @@ void Dc3NuiSequencerExtern(
           cur_name = trans_name;
           trans_name = raw_trans_name;
         } else if (!trans_loaded && s_stuck_transition_count >= 120 &&
-                   (trans_name != "game_screen" || cvars::dc3_ik_telemetry)) {
+                   (trans_name != "game_screen" ||
+                    (cvars::dc3_ik_telemetry && !merge_busy))) {
           xe::store_and_swap<uint32_t>(ui_obj + 0x48, trans_screen_h);
           xe::store_and_swap<uint32_t>(ui_obj + 0x4C, 0);
           xe::store_and_swap<uint32_t>(ui_obj + 0x2C, 0);
@@ -741,12 +788,17 @@ void Dc3NuiSequencerExtern(
           s_stuck_transition_count >= 120) {
         constexpr uint32_t kUIScreenEntering = 0x827A34F8;
         bool cur_entering = exec_guest_bool(kUIScreenEntering, cur_screen_h);
-        if (cur_entering) {
+        if (cur_entering || s_stuck_transition_count >= 240) {
+          // Force-complete the entering phase.  If curEntering is false but
+          // we've been stuck for 240+ NUI frames, the enter animation
+          // already finished but transState was never cleared (common after
+          // Force-entered transitions).
           xe::store_and_swap<uint32_t>(ui_obj + 0x2C, 0);
           xe::store_and_swap<uint32_t>(ui_obj + 0x4C, 0);
           XELOGI(
-              "DC3: Force-completed stuck enter for '{}' after {} NUI frames",
-              cur_name, s_stuck_transition_count);
+              "DC3: Force-completed stuck enter for '{}' after {} NUI frames"
+              " (curEntering={})",
+              cur_name, s_stuck_transition_count, cur_entering ? 1 : 0);
           s_last_screen = cur_screen_h;
           s_screen_stable_count = 0;
           s_last_stuck_cur_screen = 0;
@@ -844,6 +896,272 @@ void Dc3NuiSequencerExtern(
                s_skel_calls);
       }
 
+      // GATE PROBE (diagnostic): when at game_screen but the GamePanel state
+      // machine hasn't entered intro/playing (mState==0), poll the three
+      // PollForLoading gates from the host so we can see which one blocks
+      // mPollLoadState from reaching 4 (which gates GamePanel::Poll's
+      // StartIntro/StartGame). Pure-read guest fns, fired a few times only.
+      static int s_gate_probe_count = 0;
+      if (cvars::dc3_gameplay_probe && cur_name == "game_screen" &&
+          (s_skel_calls % 120) == 0 && s_gate_probe_count < 64) {
+        auto* gp_probe = kernel_state->processor();
+        auto* ts_probe = ppc_context->thread_state;
+        if (gp_probe && ts_probe) {
+          constexpr uint32_t kTheGamePanelPtr = 0x83117410;
+          constexpr uint32_t kTheHamDirectorPtr = 0x82F603A0;
+          constexpr uint32_t kTheHamWardrobePtr = 0x82F60110;
+          constexpr uint32_t kIsWorldLoaded = 0x82468838;
+          constexpr uint32_t kAllCharsLoaded = 0x824553A0;
+          constexpr uint32_t kGameIsReady = 0x82867F80;
+          constexpr uint32_t kGamePanelIsLoaded = 0x8287AD78;
+          constexpr uint32_t kUIPanelIsLoaded = 0x827A7190;
+          auto rd = [&](uint32_t a) -> uint32_t {
+            return is_guest_readable(a, 4)
+                       ? xe::load_and_swap<uint32_t>(
+                             memory->TranslateVirtual<uint8_t*>(a))
+                       : 0;
+          };
+          uint32_t gp = rd(kTheGamePanelPtr);
+          uint32_t hd = rd(kTheHamDirectorPtr);
+          uint32_t hw = rd(kTheHamWardrobePtr);
+          uint32_t game = (gp && is_guest_readable(gp + 0x38, 4))
+                              ? rd(gp + 0x38)
+                              : 0;
+          uint32_t world_loaded = 0, chars_loaded = 0, game_ready = 0;
+          if (hd) {
+            uint64_t a[1] = {hd};
+            world_loaded = static_cast<uint32_t>(
+                gp_probe->Execute(ts_probe, kIsWorldLoaded, a, 1));
+          }
+          if (hw) {
+            uint64_t a[1] = {hw};
+            chars_loaded = static_cast<uint32_t>(
+                gp_probe->Execute(ts_probe, kAllCharsLoaded, a, 1));
+          }
+          if (game) {
+            uint64_t a[1] = {game};
+            game_ready = static_cast<uint32_t>(
+                gp_probe->Execute(ts_probe, kGameIsReady, a, 1));
+          }
+          uint32_t panel_loaded = 0, uipanel_loaded = 0, mstate = 0xFFFF;
+          if (gp) {
+            uint64_t a[1] = {gp};
+            panel_loaded = static_cast<uint32_t>(
+                gp_probe->Execute(ts_probe, kGamePanelIsLoaded, a, 1));
+            uipanel_loaded = static_cast<uint32_t>(
+                gp_probe->Execute(ts_probe, kUIPanelIsLoaded, a, 1));
+            mstate = (gp && is_guest_readable(gp + 0x80, 4)) ? rd(gp + 0x80)
+                                                             : 0xFFFF;
+          }
+          XELOGI("DC3: GATE PROBE gp={:08X} game={:08X} hd={:08X} hw={:08X} "
+                 "worldLoaded={} charsLoaded={} gameReady={} panelLoaded={} "
+                 "uiPanelLoaded={} mState={} transState={}",
+                 gp, game, hd, hw, world_loaded & 0xFF, chars_loaded & 0xFF,
+                 game_ready & 0xFF, panel_loaded & 0xFF, uipanel_loaded & 0xFF,
+                 mstate, trans_state_h);
+
+          // ---- PROPKEYS PROBE (diagnostic, pure memory reads) ------------
+          // Goal: characterize the corrupt std::list<PropKeys*> mPropKeys that
+          // RndPropAnim::GetKeys spins forever in. Walk HamDirector.mSongAnims
+          // (std::map<Difficulty,RndPropAnim*> @ hd+0x5c, STLport _Rb_tree),
+          // find diff 0's RndPropAnim, read mPropKeys (@ RndPropAnim+0x10,
+          // STLport _List), and walk the node ring (capped at 64). Logs each
+          // node's addr/next/prev/value(PropKeys*) and each PropKeys' vptr +
+          // target(+0x10)/prop(+0x18)/exceptionID(+0x24). NEVER calls a guest
+          // fn (GetKeys would hang); reading memory is safe.
+          if (hd) {
+            // STLport _Rb_tree base @ hd+0x5c:
+            //   header._M_data = {color@+0, parent@+4, left@+8, right@+c},
+            //   _M_node_count @ +0x10.  Map node: base{c,par,left,right}@0..c,
+            //   then pair<const Difficulty,AnimPtr>: key(int)@+0x10, value=
+            //   AnimPtr(=ObjRefConcrete<RndPropAnim>) @ +0x14, whose layout is
+            //   {vptr@+0, next@+4, prev@+8, mObject(RndPropAnim*)@+0xc}.  So
+            //   the REAL RndPropAnim* is at node+0x14+0xc = node+0x20.  Header
+            //   is the end()/sentinel.
+            const uint32_t map_base = hd + 0x5c;
+            const uint32_t map_header = map_base;       // &header._M_data
+            const uint32_t map_root = rd(map_base + 4); // header._M_parent
+            const uint32_t map_count = rd(map_base + 0x10);
+            XELOGI("DC3: PKPROBE mSongAnims hdr={:08X} root={:08X} count={}",
+                   map_header, map_root, map_count);
+            uint32_t song_anims[3] = {};
+            uint32_t stack[16] = {};
+            int stack_count = 0;
+            if (map_root && map_root != map_header) {
+              stack[stack_count++] = map_root;
+            }
+            for (int i = 0; i < 16 && stack_count > 0; i++) {
+              uint32_t node = stack[--stack_count];
+              if (!node || node == map_header || !is_guest_readable(node, 0x24)) {
+                continue;
+              }
+              int32_t key = static_cast<int32_t>(rd(node + 0x10));
+              uint32_t aptr_vptr = rd(node + 0x14);   // AnimPtr vptr
+              uint32_t aptr_obj = rd(node + 0x20);    // AnimPtr.mObject
+              uint32_t left = rd(node + 8);
+              uint32_t right = rd(node + 0xc);
+              XELOGI("DC3: PKPROBE   mapnode {:08X} key={} aptrVptr={:08X} "
+                     "RndPropAnim*={:08X} L={:08X} R={:08X}",
+                     node, key, aptr_vptr, aptr_obj, left, right);
+              if (key >= 0 && key < 3) {
+                song_anims[key] = aptr_obj;
+              }
+              if (right && right != map_header && stack_count < 16) {
+                stack[stack_count++] = right;
+              }
+              if (left && left != map_header && stack_count < 16) {
+                stack[stack_count++] = left;
+              }
+            }
+
+            auto dump_prop_anim = [&](int diff, uint32_t song_anim) {
+              XELOGI("DC3: PKPROBE diff{} RndPropAnim={:08X}", diff,
+                     song_anim);
+              if (!song_anim || !is_guest_readable(song_anim, 0x30)) {
+                XELOGI("DC3: PKPROBE diff{} anim unreadable/NULL", diff);
+                return;
+              }
+              uint32_t anim_vptr = rd(song_anim);
+              // mPropKeys @ song_anim+0x10 is the embedded list sentinel head:
+              //   head._M_next @ +0x10, head._M_prev @ +0x14.
+              const uint32_t list_head = song_anim + 0x10;
+              uint32_t first = rd(list_head);       // head._M_next
+              uint32_t last = rd(list_head + 4);    // head._M_prev
+              uint32_t word18 = rd(song_anim + 0x18);
+              uint32_t word1c = rd(song_anim + 0x1c);
+              XELOGI("DC3: PKPROBE diff{} anim={:08X} vptr={:08X} "
+                     "listHead={:08X} head.next={:08X} head.prev={:08X} "
+                     "word18={:08X} word1c={:08X}",
+                     diff, song_anim, anim_vptr, list_head, first, last,
+                     word18, word1c);
+              // Walk the node ring. Node: next@+0, prev@+4, value(PropKeys*)@+8.
+              // Proper termination: cur == list_head (returned to sentinel).
+              uint32_t cur = first;
+              int n = 0;
+              bool reached_sentinel = false;
+              uint32_t prev_seen = list_head;
+              for (; n < 64; n++) {
+                if (cur == list_head) {
+                  reached_sentinel = true;
+                  break;
+                }
+                if (!is_guest_readable(cur, 0xc)) {
+                  XELOGI("DC3: PKPROBE   diff{} node[{}] {:08X} UNREADABLE "
+                         "(prev node was {:08X}) -> CORRUPT",
+                         diff, n, cur, prev_seen);
+                  break;
+                }
+                uint32_t nxt = rd(cur);
+                uint32_t prv = rd(cur + 4);
+                uint32_t pk = rd(cur + 8);
+                // For the PropKeys, read vptr + target(+0x10) prop(+0x18)
+                // excID(+0x24).
+                uint32_t pk_vptr = 0, pk_tgt = 0, pk_prop = 0, pk_exc = 0;
+                bool pk_ok = (pk && is_guest_readable(pk, 0x28));
+                if (pk_ok) {
+                  pk_vptr = rd(pk);
+                  pk_tgt = rd(pk + 0x10);
+                  pk_prop = rd(pk + 0x18);
+                  pk_exc = rd(pk + 0x24);
+                }
+                XELOGI("DC3: PKPROBE   diff{} node[{}] @{:08X} next={:08X} "
+                       "prev={:08X} PropKeys={:08X} | pk_ok={} vptr={:08X} "
+                       "tgt={:08X} prop={:08X} excID={}",
+                       diff, n, cur, nxt, prv, pk, pk_ok ? 1 : 0, pk_vptr,
+                       pk_tgt, pk_prop, pk_exc);
+                prev_seen = cur;
+                cur = nxt;
+              }
+              XELOGI("DC3: PKPROBE diff{} WALK DONE nodes={} reachedSentinel={} "
+                     "(64=hit cap => RING NEVER RETURNS TO SENTINEL = the "
+                     "GetKeys infinite loop)",
+                     diff, n, reached_sentinel ? 1 : 0);
+            };
+
+            for (int diff = 0; diff < 3; diff++) {
+              dump_prop_anim(diff, song_anims[diff]);
+            }
+
+            // Also walk mDancerFaceAnims @ hd+0x74 (same map layout). The
+            // GetKeys hang is on the MAIN thread; the corrupt list may be a
+            // face anim rather than a song anim, so dump those too. Tag with
+            // diff+10 so the log lines are distinguishable (diff10/11/12).
+            {
+              const uint32_t fmap_base = hd + 0x74;
+              const uint32_t fmap_header = fmap_base;
+              const uint32_t fmap_root = rd(fmap_base + 4);
+              const uint32_t fmap_count = rd(fmap_base + 0x10);
+              XELOGI("DC3: PKPROBE mDancerFaceAnims hdr={:08X} root={:08X} "
+                     "count={}",
+                     fmap_header, fmap_root, fmap_count);
+              uint32_t face_anims[3] = {};
+              uint32_t fstack[16] = {};
+              int fstack_count = 0;
+              if (fmap_root && fmap_root != fmap_header) {
+                fstack[fstack_count++] = fmap_root;
+              }
+              for (int i = 0; i < 16 && fstack_count > 0; i++) {
+                uint32_t node = fstack[--fstack_count];
+                if (!node || node == fmap_header ||
+                    !is_guest_readable(node, 0x24)) {
+                  continue;
+                }
+                int32_t key = static_cast<int32_t>(rd(node + 0x10));
+                uint32_t aptr_obj = rd(node + 0x20);  // AnimPtr.mObject
+                uint32_t left = rd(node + 8);
+                uint32_t right = rd(node + 0xc);
+                if (key >= 0 && key < 3) {
+                  face_anims[key] = aptr_obj;
+                }
+                if (right && right != fmap_header && fstack_count < 16) {
+                  fstack[fstack_count++] = right;
+                }
+                if (left && left != fmap_header && fstack_count < 16) {
+                  fstack[fstack_count++] = left;
+                }
+              }
+              for (int diff = 0; diff < 3; diff++) {
+                dump_prop_anim(diff + 10, face_anims[diff]);
+              }
+            }
+
+            // The GetKeys hang's r3(this)=HamDirector (0x406E8DA8/0x406E8D78),
+            // so the RndPropAnim* being dereferenced is a WILD pointer aliasing
+            // the HamDirector. The likely sources are the non-map anim ObjPtrs:
+            //   mMasterClipAnim @ hd+0x8c  (ObjPtr<RndPropAnim>, .mObject@+0xc)
+            //   mPlayer1RoutineBuilderAnim @ hd+0xa0
+            //   mPlayer2RoutineBuilderAnim @ hd+0xb4
+            // Dump their .mObject + each one's list. tags 20/21/22.
+            {
+              uint32_t master = rd(hd + 0x8c + 0xc);
+              uint32_t rb1 = rd(hd + 0xa0 + 0xc);
+              uint32_t rb2 = rd(hd + 0xb4 + 0xc);
+              XELOGI("DC3: PKPROBE masterClipAnim={:08X} rbAnim1={:08X} "
+                     "rbAnim2={:08X} (hd={:08X} -> if any == hd-region these "
+                     "are the wild GetKeys 'this')",
+                     master, rb1, rb2, hd);
+              dump_prop_anim(20, master);
+              dump_prop_anim(21, rb1);
+              dump_prop_anim(22, rb2);
+            }
+          }
+          // ---- end PROPKEYS PROBE ---------------------------------------
+
+          s_gate_probe_count++;
+        }
+      }
+
+      // NOTE (2026-06-02): tried pumping LoadMgr::Poll(&TheLoadMgr) here to drain
+      // the song merge before game_screen — it RACES the main thread's own load
+      // polling (confirmed: crash in LoadMgr::Poll->PollFrontLoader->
+      // DataArray::Node @0x8259F758 with LoadMgr frames on the stack). The main
+      // thread DOES drive LoadMgr::Poll, so this is a timing/merge-completeness
+      // problem (game transitions before the merge finishes), NOT a missing
+      // driver. The safe fix is to HOLD the loading->game_screen transition until
+      // the song FileMerger merge completes (host-readable signal:
+      // TheFileMergerOrganizer @0x82f5ef44 idle, or the song Merger::mLoaded
+      // set), with NO concurrent polling. See task #21.
+
       int nav_stable_threshold = 20;
       // IK telemetry: use default thresholds, the nav bridge is needed
       // because scripted input A-presses don't trigger game transitions
@@ -895,10 +1213,16 @@ void Dc3NuiSequencerExtern(
                    (cur_name == "loading_screen" ||
                     cur_name == "preloading_screen" ||
                     cur_name == "real_loading_screen")) {
-          // Skip intermediate loading screens — go straight to game_screen.
-          // The intermediate screens depend on async song loading which may
-          // not complete under Xenia.
-          target_name = "game_screen";
+          // Skip intermediate loading screens — go straight to game_screen,
+          // but ONLY once the song FileMerger merge is done (merge_busy==false).
+          // Holding here lets the main thread's LoadMgr::Poll finish the merge
+          // so HamDirector::Enter sees a fully-built anim. (task #21)
+          if (!merge_busy) {
+            target_name = "game_screen";
+          } else if ((s_skel_calls % 120) == 0) {
+            XELOGI("DC3: HOLD at '{}' — song merge still busy, not advancing",
+                   cur_name);
+          }
         }
 
         if (!target_name.empty()) {
@@ -947,11 +1271,27 @@ void Dc3NuiSequencerExtern(
           }
           if (found_screen && found_name_ptr) {
             if (processor && thread_state) {
-              if (target_name == "game_screen") {
-                // For game_screen, skip GotoScreen (it blocks on resource
-                // loading). Instead, directly set UIManager state.
-                // Do NOT call try_bootstrap_gameplay here — the APC chain
-                // was causing the NUI callback thread to stall.
+              if (target_name == "game_screen" &&
+                  cvars::dc3_game_screen_real_goto) {
+                // Real path: drive the genuine UIManager::GotoScreen so
+                // game_panel->Load() runs CreateGame() (new Game()) and the
+                // per-frame GamePanel::Poll() -> Game::HandleWait() state machine
+                // fires SetupAnims()/OnSongLoaded()/StartGame() -> animating
+                // dancer. This previously blocked because the song FileMerger
+                // merge wasn't done; we only reach here once merge_busy==false
+                // (see the HOLD above), so GotoScreen can complete. (task #21)
+                constexpr uint32_t kUIManagerGotoScreenByName = 0x8277B378;
+                XELOGI("DC3: Nav goto (real, game_screen): {} -> {} "
+                       "({:08X}, name={:08X})",
+                       cur_name, target_name, found_screen, found_name_ptr);
+                uint64_t args[4] = {ui_addr, found_name_ptr, 0, 0};
+                processor->Execute(thread_state, kUIManagerGotoScreenByName,
+                                   args, 4);
+              } else if (target_name == "game_screen") {
+                // Fallback (dc3_game_screen_real_goto=false): host force-set the
+                // UIManager screen pointers directly. Reaches game_screen visually
+                // but never creates the Game (no Load()/CreateGame()), so no
+                // animating dancer. Kept for A/B comparison.
                 xe::store_and_swap<uint32_t>(ui_obj + 0x48, found_screen);
                 xe::store_and_swap<uint32_t>(ui_obj + 0x4C, 0);
                 xe::store_and_swap<uint32_t>(ui_obj + 0x2C, 0);
@@ -980,7 +1320,16 @@ void Dc3NuiSequencerExtern(
             s_screen_stable_count = 0;
           } else if (found_name_ptr) {
             if (processor && thread_state) {
-              if (target_name == "game_screen") {
+              if (target_name == "game_screen" &&
+                  cvars::dc3_game_screen_real_goto) {
+                constexpr uint32_t kUIManagerGotoScreenByName = 0x8277B378;
+                XELOGI("DC3: Nav goto by literal (real, game_screen): {} -> {} "
+                       "(name={:08X})",
+                       cur_name, target_name, found_name_ptr);
+                uint64_t args[4] = {ui_addr, found_name_ptr, 0, 0};
+                processor->Execute(thread_state, kUIManagerGotoScreenByName,
+                                   args, 4);
+              } else if (target_name == "game_screen") {
                 XELOGI("DC3: Nav force-set by literal: {} -> {} (name={:08X})",
                        cur_name, target_name, found_name_ptr);
                 // Can't force-set without found_screen, fall through
@@ -1261,6 +1610,14 @@ void Dc3NuiSequencerExtern(
       // which in turn requires working ARK loading for all game assets.
 
       if (cur_name == "game_screen") {
+        // IK telemetry: the HolmesClientPoll override never fires (see
+        // dc3_hack_pack.cc), but this NUI hook runs every frame.  Read the
+        // always-fresh IK scratch slots + bone walk here, gated to ~2/sec so
+        // the log stays readable.  ReadDc3IKTelemetry guards every guest read
+        // and no-ops unless --dc3_ik_telemetry is set.
+        if (cvars::dc3_ik_telemetry && (s_skel_calls % 30) == 0) {
+          ReadDc3IKTelemetry(memory, static_cast<uint32_t>(s_skel_calls));
+        }
         constexpr uint32_t kTheTaskMgr = 0x82F64A58;
         auto load_u32 = [&](uint32_t guest_addr) -> uint32_t {
           auto* ptr = is_guest_readable(guest_addr, 4)
@@ -1279,8 +1636,32 @@ void Dc3NuiSequencerExtern(
           xe::store_and_swap<float>(ptr, value);
           return true;
         };
+        // Blocker 2 (gameplay crash): do not drive the song clock until the
+        // Game has actually started playback. Game::PostWaitStart clears
+        // mPaused (Game+0x5E) once its load/wait state machine completes;
+        // driving earlier runs the gameplay pipeline over a not-ready audio
+        // stream -> host SIGSEGV (the HamAudio resync / Voice path).
+        // TheGamePanel(0x83117410)->mGame(+0x38)->mPaused(+0x5E).
+        constexpr uint32_t kTheGamePanelGate = 0x83117410;
+        uint32_t gp_gate = load_u32(kTheGamePanelGate);
+        uint32_t game_gate =
+            (gp_gate && is_guest_readable(gp_gate + 0x38, 4))
+                ? load_u32(gp_gate + 0x38)
+                : 0;
+        bool beat_gate_ok = false;
+        if (game_gate && is_guest_readable(game_gate + 0x5E, 1)) {
+          auto* pp = memory->TranslateVirtual<uint8_t*>(game_gate + 0x5E);
+          beat_gate_ok = pp ? (*pp == 0) : false;  // mPaused==0 -> playing
+        }
+        if (!beat_gate_ok && s_host_beat_drive_active) {
+          XELOGI(
+              "DC3: Beat gate closed (Game paused/not ready) -> suspend beat "
+              "drive");
+          s_host_beat_drive_active = false;
+        }
         uint32_t timelines_addr = load_u32(kTheTaskMgr + 0x2C);
-        if (timelines_addr && is_guest_readable(timelines_addr + 0x54, 4) &&
+        if (beat_gate_ok && timelines_addr &&
+            is_guest_readable(timelines_addr + 0x54, 4) &&
             is_guest_readable(kTheTaskMgr + 0x48, 1)) {
           auto* auto_ptr =
               memory->TranslateVirtual<uint8_t*>(kTheTaskMgr + 0x48);
@@ -3408,6 +3789,31 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
                                  kExitControllerMode);
                         });
 
+      // Blocker A (early auto-pause during gameplay): with --fake_kinect_data,
+      // the synthetic skeleton is never registered as a "playing" player, so
+      // Game::CheckForSkeletonLoss() sees numPlaying(0) < threshold(1) every
+      // SkeletonUpdate and calls Game::PauseForSkeletonLoss() ~2s into the song
+      // -> Handle(pause_game) -> perform_pause_screen, killing playback.
+      // Confirmed root cause: PAUSE-ONSET DIAG showed the UIEventMgr dialog
+      // queue EMPTY at the pause onset (qsize=0), ruling out GamePanel::Poll's
+      // HasActiveDialogEvent() branch and pinning it on the skeleton-loss path.
+      // Real Kinect would mark the player present and this never fires; under
+      // fake input it's a false positive. Stub the void Game::PauseForSkeletonLoss
+      // (private, non-virtual; 0x82866D50) to a bare blr so the song keeps
+      // playing. Scoped to the fake-Kinect block since that's the only case that
+      // produces the false skeleton loss. The player-count computation in
+      // CheckForSkeletonLoss is left intact; only the pause action is removed.
+      constexpr uint32_t kPauseForSkeletonLoss = 0x82866D50;
+      with_patch_target("Game::PauseForSkeletonLoss", kPauseForSkeletonLoss, 4,
+                        [&](uint8_t* pfsl_ptr) {
+                          xe::store_and_swap<uint32_t>(pfsl_ptr, 0x4E800020);
+                          XELOGI("DC3: Gameplay fix: stubbed "
+                                 "Game::PauseForSkeletonLoss at {:08X} to blr "
+                                 "(suppress fake-Kinect false skeleton-loss "
+                                 "auto-pause)",
+                                 kPauseForSkeletonLoss);
+                        });
+
       constexpr uint32_t kMoviePoll = 0x82555CB8;
       with_patch_target("Movie::Poll", kMoviePoll, 8,
                         [&](uint8_t* mp_ptr) {
@@ -3450,10 +3856,26 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
       constexpr uint32_t kHamDirectorSongAnim = 0x82475578;
       with_patch_target("HamDirector::SongAnim", kHamDirectorSongAnim, 8,
                         [&](uint8_t* p) {
+                          // SongAnim(playerIndex): force the pre-authored EXPERT
+                          // song.anim (which has baked clip keyframes) instead of
+                          // the routine-builder anim (empty headless — the
+                          // remixer never runs). Mirrors the #ifdef HX_NATIVE
+                          // fallback compiled out of debug.xex.
+                          //   li r4,2 (kDifficultyExpert)
+                          //   b  0x82473E58  (HamDirector::SongAnimByDifficulty)
+                          // NOTE: branch MUST target the function ENTRY 0x82473E58
+                          // (0x4BFFE8DC), NOT 0x82473E5C/+4 (0x4BFFE8E0). The +4
+                          // target landed on the SongAnimByDifficulty survival
+                          // patch's `blr`, skipping `li r3,0`, so SongAnim returned
+                          // r3 unchanged == TheHamDirector -> ClipPlayer::Init then
+                          // called GetKeys with this==HamDirector -> infinite hang.
+                          // (Survival patch now removed; SongAnimByDifficulty runs
+                          // its real `return mSongAnims[diff]` on the healthy map.)
                           xe::store_and_swap<uint32_t>(p + 0, 0x38800002);
-                          xe::store_and_swap<uint32_t>(p + 4, 0x4BFFE8E0);
+                          xe::store_and_swap<uint32_t>(p + 4, 0x4BFFE8DC);
                           XELOGI("DC3: Anim fix: patched HamDirector::SongAnim "
-                                 "at {:08X} to return expert anim",
+                                 "at {:08X} to tail-call SongAnimByDifficulty"
+                                 "(expert)",
                                  kHamDirectorSongAnim);
                         });
     }

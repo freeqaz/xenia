@@ -226,6 +226,26 @@ Dc3HackApplyResult ApplyDc3SkeletonHackPack(const Dc3HackContext& ctx) {
       // port's "FAIL is non-fatal, continue" semantics (Debug.cpp HX_NATIVE).
       {0x825CE2DC, 0x48000090,
        "Debug::Fail: thread-fail spin -> return (worker survives assert)"},
+      // NOTE: tried `blr` at Debug::Fail entry (0x825CE1D0) to make FAIL
+      // non-fatal (match native) and limp past the preview.tmov fatal — it
+      // REGRESSES (rc=139 early): blr skips the `if(mTry) throw msg` path that
+      // MILO_TRY/MILO_CATCH blocks depend on, so code continues past a guarded
+      // failure into worse state -> earlier SIGSEGV. A surgical fix must skip
+      // only the Modal(kModalFail) halt for the SPECIFIC main-thread non-TRY
+      // fatal, or resolve preview.tmov itself. See task #21.
+      // (REMOVED 2026-06-02) SongAnimByDifficulty->null survival patch. It was a
+      // crash-era diagnostic for when mSongAnims (HamDirector+0x5c) RB-tree nodes
+      // were dangling (operator[] crash during the async-load stall). That stall
+      // is now fixed (hackpack) and mSongAnims is HEALTHY (proven: diff 0/1/2 each
+      // resolve to a valid RndPropAnim with an intact 5-node mPropKeys list).
+      // Worse, this null-stub COLLIDED with the HamDirector::SongAnim "force expert
+      // anim" redirect (emulator.cc ~3816): that redirect branched to 0x82473e5c
+      // (this stub's `blr`, skipping `li r3,0`), so SongAnim returned r3 unchanged
+      // == TheHamDirector -> ClipPlayer::Init called RndPropAnim::GetKeys with
+      // this==HamDirector -> infinite GetKeys hang (3.3M SIGSEGV, ~36s, present
+      // freeze). Fix = remove this stub + branch the SongAnim redirect to the real
+      // entry 0x82473e58. SongAnimByDifficulty now runs `return mSongAnims[diff]`
+      // on the healthy map -> a REAL expert anim with clip keyframes (animating).
   };
   for (const auto& p : skel_patches) {
     auto* h = memory->LookupHeap(p.address);

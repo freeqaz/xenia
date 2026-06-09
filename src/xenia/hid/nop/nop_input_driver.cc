@@ -388,6 +388,35 @@ void NopInputDriver::UpdateDc3HostBeatDrive() {
     return true;
   };
 
+  // Blocker 2 (gameplay crash): force-advancing the song clock while the Game
+  // is still paused/loading (mPaused==1) drives the gameplay pipeline over a
+  // not-ready audio stream and crashes (the HamAudio resync / Voice path). Only
+  // run the host beat drive once the Game's own load/wait state machine has
+  // started playback (Game::PostWaitStart sets mPaused=0).
+  // TheGamePanel(0x83117410)->mGame(+0x38)->Game.mPaused(+0x5E).
+  {
+    constexpr uint32_t kTheGamePanelGate = 0x83117410;
+    uint32_t gp_gate = load_u32(kTheGamePanelGate);
+    uint32_t game_gate =
+        (gp_gate && IsGuestReadable(memory_, gp_gate + 0x38, 4))
+            ? load_u32(gp_gate + 0x38)
+            : 0;
+    bool paused = true;
+    if (game_gate && IsGuestReadable(memory_, game_gate + 0x5E, 1)) {
+      auto* pp = memory_->TranslateVirtual<uint8_t*>(game_gate + 0x5E);
+      paused = pp ? (*pp != 0) : true;
+    }
+    if (!game_gate || paused) {
+      if (dc3_host_beat_drive_active_) {
+        dc3_host_beat_drive_active_ = false;
+        XELOGI("DC3 Script: beat gate closed (Game paused/not ready)");
+      }
+      // Keep probing so we can watch the load/wait/paused progression.
+      ProbeDc3GameplayState();
+      return;
+    }
+  }
+
   uint32_t timelines_addr = load_u32(kTheTaskMgr + 0x2C);
   if (!timelines_addr || !IsGuestReadable(memory_, timelines_addr + 0x54, 4) ||
       !IsGuestReadable(memory_, kTheTaskMgr + 0x48, 1)) {
@@ -506,6 +535,83 @@ void NopInputDriver::ProbeDc3GameplayState() {
     game_has_intro = load_u8(game_addr + 0x62) != 0;
     game_load_state = static_cast<int>(load_u32(game_addr + 0x90));
     game_wait_state = static_cast<int>(load_u32(game_addr + 0xA4));
+  }
+
+  // Blocker 2 (unpause deadlock): headless, HamAudio never reaches IsReady, so
+  // Game::PostWaitStart never fires and mPaused stays 1 forever -- the game
+  // cannot self-unpause (the HX_NATIVE audio-fail wall-clock fallback is
+  // compiled out of debug.xex). Once the stable stuck state (load=3 wait=3
+  // paused=1) is observed on game_screen, force the unpause ourselves: the safe
+  // host analogue of the native audio-fail fallback. Verified offsets (DC3
+  // Game.h + binary): game+0xA4 mWaitState, gp+0xF8 unkf8 (Game::Poll
+  // clock-clobber gate), game+0x60 mRealTime, game+0x5E mPaused. ORDER: clear
+  // wait (HandleWait then returns without touching the not-ready audio stream) +
+  // unkf8=0 (stop Poll re-clobbering the host-driven TaskMgr clock) + realTime=1
+  // FIRST, then mPaused=0 LAST so the host beat-drive gate opens only after the
+  // clobbers are disabled. Fires once.
+  static bool s_dc3_unpause_nudged = false;
+  if (!s_dc3_unpause_nudged && game_addr && game_load_state == 3 &&
+      game_wait_state == 3 && game_paused) {
+    auto wr_u32 = [&](uint32_t va, uint32_t v) {
+      if (IsGuestReadable(memory_, va, 4)) {
+        xe::store_and_swap<uint32_t>(memory_->TranslateVirtual<uint8_t*>(va), v);
+      }
+    };
+    auto wr_u8 = [&](uint32_t va, uint8_t v) {
+      if (IsGuestReadable(memory_, va, 1)) {
+        *memory_->TranslateVirtual<uint8_t*>(va) = v;
+      }
+    };
+    wr_u32(game_addr + 0xA4, 0);                            // mWaitState = 0
+    if (game_panel_addr) wr_u8(game_panel_addr + 0xF8, 0);  // unkf8 = 0
+    wr_u8(game_addr + 0x60, 1);                             // mRealTime = 1
+    wr_u8(game_addr + 0x5E, 0);                             // mPaused = 0 (LAST)
+    s_dc3_unpause_nudged = true;
+    XELOGI(
+        "DC3 Script: UNPAUSE NUDGE applied (game={:08X} gp={:08X}): wait=0 "
+        "unkf8=0 realTime=1 paused=0",
+        game_addr, game_panel_addr);
+  }
+
+  // DIAGNOSTIC (Blocker A auto-pause root cause): when the Game flips back to
+  // paused during playing, dump the UIEventMgr dialog-event queue so we can tell
+  // whether the auto-pause came from GamePanel::Poll's HasActiveDialogEvent()
+  // branch (dialog) or from Game::PauseForSkeletonLoss (fake-Kinect "no player
+  // playing"). TheUIEventMgr = *0x83119650; mEventQueue (std::vector<BandEvent*>)
+  // @ +0x2C is {begin,end,cap}; BandEvent.mType @ +0x0 (0=dialog,1=transition),
+  // BandEvent.mDataArray @ +0x4; DataArray.mNodes @ +0x0, node0.value (Symbol
+  // char*) @ +0x0. Read-only.
+  static bool s_dc3_pause_diag_logged = false;
+  if (game_paused && !dc3_last_game_paused_ && !s_dc3_pause_diag_logged) {
+    s_dc3_pause_diag_logged = true;
+    constexpr uint32_t kTheUIEventMgr = 0x83119650;
+    uint32_t mgr = load_u32(kTheUIEventMgr);
+    uint32_t qbegin = mgr ? load_u32(mgr + 0x2C) : 0;
+    uint32_t qend = mgr ? load_u32(mgr + 0x30) : 0;
+    uint32_t qsize = (qbegin && qend >= qbegin) ? (qend - qbegin) / 4 : 0;
+    int front_type = -1;
+    uint32_t front_sym = 0;
+    if (qsize) {
+      uint32_t evt = load_u32(qbegin);
+      if (evt) {
+        front_type = static_cast<int>(load_u32(evt + 0x0));
+        uint32_t arr = load_u32(evt + 0x4);
+        if (arr) {
+          uint32_t nodes = load_u32(arr + 0x0);
+          if (nodes) front_sym = load_u32(nodes + 0x0);
+        }
+      }
+    }
+    const char* sym_str = "";
+    if (front_sym && IsGuestReadable(memory_, front_sym, 1)) {
+      sym_str = reinterpret_cast<const char*>(
+          memory_->TranslateVirtual<uint8_t*>(front_sym));
+    }
+    XELOGI(
+        "DC3 Script: PAUSE-ONSET DIAG eventMgr={:08X} qsize={} frontType={} "
+        "frontSym='{}' (frontType==0 => dialog auto-pause; empty/!=0 => "
+        "skeleton-loss path)",
+        mgr, qsize, front_type, sym_str);
   }
 
   bool state_changed = game_panel_addr != dc3_last_game_panel_addr_ ||

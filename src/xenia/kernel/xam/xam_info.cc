@@ -326,7 +326,11 @@ void XamLoaderTerminateTitle_entry() {
 DECLARE_XAM_EXPORT1(XamLoaderTerminateTitle, kNone, kSketchy);
 
 dword_result_t XamAlloc_entry(dword_t unk, dword_t size, lpdword_t out_ptr) {
-  assert_true(unk == 0);
+  // DC3: unk is sometimes non-zero (DLC content queries pass flags).
+  // The original assert_true(unk == 0) crashes in headless. Just log and proceed.
+  if (unk != 0) {
+    XELOGW("XamAlloc: unk={} (expected 0); proceeding anyway", (uint32_t)unk);
+  }
 
   // Allocate from the heap. Not sure why XAM does this specially, perhaps
   // it keeps stuff in a separate heap?

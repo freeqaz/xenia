@@ -1121,8 +1121,10 @@ void EmulatorHeadless::RunWithTimeout(int32_t timeout_ms) {
             uint32_t r5 = (uint32_t)ppc_ctx->r[5];
             fprintf(stderr, "    regs: r3=0x%08X r4=0x%08X r5=0x%08X r8=0x%08X r9=0x%08X r10=0x%08X\n",
                     r3, r4, r5, r8, r9, r10);
-            fprintf(stderr, "          r11=0x%08X r12=0x%08X r30=0x%08X r31=0x%08X CTR=0x%08X\n",
-                    r11, r12, r30, r31, ctr);
+            fprintf(stderr,
+                    "          r11=0x%08X r12=0x%08X r29=0x%08X r30=0x%08X "
+                    "r31=0x%08X CTR=0x%08X\n",
+                    r11, r12, r29, r30, r31, ctr);
             // Crash forensics: inspect object-ish pointers that frequently
             // participate in decomp data-as-code crashes.
             if (auto* mem_words = emulator_->memory()) {
@@ -1144,6 +1146,85 @@ void EmulatorHeadless::RunWithTimeout(int32_t timeout_ms) {
               dump_words("r30", r30);
               dump_words("r29", r29);
               dump_words("r12", r12);
+              if (lr == 0x8267CC40) {
+                auto rd_guest = [&](uint32_t addr) -> uint32_t {
+                  auto* p = mem_words->TranslateVirtual(addr);
+                  return p ? xe::load_and_swap<uint32_t>(p) : 0;
+                };
+                uint32_t head_next = rd_guest(r29);
+                uint32_t head_prev = rd_guest(r29 + 4);
+                uint32_t node_next = rd_guest(r31);
+                uint32_t node_prev = rd_guest(r31 + 4);
+                uint32_t node_value = rd_guest(r31 + 8);
+                uint32_t pk_vptr = rd_guest(r30);
+                uint32_t pk_target = rd_guest(r30 + 0x10);
+                uint32_t pk_prop = rd_guest(r30 + 0x18);
+                fprintf(stderr,
+                        "    DC3 GetKeys cursor: listHead(r29)=0x%08X "
+                        "head.next=0x%08X head.prev=0x%08X curNode(r31)=0x%08X "
+                        "node.next=0x%08X node.prev=0x%08X node.value=0x%08X "
+                        "curPK(r30)=0x%08X pk.vptr=0x%08X pk.target=0x%08X "
+                        "pk.prop=0x%08X obj(r4)=0x%08X prop(r5)=0x%08X\n",
+                        r29, head_next, head_prev, r31, node_next, node_prev,
+                        node_value, r30, pk_vptr, pk_target, pk_prop, r4, r5);
+                // CALLER HUNT (diagnostic): GetKeys prologue is
+                //   mflr r12 ; bl __savegprlr_27 (stores r12->LR at entry_sp-8)
+                //   ; stwu r1,-128(r1)
+                // so the live SP is entry_sp-0x80. The real caller return
+                // address was saved by __savegprlr_27 at entry_sp-8 =
+                // (sp+0x80)-8 = sp+0x78. Dump the stack and resolve every
+                // 0x82xxxxxx code word to find the caller frame above GetKeys.
+                static bool dumped_getkeys_caller = false;
+                if (!dumped_getkeys_caller) {
+                  dumped_getkeys_caller = true;
+                  uint32_t entry_sp = sp + 0x80;
+                  uint32_t saved_lr = rd_guest(entry_sp - 8);
+                  std::string slr_name = "?";
+                  if (processor && saved_lr >= 0x82000000) {
+                    auto* fn = processor->QueryFunction(saved_lr);
+                    if (fn) slr_name = fn->name();
+                  }
+                  fprintf(stderr,
+                          "    DC3 GetKeys CALLER: saved_lr@entry_sp-8(0x%08X)"
+                          "=0x%08X [%s]  (entry_sp=0x%08X live_sp=0x%08X)\n",
+                          entry_sp - 8, saved_lr, slr_name.c_str(), entry_sp, sp);
+                  fprintf(stderr, "    DC3 GetKeys stack dump (sp..sp+0x120):\n");
+                  for (int i = 0; i < 72; ++i) {
+                    uint32_t a = sp + static_cast<uint32_t>(i * 4);
+                    uint32_t w = rd_guest(a);
+                    std::string wn;
+                    if (processor && w >= 0x82000000 && w < 0x84000000) {
+                      auto* fn = processor->QueryFunction(w);
+                      if (fn) wn = fn->name();
+                    }
+                    fprintf(stderr, "      [sp+0x%03X] 0x%08X: %08X %s%s\n",
+                            i * 4, a, w,
+                            (a == entry_sp - 8) ? "<savedLR> " : "",
+                            wn.c_str());
+                  }
+                  // Walk the back-chain from the live SP and resolve each
+                  // frame's saved LR (Xbox360: saved at back_sp+4).
+                  fprintf(stderr, "    DC3 GetKeys backchain walk:\n");
+                  uint32_t fsp = sp;
+                  for (int fi = 0; fi < 12; ++fi) {
+                    if (fsp < 0x70000000 || fsp >= 0x80000000) break;
+                    uint32_t bsp = rd_guest(fsp);
+                    uint32_t flr = (bsp >= 0x70000000 && bsp < 0x80000000)
+                                       ? rd_guest(bsp + 4)
+                                       : 0;
+                    std::string fn_name;
+                    if (processor && flr >= 0x82000000) {
+                      auto* fn = processor->QueryFunction(flr);
+                      if (fn) fn_name = fn->name();
+                    }
+                    fprintf(stderr,
+                            "      frame[%2d] sp=0x%08X -> 0x%08X savedLR=0x%08X [%s]\n",
+                            fi, fsp, bsp, flr, fn_name.c_str());
+                    if (!bsp || bsp <= fsp || bsp >= 0x80000000) break;
+                    fsp = bsp;
+                  }
+                }
+              }
 
               if (lr == 0x835B3D5C) {
                 static bool dumped_invarg_region = false;

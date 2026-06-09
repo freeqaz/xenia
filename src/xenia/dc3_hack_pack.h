@@ -61,12 +61,22 @@ struct Dc3HackPackSummary {
   std::vector<Dc3HackApplyResult> results;
 };
 
+// Reads the DC3 IK telemetry scratch slots (populated by the always-firing
+// guest byte-patch code-caves) plus the effector-`this` walk, and emits the
+// per-frame "DC3:IK [frame N] ..." XELOGI lines.  Call this from a host hook
+// that actually fires every frame during gameplay (e.g. Dc3NuiSequencerExtern),
+// because the original HolmesClientPoll override never executes (see
+// dc3_hack_pack.cc IK-telemetry notes).  Safe to call with a bad/unset state:
+// it no-ops when telemetry isn't allocated and guards every guest read.
+void ReadDc3IKTelemetry(Memory* memory, uint32_t frame);
+
 void Dc3MaybeCleanStaleContentCache(const std::filesystem::path& content_root);
 void Dc3PopulateAddressesFromCatalog(
     const std::unordered_map<std::string, uint32_t>& catalog,
     const std::unordered_map<std::string, uint32_t>& crt_sentinels);
 Dc3HackPackSummary ApplyDc3HackPack(const Dc3HackContext& ctx);
 Dc3HackApplyResult ApplyDc3SkeletonHackPack(const Dc3HackContext& ctx);
+Dc3HackApplyResult ApplyDc3IKTelemetry(const Dc3HackContext& ctx);
 
 }  // namespace xe
 
