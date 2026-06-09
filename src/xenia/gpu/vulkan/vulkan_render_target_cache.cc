@@ -1074,6 +1074,20 @@ bool VulkanRenderTargetCache::Resolve(const Memory& memory,
       resolve_info.GetCopyEdramTileSpan(dump_base, dump_row_length_used,
                                         dump_rows, dump_pitch);
       DumpRenderTargets(dump_base, dump_row_length_used, dump_rows, dump_pitch);
+      // RSTAB2: rects==0 means NO host RT owns these EDRAM tiles -> the resolve
+      // copy reads zeroed/stale edram_buffer_ (split black|blue clear). The
+      // line precedes its matching RSTAB:REPLAY_COPY (same recorded order).
+      uint32_t rstab2_first_rt = 0;
+      if (!dump_rectangles_.empty() && dump_rectangles_[0].render_target) {
+        rstab2_first_rt = dump_rectangles_[0].render_target->key().base_tiles;
+      }
+      XELOGI("RSTAB2: RESOLVE_DUMP dest_base=0x{:08X} extent_start=0x{:08X} "
+             "extent_len=0x{:X} dump_base={} dump_rows={} dump_pitch={} "
+             "rects={} first_rt_tiles={}",
+             resolve_info.copy_dest_base, resolve_info.copy_dest_extent_start,
+             resolve_info.copy_dest_extent_length, dump_base, dump_rows,
+             dump_pitch, static_cast<uint32_t>(dump_rectangles_.size()),
+             rstab2_first_rt);
     }
 
     draw_util::ResolveCopyShaderConstants copy_shader_constants;

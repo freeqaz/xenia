@@ -895,7 +895,12 @@ VkImageView VulkanTextureCache::RequestSwapTexture(
   if (texture_view == VK_NULL_HANDLE) {
     return VK_NULL_HANDLE;
   }
-  if (!LoadTextureData(*texture)) {
+  bool load_ok = LoadTextureData(*texture);
+  XELOGI("RequestSwapTexture: key={}x{} fmt={} base_page=0x{:X} "
+          "load_ok={}",
+          key.GetWidth(), key.GetHeight(),
+          static_cast<int>(key.format), key.base_page, load_ok);
+  if (!load_ok) {
     return VK_NULL_HANDLE;
   }
   texture->MarkAsUsed();

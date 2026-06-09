@@ -796,6 +796,7 @@ class VulkanCommandProcessor : public CommandProcessor {
   };
   bool deferred_draws_enabled_ = false;
   std::vector<DeferredDrawState> deferred_draws_;
+  uint32_t deferred_flush_count_ = 0;  // Track how many flushes have occurred.
 
   // Execute all deferred draws (called from IssueSwap).
   void FlushDeferredDraws();

@@ -186,6 +186,11 @@ class RenderTargetCache {
     return draw_resolution_scale_x() > 1 || draw_resolution_scale_y() > 1;
   }
 
+  // Destroys all host render targets and resets EDRAM ownership tracking.
+  // Used by headless capture to ensure deferred draws start from a clean slate
+  // without stale render target content from previous frames.
+  void ResetState() { DestroyAllRenderTargets(false); }
+
   // Virtual (both the common code and the implementation may do something
   // here), don't call from destructors (does work not needed for shutdown
   // also).

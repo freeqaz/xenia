@@ -43,6 +43,34 @@ DECLARE_string(dump_frames_path);
 DECLARE_int32(headless_capture_interval);
 DECLARE_bool(headless_verbose_diagnostics);
 
+DEFINE_bool(dc3_persist_render_state, true,
+            "DC3 headless capture: keep EDRAM + host render targets persistent "
+            "across deferred-draw flushes (destructive teardown runs only on the "
+            "FIRST flush). Fixes the intermittent/partial 3D-scene resolve where "
+            "the per-flush EDRAM zero-fill + RT-ownership reset wiped source tiles "
+            "the game expected to persist, so resolves copied zeroed/partial EDRAM "
+            "(HUD-only or 50%-plateau captures). Set false to restore the old "
+            "per-flush teardown (menu-transition ghosting prevention).",
+            "GPU");
+
+DEFINE_bool(dc3_replay_depth_disable, false,
+            "DC3 headless capture DIAGNOSTIC: clear RB_DEPTHCONTROL.z_enable for "
+            "every replayed deferred draw, disabling the depth test. If the 3D "
+            "scene then renders on EVERY captured flush (not just bursts), the "
+            "burst gate is geometry depth-failing against stale EDRAM depth at "
+            "replay time. Experiment only — breaks correct occlusion.",
+            "GPU");
+
+DEFINE_bool(dc3_inline_render, false,
+            "DC3 headless capture: execute draws + resolves INLINE every frame "
+            "(no deferred-draw recording/replay), so the capture readback reads "
+            "the frontbuffer the game itself resolved on its own timeline — "
+            "sidestepping the deferred-replay-reads-stale-guest-memory burst bug. "
+            "Requires a warm VkPipelineCache (/tmp/claude/xenia_vulkan_pipeline_"
+            "cache.bin) to avoid the CP-stall deadlock the deferral was built to "
+            "dodge. Validation lever (architecture review 2026-06-03).",
+            "GPU");
+
 namespace xe {
 namespace gpu {
 
@@ -1348,7 +1376,10 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
     }
 
     // Reset render/deferred state after flush (before deciding next frame).
-    if (headless_render_frame_ && !cvars::force_all_draws) {
+    // Inline-render mode keeps headless_render_frame_ true permanently so
+    // resolves run every frame (the game's own frontbuffer is produced live).
+    if (headless_render_frame_ && !cvars::force_all_draws &&
+        !cvars::dc3_inline_render) {
       headless_render_frame_ = false;
       deferred_draws_enabled_ = false;
       pipeline_cache_->SetWarmupWait(false);
@@ -1389,10 +1420,14 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
         headless_capture_interval_ == 0 ||
         (headless_frame_count_ % headless_capture_interval_) == 0;
 
-    if (cvars::force_all_draws) {
-      // force_all_draws mode (e.g. trace replay): all draws execute, no
-      // warmup needed. Just capture at the configured interval.
+    if (cvars::force_all_draws || cvars::dc3_inline_render) {
+      // force_all_draws: all draws execute but still via defer+replay.
+      // dc3_inline_render: execute draws+resolves INLINE every frame (NO defer)
+      //   so the capture reads the game's own live-resolved frontbuffer.
       headless_render_frame_ = true;
+      if (cvars::dc3_inline_render) {
+        deferred_draws_enabled_ = false;
+      }
       if (headless_frame_count_ <= 5 || headless_frame_count_ % 100 == 0 ||
           should_capture) {
         XELOGI("VdSwap #{}: ptr=0x{:08X} {}x{}{}", headless_frame_count_,
@@ -1679,6 +1714,13 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
                    headless_frame_count_, width_scaled, height_scaled,
                    static_cast<int>(format), nonzero, total_pixels,
                    total_pixels ? nonzero * 100 / total_pixels : 0);
+            XELOGI("RSTAB: CAPTURE frame={} flush#={} frontbuffer=0x{:08X} "
+                   "nonzero_pct={} verdict={}",
+                   headless_frame_count_, deferred_flush_count_, frontbuffer_ptr,
+                   total_pixels ? nonzero * 100 / total_pixels : 0,
+                   (total_pixels && nonzero * 100 / total_pixels > 15)
+                       ? "SCENE"
+                       : "HUD_ONLY");
 
             // Write gamma-corrected PPM with swizzle-corrected channels.
             char ppm_path[512];
@@ -1730,7 +1772,8 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
 
     // Schedule the NEXT render frame after capture completes.
     // Without this, only the first capture triggers RENDER+DEFER.
-    if (headless_capture_interval_ > 0) {
+    // Skip in inline-render mode (no deferral; render frame is always on).
+    if (headless_capture_interval_ > 0 && !cvars::dc3_inline_render) {
       bool next_is_capture =
           ((headless_frame_count_ + 1) % headless_capture_interval_) == 0;
       if (next_is_capture) {
@@ -5091,6 +5134,111 @@ void VulkanCommandProcessor::FlushDeferredDraws() {
   // the game thread's timing (VdSwap stops being called 2 frames later).
   shared_memory_->set_suppress_memory_watches(true);
 
+  ++deferred_flush_count_;
+
+  // Clear all host render targets and EDRAM state so deferred draws start
+  // from a clean slate. Without this, host render targets retain stale
+  // content from the previous render frame (potentially hundreds of frames
+  // ago), causing ghosting artifacts where old screen content bleeds through
+  // during transitions.
+  //
+  // BUT doing this on EVERY flush corrupts the 3D-scene resolve: DC3 relies on
+  // EDRAM/RT content persisting across frames for parts of the scene that are
+  // not re-rendered every frame (RB_COPY_DEST_BASE=0x1E830000 resolves run every
+  // flush but read zeroed tiles after the wipe -> HUD-only / 50%-plateau frames).
+  // So when dc3_persist_render_state is set, only tear down on the FIRST flush;
+  // afterwards EDRAM + host RTs persist and the resolve sees complete tiles.
+  if (render_target_cache_ &&
+      (!cvars::dc3_persist_render_state || deferred_flush_count_ == 1)) {
+    // Wait for any in-flight GPU work that references render targets.
+    if (submission_open_) {
+      EndSubmission(true);
+    }
+    AwaitAllQueueOperationsCompletion();
+
+    // First destroy all Vulkan framebuffers and render passes that hold
+    // references to render target image views. Without this, ResetState()
+    // destroys the VkImage/VkImageView objects but leaves dangling
+    // VkFramebuffer references in the cache, causing VK_ERROR_DEVICE_LOST
+    // when those framebuffers are reused on subsequent flushes.
+    render_target_cache_->ClearCache();
+
+    // Now destroy all host render targets and reset EDRAM ownership tracking.
+    // They'll be recreated fresh on demand during draw replay.
+    render_target_cache_->ResetState();
+
+    // Invalidate accumulated render target pointers which now dangle after
+    // DestroyAllRenderTargets deleted the RenderTarget objects.
+    render_target_cache_->BeginFrame();
+
+    // Also fill the EDRAM buffer with zeros via a one-shot command buffer.
+    // This ensures that any ownership transfers or EDRAM reads during the
+    // deferred draws see clean data instead of stale content.
+    VkBuffer edram_buf = render_target_cache_->edram_buffer();
+    if (edram_buf != VK_NULL_HANDLE && readback_command_buffer_ != VK_NULL_HANDLE) {
+      const ui::vulkan::VulkanDevice* vd = GetVulkanDevice();
+      const auto& dfn = vd->functions();
+      dfn.vkResetCommandPool(vd->device(), readback_command_pool_, 0);
+      VkCommandBufferBeginInfo bi{};
+      bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+      bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+      dfn.vkBeginCommandBuffer(readback_command_buffer_, &bi);
+
+      // Barrier: transition EDRAM buffer for transfer writes.
+      VkBufferMemoryBarrier buf_barrier{};
+      buf_barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+      buf_barrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT |
+                                  VK_ACCESS_SHADER_WRITE_BIT;
+      buf_barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+      buf_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+      buf_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+      buf_barrier.buffer = edram_buf;
+      buf_barrier.offset = 0;
+      buf_barrier.size = VK_WHOLE_SIZE;
+      dfn.vkCmdPipelineBarrier(
+          readback_command_buffer_,
+          VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+              VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+          VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 1, &buf_barrier, 0,
+          nullptr);
+
+      dfn.vkCmdFillBuffer(readback_command_buffer_, edram_buf, 0,
+                          render_target_cache_->edram_buffer_size(), 0);
+
+      // Barrier: transition back for shader reads.
+      buf_barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+      buf_barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT |
+                                  VK_ACCESS_SHADER_WRITE_BIT;
+      dfn.vkCmdPipelineBarrier(
+          readback_command_buffer_, VK_PIPELINE_STAGE_TRANSFER_BIT,
+          VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+              VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+          0, 0, nullptr, 1, &buf_barrier, 0, nullptr);
+
+      dfn.vkEndCommandBuffer(readback_command_buffer_);
+
+      if (readback_fence_ == VK_NULL_HANDLE) {
+        VkFenceCreateInfo fci{};
+        fci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        dfn.vkCreateFence(vd->device(), &fci, nullptr, &readback_fence_);
+      } else {
+        dfn.vkResetFences(vd->device(), 1, &readback_fence_);
+      }
+      VkSubmitInfo si{};
+      si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+      si.commandBufferCount = 1;
+      si.pCommandBuffers = &readback_command_buffer_;
+      {
+        auto qa = vd->AcquireQueue(vd->queue_family_graphics_compute(), 0);
+        dfn.vkQueueSubmit(qa.queue(), 1, &si, readback_fence_);
+      }
+      dfn.vkWaitForFences(vd->device(), 1, &readback_fence_, VK_TRUE,
+                          UINT64_MAX);
+    }
+
+    XELOGI("FlushDeferredDraws: cleared EDRAM and host render targets");
+  }
+
   // Execute all deferred draws normally (no debug limits).
 
   uint32_t success_count = 0;
@@ -5170,9 +5318,30 @@ void VulkanCommandProcessor::FlushDeferredDraws() {
       }
       ok = IssueCopy();
       copy_count++;
+      XELOGI("RSTAB: REPLAY_COPY flush#{} copy#{} dest_base=0x{:08X} ok={}",
+             deferred_flush_count_, copy_count,
+             register_file_->values[XE_GPU_REG_RB_COPY_DEST_BASE], ok);
     } else {
       active_vertex_shader_ = state.vertex_shader;
       active_pixel_shader_ = state.pixel_shader;
+      if (cvars::dc3_replay_depth_disable) {
+        // DIAGNOSTIC: clear z_enable (bit 1) so the depth test always passes.
+        register_file_->values[XE_GPU_REG_RB_DEPTHCONTROL] &= ~uint32_t(0x2);
+      }
+      // RSTAB2: bound color RT EDRAM base (tiles) per substantial-geometry draw,
+      // so a per-flush histogram can show whether scene-RT-binding draws are
+      // present on burst flushes and ~absent on HUD-only flushes (rank-2
+      // guest-side) vs invariant (rank-1 ownership-at-resolve). Gated to
+      // geometry draws + a sample to keep the hot replay loop fast.
+      if (state.index_count >= 64 || (i % 32) == 0) {
+        auto rstab2_si = register_file_->Get<reg::RB_SURFACE_INFO>();
+        XELOGI("RSTAB2: REPLAY_DRAW flush#{} draw#{} color_base_tiles={} "
+               "surface_pitch={} prim={} idx={}",
+               deferred_flush_count_, i + 1,
+               register_file_->values[XE_GPU_REG_RB_COLOR_INFO] & 0xFFF,
+               rstab2_si.surface_pitch,
+               static_cast<uint32_t>(state.prim_type), state.index_count);
+      }
       // Execute the draw with the restored state.
       ok = IssueDraw(
           state.prim_type, state.index_count,

@@ -647,6 +647,10 @@ bool TextureCache::LoadTextureData(Texture& texture) {
     base_outdated = texture.base_outdated(global_lock);
     mips_outdated = texture.mips_outdated(global_lock);
   }
+  XELOGI("RSTAB: LOAD base_page=0x{:05X} base_outdated={} mips_outdated={} "
+         "decision={}",
+         texture.key().base_page, base_outdated, mips_outdated,
+         (!base_outdated && !mips_outdated) ? "SKIP_STALE" : "UPLOAD");
   if (!base_outdated && !mips_outdated) {
     return true;
   }
