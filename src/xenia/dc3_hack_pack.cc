@@ -6447,6 +6447,8 @@ void ReadDc3IKTelemetry(Memory* memory, uint32_t frame) {
     static const char* kBoneNames[] = {
       "bone_L-ankle.mesh", "bone_R-ankle.mesh",
       "bone_L-toe.mesh",   "bone_R-toe.mesh",
+      "bone_L-knee.mesh",  "bone_R-knee.mesh",
+      "bone_L-thigh.mesh", "bone_R-thigh.mesh",
       "bone_pelvis.mesh",  "spot_neck.mesh",
     };
     static const char* kEffTypeNames[] = {
@@ -6589,16 +6591,27 @@ void ReadDc3IKTelemetry(Memory* memory, uint32_t frame) {
               float wx = 0, wy = 0, wz = 0;
               uint8_t dirty = 0;
               bool have = false;
+              float lvx = 0, mxx = 0, mxy = 0;
+              (void)dirty;
               if (mesh && IsGuestReadable(mesh, 0x100)) {
-                wx = LoadF32(mesh + kRndMeshTransSubObj + kTransWorldPosX);
-                wy = LoadF32(mesh + kRndMeshTransSubObj + kTransWorldPosY);
-                wz = LoadF32(mesh + kRndMeshTransSubObj + kTransWorldPosZ);
-                dirty = LoadU8(mesh + kRndMeshTransSubObj + kTransDirty);
+                // Correct VMX128 RndTransformable layout (verified via GDB-RSP):
+                //   mLocalXfm.m.x @ +0x08 (x@+0x08, y@+0x0C), mLocalXfm.v @ +0x38,
+                //   mWorldXfm.v @ +0x78. rotZ = atan2(m.x.y, m.x.x) (the knee bend).
+                wx = LoadF32(mesh + 0x78);
+                wy = LoadF32(mesh + 0x7C);
+                wz = LoadF32(mesh + 0x80);
+                lvx = LoadF32(mesh + 0x38);
+                mxx = LoadF32(mesh + 0x08);
+                mxy = LoadF32(mesh + 0x0C);
                 have = true;
               }
-              XELOGI("DC3:IK BONE name={} obj={:08X} meshBase={:08X} "
-                     "world=({:.4f},{:.4f},{:.4f}) dirty={} valid={}",
-                     name_buf, obj_ptr, mesh, wx, wy, wz, dirty, have ? 1 : 0);
+              // Per-frame leg trajectory: worldZ (beat indicator via pelvis),
+              // localVx (bone length), and m.x.x/m.x.y (knee rotZ) for frame-matched
+              // native-vs-Xbox comparison.
+              XELOGI("DC3:IK BONE name={} meshBase={:08X} "
+                     "worldZ={:.4f} localVx={:.4f} mxx={:.5f} mxy={:.5f} valid={}",
+                     name_buf, mesh, wz, lvx, mxx, mxy, have ? 1 : 0);
+              (void)wx; (void)wy;
               break;
             }
           }
