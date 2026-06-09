@@ -25,6 +25,7 @@
 #include "xenia/cpu/breakpoint.h"
 #include "xenia/cpu/cpu_flags.h"
 #include "xenia/cpu/export_resolver.h"
+#include "xenia/cpu/milo_trace.h"
 #include "xenia/cpu/module.h"
 #include "xenia/cpu/ppc/ppc_decode_data.h"
 #include "xenia/cpu/ppc/ppc_frontend.h"
@@ -158,6 +159,25 @@ bool Processor::Setup(std::unique_ptr<backend::Backend> backend) {
 }
 
 void Processor::PreLaunch() {
+  // milo-trace (X6): apply the capture manifest before the title's main thread
+  // resumes (this runs from KernelState::LaunchModule with the main XThread
+  // created SUSPENDED, so no guest code — hence no JIT compile — has run yet).
+  // The X64Emitter's per-function trace gate (kDebugInfoTraceCallRecords, set in
+  // ppc_translator.cc) reads MiloTraceTracedAddresses() at first-compile, and
+  // Xenia has no JIT code-cache invalidation, so the set MUST be populated
+  // before first compile to cover lazily-compiled gameplay code. MiloTraceBegin
+  // (emulator.cc CompleteLaunch) already loads it earlier; this is an idempotent
+  // safety net that (re)loads the manifest if a session is active but the set is
+  // still empty and a manifest path was given — guaranteeing first-compile
+  // coverage regardless of Begin/PreLaunch ordering.
+  if (cvars::milo_trace_enable && MiloTraceIsActive() &&
+      !cvars::milo_trace_manifest.empty() &&
+      MiloTraceTracedAddresses().empty()) {
+    int n = MiloTraceLoadManifest(cvars::milo_trace_manifest);
+    XELOGI("milo-trace: PreLaunch applied manifest '{}' ({} traced addrs)",
+           cvars::milo_trace_manifest, n);
+  }
+
   if (cvars::break_on_start) {
     // Start paused.
     XELOGI("Breaking into debugger because of --break_on_start...");

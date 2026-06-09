@@ -17,6 +17,7 @@
 #include "xenia/base/string.h"
 #include "xenia/cpu/compiler/compiler_passes.h"
 #include "xenia/cpu/cpu_flags.h"
+#include "xenia/cpu/milo_trace.h"
 #include "xenia/cpu/ppc/ppc_frontend.h"
 #include "xenia/cpu/ppc/ppc_hir_builder.h"
 #include "xenia/cpu/ppc/ppc_opcode_info.h"
@@ -122,6 +123,23 @@ bool PPCTranslator::Translate(GuestFunction* function,
   if (cvars::trace_function_data) {
     debug_info_flags |= DebugInfoFlags::kDebugInfoTraceFunctionData;
   }
+  // milo-trace (X6): mark this function for the SCALE JIT prologue/epilog
+  // capture hook ONLY when a capture session is requested AND this function's
+  // entry address is in the manifest's traced set (an empty set => trace every
+  // function, mirroring MiloTraceShouldTrace). The bit flows through
+  // X64Assembler::Assemble -> X64Emitter::Emit (debug_info_flags_), where the
+  // emitter gates its CallNative(OnEntry/OnExit) pair on it — so off-path
+  // functions emit ZERO extra code. Applied here at first-compile, which (since
+  // the manifest is loaded in MiloTraceBegin/PreLaunch before any title code
+  // runs and Xenia has no JIT code-cache invalidation) covers all lazily-
+  // compiled gameplay code. The X2 override-wrap proto path is independent and
+  // does NOT consult this bit.
+  if (cvars::milo_trace_enable) {
+    const auto& traced = MiloTraceTracedAddresses();
+    if (traced.empty() || traced.count(function->address()) != 0) {
+      debug_info_flags |= DebugInfoFlags::kDebugInfoTraceCallRecords;
+    }
+  }
   std::unique_ptr<FunctionDebugInfo> debug_info;
   if (debug_info_flags) {
     debug_info.reset(new FunctionDebugInfo());
@@ -132,7 +150,12 @@ bool PPCTranslator::Translate(GuestFunction* function,
     return false;
   }
 
-  // Setup trace data, if needed.
+  // Setup trace data, if needed. NOTE: milo-trace (X6) deliberately does NOT
+  // route through FunctionTraceData — it is only allocated when --trace_functions
+  // opens the functions-trace file (AllocateFunctionTraceData returns null
+  // otherwise, which would clear kDebugInfoTraceCallRecords here and silently
+  // disable the X6 hook). X6 stashes the guest VA straight from the GuestFunction
+  // in X64Emitter::Emit (milo_trace_func_va_), so it needs no trace_data.
   if (debug_info_flags & DebugInfoFlags::kDebugInfoTraceFunctions) {
     // Base trace data.
     size_t trace_data_size = FunctionTraceData::SizeOfHeader();

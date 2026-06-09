@@ -263,6 +263,12 @@ class X64Emitter : public Xbyak::CodeGenerator {
   FunctionDebugInfo* debug_info_ = nullptr;
   uint32_t debug_info_flags_ = 0;
   FunctionTraceData* trace_data_ = nullptr;
+  // milo-trace (X6): the guest entry VA of the function currently being emitted,
+  // passed as arg0 to the OnEntry/OnExit capture thunks. Captured directly from
+  // the GuestFunction in the outer Emit() so the X6 hook does NOT depend on
+  // FunctionTraceData (which is only allocated when --trace_functions opens the
+  // functions-trace file — not set for a milo-trace capture session).
+  uint32_t milo_trace_func_va_ = 0;
   Arena source_map_arena_;
 
   size_t stack_size_ = 0;

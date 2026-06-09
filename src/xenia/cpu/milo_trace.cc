@@ -85,6 +85,14 @@ struct PendingRecord {
   // Entry snapshot of every captured interval, for the Method-A write diff.
   // Parallel to `nodes`: pre_snapshot[i] == nodes[i].data at entry.
   std::vector<std::vector<uint8_t>> pre_snapshot;
+  // X6: ordered outbound-call target VAs observed while this frame was on top of
+  // the shadow stack. Each nested OnEntry (a traced callee) appends its func_va
+  // to its parent's list, giving a real DYNAMIC outbound-call list (target_va
+  // only — args/ret/writes are an X7-class refinement, see SerializeRecord's
+  // CALLS note). With a trace-everything session (empty manifest) this is the
+  // complete guest call list; with a manifest gate it covers only traced
+  // callees.
+  std::vector<uint32_t> outbound_calls;
 };
 
 // Per-thread shadow stack of pending records (nested calls) + an output buffer.
@@ -176,6 +184,24 @@ bool IsGuestPointer(PPCContext* ctx, uint32_t va) {
     }
   }
   return true;  // heuristic fallback
+}
+
+// Static instruction count of the function at `func_va`, looked up from the
+// processor's symbol table: (end_address - start_address)/4 + 1. This is the
+// function's SIZE in instructions, used as a coarse proxy for the schema's
+// insn_count ("instructions executed entry->exit"). A true dynamic count needs
+// per-instruction instrumentation (X7-class); the static count is a meaningful,
+// non-zero stand-in for non-leaf records and is exact for straight-line leaves.
+// Returns 0 if the function is not resolvable (then the record's insn_count
+// stays 0, as before).
+uint32_t StaticInsnCount(PPCContext* ctx, uint32_t func_va) {
+  if (!ctx->processor) return 0;
+  Function* fn = ctx->processor->QueryFunction(func_va);
+  if (!fn) return 0;
+  uint32_t start = fn->address();
+  uint32_t end = fn->end_address();
+  if (end <= start) return 0;
+  return (end - start) / 4 + 1;
 }
 
 // How many of the `len` requested bytes starting at `va` are actually safe to
@@ -486,6 +512,35 @@ void AppendWritesSection(std::vector<uint8_t>& b, PPCContext* ctx,
   PutBytes(b, payload.data(), payload.size());
 }
 
+// CALLS section (the outbound-call oracle, schema §2.6 / §3.5). X6 populates a
+// real DYNAMIC outbound-call list — one CallEdge per traced callee observed
+// while this frame was active — but only its target_va is known from the
+// prologue/epilog shadow stack. The per-call args/ret/mem_writes (the full
+// replay oracle mode (b) needs) require per-bl/bctrl instrumentation (X7), so
+// each CallEdge here is the 12-byte header only (arg_mask=0, ret_mask=0,
+// nwrites=0). This is byte-identical to a codec CallEdge with empty
+// args/ret/mem_writes (see codec.py _pack_one_call), so it round-trips, and the
+// target_va list is directly usable for discovery's dyn_call_edges. Returns
+// true iff a section was emitted.
+bool AppendCallsSection(std::vector<uint8_t>& b, const PendingRecord& rec) {
+  if (rec.outbound_calls.empty()) return false;
+  std::vector<uint8_t> payload;
+  PutU32(payload, static_cast<uint32_t>(rec.outbound_calls.size()));
+  for (uint32_t target_va : rec.outbound_calls) {
+    // mtr_call_hdr_t: src_offset u32, target_va u32, arg_mask u16, ret_mask u8,
+    // nwrites u8 (== "<IIHBB", 12 bytes). No trailing args/ret/writes.
+    PutU32(payload, 0);          // src_offset (unknown without bl-site capture)
+    PutU32(payload, target_va);  // RESOLVED callee VA (the traced child's entry)
+    PutU16(payload, 0);          // arg_mask (no args captured)
+    PutU8(payload, 0);           // ret_mask (no ret captured)
+    PutU8(payload, 0);           // nwrites
+  }
+  AppendSectionPrefix(b, MTR_SEC_CALLS, 0,
+                      static_cast<uint32_t>(payload.size()));
+  PutBytes(b, payload.data(), payload.size());
+  return true;
+}
+
 // Serialize a completed record into the thread's out buffer, byte-for-byte to
 // the mtr_format.h layout. Returns the number of sections written.
 void SerializeRecord(std::vector<uint8_t>& out, PPCContext* ctx,
@@ -520,6 +575,10 @@ void SerializeRecord(std::vector<uint8_t>& out, PPCContext* ctx,
   AppendWritesSection(sections, ctx, rec, any_writes);
   if (any_writes) ++section_count;
   // Method A => scoped, so MTR_MF_WRITES_COMPLETE stays clear.
+
+  // CALLS (X6 outbound-call oracle — target_va list, dynamic). Populates the
+  // calls[] axis for non-leaf records, which the override-wrap path left empty.
+  if (AppendCallsSection(sections, rec)) ++section_count;
 
   // Record header (mtr_header_t, 42 bytes, framing-LE).
   std::vector<uint8_t> body;
@@ -707,6 +766,14 @@ void MiloTraceOnEntryCtx(void* ppc_context, uint32_t start_addr) {
   MiloTraceAddrConfig cfg = MiloTraceConfigFor(start_addr);
 
   ThreadBuffer* tb = GetThreadBuffer();
+
+  // X6: this is an outbound call FROM the frame currently on top of the shadow
+  // stack (its immediate caller, if that caller is itself traced). Record the
+  // edge on the parent so its record carries a real dynamic outbound-call list.
+  if (!tb->pending.empty()) {
+    tb->pending.back().outbound_calls.push_back(start_addr);
+  }
+
   PendingRecord rec;
   rec.func_va = start_addr;
   rec.thread_id = ctx->thread_id;
@@ -738,7 +805,12 @@ void MiloTraceOnExitCtx(void* ppc_context, uint32_t start_addr) {
   mtr_regs_t regs_out = SnapshotRegs(ctx);
   uint64_t seq = st.call_seq.fetch_add(1, std::memory_order_relaxed);
 
-  SerializeRecord(tb->out, ctx, rec, regs_out, /*insn_count=*/0, seq);
+  // X6: populate insn_count with the function's static instruction count (a
+  // meaningful non-zero value for non-leaf records; the override-wrap path left
+  // it 0). A true dynamic executed-instruction count is X7-class.
+  uint32_t insn_count = StaticInsnCount(ctx, rec.func_va);
+
+  SerializeRecord(tb->out, ctx, rec, regs_out, insn_count, seq);
 
   if (tb->out.size() >= kFlushThreshold) {
     std::lock_guard<std::mutex> lock(st.mutex);

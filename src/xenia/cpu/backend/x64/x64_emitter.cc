@@ -33,6 +33,7 @@
 #include "xenia/cpu/cpu_flags.h"
 #include "xenia/cpu/function.h"
 #include "xenia/cpu/function_debug_info.h"
+#include "xenia/cpu/milo_trace.h"
 #include "xenia/cpu/processor.h"
 #include "xenia/cpu/symbol.h"
 #include "xenia/cpu/thread_state.h"
@@ -55,6 +56,12 @@ namespace x64 {
 using xe::cpu::hir::HIRBuilder;
 using xe::cpu::hir::Instr;
 using namespace xe::literals;
+
+// milo-trace (X6) capture trampolines — defined below; forward-declared here so
+// the prologue entry hook (in X64Emitter::Emit) can reference them. See their
+// definitions for the ABI/contract.
+static uint64_t MiloTraceEntryTrampoline(void* raw_context, uint64_t address);
+static uint64_t MiloTraceExitTrampoline(void* raw_context, uint64_t address);
 
 static const size_t kMaxCodeSize = 1_MiB;
 
@@ -150,6 +157,9 @@ bool X64Emitter::Emit(GuestFunction* function, HIRBuilder* builder,
   debug_info_ = debug_info;
   debug_info_flags_ = debug_info_flags;
   trace_data_ = &function->trace_data();
+  // milo-trace (X6): stash the guest entry VA directly from the function so the
+  // capture hook needs no FunctionTraceData.
+  milo_trace_func_va_ = function->address();
   source_map_arena_.Reset();
 
   // Fill the generator with code.
@@ -277,6 +287,22 @@ bool X64Emitter::Emit(HIRBuilder* builder, EmitFunctionInfo& func_info) {
     bts(qword[low_address(&trace_header->function_thread_use)], rax);
   }
 
+  // milo-trace (X6) entry hook. Emitted ONLY for traced functions (the
+  // kDebugInfoTraceCallRecords bit is set by ppc_translator.cc only when
+  // --milo_trace_enable is on AND this address is in the manifest set), so a
+  // non-traced function's prolog is byte-identical to baseline. At this point
+  // the context reg (rsi) still holds the live PPCContext* the C-call set up,
+  // and the prolog has already stored it to GUEST_CTX_HOME; the membase reg is
+  // not yet loaded, but MiloTraceOnEntry reads membase from the PPCContext
+  // field, not the register, so the ordering is safe. CallNativeSafe saves/
+  // restores all volatile regs except rax — and rax is dead here (the body
+  // begins after), so no save is needed (unlike the exit hook). The traced
+  // guest entry VA is passed as arg0.
+  if (debug_info_flags_ & DebugInfoFlags::kDebugInfoTraceCallRecords) {
+    CallNative(MiloTraceEntryTrampoline,
+               static_cast<uint64_t>(milo_trace_func_va_));
+  }
+
   // Load membase.
   mov(GetMembaseReg(),
       qword[GetContextReg() + offsetof(ppc::PPCContext, virtual_membase)]);
@@ -370,7 +396,58 @@ void X64Emitter::EmitGetCurrentThreadId() {
   mov(ax, word[GetContextReg() + offsetof(ppc::PPCContext, thread_id)]);
 }
 
-void X64Emitter::EmitTraceUserCallReturn() {}
+// ---------------------------------------------------------------------------
+// milo-trace (X6): SCALE JIT prologue/epilog capture hook.
+//
+// These two C-ABI trampolines match the CallNative(fn(void* raw_context,
+// uint64_t arg0)) signature (uint64_t return, like TrapDebugPrint). They forward
+// to the MiloTrace TU's OnEntry/OnExit thunks (declared void in milo_trace.h, so
+// we wrap rather than CallNative them directly). raw_context is the JIT context
+// register (rsi), which IS a PPCContext* whose first qword is the ThreadState*
+// (ppc_context.h: thread_state at +0x0) — exactly the ThreadState** the OnEntry/
+// OnExit thunks dereference. arg0 is the traced function's guest entry VA.
+//
+// Off-path functions never reach these: the X64Emitter only emits the
+// CallNative pair when debug_info_flags_ carries kDebugInfoTraceCallRecords,
+// which ppc_translator.cc sets ONLY for addresses in the milo-trace manifest
+// set. So a non-traced function's generated code is byte-identical to baseline.
+static uint64_t MiloTraceEntryTrampoline(void* raw_context, uint64_t address) {
+  MiloTraceOnEntry(raw_context, address);
+  return 0;
+}
+static uint64_t MiloTraceExitTrampoline(void* raw_context, uint64_t address) {
+  MiloTraceOnExit(raw_context, address);
+  return 0;
+}
+
+// Emitted at every function exit convergence point (the epilog, and each
+// direct/indirect/extern TAIL-call site — all of which route through here, so a
+// single implementation covers all three return forms). Only emits code for a
+// traced function. CallNativeSafe clobbers rax (the thunk does NOT save it) and
+// the context reg may not be the live context at the tail-call sites, so we:
+//   1. stash rax in the guest scratch slot (the tail-call target lives in rax),
+//   2. reload the context reg from its home slot so the thunk reads a valid
+//      PPCContext* (the prolog stored the live context there; it is never
+//      overwritten), then
+//   3. CallNative(OnExit, start_addr), then
+//   4. restore rax.
+// Using a stack scratch slot (not push/pop) keeps the 16-byte alignment
+// CallNativeSafe's thunk requires.
+void X64Emitter::EmitTraceUserCallReturn() {
+  if (!(debug_info_flags_ & DebugInfoFlags::kDebugInfoTraceCallRecords)) {
+    return;
+  }
+  uint32_t start_address = milo_trace_func_va_;
+  // Save rax (the resolved tail-call target) into the guest scratch region
+  // (rsp+32, 48b free per x64_stack_layout.h).
+  mov(qword[rsp + 32], rax);
+  // Reload the live context into the context reg so the guest_to_host_thunk
+  // hands MiloTraceOnExit a valid PPCContext* (== ThreadState** at +0).
+  mov(GetContextReg(), qword[rsp + StackLayout::GUEST_CTX_HOME]);
+  CallNative(MiloTraceExitTrampoline, static_cast<uint64_t>(start_address));
+  // Restore rax for the tail-call jmp(rax).
+  mov(rax, qword[rsp + 32]);
+}
 
 void X64Emitter::DebugBreak() {
   // TODO(benvanik): notify debugger.

@@ -10,6 +10,7 @@
 #include "xenia/cpu/function.h"
 
 #include "xenia/base/logging.h"
+#include "xenia/cpu/cpu_flags.h"
 #include "xenia/cpu/milo_trace.h"
 #include "xenia/cpu/symbol.h"
 #include "xenia/cpu/thread_state.h"
@@ -151,7 +152,19 @@ bool GuestFunction::Call(ThreadState* thread_state, uint32_t return_address) {
     // emits no extra code beyond the branch. CallImpl may re-enter Call() for
     // nested guest calls; the per-thread shadow stack in milo_trace.cc handles
     // arbitrary nesting (depth_hint = pending.size()).
-    const bool trace_wrap = MiloTraceIsActive();
+    //
+    // X6 disambiguation: when --milo_trace_enable is set, the SCALE JIT
+    // prologue/epilog hook (x64_emitter.cc, gated by kDebugInfoTraceCallRecords
+    // set in ppc_translator.cc) captures the SAME traced functions from INSIDE
+    // the JIT'd body that CallImpl jumps into. Wrapping here too would emit a
+    // DUPLICATE record per call (X2 outer + X6 inner, same func_va). So when an
+    // X6 capture session is enabled, X2 yields to it for any traced address —
+    // the JIT hook is the canonical, comprehensive path (it also reaches the
+    // JIT-inlined internal bl/bctrl calls that never go through Call(), which is
+    // exactly what X6 unblocks). The common no-session path is unchanged.
+    const bool x6_covers =
+        cvars::milo_trace_enable && MiloTraceShouldTrace(address_);
+    const bool trace_wrap = MiloTraceIsActive() && !x6_covers;
     const uint32_t trace_addr = address_;
     if (trace_wrap) {
       MiloTraceOnEntryCtx(thread_state->context(), trace_addr);
