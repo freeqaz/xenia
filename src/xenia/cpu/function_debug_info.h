@@ -29,6 +29,16 @@ enum DebugInfoFlags : uint32_t {
   kDebugInfoTraceFunctionReferences = (1 << 8) | kDebugInfoTraceFunctions,
   kDebugInfoTraceFunctionData = (1 << 9) | kDebugInfoTraceFunctions,
 
+  // milo-trace (X-track): when set on a function's debug info, the X6 SCALE JIT
+  // prologue/epilog hook emits CallNative(MiloTraceOnEntry/OnExit) for that
+  // function. Set by ppc_translator.cc when --milo_trace_enable is on and the
+  // address is in the traced set. NOTE: the X2 override-wrap proto hook in
+  // GuestFunction::Call does NOT consult this bit — it gates at runtime on
+  // MiloTraceIsActive()+MiloTraceShouldTrace(addr) — so the X5 activation seam
+  // (cvars + MiloTraceBegin) is sufficient to capture today; this bit is the
+  // X6-path gate only.
+  kDebugInfoTraceCallRecords = (1 << 10),
+
   kDebugInfoAllTracing =
       kDebugInfoTraceFunctions | kDebugInfoTraceFunctionCoverage |
       kDebugInfoTraceFunctionReferences | kDebugInfoTraceFunctionData,

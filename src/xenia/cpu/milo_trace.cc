@@ -107,6 +107,16 @@ struct MiloTraceState {
   std::unordered_set<uint32_t> traced;
   std::unordered_map<uint32_t, MiloTraceAddrConfig> addr_cfg;
   MiloTraceAddrConfig default_cfg;
+
+  // Registry of every live per-thread buffer, so MiloTraceEnd can drain ALL
+  // threads (not just the caller's). The guest runs on a different OS thread
+  // than the headless/UI thread that calls End — without this, that thread's
+  // sub-256 KB buffered records (i.e. an entire short boot run) are lost. Guarded
+  // by its own mutex (registration is off the per-call hot path; only at
+  // first-touch per thread). ThreadBuffers are intentionally leaked at thread
+  // exit (X6-era refinement to deregister + flush on thread teardown).
+  std::mutex registry_mutex;
+  std::unordered_set<ThreadBuffer*> live_buffers;
 };
 
 MiloTraceState& State() {
@@ -121,6 +131,11 @@ thread_local ThreadBuffer* tls_buffer = nullptr;
 ThreadBuffer* GetThreadBuffer() {
   if (!tls_buffer) {
     tls_buffer = new ThreadBuffer();
+    // Register so MiloTraceEnd can drain this thread's buffer even if End runs
+    // on a different thread. First-touch only — off the per-call hot path.
+    MiloTraceState& st = State();
+    std::lock_guard<std::mutex> reg(st.registry_mutex);
+    st.live_buffers.insert(tls_buffer);
   }
   return tls_buffer;
 }
@@ -163,17 +178,84 @@ bool IsGuestPointer(PPCContext* ctx, uint32_t va) {
   return true;  // heuristic fallback
 }
 
-// Copy `len` BE guest bytes at `va` into `out`. Returns false if unmapped.
+// How many of the `len` requested bytes starting at `va` are actually safe to
+// read — i.e. lie within the contiguous run of COMMITTED + readable guest pages
+// beginning at `va`. The X1 code read the whole requested window in one memcpy
+// after a single start-of-window IsGuestPointer() check; but a window straddling
+// the end of a heap region (classic for a Tier-A stack window `[sp-256, sp+512)`
+// whose low end falls below the thread's stack reservation, or a Tier-B node
+// near the top of an allocation) faults — the guest reservation is contiguous in
+// host VA but not all of it is committed/readable. Clamp to the mapped run so
+// memcpy never crosses into a guard/uncommitted page (the SIGSEGV fix that lets
+// real capture emit records). Returns 0 if `va` itself is not readable.
+uint32_t MappedReadableLen(PPCContext* ctx, uint32_t va, uint32_t len) {
+  if (len == 0) return 0;
+  if (va < kPtrLo || va > kPtrHi - len) {
+    // Fall back to a conservative per-region clamp below for in-range, but a
+    // wrap or absurd va is never readable.
+    if (va < kPtrLo) return 0;
+  }
+  if (!ctx->processor) {
+    // No heap map reachable (test/standalone). Trust the heuristic range but do
+    // not read past kPtrHi.
+    if (va >= kPtrHi) return 0;
+    uint32_t cap = kPtrHi - va;
+    return len < cap ? len : cap;
+  }
+  auto* memory = ctx->processor->memory();
+  if (!memory) {
+    if (va >= kPtrHi) return 0;
+    uint32_t cap = kPtrHi - va;
+    return len < cap ? len : cap;
+  }
+
+  uint32_t got = 0;
+  uint32_t cur = va;
+  // Walk contiguous identical-attribute regions, accumulating committed+readable
+  // bytes until we cover `len`, hit a non-readable region, or run out of heap.
+  while (got < len) {
+    BaseHeap* heap = memory->LookupHeap(cur);
+    if (!heap) break;
+    HeapAllocationInfo info{};
+    if (!heap->QueryRegionInfo(cur, &info)) break;
+    const bool committed = (info.state & kMemoryAllocationCommit) != 0;
+    const bool readable = (info.protect & kMemoryProtectRead) != 0;
+    if (!committed || !readable) break;
+    // CAREFUL: QueryRegionInfo sets info.base_address = the (possibly UNALIGNED)
+    // address we passed, but info.region_size is measured in whole pages from the
+    // page that CONTAINS that address. So the mapped run covers
+    // [page_floor(cur), page_floor(cur) + region_size); the readable bytes from
+    // `cur` itself are region_size minus the intra-page offset. Using
+    // base_address + region_size directly over-reports by that offset and walks
+    // straight off the end of a heap region into a guard page — the SIGSEGV.
+    const uint32_t page = heap->page_size();
+    const uint32_t page_floor = cur - (cur % page);
+    const uint32_t region_end = page_floor + info.region_size;
+    if (cur >= region_end) break;  // defensive (shouldn't happen)
+    uint32_t run = region_end - cur;
+    got += run;
+    cur = region_end;
+  }
+  return got < len ? got : len;
+}
+
+// Copy up to `len` BE guest bytes at `va` into `out`, clamped to the mapped run.
+// Returns false only if NOTHING at `va` is readable (so the caller skips the
+// node); a partial read is a success with a shorter `out` (the record records
+// the actual captured length, so a clamped window is still well-formed).
 bool ReadGuest(PPCContext* ctx, uint32_t va, uint32_t len,
                std::vector<uint8_t>& out) {
-  if (!IsGuestPointer(ctx, va)) return false;
-  out.resize(len);
-  std::memcpy(out.data(), GuestPtr(ctx, va), len);  // raw BE guest-native bytes
+  uint32_t safe = MappedReadableLen(ctx, va, len);
+  if (safe == 0) return false;
+  out.resize(safe);
+  std::memcpy(out.data(), GuestPtr(ctx, va), safe);  // raw BE guest-native bytes
   return true;
 }
 
 // Read a 32-bit big-endian guest word at `va` (for pointer-chase seeds).
+// Returns 0 if the 4 bytes are not all readable (so it never faults).
 uint32_t ReadGuestBE32(PPCContext* ctx, uint32_t va) {
+  if (MappedReadableLen(ctx, va, 4) < 4) return 0;
   const uint8_t* p = GuestPtr(ctx, va);
   return (uint32_t(p[0]) << 24) | (uint32_t(p[1]) << 16) |
          (uint32_t(p[2]) << 8) | uint32_t(p[3]);
@@ -364,6 +446,9 @@ void AppendWritesSection(std::vector<uint8_t>& b, PPCContext* ctx,
     // Re-read the post image at the same VA.
     std::vector<uint8_t> post;
     if (!ReadGuest(ctx, node.base, n, post)) continue;
+    // ReadGuest clamps to the mapped run, so the post image may be shorter than
+    // the entry snapshot (e.g. the stack contracted). Only diff the overlap.
+    if (post.size() < n) n = static_cast<uint32_t>(post.size());
     // Walk for contiguous changed runs.
     uint32_t j = 0;
     while (j < n) {
@@ -576,10 +661,18 @@ void MiloTraceEnd(const char* reason) {
   std::lock_guard<std::mutex> lock(st.mutex);
   if (!st.active.load(std::memory_order_acquire)) return;
 
-  // NOTE: per-thread buffers belonging to threads that already exited are lost;
-  // active threads flush on their next OnExit. A whole-process drain on shutdown
-  // is an X6-era refinement (a registry of live ThreadBuffers).
-  if (tls_buffer) FlushThreadBufferLocked(st, tls_buffer);
+  // Drain EVERY live per-thread buffer (the guest thread that produced the
+  // records is almost never the thread calling End). Records are flushed at a
+  // 256 KB threshold during the run, so a short capture (an entire boot run)
+  // typically sits entirely unflushed in the guest thread's buffer until here.
+  // Buffers belonging to threads that exited before End are still drained
+  // (ThreadBuffers are leaked, not freed, at thread teardown).
+  {
+    std::lock_guard<std::mutex> reg(st.registry_mutex);
+    for (ThreadBuffer* tb : st.live_buffers) {
+      FlushThreadBufferLocked(st, tb);
+    }
+  }
 
   if (st.file.is_open()) {
     st.file.flush();

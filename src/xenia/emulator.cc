@@ -43,6 +43,7 @@
 #include "xenia/cpu/backend/code_cache.h"
 #include "xenia/cpu/backend/null_backend.h"
 #include "xenia/cpu/cpu_flags.h"
+#include "xenia/cpu/milo_trace.h"
 #include "xenia/cpu/thread_state.h"
 #include "xenia/dc3_hack_pack.h"
 #include "xenia/dc3_nui_patch_resolver.h"
@@ -1930,6 +1931,7 @@ X_STATUS Emulator::TerminateTitle() {
     processor_->ClearGuestFunctionOverrides();
   }
   Dc3RuntimeTelemetryEndSession("terminate_title");
+  cpu::MiloTraceEnd("terminate_title");
   kernel_state_->TerminateTitle();
   title_id_ = std::nullopt;
   title_name_ = "";
@@ -1940,6 +1942,7 @@ X_STATUS Emulator::TerminateTitle() {
 
 X_STATUS Emulator::LaunchPath(const std::filesystem::path& path) {
   Dc3RuntimeTelemetryEndSession("launch_path_reset");
+  cpu::MiloTraceEnd("launch_path_reset");
   if (processor_) {
     processor_->ClearGuestFunctionOverrides();
   }
@@ -2605,6 +2608,33 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
         display_window_->SetIcon(icon_block.buffer, icon_block.size);
 #endif
       }
+    }
+  }
+
+  // milo-trace (X-track) capture-session activation (X5). Driven purely by the
+  // --milo_trace_* cvars so it works for ANY title (dc3 validation ground truth
+  // AND rb3-xenon discovery), independent of the DC3-specific NUI-patch block
+  // below. Opened here — after the module is loaded and title_id_ is known, but
+  // before the title's main guest code runs — so the GuestFunction::Call
+  // override-wrap hook (X2) is live for every traced call. MiloTraceBegin is a
+  // no-op (leaves IsActive()==false) when out_path is empty, so the common
+  // no-flag path costs nothing.
+  if (cvars::milo_trace_enable && !cvars::milo_trace_out.empty()) {
+    cpu::MiloTraceConfig milo_config;
+    milo_config.title_id =
+        title_id_.has_value() ? fmt::format("{:08X}", title_id_.value()) : "";
+    milo_config.out_path = cvars::milo_trace_out;
+    milo_config.manifest_path = cvars::milo_trace_manifest;
+    milo_config.target_sha1 = "";  // provenance; filled in a later task
+    milo_config.arch = 2;          // ppc-xenon
+    milo_config.capture_method = 3;  // xenia_override (the X2 Call-hook path)
+    cpu::MiloTraceBegin(milo_config);
+    if (cpu::MiloTraceIsActive()) {
+      XELOGI("milo-trace: session active for title {} -> '{}'",
+             milo_config.title_id, milo_config.out_path);
+    } else {
+      XELOGW("milo-trace: --milo_trace_enable set but session did not open "
+             "(out='{}')", milo_config.out_path);
     }
   }
 

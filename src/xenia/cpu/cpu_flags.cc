@@ -30,6 +30,25 @@ DEFINE_bool(trace_function_references, false,
 DEFINE_bool(trace_function_data, false,
             "Generate tracing for function result data.", "CPU");
 
+// milo-trace (X-track) capture-session activation. When --milo_trace_enable is
+// set AND --milo_trace_out names a path, a MiloTraceBegin() session is opened at
+// title launch and the GuestFunction::Call override-wrap hook (X2) emits .mtr
+// records for every traced address. --milo_trace_manifest is the JSON address
+// manifest (empty => trace every guest call). Mirrors the trace_functions family.
+DEFINE_bool(milo_trace_enable, false,
+            "milo-trace: open a capture session at title launch (X-track). "
+            "Requires --milo_trace_out. Emits per-call .mtr records via the "
+            "GuestFunction::Call override-wrap hook.",
+            "CPU");
+DEFINE_string(milo_trace_manifest, "",
+              "milo-trace: path to the JSON address manifest (traced addresses "
+              "+ per-addr mem windows). Empty => trace every guest call.",
+              "CPU");
+DEFINE_string(milo_trace_out, "",
+              "milo-trace: output .mtr path. Ignored unless "
+              "--milo_trace_enable=true.",
+              "CPU");
+
 DEFINE_bool(
     disable_global_lock, false,
     "Disables global lock usage in guest code. Does not affect host code.",

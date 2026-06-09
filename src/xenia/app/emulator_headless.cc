@@ -40,6 +40,7 @@
 #include "xenia/cpu/backend/code_cache.h"
 #include "xenia/cpu/debug_listener.h"
 #include "xenia/cpu/function.h"
+#include "xenia/cpu/milo_trace.h"
 #include "xenia/cpu/processor.h"
 #include "xenia/cpu/ppc/ppc_context.h"
 #include "xenia/dc3_runtime_telemetry.h"
@@ -993,6 +994,7 @@ void EmulatorHeadless::EmulatorThread(std::filesystem::path launch_path) {
 
   xe::Dc3RuntimeTelemetryRecordBootMilestone("emulator_thread_finished");
   xe::Dc3RuntimeTelemetryEndSession("emulator_thread_finished");
+  xe::cpu::MiloTraceEnd("emulator_thread_finished");
   XELOGI("Emulator thread finished");
 }
 
@@ -1016,6 +1018,7 @@ void EmulatorHeadless::RunWithTimeout(int32_t timeout_ms) {
       XELOGI("Timeout of {}ms reached, terminating...", timeout_ms);
       xe::Dc3RuntimeTelemetryRecordBootMilestone("headless_timeout_reached");
       xe::Dc3RuntimeTelemetryEndSession("headless_timeout", timeout_ms);
+      xe::cpu::MiloTraceEnd("headless_timeout");
       std::cout << "TIMEOUT: " << timeout_ms << "ms reached" << std::endl;
       // Use _exit to avoid assertion failures during cleanup
       // The emulator thread is stuck in WaitUntilExit() and can't be cleanly joined

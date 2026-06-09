@@ -22,6 +22,11 @@ DECLARE_bool(trace_function_coverage);
 DECLARE_bool(trace_function_references);
 DECLARE_bool(trace_function_data);
 
+// milo-trace (X-track) capture-session activation.
+DECLARE_bool(milo_trace_enable);
+DECLARE_string(milo_trace_manifest);
+DECLARE_string(milo_trace_out);
+
 DECLARE_bool(disable_global_lock);
 
 DECLARE_bool(validate_hir);
