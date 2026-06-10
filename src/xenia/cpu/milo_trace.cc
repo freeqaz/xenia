@@ -122,6 +122,14 @@ struct PendingRecord {
   // consumer routes it correctly.
   bool tail_exit = false;
 
+  // X7 (tail-CALLS oracle): on a TAIL bctr exit, the resolved tail-callee VA
+  // (ctx->ctr at the bctr). The function's single outbound call is the tail call
+  // itself; we emit a CALLS entry for this target carrying the args-to-tail-
+  // callee (r3..r10, f1..f13 at the bctr, from regs_out) + the function's own
+  // captured write delta (mem_writes attributable to it before the handoff). 0
+  // when not a tail exit or the tail target is not a plausible code pointer.
+  uint32_t tail_target_va = 0;
+
   // X6-capture-fix (DEEPER CAPTURE): the Tier-B chase hit a node/byte budget, so
   // the read graph may be incomplete (=> MTR_MF_TRUNCATED).
   bool truncated_chase = false;
@@ -575,16 +583,19 @@ void AppendMemNodeSection(std::vector<uint8_t>& b, const CaptureNode& n) {
   PutBytes(b, n.data.data(), n.data.size());
 }
 
-// Method-A write delta: diff each captured interval pre vs post. Emits one
-// WRITES section with the changed spans (kind=0 snapshot). schema §2.5.
-void AppendWritesSection(std::vector<uint8_t>& b, PPCContext* ctx,
-                         const PendingRecord& rec, bool& any_writes) {
-  // First collect the changed spans so we can emit the count prefix.
-  struct Span {
-    uint32_t addr;
-    std::vector<uint8_t> bytes;
-  };
-  std::vector<Span> spans;
+// A contiguous changed span in a captured interval (the Method-A write delta).
+struct WriteSpan {
+  uint32_t addr;
+  std::vector<uint8_t> bytes;
+};
+
+// Method-A write delta: diff each captured interval pre vs post, returning the
+// changed spans (kind=0 snapshot). schema §2.5. Shared by AppendWritesSection
+// (the mem_out delta) and the X7 tail-CALLS entry (the tail call's attributable
+// mem_writes), so the two never disagree about what the function wrote.
+std::vector<WriteSpan> ComputeWriteSpans(PPCContext* ctx,
+                                         const PendingRecord& rec) {
+  std::vector<WriteSpan> spans;
   for (size_t i = 0; i < rec.nodes.size(); ++i) {
     const CaptureNode& node = rec.nodes[i];
     const std::vector<uint8_t>& pre = rec.pre_snapshot[i];
@@ -601,7 +612,7 @@ void AppendWritesSection(std::vector<uint8_t>& b, PPCContext* ctx,
       if (post[j] != pre[j]) {
         uint32_t start = j;
         while (j < n && post[j] != pre[j]) ++j;
-        Span s;
+        WriteSpan s;
         s.addr = node.base + start;
         s.bytes.assign(post.begin() + start, post.begin() + j);
         spans.push_back(std::move(s));
@@ -610,6 +621,16 @@ void AppendWritesSection(std::vector<uint8_t>& b, PPCContext* ctx,
       }
     }
   }
+  return spans;
+}
+
+// Method-A write delta: emit one WRITES section from precomputed changed spans
+// (kind=0 snapshot). schema §2.5. The caller (SerializeRecord) computes the
+// spans once via ComputeWriteSpans so the X7 tail-CALLS entry reuses the SAME
+// delta.
+void AppendWritesSection(std::vector<uint8_t>& b, const PendingRecord& rec,
+                         const std::vector<WriteSpan>& spans, bool& any_writes) {
+  (void)rec;
   if (spans.empty()) {
     any_writes = false;
     return;
@@ -632,28 +653,94 @@ void AppendWritesSection(std::vector<uint8_t>& b, PPCContext* ctx,
   PutBytes(b, payload.data(), payload.size());
 }
 
+// Emit one CALLS entry header (mtr_call_hdr_t: src_offset u32, target_va u32,
+// arg_mask u16, ret_mask u8, nwrites u8 == "<IIHBB", 12 bytes). The variable
+// args/ret/writes that follow are gated by the masks (schema §3.5).
+void PutCallHeaderOnly(std::vector<uint8_t>& payload, uint32_t src_offset,
+                       uint32_t target_va) {
+  PutU32(payload, src_offset);
+  PutU32(payload, target_va);
+  PutU16(payload, 0);  // arg_mask (no args captured)
+  PutU8(payload, 0);   // ret_mask (no ret captured)
+  PutU8(payload, 0);   // nwrites
+}
+
+// X7: emit the tail-CALLS entry — a full CallEdge for a TAIL bctr's resolved
+// tail-callee. arg_mask covers r3..r10 (bits 0..7) + f1..f8 (bits 8..15); the
+// args are the args-to-tail-callee at the bctr (== regs_out, the X6 entry-pin
+// snapshot at the tail site). nwrites carries the function's own captured write
+// delta (the member store a setter performed before the handoff). Encoded EXACTLY
+// per schema §3.5 (codec.py _pack_one_call): header, then present GPR args (u32
+// in reg order), present FPR args (u64 in reg order), then ret (none here), then
+// nwrites WRITES entries.
+//
+// FPR arg width: arg_mask is u16, so the high byte (bits 8..15) carries f-args —
+// i.e. f1..f8 (the codec's _CALL_FPR_ARGS is masked to this 8-bit window). A
+// PPC32 setter passes its float in f1, well inside this set, so capturing
+// f1..f8 covers every member-setter tail handoff.
+void PutTailCallEntry(std::vector<uint8_t>& payload, uint32_t target_va,
+                      const mtr_regs_t& regs_out,
+                      const std::vector<WriteSpan>& spans) {
+  // arg_mask: r3..r10 -> bits 0..7 (the full int arg set at the bctr); f1..f8 ->
+  // bits 8..15. We mark the full representable ABI arg set present so the
+  // consumer's tail oracle has the args-to-tail-callee register file.
+  uint16_t arg_mask = 0;
+  for (int i = 0; i < 8; ++i) arg_mask |= static_cast<uint16_t>(1u << i);
+  for (int i = 0; i < 8; ++i) arg_mask |= static_cast<uint16_t>(1u << (8 + i));
+
+  uint8_t nwrites = static_cast<uint8_t>(
+      spans.size() > 0xFF ? 0xFF : spans.size());
+
+  PutU32(payload, 0);          // src_offset (the tail handoff is at the bctr)
+  PutU32(payload, target_va);  // RESOLVED tail-callee VA (ctx->ctr at the bctr)
+  PutU16(payload, arg_mask);
+  PutU8(payload, 0);           // ret_mask (the tail-callee's ret is its own, not
+                               //  observed at the handoff — none captured)
+  PutU8(payload, nwrites);
+
+  // GPR args r3..r10 (u32), in reg order (bit order).
+  for (int reg = 3; reg <= 10; ++reg) {
+    PutU32(payload, regs_out.gpr[reg]);
+  }
+  // FPR args f1..f8 (raw u64), in reg order.
+  for (int reg = 1; reg <= 8; ++reg) {
+    PutU64(payload, regs_out.fpr[reg]);
+  }
+  // No ret regs (ret_mask == 0).
+  // WRITES: mtr_write_entry_t {addr u32, len u16, kind u8, _pad u8} + data[len].
+  for (uint8_t i = 0; i < nwrites; ++i) {
+    const WriteSpan& s = spans[i];
+    PutU32(payload, s.addr);
+    PutU16(payload, static_cast<uint16_t>(s.bytes.size()));
+    PutU8(payload, 0);  // kind = snapshot
+    PutU8(payload, 0);  // _pad
+    PutBytes(payload, s.bytes.data(), s.bytes.size());
+  }
+}
+
 // CALLS section (the outbound-call oracle, schema §2.6 / §3.5). X6 populates a
-// real DYNAMIC outbound-call list — one CallEdge per traced callee observed
-// while this frame was active — but only its target_va is known from the
-// prologue/epilog shadow stack. The per-call args/ret/mem_writes (the full
-// replay oracle mode (b) needs) require per-bl/bctrl instrumentation (X7), so
-// each CallEdge here is the 12-byte header only (arg_mask=0, ret_mask=0,
-// nwrites=0). This is byte-identical to a codec CallEdge with empty
-// args/ret/mem_writes (see codec.py _pack_one_call), so it round-trips, and the
-// target_va list is directly usable for discovery's dyn_call_edges. Returns
-// true iff a section was emitted.
-bool AppendCallsSection(std::vector<uint8_t>& b, const PendingRecord& rec) {
-  if (rec.outbound_calls.empty()) return false;
+// real DYNAMIC outbound-call list — one header-only CallEdge per traced callee
+// observed while this frame was active (only target_va known from the shadow
+// stack). X7 additionally synthesizes a FULL tail-CALLS entry on a TAIL bctr
+// exit: the resolved tail target (ctx->ctr) + the args-to-tail-callee (regs_out)
+// + the function's own write delta, so a setter that tail-calls through the
+// vtable carries its single outbound call (calls>=1 on a TAIL record, vs the old
+// calls=0). The tail entry is emitted LAST (it IS the function's terminal
+// outbound branch). Returns true iff a section was emitted.
+bool AppendCallsSection(std::vector<uint8_t>& b, const PendingRecord& rec,
+                        const mtr_regs_t& regs_out,
+                        const std::vector<WriteSpan>& spans) {
+  const bool emit_tail = rec.tail_exit && rec.tail_target_va != 0;
+  if (rec.outbound_calls.empty() && !emit_tail) return false;
+  uint32_t count = static_cast<uint32_t>(rec.outbound_calls.size()) +
+                   (emit_tail ? 1u : 0u);
   std::vector<uint8_t> payload;
-  PutU32(payload, static_cast<uint32_t>(rec.outbound_calls.size()));
+  PutU32(payload, count);
   for (uint32_t target_va : rec.outbound_calls) {
-    // mtr_call_hdr_t: src_offset u32, target_va u32, arg_mask u16, ret_mask u8,
-    // nwrites u8 (== "<IIHBB", 12 bytes). No trailing args/ret/writes.
-    PutU32(payload, 0);          // src_offset (unknown without bl-site capture)
-    PutU32(payload, target_va);  // RESOLVED callee VA (the traced child's entry)
-    PutU16(payload, 0);          // arg_mask (no args captured)
-    PutU8(payload, 0);           // ret_mask (no ret captured)
-    PutU8(payload, 0);           // nwrites
+    PutCallHeaderOnly(payload, /*src_offset=*/0, target_va);
+  }
+  if (emit_tail) {
+    PutTailCallEntry(payload, rec.tail_target_va, regs_out, spans);
   }
   AppendSectionPrefix(b, MTR_SEC_CALLS, 0,
                       static_cast<uint32_t>(payload.size()));
@@ -727,15 +814,20 @@ void SerializeRecord(std::vector<uint8_t>& out, PPCContext* ctx,
     ++section_count;
   }
 
-  // WRITES (mem_out delta, Method A).
+  // WRITES (mem_out delta, Method A). Compute the changed spans ONCE so the
+  // CALLS section's X7 tail entry reuses the SAME delta (they must not disagree
+  // about what the function wrote).
+  std::vector<WriteSpan> write_spans = ComputeWriteSpans(ctx, rec);
   bool any_writes = false;
-  AppendWritesSection(sections, ctx, rec, any_writes);
+  AppendWritesSection(sections, rec, write_spans, any_writes);
   if (any_writes) ++section_count;
   // Method A => scoped, so MTR_MF_WRITES_COMPLETE stays clear.
 
-  // CALLS (X6 outbound-call oracle — target_va list, dynamic). Populates the
-  // calls[] axis for non-leaf records, which the override-wrap path left empty.
-  if (AppendCallsSection(sections, rec)) ++section_count;
+  // CALLS (X6 outbound-call oracle — target_va list, dynamic — plus the X7 tail-
+  // CALLS entry on a TAIL bctr exit). Populates the calls[] axis for non-leaf
+  // records (which the override-wrap path left empty) AND the single outbound
+  // tail call for a vtable-tail-calling setter (X7).
+  if (AppendCallsSection(sections, rec, regs_out, write_spans)) ++section_count;
 
   // ACCESS_LOG (X6-capture-fix Tier C — observed (va,size,is_write) reads/writes
   // during the call). Present only for exact_mem records.
@@ -984,6 +1076,21 @@ void MiloTraceFinishExit(PPCContext* ctx, uint32_t start_addr, bool tail) {
     // Mismatched pairing; the record is still emitted with its captured entry.
   }
   rec.tail_exit = tail;
+
+  // X7 (tail-CALLS oracle): on a TAIL bctr exit, the resolved tail-callee VA is
+  // ctx->ctr (the bctr branches to CTR). The emitter pins this thunk at the tail
+  // site (EmitTraceUserCallReturn(is_tail=true)) right before the bctr's
+  // jmp(rax), so ctx->ctr already holds the resolved guest target of the indirect
+  // tail (the vtable-slot value a setter loaded into CTR). Record it only when it
+  // is a plausible code pointer; AppendCallsSection then emits the single
+  // outbound tail call (target_va = this CTR) carrying the args-to-tail-callee
+  // (regs_out) + the function's own write delta.
+  if (tail) {
+    uint32_t resolved = static_cast<uint32_t>(ctx->ctr);
+    if (resolved >= kPtrLo && resolved < kPtrHi && (resolved & 0x3u) == 0) {
+      rec.tail_target_va = resolved;
+    }
+  }
 
   // X6-capture-fix (DEEPER CAPTURE / Tier C): fold the observed reads into the
   // captured node set BEFORE the post-image diff, so a member-deref page the
