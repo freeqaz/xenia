@@ -2628,6 +2628,7 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
     milo_config.target_sha1 = "";  // provenance; filled in a later task
     milo_config.arch = 2;          // ppc-xenon
     milo_config.capture_method = 3;  // xenia_override (the X2 Call-hook path)
+    milo_config.exact_mem = cvars::milo_trace_exact_mem;  // X6-capture-fix
     cpu::MiloTraceBegin(milo_config);
     if (cpu::MiloTraceIsActive()) {
       XELOGI("milo-trace: session active for title {} -> '{}'",

@@ -763,6 +763,7 @@ struct LOAD_I8 : Sequence<LOAD_I8, I<OPCODE_LOAD, I8Op, I64Op>> {
       e.lea(e.GetNativeParam(0), e.ptr[addr]);
       e.CallNative(reinterpret_cast<void*>(TraceMemoryLoadI8));
     }
+    if (e.IsMiloExactMem()) e.EmitMiloMemAccess(addr, 1, 0);
   }
 };
 struct LOAD_I16 : Sequence<LOAD_I16, I<OPCODE_LOAD, I16Op, I64Op>> {
@@ -783,6 +784,7 @@ struct LOAD_I16 : Sequence<LOAD_I16, I<OPCODE_LOAD, I16Op, I64Op>> {
       e.lea(e.GetNativeParam(0), e.ptr[addr]);
       e.CallNative(reinterpret_cast<void*>(TraceMemoryLoadI16));
     }
+    if (e.IsMiloExactMem()) e.EmitMiloMemAccess(addr, 2, 0);
   }
 };
 struct LOAD_I32 : Sequence<LOAD_I32, I<OPCODE_LOAD, I32Op, I64Op>> {
@@ -803,6 +805,7 @@ struct LOAD_I32 : Sequence<LOAD_I32, I<OPCODE_LOAD, I32Op, I64Op>> {
       e.lea(e.GetNativeParam(0), e.ptr[addr]);
       e.CallNative(reinterpret_cast<void*>(TraceMemoryLoadI32));
     }
+    if (e.IsMiloExactMem()) e.EmitMiloMemAccess(addr, 4, 0);
   }
 };
 struct LOAD_I64 : Sequence<LOAD_I64, I<OPCODE_LOAD, I64Op, I64Op>> {
@@ -823,6 +826,7 @@ struct LOAD_I64 : Sequence<LOAD_I64, I<OPCODE_LOAD, I64Op, I64Op>> {
       e.lea(e.GetNativeParam(0), e.ptr[addr]);
       e.CallNative(reinterpret_cast<void*>(TraceMemoryLoadI64));
     }
+    if (e.IsMiloExactMem()) e.EmitMiloMemAccess(addr, 8, 0);
   }
 };
 struct LOAD_F32 : Sequence<LOAD_F32, I<OPCODE_LOAD, F32Op, I64Op>> {
@@ -837,6 +841,7 @@ struct LOAD_F32 : Sequence<LOAD_F32, I<OPCODE_LOAD, F32Op, I64Op>> {
       e.lea(e.GetNativeParam(0), e.ptr[addr]);
       e.CallNative(reinterpret_cast<void*>(TraceMemoryLoadF32));
     }
+    if (e.IsMiloExactMem()) e.EmitMiloMemAccess(addr, 4, 0);
   }
 };
 struct LOAD_F64 : Sequence<LOAD_F64, I<OPCODE_LOAD, F64Op, I64Op>> {
@@ -851,6 +856,7 @@ struct LOAD_F64 : Sequence<LOAD_F64, I<OPCODE_LOAD, F64Op, I64Op>> {
       e.lea(e.GetNativeParam(0), e.ptr[addr]);
       e.CallNative(reinterpret_cast<void*>(TraceMemoryLoadF64));
     }
+    if (e.IsMiloExactMem()) e.EmitMiloMemAccess(addr, 8, 0);
   }
 };
 struct LOAD_V128 : Sequence<LOAD_V128, I<OPCODE_LOAD, V128Op, I64Op>> {
@@ -867,6 +873,7 @@ struct LOAD_V128 : Sequence<LOAD_V128, I<OPCODE_LOAD, V128Op, I64Op>> {
       e.lea(e.GetNativeParam(0), e.ptr[addr]);
       e.CallNative(reinterpret_cast<void*>(TraceMemoryLoadV128));
     }
+    if (e.IsMiloExactMem()) e.EmitMiloMemAccess(addr, 16, 0);
   }
 };
 EMITTER_OPCODE_TABLE(OPCODE_LOAD, LOAD_I8, LOAD_I16, LOAD_I32, LOAD_I64,
@@ -889,6 +896,10 @@ struct STORE_I8 : Sequence<STORE_I8, I<OPCODE_STORE, VoidOp, I64Op, I8Op>> {
       e.mov(e.GetNativeParam(1).cvt8(), e.byte[addr]);
       e.lea(e.GetNativeParam(0), e.ptr[addr]);
       e.CallNative(reinterpret_cast<void*>(TraceMemoryStoreI8));
+    }
+    if (e.IsMiloExactMem()) {
+      addr = ComputeMemoryAddress(e, i.src1);
+      e.EmitMiloMemAccess(addr, 1, 1);
     }
   }
 };
@@ -915,6 +926,10 @@ struct STORE_I16 : Sequence<STORE_I16, I<OPCODE_STORE, VoidOp, I64Op, I16Op>> {
       e.lea(e.GetNativeParam(0), e.ptr[addr]);
       e.CallNative(reinterpret_cast<void*>(TraceMemoryStoreI16));
     }
+    if (e.IsMiloExactMem()) {
+      addr = ComputeMemoryAddress(e, i.src1);
+      e.EmitMiloMemAccess(addr, 2, 1);
+    }
   }
 };
 struct STORE_I32 : Sequence<STORE_I32, I<OPCODE_STORE, VoidOp, I64Op, I32Op>> {
@@ -939,6 +954,10 @@ struct STORE_I32 : Sequence<STORE_I32, I<OPCODE_STORE, VoidOp, I64Op, I32Op>> {
       e.mov(e.GetNativeParam(1).cvt32(), e.dword[addr]);
       e.lea(e.GetNativeParam(0), e.ptr[addr]);
       e.CallNative(reinterpret_cast<void*>(TraceMemoryStoreI32));
+    }
+    if (e.IsMiloExactMem()) {
+      addr = ComputeMemoryAddress(e, i.src1);
+      e.EmitMiloMemAccess(addr, 4, 1);
     }
   }
 };
@@ -965,6 +984,10 @@ struct STORE_I64 : Sequence<STORE_I64, I<OPCODE_STORE, VoidOp, I64Op, I64Op>> {
       e.lea(e.GetNativeParam(0), e.ptr[addr]);
       e.CallNative(reinterpret_cast<void*>(TraceMemoryStoreI64));
     }
+    if (e.IsMiloExactMem()) {
+      addr = ComputeMemoryAddress(e, i.src1);
+      e.EmitMiloMemAccess(addr, 8, 1);
+    }
   }
 };
 struct STORE_F32 : Sequence<STORE_F32, I<OPCODE_STORE, VoidOp, I64Op, F32Op>> {
@@ -986,6 +1009,10 @@ struct STORE_F32 : Sequence<STORE_F32, I<OPCODE_STORE, VoidOp, I64Op, F32Op>> {
       e.lea(e.GetNativeParam(0), e.ptr[addr]);
       e.CallNative(reinterpret_cast<void*>(TraceMemoryStoreF32));
     }
+    if (e.IsMiloExactMem()) {
+      addr = ComputeMemoryAddress(e, i.src1);
+      e.EmitMiloMemAccess(addr, 4, 1);
+    }
   }
 };
 struct STORE_F64 : Sequence<STORE_F64, I<OPCODE_STORE, VoidOp, I64Op, F64Op>> {
@@ -1006,6 +1033,10 @@ struct STORE_F64 : Sequence<STORE_F64, I<OPCODE_STORE, VoidOp, I64Op, F64Op>> {
       e.lea(e.GetNativeParam(1), e.ptr[addr]);
       e.lea(e.GetNativeParam(0), e.ptr[addr]);
       e.CallNative(reinterpret_cast<void*>(TraceMemoryStoreF64));
+    }
+    if (e.IsMiloExactMem()) {
+      addr = ComputeMemoryAddress(e, i.src1);
+      e.EmitMiloMemAccess(addr, 8, 1);
     }
   }
 };
@@ -1030,6 +1061,10 @@ struct STORE_V128
       e.lea(e.GetNativeParam(1), e.ptr[addr]);
       e.lea(e.GetNativeParam(0), e.ptr[addr]);
       e.CallNative(reinterpret_cast<void*>(TraceMemoryStoreV128));
+    }
+    if (e.IsMiloExactMem()) {
+      addr = ComputeMemoryAddress(e, i.src1);
+      e.EmitMiloMemAccess(addr, 16, 1);
     }
   }
 };

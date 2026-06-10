@@ -26,6 +26,7 @@
 #include "xenia/cpu/milo_trace.h"
 
 #include <atomic>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -58,6 +59,22 @@ constexpr int kMaxChaseDepth = 3;
 constexpr int kMaxChaseNodes = 64;
 constexpr uint32_t kMaxChaseBytes = 8192;
 constexpr uint32_t kNodeWindow = 256;
+
+// X6-capture-fix (DEEPER CAPTURE): widened budgets used when a record is in
+// EXACT-MEM mode (--milo_trace_exact_mem or a per-addr "exact_mem":true). The
+// frozen budgets above were too shallow to close a member-deref read graph
+// (SetSpeed/SetPan-class). schema.md §2.3 allows a per-capture-wider chase; the
+// node's own base/len record the actual window so the reader never assumes.
+//
+// NOTE on DEPTH: in exact mode the precise read graph is closed by the Tier-C
+// ACCESS_LOG (CaptureObservedReads folds in the EXACT addresses the function
+// read), NOT by a deeper blind BFS. A deeper BFS just follows more FALSE pointers
+// (random stack words that look mapped) and exhausts the node budget on noise —
+// so depth stays at the frozen 3; only the node/byte ceilings widen, to leave
+// room for the observed-read windows the access log adds.
+constexpr int kMaxChaseDepthExact = 3;
+constexpr int kMaxChaseNodesExact = 128;
+constexpr uint32_t kMaxChaseBytesExact = 49152;  // 48 KB (room for observed reads)
 
 // Heuristic mapped-range pointer test (GDB-style fallback bounds, schema §2.3
 // step 2). Xenia's real test is memory()->LookupHeap(addr); we also use that.
@@ -93,7 +110,41 @@ struct PendingRecord {
   // complete guest call list; with a manifest gate it covers only traced
   // callees.
   std::vector<uint32_t> outbound_calls;
+
+  // X6-capture-fix (DEEPER CAPTURE): this record is in EXACT-MEM mode (wider
+  // Tier-B chase + Tier-C ACCESS_LOG). Set from MiloTraceConfig.exact_mem or a
+  // per-addr cfg.exact_mem.
+  bool exact_mem = false;
+
+  // X6-capture-fix (ENTRY-PIN): the frame exited via a TAIL-call (the function
+  // jumps away mid-frame), so regs_out is the args-to-tail-callee state, not a
+  // clean return. The record is tagged with a `TAIL:` NOTE so the replay
+  // consumer routes it correctly.
+  bool tail_exit = false;
+
+  // X6-capture-fix (DEEPER CAPTURE): the Tier-B chase hit a node/byte budget, so
+  // the read graph may be incomplete (=> MTR_MF_TRUNCATED).
+  bool truncated_chase = false;
+
+  // X6-capture-fix (DEEPER CAPTURE / Tier C): the actual guest memory accesses
+  // the traced call performed, as (va, size, is_write) entries — populated by
+  // the per-load/store JIT instrumentation (MiloTraceMemAccess) only when
+  // exact_mem is on. Drives ACCESS_LOG (schema §2.3 Tier C / §3.2 type 10): it
+  // tells replay EXACTLY which addresses were read, so an under-capture is loud
+  // (DECISION D1) instead of silently matching, and a deferred pass captures the
+  // read-region windows the heuristic chase missed.
+  struct Access {
+    uint32_t va;
+    uint8_t size;
+    uint8_t is_write;
+  };
+  std::vector<Access> access_log;
 };
+
+// Cap the per-record access log so a long-running traced function (a hot loop)
+// cannot grow it without bound. 8192 entries ~ 64 KB/record, plenty to close a
+// setter/getter read graph; truncation sets MTR_MF_TRUNCATED.
+constexpr size_t kMaxAccessLog = 8192;
 
 // Per-thread shadow stack of pending records (nested calls) + an output buffer.
 struct ThreadBuffer {
@@ -175,8 +226,17 @@ uint8_t* GuestPtr(PPCContext* ctx, uint32_t guest_va) {
 
 // Is `va` a plausible, mapped guest pointer? Prefer the real heap map; fall back
 // to the heuristic range when no processor/memory is reachable.
+//
+// X6-capture-fix (DEEPER CAPTURE — precision): require 4-byte alignment. Every
+// real Xenon guest object / vtable / code pointer is at least word-aligned; the
+// chase's FALSE positives were overwhelmingly UNALIGNED ASCII stack words
+// ("DOS ", "METI", 0x41879026) that happened to land in a huge mapped region and
+// got chased as objects — flooding the node budget with garbage that masked the
+// real read graph. Rejecting unaligned values keeps every legitimate pointer and
+// drops the noise. (A misaligned datum is never a Milo object base.)
 bool IsGuestPointer(PPCContext* ctx, uint32_t va) {
   if (va < kPtrLo || va >= kPtrHi) return false;
+  if (va & 0x3u) return false;  // real guest pointers are word-aligned
   if (ctx->processor) {
     auto* memory = ctx->processor->memory();
     if (memory) {
@@ -338,13 +398,53 @@ void CaptureStackWindow(PPCContext* ctx, const MiloTraceAddrConfig& cfg,
   rec.nodes.push_back(std::move(node));
 }
 
+// Add `va` (window [va, va+want)) as a chased node if it is a live pointer and
+// not already covered. Returns true iff a node was added. Sets the vtable hint.
+// Shared by the entry chase and the X6-capture-fix exit-time read-region capture.
+bool MaybeAddChaseNode(PPCContext* ctx, PendingRecord& rec, uint32_t va,
+                       uint32_t want, uint32_t& total_bytes,
+                       uint32_t max_bytes) {
+  if (total_bytes >= max_bytes) return false;
+  for (const auto& n : rec.nodes) {
+    if (va >= n.base && va < n.base + static_cast<uint32_t>(n.data.size())) {
+      return false;  // coarse interval-merge: already covered
+    }
+  }
+  if (total_bytes + want > max_bytes) want = max_bytes - total_bytes;
+  if (want < 4) return false;
+  CaptureNode node;
+  node.base = va;
+  if (!ReadGuest(ctx, va, want, node.data)) return false;
+  node.node_id = static_cast<uint16_t>(rec.nodes.size());
+  uint32_t first_word = ReadGuestBE32(ctx, va);
+  if (IsGuestPointer(ctx, first_word)) {
+    node.flags |= 1u << 0;  // NODE_IS_VTABLE hint (coarse)
+  }
+  total_bytes += static_cast<uint32_t>(node.data.size());
+  rec.pre_snapshot.push_back(node.data);
+  rec.nodes.push_back(std::move(node));
+  return true;
+}
+
 // Bounded BFS pointer chase from arg regs r3..r10 (schema §2.3 Tier B). Captures
 // up to kMaxChaseNodes / kMaxChaseBytes; merges overlapping intervals coarsely
 // (skips a seed already inside a captured node). Vtable special-case: if a node's
 // first word points into a mapped region we still capture the node; full vtable
 // slot capture + EDGES are an F2-side refinement (left to the pointer-chase lib).
+//
+// X6-capture-fix (DEEPER CAPTURE): when rec.exact_mem is set, the depth/node/byte
+// budgets widen and the seed set also includes ctr/lr (the indirect-branch
+// target + return continuation), so a `bctr`-dispatching dispatcher's target
+// object/vtable page is captured. Sets `truncated` (=> MTR_MF_TRUNCATED) if a
+// budget is hit mid-chase, so an under-capture is visible, not silent.
 void CaptureArgChase(PPCContext* ctx, const MiloTraceAddrConfig& cfg,
-                     PendingRecord& rec) {
+                     PendingRecord& rec, bool& truncated) {
+  const bool exact = rec.exact_mem;
+  const int max_depth = exact ? kMaxChaseDepthExact : kMaxChaseDepth;
+  const int max_nodes = exact ? kMaxChaseNodesExact : kMaxChaseNodes;
+  const uint32_t max_bytes = exact ? kMaxChaseBytesExact : kMaxChaseBytes;
+  (void)cfg;
+
   uint32_t total_bytes = 0;
   for (const auto& n : rec.nodes) {
     total_bytes += static_cast<uint32_t>(n.data.size());
@@ -359,47 +459,41 @@ void CaptureArgChase(PPCContext* ctx, const MiloTraceAddrConfig& cfg,
     uint32_t v = static_cast<uint32_t>(ctx->r[reg]);
     if (IsGuestPointer(ctx, v)) queue.push_back({v, 0});
   }
+  if (exact) {
+    // Seed the indirect-branch target (ctr) and the return continuation (lr) so a
+    // dispatcher's resolved-target page + its caller frame's object are captured.
+    uint32_t ctr = static_cast<uint32_t>(ctx->ctr);
+    uint32_t lr = static_cast<uint32_t>(ctx->lr);
+    if (IsGuestPointer(ctx, ctr)) queue.push_back({ctr, 0});
+    if (IsGuestPointer(ctx, lr)) queue.push_back({lr, 0});
+  }
 
   size_t qi = 0;
   while (qi < queue.size()) {
     Hop hop = queue[qi++];
-    if (static_cast<int>(rec.nodes.size()) >= kMaxChaseNodes) break;
-    if (total_bytes >= kMaxChaseBytes) break;
-
-    // Already captured (coarse interval-merge: inside an existing node)?
-    bool covered = false;
-    for (const auto& n : rec.nodes) {
-      if (hop.va >= n.base &&
-          hop.va < n.base + static_cast<uint32_t>(n.data.size())) {
-        covered = true;
-        break;
-      }
+    if (static_cast<int>(rec.nodes.size()) >= max_nodes) {
+      // In EXACT mode the blind chase is supplementary — the Tier-C ACCESS_LOG is
+      // the authoritative read graph, so hitting the (deliberately deep) node
+      // ceiling is expected and benign; do NOT mark the record incomplete (that
+      // would make the trust gate reject a record whose precise reads ARE
+      // captured). Only the access-log cap (MiloTraceMemAccess) flags exact
+      // truncation. For the non-exact heuristic-only chase, a budget hit IS a
+      // real under-capture risk and is flagged.
+      if (!exact) truncated = true;
+      break;
     }
-    if (covered) continue;
-
-    uint32_t want = kNodeWindow;
-    if (total_bytes + want > kMaxChaseBytes) {
-      want = kMaxChaseBytes - total_bytes;
-    }
-    if (want < 4) break;
-
-    CaptureNode node;
-    node.base = hop.va;
-    if (!ReadGuest(ctx, hop.va, want, node.data)) continue;
-    node.node_id = static_cast<uint16_t>(rec.nodes.size());
-
-    // Vtable heuristic: [obj+0] points into a mapped (likely .rdata) region.
-    uint32_t first_word = ReadGuestBE32(ctx, hop.va);
-    if (IsGuestPointer(ctx, first_word)) {
-      node.flags |= 1u << 0;  // NODE_IS_VTABLE hint (a refinement; coarse here)
+    if (total_bytes >= max_bytes) {
+      if (!exact) truncated = true;
+      break;
     }
 
-    total_bytes += static_cast<uint32_t>(node.data.size());
-    rec.pre_snapshot.push_back(node.data);
-    rec.nodes.push_back(std::move(node));
+    if (!MaybeAddChaseNode(ctx, rec, hop.va, kNodeWindow, total_bytes,
+                           max_bytes)) {
+      continue;
+    }
 
     // Enqueue child pointers for the next hop.
-    if (hop.depth + 1 <= kMaxChaseDepth) {
+    if (hop.depth + 1 <= max_depth) {
       const CaptureNode& just = rec.nodes.back();
       for (uint32_t off = 0; off + 4 <= just.data.size(); off += 4) {
         uint32_t w = (uint32_t(just.data[off]) << 24) |
@@ -409,6 +503,32 @@ void CaptureArgChase(PPCContext* ctx, const MiloTraceAddrConfig& cfg,
         if (IsGuestPointer(ctx, w)) queue.push_back({w, hop.depth + 1});
       }
     }
+  }
+}
+
+// X6-capture-fix (DEEPER CAPTURE / Tier C): after the traced call returns, fold
+// the observed read addresses (rec.access_log, gathered by the per-load JIT
+// instrumentation) into the captured node set — capturing the [page, page+256)
+// window of any READ address the heuristic chase missed. This is what closes the
+// member-deref read graph (SetSpeed/SetPan-class): the setter reads through `this`
+// to an object the arg chase never reached, and that read is now captured at its
+// real VA so a1 replay can reproduce it (DECISION D1: an uncaptured read faults).
+// Only runs for exact_mem records. Bounded by the exact byte budget.
+void CaptureObservedReads(PPCContext* ctx, PendingRecord& rec) {
+  if (!rec.exact_mem || rec.access_log.empty()) return;
+  uint32_t total_bytes = 0;
+  for (const auto& n : rec.nodes) {
+    total_bytes += static_cast<uint32_t>(n.data.size());
+  }
+  for (const auto& a : rec.access_log) {
+    if (a.is_write) continue;  // writes land in mem_out; capture READ inputs
+    if (total_bytes >= kMaxChaseBytesExact) break;
+    if (!IsGuestPointer(ctx, a.va)) continue;
+    // Capture an aligned 256 B window covering the access so a small struct/array
+    // touched at an offset is grabbed whole.
+    uint32_t win_base = a.va & ~0x3Fu;  // 64 B align down (covers the access)
+    MaybeAddChaseNode(ctx, rec, win_base, kNodeWindow, total_bytes,
+                      kMaxChaseBytesExact);
   }
 }
 
@@ -541,6 +661,43 @@ bool AppendCallsSection(std::vector<uint8_t>& b, const PendingRecord& rec) {
   return true;
 }
 
+// X6-capture-fix (DEEPER CAPTURE / Tier C): ACCESS_LOG section (schema §3.2 type
+// 10). One mtr_access_entry_t {addr u32, size u8, is_write u8, _pad u16} per
+// observed access, in execution order. Records what the call ACTUALLY touched, so
+// replay can prove its captured read graph is complete (DECISION D1). Returns
+// true iff a section was emitted.
+bool AppendAccessLogSection(std::vector<uint8_t>& b, const PendingRecord& rec) {
+  if (rec.access_log.empty()) return false;
+  std::vector<uint8_t> payload;
+  PutU32(payload, static_cast<uint32_t>(rec.access_log.size()));
+  for (const auto& a : rec.access_log) {
+    // mtr_access_entry_t == "<IBBH" (8 bytes): addr, size, is_write, _pad.
+    PutU32(payload, a.va);
+    PutU8(payload, a.size);
+    PutU8(payload, a.is_write);
+    PutU16(payload, 0);  // _pad
+  }
+  AppendSectionPrefix(b, MTR_SEC_ACCESS_LOG, 0,
+                      static_cast<uint32_t>(payload.size()));
+  PutBytes(b, payload.data(), payload.size());
+  return true;
+}
+
+// X6-capture-fix (ENTRY-PIN): a NOTE section (schema §3.2 type 11) carrying a
+// short UTF-8 diagnostic tag. Used to mark a TAIL-exit record (`TAIL:<hex
+// func_va>`) so the replay consumer knows regs_out is an args-to-tail-callee
+// handoff, not a clean return. NOTE is non-authoritative + skip-safe, so this is
+// additive and never disturbs an old reader. codec.py NOTE payload = u32 len +
+// utf8 bytes.
+void AppendNoteSection(std::vector<uint8_t>& b, const std::string& text) {
+  std::vector<uint8_t> payload;
+  PutU32(payload, static_cast<uint32_t>(text.size()));
+  PutBytes(payload, text.data(), text.size());
+  AppendSectionPrefix(b, MTR_SEC_NOTE, 0,
+                      static_cast<uint32_t>(payload.size()));
+  PutBytes(b, payload.data(), payload.size());
+}
+
 // Serialize a completed record into the thread's out buffer, byte-for-byte to
 // the mtr_format.h layout. Returns the number of sections written.
 void SerializeRecord(std::vector<uint8_t>& out, PPCContext* ctx,
@@ -579,6 +736,23 @@ void SerializeRecord(std::vector<uint8_t>& out, PPCContext* ctx,
   // CALLS (X6 outbound-call oracle — target_va list, dynamic). Populates the
   // calls[] axis for non-leaf records, which the override-wrap path left empty.
   if (AppendCallsSection(sections, rec)) ++section_count;
+
+  // ACCESS_LOG (X6-capture-fix Tier C — observed (va,size,is_write) reads/writes
+  // during the call). Present only for exact_mem records.
+  if (AppendAccessLogSection(sections, rec)) {
+    ++section_count;
+    mem_flags |= MTR_MF_TIER_C;
+  }
+
+  // X6-capture-fix: surface a too-shallow chase + a tail handoff so the consumer
+  // (and the trust gate) can tell capture-completeness limits from clean records.
+  if (rec.truncated_chase) mem_flags |= MTR_MF_TRUNCATED;
+  if (rec.tail_exit) {
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "TAIL:%08x", rec.func_va);
+    AppendNoteSection(sections, std::string(buf));
+    ++section_count;
+  }
 
   // Record header (mtr_header_t, 42 bytes, framing-LE).
   std::vector<uint8_t> body;
@@ -780,16 +954,24 @@ void MiloTraceOnEntryCtx(void* ppc_context, uint32_t start_addr) {
   rec.caller_va = static_cast<uint32_t>(ctx->lr) - 4;  // = bl site
   rec.depth_hint = static_cast<uint16_t>(tb->pending.size());
   rec.regs_in = SnapshotRegs(ctx);
+  // X6-capture-fix: EXACT-MEM mode if either the session default or this addr's
+  // manifest config asks for it. Drives the wider chase + Tier-C ACCESS_LOG.
+  rec.exact_mem = st.config.exact_mem || cfg.exact_mem;
 
   CaptureStackWindow(ctx, cfg, rec);
-  CaptureArgChase(ctx, cfg, rec);
+  CaptureArgChase(ctx, cfg, rec, rec.truncated_chase);
 
   tb->pending.push_back(std::move(rec));
   (void)st;
 }
 
-void MiloTraceOnExitCtx(void* ppc_context, uint32_t start_addr) {
-  PPCContext* ctx = reinterpret_cast<PPCContext*>(ppc_context);
+// X6-capture-fix (ENTRY-PIN): the shared exit finalizer. `tail` distinguishes the
+// TRUE epilog (real return — regs_out is the post-function state) from a TAIL
+// site (the frame jumps away mid-function — regs_out is the args-to-tail-callee
+// state). On a tail site the record is tagged so the consumer never matches
+// regs_out as a clean return; on either path the exact-mem read-region capture
+// closes the read graph from the observed accesses.
+void MiloTraceFinishExit(PPCContext* ctx, uint32_t start_addr, bool tail) {
   MiloTraceState& st = State();
   ThreadBuffer* tb = GetThreadBuffer();
   if (tb->pending.empty()) return;
@@ -801,6 +983,12 @@ void MiloTraceOnExitCtx(void* ppc_context, uint32_t start_addr) {
   if (rec.func_va != start_addr) {
     // Mismatched pairing; the record is still emitted with its captured entry.
   }
+  rec.tail_exit = tail;
+
+  // X6-capture-fix (DEEPER CAPTURE / Tier C): fold the observed reads into the
+  // captured node set BEFORE the post-image diff, so a member-deref page the
+  // heuristic chase missed is part of mem_in (and its pre/post snapshot lines up).
+  CaptureObservedReads(ctx, rec);
 
   mtr_regs_t regs_out = SnapshotRegs(ctx);
   uint64_t seq = st.call_seq.fetch_add(1, std::memory_order_relaxed);
@@ -818,6 +1006,11 @@ void MiloTraceOnExitCtx(void* ppc_context, uint32_t start_addr) {
   }
 }
 
+void MiloTraceOnExitCtx(void* ppc_context, uint32_t start_addr) {
+  MiloTraceFinishExit(reinterpret_cast<PPCContext*>(ppc_context), start_addr,
+                      /*tail=*/false);
+}
+
 void MiloTraceOnEntry(void* raw_context, uint64_t start_addr) {
   // CallNative ABI: raw_context is ThreadState** (x64_tracers.cc:55).
   auto* ts = *reinterpret_cast<ThreadState**>(raw_context);
@@ -826,7 +1019,35 @@ void MiloTraceOnEntry(void* raw_context, uint64_t start_addr) {
 
 void MiloTraceOnExit(void* raw_context, uint64_t start_addr) {
   auto* ts = *reinterpret_cast<ThreadState**>(raw_context);
-  MiloTraceOnExitCtx(ts->context(), static_cast<uint32_t>(start_addr));
+  MiloTraceFinishExit(ts->context(), static_cast<uint32_t>(start_addr),
+                      /*tail=*/false);
+}
+
+void MiloTraceOnExitTail(void* raw_context, uint64_t start_addr) {
+  auto* ts = *reinterpret_cast<ThreadState**>(raw_context);
+  MiloTraceFinishExit(ts->context(), static_cast<uint32_t>(start_addr),
+                      /*tail=*/true);
+}
+
+// X6-capture-fix (DEEPER CAPTURE / Tier C): the per-load/store JIT instrumentation
+// callback. Emitted (when the per-function exact-mem flag is set) at every guest
+// memory access; appends (va,size,is_write) to the top pending record's access
+// log. Cheap: a relaxed active check + a vector push under no lock (per-thread).
+// Only records while a pending record is on this thread's shadow stack and that
+// record is in exact_mem mode.
+void MiloTraceMemAccess(void* raw_context, uint32_t address, uint32_t size,
+                        uint32_t is_write) {
+  if (!MiloTraceIsActive()) return;
+  ThreadBuffer* tb = tls_buffer;  // do NOT create a buffer off the hot path
+  if (!tb || tb->pending.empty()) return;
+  PendingRecord& rec = tb->pending.back();
+  if (!rec.exact_mem) return;
+  if (rec.access_log.size() >= kMaxAccessLog) {
+    rec.truncated_chase = true;  // log full => may be under-captured
+    return;
+  }
+  rec.access_log.push_back(
+      {address, static_cast<uint8_t>(size), static_cast<uint8_t>(is_write)});
 }
 
 int MiloTraceLoadManifest(std::string_view path) {

@@ -62,6 +62,10 @@ using namespace xe::literals;
 // definitions for the ABI/contract.
 static uint64_t MiloTraceEntryTrampoline(void* raw_context, uint64_t address);
 static uint64_t MiloTraceExitTrampoline(void* raw_context, uint64_t address);
+// X6-capture-fix (ENTRY-PIN): a separate trampoline for the TAIL-call exit site,
+// so the TU records regs_out as a tail handoff (mid-frame) rather than a clean
+// return. Keeps the CallNative(fn(ctx, arg0)) ABI — no bit-packing on `address`.
+static uint64_t MiloTraceExitTailTrampoline(void* raw_context, uint64_t address);
 
 static const size_t kMaxCodeSize = 1_MiB;
 
@@ -419,6 +423,11 @@ static uint64_t MiloTraceExitTrampoline(void* raw_context, uint64_t address) {
   MiloTraceOnExit(raw_context, address);
   return 0;
 }
+static uint64_t MiloTraceExitTailTrampoline(void* raw_context,
+                                            uint64_t address) {
+  MiloTraceOnExitTail(raw_context, address);
+  return 0;
+}
 
 // Emitted at every function exit convergence point (the epilog, and each
 // direct/indirect/extern TAIL-call site — all of which route through here, so a
@@ -433,7 +442,7 @@ static uint64_t MiloTraceExitTrampoline(void* raw_context, uint64_t address) {
 //   4. restore rax.
 // Using a stack scratch slot (not push/pop) keeps the 16-byte alignment
 // CallNativeSafe's thunk requires.
-void X64Emitter::EmitTraceUserCallReturn() {
+void X64Emitter::EmitTraceUserCallReturn(bool is_tail) {
   if (!(debug_info_flags_ & DebugInfoFlags::kDebugInfoTraceCallRecords)) {
     return;
   }
@@ -444,9 +453,39 @@ void X64Emitter::EmitTraceUserCallReturn() {
   // Reload the live context into the context reg so the guest_to_host_thunk
   // hands MiloTraceOnExit a valid PPCContext* (== ThreadState** at +0).
   mov(GetContextReg(), qword[rsp + StackLayout::GUEST_CTX_HOME]);
-  CallNative(MiloTraceExitTrampoline, static_cast<uint64_t>(start_address));
+  // ENTRY-PIN: route the TRUE epilog (a real guest return — regs_out is the
+  // post-function state) and the TAIL-call sites (the frame jumps away
+  // mid-function — regs_out is the args-to-tail-callee state) to different
+  // thunks. At a tail site rax holds the resolved tail target, which the TU
+  // records as the final outbound CallEdge (closing the SetSpeed-class read
+  // graph: a 9-insn setter that tail-branches to its real worker).
+  if (is_tail) {
+    CallNative(MiloTraceExitTailTrampoline,
+               static_cast<uint64_t>(start_address));
+  } else {
+    CallNative(MiloTraceExitTrampoline, static_cast<uint64_t>(start_address));
+  }
   // Restore rax for the tail-call jmp(rax).
   mov(rax, qword[rsp + 32]);
+}
+
+// milo-trace (X6-capture-fix / Tier C): emit the per-access logger for a guest
+// load/store. `host_addr` is the membase-relative host address the sequence
+// already computed (ComputeMemoryAddress returns membase + guest_va). We recover
+// the guest VA by subtracting the membase reg, then CallNative(MiloTraceMemAccess,
+// guest_va) with size + is_write in params 1/2. Only emitted when IsMiloExactMem()
+// (a per-function gate), so non-exact code is byte-identical. Modeled on the
+// existing TraceMemory* emission (after the access completes); the logger touches
+// only its own per-thread buffer, never guest regs.
+void X64Emitter::EmitMiloMemAccess(const Xbyak::RegExp& host_addr, uint32_t size,
+                                   uint32_t is_write) {
+  // guest_va = host_addr - membase. Use GetNativeParam(0) (rdx) as the scratch
+  // that becomes arg0; lea the host address, then subtract membase.
+  lea(GetNativeParam(0), ptr[host_addr]);
+  sub(GetNativeParam(0), GetMembaseReg());
+  mov(GetNativeParam(1).cvt32(), size);
+  mov(GetNativeParam(2).cvt32(), is_write);
+  CallNative(reinterpret_cast<void*>(MiloTraceMemAccess));
 }
 
 void X64Emitter::DebugBreak() {
@@ -631,7 +670,7 @@ void X64Emitter::Call(const hir::Instr* instr, GuestFunction* function) {
   if (function->behavior() == Function::Behavior::kExtern) {
     CallExtern(instr, function);
     if (instr->flags & hir::CALL_TAIL) {
-      EmitTraceUserCallReturn();
+      EmitTraceUserCallReturn(/*is_tail=*/true);
       jmp(epilog_label(), CodeGenerator::T_NEAR);
     }
     return;
@@ -669,7 +708,7 @@ void X64Emitter::Call(const hir::Instr* instr, GuestFunction* function) {
   // Actually jump/call to rax.
   if (instr->flags & hir::CALL_TAIL) {
     // Since we skip the prolog we need to mark the return here.
-    EmitTraceUserCallReturn();
+    EmitTraceUserCallReturn(/*is_tail=*/true);
 
     // Pass the callers return address over.
     mov(rcx, qword[rsp + StackLayout::GUEST_RET_ADDR]);
@@ -760,7 +799,7 @@ void X64Emitter::CallIndirect(const hir::Instr* instr,
   // Actually jump/call to rax.
   if (instr->flags & hir::CALL_TAIL) {
     // Since we skip the prolog we need to mark the return here.
-    EmitTraceUserCallReturn();
+    EmitTraceUserCallReturn(/*is_tail=*/true);
 
     // Pass the callers return address over.
     mov(rcx, qword[rsp + StackLayout::GUEST_RET_ADDR]);

@@ -56,6 +56,11 @@ struct MiloTraceConfig {
   std::string target_sha1;    // hex sha1 of the xex (provenance; may be empty)
   int arch = 2;               // mtr_arch_t: 1=gekko, 2=xenon (Xenia => xenon)
   int capture_method = 3;     // mtr_capture_method_t: 3=xenia_override, 2=jit
+  // X6-capture-fix (DEEPER CAPTURE): session-wide opt-in to EXACT memory capture
+  // (wider Tier-B chase + Tier-C ACCESS_LOG). Off by default; set from
+  // --milo_trace_exact_mem. A per-addr manifest "exact_mem" still overrides per
+  // function, but this makes EVERY traced address exact when set.
+  bool exact_mem = false;
 };
 
 // ---------------------------------------------------------------------------
@@ -93,7 +98,27 @@ void MiloTraceOnEntry(void* raw_context, uint64_t start_addr);
 
 // Snapshot exit state: full reg file + re-read captured windows -> mem_out
 // write delta. Pops the pending record, finishes it, appends to the buffer.
+// This is the TRUE-epilog exit (a real guest return — regs_out is the
+// post-function state). ENTRY-PIN: pairs with the prologue entry hook so the
+// record's entry/exit are pinned to the real prologue/epilog.
 void MiloTraceOnExit(void* raw_context, uint64_t start_addr);
+
+// X6-capture-fix (ENTRY-PIN): the TAIL-call exit. The traced frame jumps away
+// mid-function (a `b`/`bctr` tail), so regs_out is the args-to-tail-callee state,
+// NOT a clean return. Finalizes the record like OnExit but tags it as a tail
+// handoff (a `TAIL:` NOTE) so the replay consumer does not match regs_out as a
+// return. Same shadow-stack pop semantics as OnExit.
+void MiloTraceOnExitTail(void* raw_context, uint64_t start_addr);
+
+// X6-capture-fix (DEEPER CAPTURE / Tier C): per-load/store memory-access logger.
+// Called from the JIT load/store sequences (gated by the per-function exact-mem
+// flag, so off-path code is byte-identical) with the resolved guest address,
+// access size in bytes, and is_write (0=read, 1=write). Appends to the top
+// pending record's ACCESS_LOG when that record is in exact_mem mode. raw_context
+// is the JIT context register (a PPCContext* whose first qword is ThreadState*),
+// but this thunk does not need it (kept for ABI uniformity with TraceMemory*).
+void MiloTraceMemAccess(void* raw_context, uint32_t address, uint32_t size,
+                        uint32_t is_write);
 
 // Override-wrap convenience (X2): the GuestFunction::Call hook holds a
 // PPCContext* directly, not a raw_context (ThreadState**). These take the

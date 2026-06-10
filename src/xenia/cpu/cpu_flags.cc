@@ -48,6 +48,18 @@ DEFINE_string(milo_trace_out, "",
               "milo-trace: output .mtr path. Ignored unless "
               "--milo_trace_enable=true.",
               "CPU");
+// X6-capture-fix (DEEPER CAPTURE): opt-in EXACT memory capture. When set, the
+// capture hook (a) widens the Tier-B pointer chase (more nodes/bytes, plus the
+// ctr/lr indirect-branch-target seeds), and (b) emits a Tier-C ACCESS_LOG of the
+// region windows the traced call actually touched so the read graph closes for
+// member-deref setters (SetSpeed/SetPan-class) that a heuristic chase misses.
+// Off by default (per-instruction-grade capture is expensive); turn on only for
+// a small, gated manifest.
+DEFINE_bool(milo_trace_exact_mem, false,
+            "milo-trace: opt into EXACT memory capture (wider Tier-B chase + "
+            "Tier-C access log). Heavier; use with a gated manifest. Requires "
+            "--milo_trace_enable=true.",
+            "CPU");
 
 DEFINE_bool(
     disable_global_lock, false,

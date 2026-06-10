@@ -241,12 +241,37 @@ class X64Emitter : public Xbyak::CodeGenerator {
 
   size_t stack_size() const { return stack_size_; }
 
+  // milo-trace (X6-capture-fix / Tier C): true iff the function being emitted is
+  // marked for EXACT memory capture, so the load/store sequences should emit a
+  // MiloTraceMemAccess(addr,size,is_write) callback per access.
+  bool IsMiloExactMem() const {
+    return (debug_info_flags_ &
+            DebugInfoFlags::kDebugInfoMiloExactMem) ==
+           DebugInfoFlags::kDebugInfoMiloExactMem;
+  }
+  // Emit the per-access logger for a load/store at the already-computed guest
+  // address. `size` is the access width in bytes; `is_write` selects read/write.
+  // Clobbers volatile regs only (CallNativeSafe), so the sequence must call this
+  // AFTER consuming the loaded value / BEFORE the value it needs is in a volatile
+  // reg — the existing TraceMemory* sites are the safe template (they call after
+  // the load completes). Caller passes the raw guest address RegExp (NOT membase-
+  // relative): the sequence's `addr` already includes membase, so we subtract it
+  // to recover the guest VA.
+  void EmitMiloMemAccess(const Xbyak::RegExp& host_addr, uint32_t size,
+                         uint32_t is_write);
+
  protected:
   void* Emplace(const EmitFunctionInfo& func_info,
                 GuestFunction* function = nullptr);
   bool Emit(hir::HIRBuilder* builder, EmitFunctionInfo& func_info);
   void EmitGetCurrentThreadId();
-  void EmitTraceUserCallReturn();
+  // milo-trace (X6-capture-fix): `is_tail` distinguishes the TRUE epilog (a real
+  // guest return, regs_out == post-function state) from a TAIL-call site (the
+  // function jumps away mid-frame — regs_out is the args-to-tail-callee state,
+  // NOT a clean return). The exit thunk routes the two so the consumer can
+  // pin entry/exit to the real prologue/epilog (ENTRY-PIN). Default false (true
+  // epilog) for the single non-tail call site.
+  void EmitTraceUserCallReturn(bool is_tail = false);
 
  protected:
   Processor* processor_ = nullptr;

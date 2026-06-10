@@ -138,6 +138,14 @@ bool PPCTranslator::Translate(GuestFunction* function,
     const auto& traced = MiloTraceTracedAddresses();
     if (traced.empty() || traced.count(function->address()) != 0) {
       debug_info_flags |= DebugInfoFlags::kDebugInfoTraceCallRecords;
+      // X6-capture-fix (DEEPER CAPTURE / Tier C): when --milo_trace_exact_mem is
+      // on, ALSO mark this traced function so its load/store sequences emit the
+      // MiloTraceMemAccess per-access logger (kDebugInfoMiloExactMem implies
+      // kDebugInfoTraceCallRecords). Off-path / non-exact functions emit ZERO
+      // per-access code, so their generated code is unchanged.
+      if (cvars::milo_trace_exact_mem) {
+        debug_info_flags |= DebugInfoFlags::kDebugInfoMiloExactMem;
+      }
     }
   }
   std::unique_ptr<FunctionDebugInfo> debug_info;

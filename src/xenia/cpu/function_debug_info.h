@@ -39,6 +39,14 @@ enum DebugInfoFlags : uint32_t {
   // X6-path gate only.
   kDebugInfoTraceCallRecords = (1 << 10),
 
+  // milo-trace (X6-capture-fix): when ALSO set, the function's load/store
+  // sequences emit CallNative(MiloTraceMemAccess) per access — the Tier-C
+  // ACCESS_LOG (DEEPER CAPTURE). Set by ppc_translator.cc when
+  // --milo_trace_exact_mem is on AND the address is traced. Implies (is only
+  // honored alongside) kDebugInfoTraceCallRecords. Off => no per-access code, so
+  // a non-exact traced function is byte-identical to the pre-capture-fix hook.
+  kDebugInfoMiloExactMem = (1 << 11) | kDebugInfoTraceCallRecords,
+
   kDebugInfoAllTracing =
       kDebugInfoTraceFunctions | kDebugInfoTraceFunctionCoverage |
       kDebugInfoTraceFunctionReferences | kDebugInfoTraceFunctionData,
