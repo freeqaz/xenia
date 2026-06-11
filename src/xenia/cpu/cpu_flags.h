@@ -27,6 +27,7 @@ DECLARE_bool(milo_trace_enable);
 DECLARE_string(milo_trace_manifest);
 DECLARE_string(milo_trace_out);
 DECLARE_bool(milo_trace_exact_mem);
+DECLARE_bool(milo_trace_call_effects);
 
 DECLARE_bool(disable_global_lock);
 

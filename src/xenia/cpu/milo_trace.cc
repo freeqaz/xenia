@@ -40,6 +40,7 @@
 #include "third_party/rapidjson/include/rapidjson/error/en.h"
 
 #include "xenia/base/logging.h"
+#include "xenia/cpu/cpu_flags.h"
 #include "xenia/cpu/mtr_format.h"
 #include "xenia/cpu/ppc/ppc_context.h"
 #include "xenia/cpu/processor.h"
@@ -81,6 +82,34 @@ constexpr uint32_t kMaxChaseBytesExact = 49152;  // 48 KB (room for observed rea
 constexpr uint32_t kPtrLo = 0x00010000u;
 constexpr uint32_t kPtrHi = 0xFF000000u;
 
+// A contiguous changed span in a captured interval (the Method-A write delta).
+// Defined up here so CallSiteEffect (in PendingRecord) can carry a callee's own
+// write delta. ComputeWriteSpans / AppendWritesSection (below) produce/consume it.
+struct WriteSpan {
+  uint32_t addr;
+  std::vector<uint8_t> bytes;
+};
+
+// X8-CE (call effects): one finalized-or-pending outbound call observed while the
+// owning FULL frame was on top of the shadow stack. X7 carried only `target_va`
+// (a header-only CallEdge); X8-CE additionally captures the args-to-callee (at the
+// bl) AND, once the callee returns, its return regs (r3/f1) + the parent frame's
+// write delta over the call boundary — the per-call oracle EFFECT the a2i replay
+// path injects. A `finalized` entry serializes EXACTLY like PutTailCallEntry
+// (arg_mask r3..r10 + f1..f8, ret_mask R3|F1, nwrites spans); an unfinalized one
+// keeps today's header-only bytes (honest absence — reads like the X7 ret=0/wr=0).
+struct CallSiteEffect {
+  uint32_t target_va = 0;
+  uint32_t args_gpr[8] = {0};   // r3..r10 at the call boundary
+  uint64_t args_fpr[8] = {0};   // f1..f8 at the call boundary (raw u64)
+  bool has_args = false;
+  bool has_ret = false;
+  bool finalized = false;
+  uint32_t ret_r3 = 0;
+  uint64_t ret_f1 = 0;
+  std::vector<WriteSpan> writes;
+};
+
 // A captured memory node (Tier A stack or Tier B chased object).
 struct CaptureNode {
   uint16_t node_id = 0;
@@ -102,14 +131,40 @@ struct PendingRecord {
   // Entry snapshot of every captured interval, for the Method-A write diff.
   // Parallel to `nodes`: pre_snapshot[i] == nodes[i].data at entry.
   std::vector<std::vector<uint8_t>> pre_snapshot;
-  // X6: ordered outbound-call target VAs observed while this frame was on top of
-  // the shadow stack. Each nested OnEntry (a traced callee) appends its func_va
-  // to its parent's list, giving a real DYNAMIC outbound-call list (target_va
-  // only — args/ret/writes are an X7-class refinement, see SerializeRecord's
-  // CALLS note). With a trace-everything session (empty manifest) this is the
-  // complete guest call list; with a manifest gate it covers only traced
-  // callees.
-  std::vector<uint32_t> outbound_calls;
+  // X6/X8-CE: ordered outbound calls observed while this frame was on top of the
+  // shadow stack. Each nested OnEntry appends a CallSiteEffect to its parent's
+  // list (X6 logged target_va only; X8-CE captures args at the bl and, on the
+  // callee's exit, finalizes the entry with its ret regs + the parent's write
+  // delta — see CallSiteEffect). With a trace-everything session (empty manifest)
+  // or --milo_trace_call_effects this is the complete dynamic guest call list of
+  // the FULL frame; with a manifest gate and no call_effects it covers only
+  // manifest-traced callees.
+  std::vector<CallSiteEffect> outbound_calls;
+
+  // X8-CE: LIGHT-frame bookkeeping. A LIGHT frame is an un-manifested callee of a
+  // traced ancestor, pushed only when --milo_trace_call_effects is on; it does NO
+  // full capture — it exists solely to detect its own exit so it can finalize the
+  // anchor (FULL) frame's CALLS[] entry with this callee's ret + write delta.
+  bool light = false;
+  // Descendants of a LIGHT frame do not get their own frames; the LIGHT frame on
+  // top just counts them so the matching exits are balanced (LIFO).
+  uint32_t skip_depth = 0;
+  // For a LIGHT frame (or a FULL child whose entry was appended to its parent):
+  // index into the anchor frame's outbound_calls of the entry this frame
+  // finalizes on exit; -1 if none.
+  int parent_call_index = -1;
+  // For a LIGHT frame: index (in the pending shadow stack) of the anchor FULL
+  // frame whose CALLS[] entry + node intervals this frame finalizes/diffs.
+  size_t anchor_index = 0;
+  // For a LIGHT frame: snapshot of the anchor frame's node intervals at the call
+  // boundary (parallel to anchor.nodes). The write delta finalized on this
+  // frame's exit is current-guest-bytes vs this snapshot. Captured at push time.
+  std::vector<std::vector<uint8_t>> boundary_pre;
+  // X8-CE: a FULL frame that consumed a tail continuation (a light tail chain
+  // handed off to this manifested target) finalizes the parent's entry with the
+  // CUMULATIVE anchor boundary diff (light chain + this frame), not its own
+  // mem_out. True when boundary_pre above is the inherited anchor snapshot.
+  bool inherited_boundary = false;
 
   // X6-capture-fix (DEEPER CAPTURE): this record is in EXACT-MEM mode (wider
   // Tier-B chase + Tier-C ACCESS_LOG). Set from MiloTraceConfig.exact_mem or a
@@ -134,6 +189,15 @@ struct PendingRecord {
   // the read graph may be incomplete (=> MTR_MF_TRUNCATED).
   bool truncated_chase = false;
 
+  // X8-CE: the effect-carrying CALLS[] budget (kMaxCallEffects / bytes) was hit,
+  // so some forward calls in this record are header-only despite call_effects
+  // being on. Serialized as a CE_TRUNC NOTE so the consumer can tell a budget cap
+  // from a genuine HLE/import header-only call.
+  bool ce_truncated = false;
+  // Running total of attached effect bytes (args + ret + write-span data) for the
+  // budget check.
+  size_t ce_bytes = 0;
+
   // X6-capture-fix (DEEPER CAPTURE / Tier C): the actual guest memory accesses
   // the traced call performed, as (va, size, is_write) entries — populated by
   // the per-load/store JIT instrumentation (MiloTraceMemAccess) only when
@@ -154,10 +218,39 @@ struct PendingRecord {
 // setter/getter read graph; truncation sets MTR_MF_TRUNCATED.
 constexpr size_t kMaxAccessLog = 8192;
 
+// X8-CE budgets (bound the LIGHT-frame call-effect work on hot functions).
+//  - kMaxCallEffects: at most this many effect-carrying (args/ret/writes) CALLS[]
+//    entries per record. Beyond it, the call is recorded header-only + a CE_TRUNC
+//    NOTE rides the record. 48 covers every non-leaf in the powered cohort
+//    (W4 probe: nt<=7) with headroom; a hot dispatcher truncates honestly.
+//  - kMaxCallEffectBytes: total attached effect bytes (args+ret+write-span data)
+//    per record. 64 KB matches the access-log budget; protects a pathological
+//    record from unbounded write-span capture.
+//  - kMaxFinalizeWrites: u8 nwrites ceiling per finalized entry (the schema
+//    field is u8); a callee that scribbles more spans is capped + flagged.
+constexpr size_t kMaxCallEffects = 48;
+constexpr size_t kMaxCallEffectBytes = 64 * 1024;
+constexpr size_t kMaxFinalizeWrites = 255;
+
+// X8-CE: a tail-call continuation token. A LIGHT frame C that tail-calls T fires
+// its exit thunk with is_tail at the handoff (regs are the args-to-T, NOT the
+// return). The token transfers C's call entry + boundary snapshot to T's frame so
+// T's REAL exit finalizes the parent's entry with the true return + the cumulative
+// boundary diff (C+T). Consumed by the IMMEDIATELY-following OnEntry (the tail
+// jump lands on T's entry); cleared by any other event (stale handoff, e.g. an
+// HLE tail target with no entry thunk -> the entry stays header-only, honest).
+struct TailCont {
+  bool pending = false;
+  int parent_call_index = -1;
+  size_t anchor_index = 0;
+  std::vector<std::vector<uint8_t>> boundary_pre;
+};
+
 // Per-thread shadow stack of pending records (nested calls) + an output buffer.
 struct ThreadBuffer {
   std::vector<PendingRecord> pending;  // shadow stack
   std::vector<uint8_t> out;            // serialized records awaiting flush
+  TailCont tail_cont;                  // X8-CE tail-chain handoff (one in flight)
 };
 
 struct MiloTraceState {
@@ -583,23 +676,23 @@ void AppendMemNodeSection(std::vector<uint8_t>& b, const CaptureNode& n) {
   PutBytes(b, n.data.data(), n.data.size());
 }
 
-// A contiguous changed span in a captured interval (the Method-A write delta).
-struct WriteSpan {
-  uint32_t addr;
-  std::vector<uint8_t> bytes;
-};
-
-// Method-A write delta: diff each captured interval pre vs post, returning the
-// changed spans (kind=0 snapshot). schema §2.5. Shared by AppendWritesSection
-// (the mem_out delta) and the X7 tail-CALLS entry (the tail call's attributable
-// mem_writes), so the two never disagree about what the function wrote.
-std::vector<WriteSpan> ComputeWriteSpans(PPCContext* ctx,
-                                         const PendingRecord& rec) {
+// Method-A write delta core: diff each captured interval (nodes[i] current guest
+// bytes) vs its entry snapshot `pre[i]`, returning the changed spans (kind=0
+// snapshot). schema §2.5. Factored out (X8-CE) so BOTH the record's own mem_out
+// (nodes vs rec.pre_snapshot) AND a LIGHT-frame's call-boundary delta (anchor
+// nodes vs the boundary_pre snapshot) walk identical logic — the producer and
+// replay agree about what was written by construction.
+std::vector<WriteSpan> ComputeWriteSpansFrom(
+    PPCContext* ctx, const std::vector<CaptureNode>& nodes,
+    const std::vector<std::vector<uint8_t>>& pre) {
   std::vector<WriteSpan> spans;
-  for (size_t i = 0; i < rec.nodes.size(); ++i) {
-    const CaptureNode& node = rec.nodes[i];
-    const std::vector<uint8_t>& pre = rec.pre_snapshot[i];
-    uint32_t n = static_cast<uint32_t>(pre.size());
+  // Walk only the overlap (pre and nodes are parallel; a boundary_pre captured at
+  // call time may be shorter than nodes if the anchor grew between, so clamp).
+  size_t count = nodes.size() < pre.size() ? nodes.size() : pre.size();
+  for (size_t i = 0; i < count; ++i) {
+    const CaptureNode& node = nodes[i];
+    const std::vector<uint8_t>& pre_i = pre[i];
+    uint32_t n = static_cast<uint32_t>(pre_i.size());
     // Re-read the post image at the same VA.
     std::vector<uint8_t> post;
     if (!ReadGuest(ctx, node.base, n, post)) continue;
@@ -609,9 +702,9 @@ std::vector<WriteSpan> ComputeWriteSpans(PPCContext* ctx,
     // Walk for contiguous changed runs.
     uint32_t j = 0;
     while (j < n) {
-      if (post[j] != pre[j]) {
+      if (post[j] != pre_i[j]) {
         uint32_t start = j;
-        while (j < n && post[j] != pre[j]) ++j;
+        while (j < n && post[j] != pre_i[j]) ++j;
         WriteSpan s;
         s.addr = node.base + start;
         s.bytes.assign(post.begin() + start, post.begin() + j);
@@ -622,6 +715,15 @@ std::vector<WriteSpan> ComputeWriteSpans(PPCContext* ctx,
     }
   }
   return spans;
+}
+
+// Method-A write delta: the record's own mem_out (nodes vs entry snapshot).
+// Shared by AppendWritesSection (the mem_out delta) and the X7 tail-CALLS entry
+// (the tail call's attributable mem_writes), so the two never disagree about what
+// the function wrote.
+std::vector<WriteSpan> ComputeWriteSpans(PPCContext* ctx,
+                                         const PendingRecord& rec) {
+  return ComputeWriteSpansFrom(ctx, rec.nodes, rec.pre_snapshot);
 }
 
 // Method-A write delta: emit one WRITES section from precomputed changed spans
@@ -718,15 +820,65 @@ void PutTailCallEntry(std::vector<uint8_t>& payload, uint32_t target_va,
   }
 }
 
-// CALLS section (the outbound-call oracle, schema §2.6 / §3.5). X6 populates a
+// X8-CE: emit one FINALIZED forward-call CALLS entry — a full CallEdge for a
+// forward `bl` whose callee returned while the FULL frame was on the shadow
+// stack. arg_mask covers r3..r10 + the present f1..f8 (the args-to-callee captured
+// at the bl); ret_mask = R3|F1 (the callee's return regs, r3 THEN f1 order, per
+// codec.py _RET_MASK_*); nwrites carries the parent's write delta over the call
+// boundary (current anchor bytes vs the boundary snapshot). Encoded EXACTLY like
+// PutTailCallEntry / codec.py _pack_one_call: header, GPR args, FPR args, ret r3,
+// ret f1, then nwrites WRITES entries. This is the per-call oracle EFFECT the a2i
+// consumer injects (engine_trace._build_oracle_calls reads c.ret + c.mem_writes).
+void PutFinalizedCallEntry(std::vector<uint8_t>& payload,
+                           const CallSiteEffect& eff) {
+  // arg_mask: r3..r10 -> bits 0..7 (always marked present — the int arg file at
+  // the bl), f1..f8 -> bits 8..15.
+  uint16_t arg_mask = 0;
+  for (int i = 0; i < 8; ++i) arg_mask |= static_cast<uint16_t>(1u << i);
+  for (int i = 0; i < 8; ++i) arg_mask |= static_cast<uint16_t>(1u << (8 + i));
+
+  // ret_mask = R3 (bit0) | F1 (bit1) — the codec narrows to r3/f1/cr.
+  const uint8_t ret_mask = 0x1u | 0x2u;
+
+  uint8_t nwrites = static_cast<uint8_t>(eff.writes.size() > kMaxFinalizeWrites
+                                             ? kMaxFinalizeWrites
+                                             : eff.writes.size());
+
+  PutU32(payload, 0);                // src_offset (the bl site; 0 == not tracked)
+  PutU32(payload, eff.target_va);    // the forward callee VA
+  PutU16(payload, arg_mask);
+  PutU8(payload, ret_mask);
+  PutU8(payload, nwrites);
+
+  // GPR args r3..r10 (u32), in reg order (bit order).
+  for (int i = 0; i < 8; ++i) PutU32(payload, eff.args_gpr[i]);
+  // FPR args f1..f8 (raw u64), in reg order.
+  for (int i = 0; i < 8; ++i) PutU64(payload, eff.args_fpr[i]);
+  // ret regs, r3 THEN f1 (matches codec.py _unpack_one_call order).
+  PutU32(payload, eff.ret_r3);
+  PutU64(payload, eff.ret_f1);
+  // WRITES: mtr_write_entry_t {addr u32, len u16, kind u8, _pad u8} + data[len].
+  for (uint8_t i = 0; i < nwrites; ++i) {
+    const WriteSpan& s = eff.writes[i];
+    PutU32(payload, s.addr);
+    PutU16(payload, static_cast<uint16_t>(s.bytes.size()));
+    PutU8(payload, 0);  // kind = snapshot
+    PutU8(payload, 0);  // _pad
+    PutBytes(payload, s.bytes.data(), s.bytes.size());
+  }
+}
+
+// CALLS section (the outbound-call oracle, schema §2.6 / §3.5). X6 populated a
 // real DYNAMIC outbound-call list — one header-only CallEdge per traced callee
 // observed while this frame was active (only target_va known from the shadow
-// stack). X7 additionally synthesizes a FULL tail-CALLS entry on a TAIL bctr
-// exit: the resolved tail target (ctx->ctr) + the args-to-tail-callee (regs_out)
-// + the function's own write delta, so a setter that tail-calls through the
-// vtable carries its single outbound call (calls>=1 on a TAIL record, vs the old
-// calls=0). The tail entry is emitted LAST (it IS the function's terminal
-// outbound branch). Returns true iff a section was emitted.
+// stack). X8-CE FINALIZES forward-call entries with the callee's args/ret/writes
+// (PutFinalizedCallEntry) when --milo_trace_call_effects captured them; an
+// unfinalized entry (HLE/import callee, or budget-capped) keeps the header-only
+// bytes (honest absence). X7 additionally synthesizes a FULL tail-CALLS entry on
+// a TAIL bctr exit: the resolved tail target (ctx->ctr) + the args-to-tail-callee
+// (regs_out) + the function's own write delta. The tail entry is emitted LAST (it
+// IS the function's terminal outbound branch). Returns true iff a section was
+// emitted.
 bool AppendCallsSection(std::vector<uint8_t>& b, const PendingRecord& rec,
                         const mtr_regs_t& regs_out,
                         const std::vector<WriteSpan>& spans) {
@@ -736,8 +888,12 @@ bool AppendCallsSection(std::vector<uint8_t>& b, const PendingRecord& rec,
                    (emit_tail ? 1u : 0u);
   std::vector<uint8_t> payload;
   PutU32(payload, count);
-  for (uint32_t target_va : rec.outbound_calls) {
-    PutCallHeaderOnly(payload, /*src_offset=*/0, target_va);
+  for (const CallSiteEffect& eff : rec.outbound_calls) {
+    if (eff.finalized) {
+      PutFinalizedCallEntry(payload, eff);
+    } else {
+      PutCallHeaderOnly(payload, /*src_offset=*/0, eff.target_va);
+    }
   }
   if (emit_tail) {
     PutTailCallEntry(payload, rec.tail_target_va, regs_out, spans);
@@ -839,6 +995,18 @@ void SerializeRecord(std::vector<uint8_t>& out, PPCContext* ctx,
   // X6-capture-fix: surface a too-shallow chase + a tail handoff so the consumer
   // (and the trust gate) can tell capture-completeness limits from clean records.
   if (rec.truncated_chase) mem_flags |= MTR_MF_TRUNCATED;
+  // X8-CE: the call-effect budget was hit, so some forward calls are header-only
+  // despite call_effects being on. A CE_TRUNC NOTE lets the consumer distinguish
+  // a budget cap from a genuine HLE/import header-only call. Emitted BEFORE the
+  // TAIL note so that — since the codec keeps only the LAST non-symbol NOTE in
+  // rec.note — a TAIL record's `note` stays "TAIL:..." (is_tail_record must keep
+  // working; the tail entry is the LAST calls[] entry the consumer pops off).
+  if (rec.ce_truncated) {
+    char buf[40];
+    std::snprintf(buf, sizeof(buf), "CE_TRUNC:%08x", rec.func_va);
+    AppendNoteSection(sections, std::string(buf));
+    ++section_count;
+  }
   if (rec.tail_exit) {
     char buf[32];
     std::snprintf(buf, sizeof(buf), "TAIL:%08x", rec.func_va);
@@ -1025,19 +1193,133 @@ MiloTraceAddrConfig MiloTraceConfigFor(uint32_t start_addr) {
   return st.default_cfg;
 }
 
+// X8-CE: fill `eff`'s args-to-callee from the call-boundary register file
+// (r3..r10, f1..f8). At a FULL/LIGHT child's OnEntry the context IS the
+// args-to-callee state (the bl just transferred control), so the entry register
+// file is the call's argument frame.
+void CaptureCallArgs(PPCContext* ctx, CallSiteEffect& eff) {
+  for (int i = 0; i < 8; ++i) {
+    eff.args_gpr[i] = static_cast<uint32_t>(ctx->r[3 + i]);  // r3..r10
+  }
+  for (int i = 0; i < 8; ++i) {
+    uint64_t bits;
+    std::memcpy(&bits, &ctx->f[1 + i], sizeof(bits));  // f1..f8 raw u64
+    eff.args_fpr[i] = bits;
+  }
+  eff.has_args = true;
+}
+
+// X8-CE: snapshot a frame's captured node intervals (current guest bytes) for the
+// call-boundary write diff. Parallel to `frame.nodes`.
+std::vector<std::vector<uint8_t>> SnapshotNodeIntervals(PPCContext* ctx,
+                                                        const PendingRecord& f) {
+  std::vector<std::vector<uint8_t>> snap;
+  snap.reserve(f.nodes.size());
+  for (const auto& node : f.nodes) {
+    std::vector<uint8_t> cur;
+    ReadGuest(ctx, node.base, static_cast<uint32_t>(node.data.size()), cur);
+    snap.push_back(std::move(cur));
+  }
+  return snap;
+}
+
+// X8-CE: is --milo_trace_call_effects active? (only meaningful when a session is
+// active; callers check IsActive separately).
+inline bool CallEffectsOn() { return cvars::milo_trace_call_effects; }
+
 void MiloTraceOnEntryCtx(void* ppc_context, uint32_t start_addr) {
-  if (!MiloTraceShouldTrace(start_addr)) return;
   PPCContext* ctx = reinterpret_cast<PPCContext*>(ppc_context);
   MiloTraceState& st = State();
-  MiloTraceAddrConfig cfg = MiloTraceConfigFor(start_addr);
 
+  const bool manifested = MiloTraceShouldTrace(start_addr);
+  const bool ce_on = MiloTraceIsActive() && CallEffectsOn();
+
+  // ---- X8-CE LIGHT-frame path: an un-manifested callee of a traced ancestor. ----
+  if (!manifested) {
+    // No call-effects, or no live session: X7 behavior (the thunk only fired
+    // because trace_all widened it; do nothing — byte-identical X7 capture).
+    if (!ce_on) return;
+    ThreadBuffer* tb = tls_buffer;  // do NOT create a buffer off the hot path
+    if (!tb || tb->pending.empty()) {
+      if (tb) tb->tail_cont.pending = false;  // stale token, no anchor
+      return;
+    }
+    PendingRecord& top = tb->pending.back();
+
+    // A grandchild of a LIGHT frame: its writes are inside the direct call's
+    // boundary diff, so just count it for LIFO balance and do not push a frame.
+    if (top.light) {
+      tb->tail_cont.pending = false;  // any non-consuming entry clears the token
+      top.skip_depth++;
+      return;
+    }
+
+    // top is a FULL frame. A pending tail continuation transfers a prior light
+    // frame's call entry + boundary snapshot to THIS frame (the tail jump landed
+    // here) so its real exit finalizes the parent's entry (§3.4).
+    if (tb->tail_cont.pending) {
+      PendingRecord light;
+      light.func_va = start_addr;
+      light.light = true;
+      light.parent_call_index = tb->tail_cont.parent_call_index;
+      light.anchor_index = tb->tail_cont.anchor_index;
+      light.boundary_pre = std::move(tb->tail_cont.boundary_pre);
+      tb->tail_cont.pending = false;
+      tb->pending.push_back(std::move(light));
+      return;
+    }
+
+    // Budget cap: a hot dispatcher must not grow the effect list without bound.
+    // Append a header-only entry, count the descendant (skip its subtree), flag.
+    const bool over_count = top.outbound_calls.size() >= kMaxCallEffects;
+    const bool over_bytes = top.ce_bytes >= kMaxCallEffectBytes;
+    if (over_count || over_bytes) {
+      CallSiteEffect eff;
+      eff.target_va = start_addr;
+      top.outbound_calls.push_back(std::move(eff));  // header-only, unfinalized
+      top.ce_truncated = true;
+      top.skip_depth++;  // its subtree is skipped (the entry stays header-only)
+      return;
+    }
+
+    // Normal direct light call: capture args, append the (to-be-finalized) entry
+    // to the FULL anchor, snapshot the anchor's node intervals at this boundary,
+    // and push a LIGHT frame that will finalize the entry on its own exit.
+    CallSiteEffect eff;
+    eff.target_va = start_addr;
+    CaptureCallArgs(ctx, eff);
+    top.ce_bytes += 8 * 4 + 8 * 8 + 12;  // args + ret + header (write bytes TBD)
+    size_t anchor_idx = tb->pending.size() - 1;
+    int call_idx = static_cast<int>(top.outbound_calls.size());
+    top.outbound_calls.push_back(std::move(eff));
+
+    PendingRecord light;
+    light.func_va = start_addr;
+    light.light = true;
+    light.parent_call_index = call_idx;
+    light.anchor_index = anchor_idx;
+    light.boundary_pre = SnapshotNodeIntervals(ctx, tb->pending[anchor_idx]);
+    tb->pending.push_back(std::move(light));
+    return;
+  }
+
+  // ---- FULL (manifested) frame path (X6/X7 capture unchanged + X8-CE pairing). --
+  MiloTraceAddrConfig cfg = MiloTraceConfigFor(start_addr);
   ThreadBuffer* tb = GetThreadBuffer();
 
-  // X6: this is an outbound call FROM the frame currently on top of the shadow
-  // stack (its immediate caller, if that caller is itself traced). Record the
-  // edge on the parent so its record carries a real dynamic outbound-call list.
-  if (!tb->pending.empty()) {
-    tb->pending.back().outbound_calls.push_back(start_addr);
+  // Any manifested OnEntry that does not consume a pending tail continuation
+  // clears it (stale — a manifested tail target finalizes via its own frame, not
+  // the light path; the inherited linkage is set below).
+  bool inherited_tail = false;
+  int inh_parent_call_index = -1;
+  size_t inh_anchor_index = 0;
+  std::vector<std::vector<uint8_t>> inh_boundary_pre;
+  if (ce_on && tb->tail_cont.pending) {
+    inherited_tail = true;
+    inh_parent_call_index = tb->tail_cont.parent_call_index;
+    inh_anchor_index = tb->tail_cont.anchor_index;
+    inh_boundary_pre = std::move(tb->tail_cont.boundary_pre);
+    tb->tail_cont.pending = false;
   }
 
   PendingRecord rec;
@@ -1053,6 +1335,42 @@ void MiloTraceOnEntryCtx(void* ppc_context, uint32_t start_addr) {
   CaptureStackWindow(ctx, cfg, rec);
   CaptureArgChase(ctx, cfg, rec, rec.truncated_chase);
 
+  // X6/X8-CE: record the outbound-call edge on the parent (if any).
+  //  - Parent is FULL: a DIRECT manifested call. Append a (to-be-finalized) entry
+  //    with args; this FULL frame's exit fills its ret + own write spans into it.
+  //  - Parent is LIGHT (this FULL frame is a grandchild reached via a light call):
+  //    do NOT add a direct-call entry — the light frame's boundary diff already
+  //    represents this subtree to the anchor. Its own record is still captured.
+  //  - inherited tail continuation: finalize the inherited entry (the prior tail
+  //    chain's parent), not a fresh one.
+  if (inherited_tail && inh_parent_call_index >= 0) {
+    rec.parent_call_index = inh_parent_call_index;
+    rec.anchor_index = inh_anchor_index;
+    rec.boundary_pre = std::move(inh_boundary_pre);
+    rec.inherited_boundary = true;
+  } else if (!tb->pending.empty()) {
+    PendingRecord& parent = tb->pending.back();
+    if (!parent.light && ce_on &&
+        parent.outbound_calls.size() < kMaxCallEffects &&
+        parent.ce_bytes < kMaxCallEffectBytes) {
+      CallSiteEffect eff;
+      eff.target_va = start_addr;
+      CaptureCallArgs(ctx, eff);
+      parent.ce_bytes += 8 * 4 + 8 * 8 + 12;
+      rec.parent_call_index = static_cast<int>(parent.outbound_calls.size());
+      rec.anchor_index = tb->pending.size() - 1;
+      parent.outbound_calls.push_back(std::move(eff));
+    } else if (!parent.light) {
+      // call_effects off (or budget hit): keep the X6 header-only edge so the
+      // dynamic outbound-call list is still populated (byte-identical to X7 when
+      // ce is off, since no args/ret are attached).
+      CallSiteEffect eff;
+      eff.target_va = start_addr;
+      if (ce_on) parent.ce_truncated = true;
+      parent.outbound_calls.push_back(std::move(eff));
+    }
+  }
+
   tb->pending.push_back(std::move(rec));
   (void)st;
 }
@@ -1063,11 +1381,76 @@ void MiloTraceOnEntryCtx(void* ppc_context, uint32_t start_addr) {
 // state). On a tail site the record is tagged so the consumer never matches
 // regs_out as a clean return; on either path the exact-mem read-region capture
 // closes the read graph from the observed accesses.
+// X8-CE: finalize a parent's CALLS[] entry with a callee's return regs + write
+// delta. `anchor_index`/`call_index` address the entry in the anchor FULL frame;
+// `spans` is the write delta to attach (the FULL child's own mem_out, or the
+// LIGHT child's anchor-boundary diff). Updates the anchor's ce_bytes budget.
+void FinalizeParentEntry(ThreadBuffer* tb, size_t anchor_index, int call_index,
+                         uint32_t ret_r3, uint64_t ret_f1,
+                         std::vector<WriteSpan>&& spans) {
+  if (call_index < 0 || anchor_index >= tb->pending.size()) return;
+  PendingRecord& anchor = tb->pending[anchor_index];
+  if (static_cast<size_t>(call_index) >= anchor.outbound_calls.size()) return;
+  CallSiteEffect& eff = anchor.outbound_calls[call_index];
+  if (eff.finalized) return;  // already finalized (defensive)
+  // Cap write spans to the u8 nwrites field; account budget.
+  if (spans.size() > kMaxFinalizeWrites) {
+    spans.resize(kMaxFinalizeWrites);
+    anchor.ce_truncated = true;
+  }
+  size_t bytes = 0;
+  for (const auto& s : spans) bytes += 8 + s.bytes.size();
+  anchor.ce_bytes += bytes;
+  eff.ret_r3 = ret_r3;
+  eff.ret_f1 = ret_f1;
+  eff.has_ret = true;
+  eff.writes = std::move(spans);
+  eff.finalized = true;
+}
+
 void MiloTraceFinishExit(PPCContext* ctx, uint32_t start_addr, bool tail) {
   MiloTraceState& st = State();
   ThreadBuffer* tb = GetThreadBuffer();
   if (tb->pending.empty()) return;
 
+  // X8-CE: a skipped descendant of a LIGHT frame (counted at OnEntry). Decrement
+  // and return — its subtree is represented by the light frame's boundary diff.
+  // LIFO guarantees the matching frame is the top LIGHT frame's counter.
+  if (tb->pending.back().light && tb->pending.back().skip_depth > 0) {
+    tb->pending.back().skip_depth--;
+    return;
+  }
+
+  // X8-CE: a LIGHT frame's own exit. It finalizes the anchor's CALLS[] entry with
+  // this callee's return + the anchor's call-boundary write delta — UNLESS this is
+  // a tail handoff (regs are args-to-tail-callee, not the return), in which case a
+  // TailCont token transfers the entry to the tail target's frame (§3.4).
+  if (tb->pending.back().light) {
+    PendingRecord light = std::move(tb->pending.back());
+    tb->pending.pop_back();
+    if (tail) {
+      // Defer finalization to the tail target's REAL exit (cumulative boundary).
+      tb->tail_cont.pending = true;
+      tb->tail_cont.parent_call_index = light.parent_call_index;
+      tb->tail_cont.anchor_index = light.anchor_index;
+      tb->tail_cont.boundary_pre = std::move(light.boundary_pre);
+      return;
+    }
+    if (light.parent_call_index >= 0 &&
+        light.anchor_index < tb->pending.size()) {
+      const PendingRecord& anchor = tb->pending[light.anchor_index];
+      std::vector<WriteSpan> spans =
+          ComputeWriteSpansFrom(ctx, anchor.nodes, light.boundary_pre);
+      uint32_t ret_r3 = static_cast<uint32_t>(ctx->r[3]);
+      uint64_t ret_f1;
+      std::memcpy(&ret_f1, &ctx->f[1], sizeof(ret_f1));
+      FinalizeParentEntry(tb, light.anchor_index, light.parent_call_index,
+                          ret_r3, ret_f1, std::move(spans));
+    }
+    return;
+  }
+
+  // ---- FULL frame exit (X6/X7 record + X8-CE parent finalization). ----
   // Match by func_va from the top of the shadow stack (defensive against a
   // missed entry/exit pairing — pop the matching frame).
   PendingRecord rec = std::move(tb->pending.back());
@@ -1099,6 +1482,32 @@ void MiloTraceFinishExit(PPCContext* ctx, uint32_t start_addr, bool tail) {
 
   mtr_regs_t regs_out = SnapshotRegs(ctx);
   uint64_t seq = st.call_seq.fetch_add(1, std::memory_order_relaxed);
+
+  // X8-CE: finalize this FULL frame's entry on its parent (a DIRECT manifested
+  // call) with this record's return regs (r3/f1) + its OWN mem_out write spans.
+  // The frame was already popped, so the anchor (parent) sits at its recorded
+  // absolute index; on a tail exit regs_out is the args-to-tail-callee handoff
+  // (NOT a return), so do not inject a wrong ret — leave the entry header-only
+  // (honest), as the X7 tail behavior already did for the entry's perspective.
+  if (rec.parent_call_index >= 0 && !tail &&
+      rec.anchor_index < tb->pending.size()) {
+    std::vector<WriteSpan> spans;
+    if (rec.inherited_boundary) {
+      // A manifested tail target of a light tail chain: the cumulative write
+      // delta is the anchor's boundary diff (chain + this frame), not rec's own
+      // mem_out (rec's nodes are this frame's, a DIFFERENT object than the anchor).
+      const PendingRecord& anchor = tb->pending[rec.anchor_index];
+      spans = ComputeWriteSpansFrom(ctx, anchor.nodes, rec.boundary_pre);
+    } else {
+      // A direct manifested call: this frame's own mem_out is its attributable
+      // write delta (already the Method-A scoped delta the record serializes).
+      spans = ComputeWriteSpans(ctx, rec);
+    }
+    uint32_t ret_r3 = regs_out.gpr[3];
+    uint64_t ret_f1 = regs_out.fpr[1];
+    FinalizeParentEntry(tb, rec.anchor_index, rec.parent_call_index, ret_r3,
+                        ret_f1, std::move(spans));
+  }
 
   // X6: populate insn_count with the function's static instruction count (a
   // meaningful non-zero value for non-leaf records; the override-wrap path left

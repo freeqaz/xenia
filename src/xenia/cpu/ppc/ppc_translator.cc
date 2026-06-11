@@ -136,14 +136,34 @@ bool PPCTranslator::Translate(GuestFunction* function,
   // does NOT consult this bit.
   if (cvars::milo_trace_enable) {
     const auto& traced = MiloTraceTracedAddresses();
-    if (traced.empty() || traced.count(function->address()) != 0) {
+    // X8-CE (call effects): with --milo_trace_call_effects, emit the entry/exit
+    // capture thunks for EVERY compiled function — even ones outside the manifest
+    // — so a manifest-traced (FULL) frame's forward calls into un-manifested
+    // callees fire the OnEntry/FinishExit hooks. milo_trace.cc routes those to
+    // LIGHT frames whose return regs + write delta finalize the parent's CALLS[]
+    // entry (the per-call oracle effect the a2i path needs). EXACT-mem per-access
+    // logging (kDebugInfoMiloExactMem) stays manifest-gated below — only the
+    // call-effect thunks go everywhere. With the cvar OFF, this whole `||` short-
+    // circuits to the X7 manifest gate, so translation is byte-identical to X7
+    // (the negative control). See docs/W5_X8CE_CALL_EFFECTS.md.
+    const bool trace_all = cvars::milo_trace_call_effects;
+    const bool in_manifest =
+        traced.empty() || traced.count(function->address()) != 0;
+    if (trace_all || in_manifest) {
       debug_info_flags |= DebugInfoFlags::kDebugInfoTraceCallRecords;
       // X6-capture-fix (DEEPER CAPTURE / Tier C): when --milo_trace_exact_mem is
       // on, ALSO mark this traced function so its load/store sequences emit the
       // MiloTraceMemAccess per-access logger (kDebugInfoMiloExactMem implies
       // kDebugInfoTraceCallRecords). Off-path / non-exact functions emit ZERO
       // per-access code, so their generated code is unchanged.
-      if (cvars::milo_trace_exact_mem) {
+      //
+      // X8-CE: exact-mem per-access logging stays MANIFEST-gated even when
+      // trace_all widened the call-record thunks above — the per-access log is
+      // the expensive part and the LIGHT-frame call-effect path needs only the
+      // entry/exit thunks + the Method-A snapshot diff, not the Tier-C log. So a
+      // forward-called un-manifested callee gets cheap LIGHT capture, never the
+      // exact-mem instrumentation.
+      if (cvars::milo_trace_exact_mem && in_manifest) {
         debug_info_flags |= DebugInfoFlags::kDebugInfoMiloExactMem;
       }
     }

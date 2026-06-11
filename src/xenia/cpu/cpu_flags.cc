@@ -60,6 +60,22 @@ DEFINE_bool(milo_trace_exact_mem, false,
             "Tier-C access log). Heavier; use with a gated manifest. Requires "
             "--milo_trace_enable=true.",
             "CPU");
+// X8-CE (call effects). When set together with --milo_trace_enable, the
+// entry/exit capture thunks (kDebugInfoTraceCallRecords) are emitted for ALL
+// compiled functions, not just the manifest-traced set (ppc_translator.cc). That
+// makes FORWARD calls into un-manifested callees of a traced (FULL) frame visible
+// as LIGHT frames, so the parent's CALLS[] entry can be FINALIZED with the
+// callee's actual return regs (r3/f1) + memory-write delta — the per-call oracle
+// effect the a2i replay path needs (W4_A2_NONLEAF §2 found ret=0/wr=0 forward
+// calls under X7). EXACT-mem per-access logging stays manifest-gated (the
+// expensive part is unaffected). With this OFF, translation is byte-identical to
+// X7 (the negative control). Doc: docs/W5_X8CE_CALL_EFFECTS.md.
+DEFINE_bool(milo_trace_call_effects, false,
+            "milo-trace (X8-CE): emit capture thunks for ALL functions so a "
+            "traced frame's forward calls get their return regs + write delta "
+            "captured into the parent's CALLS[] oracle. Requires "
+            "--milo_trace_enable=true. OFF => byte-identical X7 translation.",
+            "CPU");
 
 DEFINE_bool(
     disable_global_lock, false,
