@@ -81,3 +81,96 @@ write-downgrade path. Both fixes are additive/inert for DC3 by construction.
 Next step toward gameplay would be driving input / verifying the menu renders
 via a non-null GPU backend, and implementing the two unresolved externs above if
 a later stage (profile/save) needs them.
+
+---
+
+# Session 2 (2026-07-07): XamUser fake local profile + real crash localization
+
+## What was implemented (Xenia kernel)
+
+1. **`xam_user.cc` — real multi-user fake local profile.** The XamUser sign-in
+   APIs were already implemented for a single hard-coded user 0. Generalized them
+   into a configurable fake local-profile model:
+   - New cvar **`--local_user_count`** (default 1, clamped 1-4). Users beyond
+     index 0 are *synthesized* (stable offline XUID `0xE000...+idx`, gamertag
+     `Player{N}`) purely inside the sign-in query APIs, without touching the
+     content/`UserProfile` plumbing — so single-user titles (and DC3) are byte-
+     identical at the default, while local multiplayer titles observe the extra
+     signed-in controllers.
+   - `XamUserGetSigninState / GetXUID / GetName / GetGamerTag / GetSigninInfo`,
+     `XamUserCheckPrivilege` (now **grants** for signed-in local users, was
+     deny-all), `XamUserAreUsersFriends`, `XamUserContentRestriction*`,
+     `XamUserGetMembershipTier` all honor `IsLocalUserSignedIn(index)`.
+   - `XamUserGetXUID` now reports a local user as *offline-only* (mask bit 1),
+     consistent with `signin_state == SignedInLocally`.
+   - Runtime-verified: with `--local_user_count=2`, RB3 queries all four indices
+     and sees `user 0 -> 1`, `user 1 -> 1`, `user 2/3 -> 0`.
+2. **`user_profile.cc` — offline XUID.** User 0's placeholder XUID
+   `0xB13EBABEBABEBABE` (invalid top nibble) → `0xE00000000000BABE` (offline
+   form, top nibble 0xE), and name `User` → `Player1`. Mask check
+   `0x00C0000000000000` stays clear. Consistent with a signed-in-locally profile.
+3. **`xboxkrnl_io.cc` — `IoDismountVolumeByFileHandle`** minimal success stub
+   (was an "undefined extern call"; RB3 calls it managing its cache volume).
+4. **`xboxkrnl_crypt.cc` — `XeKeysConsolePrivateKeySign`** log-and-continue
+   success stub (does NOT touch the output buffer — the true signature size is
+   uncertain from the ABI and writing a wrong length could corrupt guest memory).
+
+Both previously-unresolved externs now resolve cleanly (no `!!` / "undefined
+extern call" in the boot log).
+
+## DC3 regression: PASS (measured, not assumed)
+
+DC3 boots identically with and without these changes. Its boot hits a pre-existing
+crash at guest `0x82311A94` (fault `0x100000000`, single SIGSEGV) — **reproduced
+byte-for-byte with the code reverted to HEAD**, so it is NOT caused by this work.
+At the default `local_user_count=1`, only the user-0 identity changes apply.
+
+## The `main_hub` crash: XamUser hypothesis REFUTED; real cause localized
+
+The prior session hypothesized the `main_hub` heap crash was caused by
+unimplemented XamUser sign-in APIs. **This is refuted:** with the full multi-user
+implementation above, the patched RB3 **Deluxe** build crashes identically (heap-
+allocator null-walk, fault `-8`, in the game's own MSL allocator at `0x8284xxxx`).
+
+Two distinct facts were established:
+
+- **The two "RB3" XEXes are different builds.** `/srv/torrents/games/arbys/rb3/`
+  contains both `default.xex` (sha `6639ce25…`, **RB3 Deluxe** — contains the
+  `rbdxcache` string and `songs/updates/deluxe/…`) and `default_vanilla.xex`
+  (sha `cd472d07…`, **true retail RB3**, no `rbdxcache`). The prior session's
+  "vanilla control" was actually the Deluxe build. The same-instrument **patch
+  targets Deluxe TU5**.
+- **Deluxe's crash is in the RB3-Deluxe `rbdxcache` path, not XamUser.** The
+  crash is immediately preceded by
+  `xeXamContentCreate root='rbdxcache' flags=0x14` →
+  `NtCreateFile rbdxcache:\rbdxcache disp=1` → an (unlogged) `NtReadFile` on that
+  handle returning `STATUS_ACCESS_VIOLATION` (`xeRtlNtStatusToDosError C0000005`)
+  → RB3-Deluxe's cache-init then corrupts the MSL heap free-list → the next
+  alloc/free walks a nulled node and faults. Nondeterministic crash *address*
+  (heap state), deterministic *trigger* (loading `main_hub` after the splash).
+- **True retail (`default_vanilla.xex`) boots much further** — past the logo,
+  photosensitivity, and the shattered-glass splash to the **ESRB /
+  "This game uses an autosave system" screen** (frame 700) — then hits a
+  *deterministic* crash at `0x8226045C` (fault `0x100000000`), reproducible
+  **with no input**, at the ESRB→main-menu transition. This is the same
+  `0x100000000` fault family as DC3's pre-existing crash. (Retail is a third
+  build — its VAs don't match the rb3-xenon `band.exe` disassembly base
+  `4704202f`, so instruction-level disassembly of this XEX is not yet available.)
+
+Net: reaching the RB3 overshell is blocked by **two independent, pre-existing
+emulator/game crashes** — the Deluxe `rbdxcache` heap corruption (blocks the
+*patched* build) and the retail/DC3 `0x100000000` fault (blocks the *unpatched*
+retail build) — **neither related to the XamUser sign-in APIs.**
+
+## Reproduce
+
+```bash
+# retail (boots furthest, to ESRB/autosave), no input, deterministic 0x8226045C:
+mkdir -p /tmp/rb3retailboot && cd /tmp/rb3retailboot && \
+  cp /srv/torrents/games/arbys/rb3/default_vanilla.xex default.xex && \
+  for f in gen AvatarAwards nxeart charnames.zbm; do \
+    ln -sf /srv/torrents/games/arbys/rb3/$f $f; done
+build/bin/Linux/Checked/xenia-headless --target=/tmp/rb3retailboot/default.xex \
+  --gpu=vulkan --local_user_count=2 \
+  --dump_frames_path=rb3-verify/frames/retail --headless_timeout_ms=80000
+```

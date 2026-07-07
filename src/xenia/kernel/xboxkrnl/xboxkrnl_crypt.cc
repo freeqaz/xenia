@@ -714,6 +714,20 @@ dword_result_t XeKeysGetConsoleID_entry(lpvoid_t console_id_ptr,
 }
 DECLARE_XBOXKRNL_EXPORT1(XeKeysGetConsoleID, kNone, kStub);
 
+dword_result_t XeKeysConsolePrivateKeySign_entry(lpvoid_t hash_ptr,
+                                                 lpvoid_t out_sig_ptr) {
+  // Signs a hash with the per-console private key (RSA-2048). We have no real
+  // console key, so a genuine signature is not reproducible. Titles that call
+  // this at boot only need a well-formed success return (the resulting
+  // signature cannot be checked against the real console cert in emulation).
+  // We deliberately do NOT touch the output buffer: the true output size is
+  // not certain from this ABI and writing a wrong length could corrupt guest
+  // memory. Returning success (instead of the prior "undefined extern"
+  // garbage) is the safe log-and-continue.
+  return X_STATUS_SUCCESS;
+}
+DECLARE_XBOXKRNL_EXPORT1(XeKeysConsolePrivateKeySign, kNone, kStub);
+
 }  // namespace xboxkrnl
 }  // namespace kernel
 }  // namespace xe

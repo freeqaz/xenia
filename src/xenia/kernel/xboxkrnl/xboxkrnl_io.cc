@@ -707,6 +707,15 @@ dword_result_t IoCreateDevice_entry(dword_t device_struct, dword_t r4,
 }
 DECLARE_XBOXKRNL_EXPORT1(IoCreateDevice, kFileSystem, kStub);
 
+dword_result_t IoDismountVolumeByFileHandle_entry(dword_t file_handle) {
+  // There is no real mounted volume behind an emulated file handle, so there
+  // is nothing to dismount. Report success so the caller's teardown/cache
+  // path proceeds instead of taking an "undefined extern" garbage return.
+  // (Rock Band 3 calls this while managing its dx/rbdxcache volume.)
+  return X_STATUS_SUCCESS;
+}
+DECLARE_XBOXKRNL_EXPORT1(IoDismountVolumeByFileHandle, kFileSystem, kStub);
+
 }  // namespace xboxkrnl
 }  // namespace kernel
 }  // namespace xe

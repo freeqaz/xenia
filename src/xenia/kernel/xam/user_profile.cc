@@ -23,8 +23,15 @@ UserProfile::UserProfile() {
   // 58410A1F checks the user XUID against a mask of 0x00C0000000000000 (3<<54),
   // if non-zero, it prevents the user from playing the game.
   // "You do not have permissions to perform this operation."
-  xuid_ = 0xB13EBABEBABEBABE;
-  name_ = "User";
+  //
+  // Use a proper *offline* XUID (top nibble 0xE marks a local, non-Live
+  // account). This is consistent with signin_state()==1 (SignedInLocally):
+  // a signed-in-locally profile has an offline XUID, not an online one. The
+  // previous placeholder (0xB13E...) has an invalid top nibble which some
+  // titles (e.g. Rock Band 3) treat as a malformed online profile. The mask
+  // above stays clear (byte 6 == 0x00).
+  xuid_ = 0xE00000000000BABEull;
+  name_ = "Player1";
 
   // https://cs.rin.ru/forum/viewtopic.php?f=38&t=60668&hilit=gfwl+live&start=195
   // https://github.com/arkem/py360/blob/master/py360/constants.py

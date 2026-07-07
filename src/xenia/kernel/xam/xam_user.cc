@@ -8,7 +8,9 @@
  */
 
 #include <cstring>
+#include <string>
 
+#include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
 #include "xenia/base/string_util.h"
@@ -22,9 +24,58 @@
 
 DECLARE_int32(user_language);
 
+// Number of fake signed-in local user profiles. Default 1 preserves the
+// historical single-user behavior (and keeps DC3 unaffected). RB3's 2-player
+// / same-instrument overshell flow needs a signed-in user on a second
+// controller, so its verification harness boots with --local_user_count=2.
+// Clamped to [1, 4].
+DEFINE_int32(local_user_count, 1,
+             "Number of fake signed-in local user profiles (1-4). Users beyond "
+             "index 0 are synthesized with a stable offline XUID and a "
+             "Player{N} gamertag so local multiplayer (e.g. join on a second "
+             "controller) sees a valid signed-in profile.",
+             "Kernel");
+
 namespace xe {
 namespace kernel {
 namespace xam {
+
+// ---------------------------------------------------------------------------
+// Fake local-profile model.
+//
+// user_index 0 is backed by the kernel's single UserProfile object (which also
+// backs content storage). Additional indices (1..3) are *synthesized* on the
+// fly by the sign-in query APIs: a stable offline XUID and a "Player{N}"
+// gamertag. This is deliberately surgical — it does not touch the content /
+// UserProfile plumbing, so single-user titles behave exactly as before, while
+// local multiplayer titles observe the extra signed-in controllers.
+// ---------------------------------------------------------------------------
+static uint32_t local_user_count() {
+  int32_t n = cvars::local_user_count;
+  if (n < 1) n = 1;
+  if (n > 4) n = 4;
+  return static_cast<uint32_t>(n);
+}
+
+static bool IsLocalUserSignedIn(uint32_t user_index) {
+  return user_index < local_user_count();
+}
+
+static uint64_t LocalUserXuid(uint32_t user_index) {
+  if (user_index == 0) {
+    return kernel_state()->user_profile()->xuid();
+  }
+  // Offline XUID form: top nibble 0xE marks an offline (local) profile.
+  // Stable and distinct per index.
+  return 0xE00000000000BABEull + user_index;
+}
+
+static std::string LocalUserName(uint32_t user_index) {
+  if (user_index == 0) {
+    return kernel_state()->user_profile()->name();
+  }
+  return "Player" + std::to_string(user_index + 1);
+}
 
 X_HRESULT_result_t XamUserGetXUID_entry(dword_t user_index, dword_t type_mask,
                                         lpqword_t xuid_ptr) {
@@ -36,16 +87,11 @@ X_HRESULT_result_t XamUserGetXUID_entry(dword_t user_index, dword_t type_mask,
   uint32_t result = X_E_NO_SUCH_USER;
   uint64_t xuid = 0;
   if (user_index < 4) {
-    if (user_index == 0) {
-      const auto& user_profile = kernel_state()->user_profile();
-      auto type = user_profile->type() & type_mask;
-      if (type & (2 | 4)) {
-        // maybe online profile?
-        xuid = user_profile->xuid();
-        result = X_E_SUCCESS;
-      } else if (type & 1) {
-        // maybe offline profile?
-        xuid = user_profile->xuid();
+    if (IsLocalUserSignedIn(user_index)) {
+      // Local profiles are offline; honor the offline bit (1) of the mask.
+      // (A local user has no online/live XUID, so masks 2/4 alone fail.)
+      if (type_mask & 1) {
+        xuid = LocalUserXuid(user_index);
         result = X_E_SUCCESS;
       }
     }
@@ -62,9 +108,22 @@ dword_result_t XamUserGetSigninState_entry(dword_t user_index) {
   xe::threading::MaybeYield();
   uint32_t signin_state = 0;
   if (user_index < 4) {
-    if (user_index == 0) {
-      const auto& user_profile = kernel_state()->user_profile();
-      signin_state = user_profile->signin_state();
+    if (IsLocalUserSignedIn(user_index)) {
+      // 1 == eXUserSigninState_SignedInLocally (no Live session).
+      signin_state = 1;
+    }
+  }
+  // Log the first observed result per user index (this export is high
+  // frequency, so only the initial transition is logged). Confirms which local
+  // profiles a title actually queries and that they report signed-in.
+  if (user_index < 4) {
+    static uint32_t s_logged_mask = 0;
+    uint32_t bit = 1u << static_cast<uint32_t>(user_index);
+    if (!(s_logged_mask & bit)) {
+      s_logged_mask |= bit;
+      XELOGI("XamUserGetSigninState: user {} -> {} (local_user_count={})",
+             static_cast<uint32_t>(user_index), signin_state,
+             local_user_count());
     }
   }
   return signin_state;
@@ -89,14 +148,13 @@ X_HRESULT_result_t XamUserGetSigninInfo_entry(
   }
 
   std::memset(reinterpret_cast<void*>(&*info), 0, sizeof(X_USER_SIGNIN_INFO));
-  if (user_index) {
+  if (!IsLocalUserSignedIn(user_index)) {
     return X_E_NO_SUCH_USER;
   }
 
-  const auto& user_profile = kernel_state()->user_profile();
-  info->xuid = user_profile->xuid();
-  info->signin_state = user_profile->signin_state();
-  xe::string_util::copy_truncating(info->name, user_profile->name(),
+  info->xuid = LocalUserXuid(user_index);
+  info->signin_state = 1;
+  xe::string_util::copy_truncating(info->name, LocalUserName(user_index),
                                    xe::countof(info->name));
   return X_E_SUCCESS;
 }
@@ -108,12 +166,11 @@ dword_result_t XamUserGetName_entry(dword_t user_index, lpstring_t buffer,
     return X_E_INVALIDARG;
   }
 
-  if (user_index) {
+  if (!IsLocalUserSignedIn(user_index)) {
     return X_E_NO_SUCH_USER;
   }
 
-  const auto& user_profile = kernel_state()->user_profile();
-  const auto& user_name = user_profile->name();
+  auto user_name = LocalUserName(user_index);
   xe::string_util::copy_truncating(buffer, user_name,
                                    std::min(buffer_len.value(), uint32_t(16)));
   return X_E_SUCCESS;
@@ -127,7 +184,7 @@ dword_result_t XamUserGetGamerTag_entry(dword_t user_index,
     return X_E_INVALIDARG;
   }
 
-  if (user_index) {
+  if (!IsLocalUserSignedIn(user_index)) {
     return X_E_NO_SUCH_USER;
   }
 
@@ -135,8 +192,7 @@ dword_result_t XamUserGetGamerTag_entry(dword_t user_index,
     return X_E_INVALIDARG;
   }
 
-  const auto& user_profile = kernel_state()->user_profile();
-  auto user_name = xe::to_utf16(user_profile->name());
+  auto user_name = xe::to_utf16(LocalUserName(user_index));
   xe::string_util::copy_and_swap_truncating(
       buffer, user_name, std::min(buffer_len.value(), uint32_t(16)));
   return X_E_SUCCESS;
@@ -403,20 +459,24 @@ dword_result_t XamUserCheckPrivilege_entry(dword_t user_index, dword_t mask,
       return X_ERROR_INVALID_PARAMETER;
     }
 
-    if (user_index) {
+    if (!IsLocalUserSignedIn(user_index)) {
       return X_ERROR_NO_SUCH_USER;
     }
   }
 
-  // If we deny everything, games should hopefully not try to do stuff.
-  *out_value = 0;
+  // Grant the privilege for a signed-in local profile. A local (offline)
+  // account is unrestricted, so titles gating local features (e.g. local
+  // multiplayer / same-instrument join) on a privilege see it as available.
+  if (out_value) {
+    *out_value = 1;
+  }
   return X_ERROR_SUCCESS;
 }
-DECLARE_XAM_EXPORT1(XamUserCheckPrivilege, kUserProfiles, kStub);
+DECLARE_XAM_EXPORT1(XamUserCheckPrivilege, kUserProfiles, kImplemented);
 
 dword_result_t XamUserContentRestrictionGetFlags_entry(dword_t user_index,
                                                        lpdword_t out_flags) {
-  if (user_index) {
+  if (!IsLocalUserSignedIn(user_index)) {
     return X_ERROR_NO_SUCH_USER;
   }
 
@@ -430,7 +490,7 @@ dword_result_t XamUserContentRestrictionGetRating_entry(dword_t user_index,
                                                         dword_t unk1,
                                                         lpdword_t out_unk2,
                                                         lpdword_t out_unk3) {
-  if (user_index) {
+  if (!IsLocalUserSignedIn(user_index)) {
     return X_ERROR_NO_SUCH_USER;
   }
 
@@ -464,7 +524,7 @@ dword_result_t XamUserGetMembershipTier_entry(dword_t user_index) {
   if (user_index >= 4) {
     return X_ERROR_INVALID_PARAMETER;
   }
-  if (user_index) {
+  if (!IsLocalUserSignedIn(user_index)) {
     return X_ERROR_NO_SUCH_USER;
   }
   return 6 /* 6 appears to be Gold */;
@@ -480,17 +540,11 @@ dword_result_t XamUserAreUsersFriends_entry(dword_t user_index, dword_t unk1,
   if (user_index >= 4) {
     result = X_ERROR_INVALID_PARAMETER;
   } else {
-    if (user_index == 0) {
-      const auto& user_profile = kernel_state()->user_profile();
-      if (user_profile->signin_state() == 0) {
-        result = X_ERROR_NOT_LOGGED_ON;
-      } else {
-        // No friends!
-        are_friends = 0;
-        result = X_ERROR_SUCCESS;
-      }
+    if (IsLocalUserSignedIn(user_index)) {
+      // Local profiles have no friends list.
+      are_friends = 0;
+      result = X_ERROR_SUCCESS;
     } else {
-      // Only support user 0.
       result =
           X_ERROR_NO_SUCH_USER;  // if user is local -> X_ERROR_NOT_LOGGED_ON
     }
