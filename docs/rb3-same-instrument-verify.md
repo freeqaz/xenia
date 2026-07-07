@@ -216,3 +216,71 @@ same point; no patch region is ever in any observed crash path). Runtime
 functional proof (two players selecting Guitar+Guitar in the overshell) requires
 first fixing one of the two emulator/game crashes above — tracked in
 `docs/rb3-bringup-notes.md` (session 2).
+
+---
+
+# UPDATE (2026-07-07, session 3): clean-TU5 target — patch built + verified; A/B still blocked (content dirty-disc)
+
+## What changed vs session 2
+
+The target moved to **clean TU5** (`clean_tu5.xex`, sha `941ecfde…`, v0.0.5.1, no
+`rbdxcache`) — the DX-free base the patch was designed against. The prior
+teardown-crash chain that aborted the emulator is now **fully fixed** (see
+`rb3-bringup-notes.md` session 3, commit `ef5025af9`): clean TU5 runs to a clean
+exit with 0 aborts.
+
+## Deliverables
+
+| Item | Result |
+|---|---|
+| Clear the host-side assert chain | **DONE** — 3 general, DC3-safe kernel fixes; 0 aborts (was SIGABRT at `object_table.cc:196`). |
+| Produce PATCHED clean-TU5 build | **DONE + byte-verified** — `clean_tu5_patched.xex` (sha `e411086b…`). |
+| Reach the Overshell | **NO** — clean TU5 raises its own dirty-disc during ARK init, *before any frame renders*, and exits to dashboard. |
+| The 2-guitar A/B (UI frames) | **NOT OBTAINED** — clean TU5 never renders a menu; blocked by the game's content check. |
+| Fallback state-level proof + honest wall | **YES** — below. |
+
+## Patched clean-TU5 build (deliverable 3) — byte-verified
+
+`rb3-verify/patch/apply_same_instrument_clean_tu5.py` applies the same 675-write
+list that targets RB3DX (`default_tu5_patched.writes.json`: 671 cave words + 4
+detours). clean_tu5.xex is **uncompressed/unencrypted** and stores a **flat**
+basefile, so `file_off = 0x3000 + (VA - 0x82000000)`. Applied with a full
+old-value validation pass (all 675 `old` bytes matched) →
+`clean_tu5_patched.xex` (sha `e411086b…`, staged `/tmp/rb3cleanpatchedboot/`):
+
+- 4 detours are branches into the cave: `0x826684C0→0x48621BC0`,
+  `0x825B6488→0x486D3C38`, `0x8276FA08→0x4851AEA8`, `0x82794740→0x484F5E50`.
+- Cave head `0x82C8A000 = 0x81630050`; **`gSameInstrumentEnabled@0x82C8AAA0 = 1`**.
+
+Matches the session-2 "ENABLED build" state exactly. This confirms the divergence
+doc's claim that **one patch serves both RB3DX and clean TU5 unchanged**.
+
+## The A/B — boot-boundary evidence (fallback, deliverable 5)
+
+Full UI capture is impossible on clean TU5: it raises `XamShowDirtyDiscErrorUI`
+during ARK-filesystem init, **before the first frame**, and exits to dashboard —
+so no logo/menu ever renders. **Patched and vanilla clean TU5 boot byte-for-byte
+identically** to the same exit: same guest caller `LR=0x8283D750`, same SP, same
+args, **0 aborts** on both (`rb3-verify/logs/clean_tu5_patched_boot.log` vs
+`rb3clean_final.log`). No patch region (cave `0x82C8Axxx`; detours
+`0x826684C0/0x825B6488/0x8276FA08/0x82794740`) is ever in the exit path, and the
+overshell is never reached so the cave detours never execute.
+
+**Proven:** the same-instrument patch is present, byte-verified, **enabled**
+(`gSameInstrumentEnabled=1`), and **boot-stable** (identical reachable path to
+vanilla). **Not obtained:** the functional UI proof (two players picking
+Guitar+Guitar), because clean TU5 self-exits on a game-side content-integrity
+("dirty disc") check before any menu — a wall independent of the patch.
+
+## The wall, precisely — and would Canary clear it?
+
+The dirty disc is **RB3's own content check**, not an emulator fault: the emulator
+serves byte-correct file data (verified against the raw host arks), and retail
+reads the same base arks and boots to ESRB. Clean TU5 (TU5) additionally requires
+its title-update content to be present *and matching*; the available
+`gen/patch_xbox.hdr` is a placeholder (`"LOLZ"` magic, not the arks' encrypted
+form) that RB3 rejects. **Canary Xenia would NOT clear this** — it is the same
+content on the same VFS; the check is in guest code and depends on having genuine,
+matching TU5 patch content (which this content set lacks), not on emulator
+behavior. Unblocking requires a correct TU5 title-update package (or a game-side
+patch to skip the check — out of scope for emulator work).

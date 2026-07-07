@@ -174,3 +174,75 @@ build/bin/Linux/Checked/xenia-headless --target=/tmp/rb3retailboot/default.xex \
   --gpu=vulkan --local_user_count=2 \
   --dump_frames_path=rb3-verify/frames/retail --headless_timeout_ms=80000
 ```
+
+---
+
+# Session 3 (2026-07-07): clean-TU5 assert chain CLEARED; real blocker = game dirty-disc
+
+Target switched to **clean TU5** (`clean_tu5.xex`, sha `941ecfde…`, v0.0.5.1, no
+`rbdxcache`) staged at `/tmp/rb3cleanboot/`. Boot cmd:
+```
+build/bin/Linux/Checked/xenia-headless --target=/tmp/rb3cleanboot/default.xex \
+  --gpu=vulkan --local_user_count=2 --headless_timeout_ms=120000
+```
+
+## Xenia fixes (committed) — the title-teardown assert chain
+
+Clean TU5 tripped a **chain of over-strict Checked-build asserts, all on the
+title-teardown path** (`TerminateTitle`, reached when RB3 bails to the dashboard).
+Fixed as general, upstream-correct, DC3-safe changes (commit `ef5025af9`):
+
+1. **`object_table.cc` `RemoveHandle`** — `assert_zero(handle_ref_count)` aborted
+   when a still-referenced handle is force-removed (module unload at
+   `TerminateTitle:538`, `NtDuplicateObject DUPLICATE_CLOSE_SOURCE`,
+   `XObject::Delete`). refcount>0 is expected there → log-and-continue.
+   *(This is the `object_table.cc:196` assert the prior session flagged as "next".)*
+2. **`object_table.cc` `PurgeAllObjects`** — released each object's table ref
+   without erasing the handle from the object's `handles_` list, so objects
+   destructed with a non-empty `handles_` → `~XObject`'s `assert_true(handles_.empty())`
+   aborted. Now mirrors `RemoveHandle` per-slot (erase before Release).
+3. **`xobject.{h,cc}` `handle()/RetainHandle()/ReleaseHandle()`** — indexed
+   `handles_[0]` unconditionally. After (2) reclaims a *running* thread's entry,
+   that thread commits suicide (`XThread::Terminate -> ReleaseHandle`) with an
+   empty `handles_` → hard abort under the debug STL. Guard against empty.
+
+Result: clean TU5 now runs its exit-to-dashboard path to completion with **0
+aborts** (was: `SIGABRT` at `object_table.cc:196`). Verified via gdb backtrace
+that each successive assert was a distinct link in this one teardown chain.
+
+## The real blocker: RB3 raises its own "dirty disc" and exits (NOT an emulator bug)
+
+With the asserts cleared, the true wall is visible: during ARK-filesystem init —
+**before any frame renders** — RB3 calls `XamShowDirtyDiscErrorUI` and then
+`XamLoaderLaunchTitle(NULL)` (exit to dashboard). Established:
+
+- **Emulator serves byte-correct data.** Dumped the first 16 bytes of every early
+  read; `main_xbox.hdr` (`E8036F60…`) and `main_xbox_1.ark` (`E84D0000…`) match
+  the raw host files exactly. Not a read-correctness bug.
+- **Guest raises it**, from clean-TU5 `LR=0x8283D750` — the helper at `0x8283D740`
+  = `ShowDirtyDiscAndBail()` (calls the dirty-disc UI import thunk `0x82c4bdec`,
+  then exit-to-dashboard `0x8283d4f0`). Its *caller* is RB3's content-integrity
+  check. (clean_tu5.xex is uncompressed/unencrypted, so it disassembles directly
+  via flat map `off = 0x3000 + (VA - 0x82000000)`.)
+- **It is content-side, TU5-specific.** Retail (`default_vanilla.xex`) reads the
+  *same* base arks and boots past it to the ESRB screen (781 swaps) — then hits
+  the pre-existing deterministic `0x8226045C` guest fault (`stw r10,0(r0)`,
+  fault `0x100000000`), same family as DC3's. Clean TU5's TU5 check is stricter.
+- **`update:` is the wrong lever.** RB3 probes `update:\gen\patch_xbox.hdr` (TU
+  content). Symlinking `update:` to the disc dir *does* let it open, but the
+  bundled `patch_xbox.hdr` is a placeholder (`"LOLZ"` magic, not the base arks'
+  encrypted form); RB3 loads and **rejects** it → dirty-disc on BOTH retail and
+  clean TU5 (a **regression** vs leaving update: unmounted). Reverted; documented
+  in `emulator.cc`. A genuine `update:` mount needs a *matching* TU5 package.
+
+Net: reaching the RB3 overshell on clean TU5 is blocked by a **game-side content
+check** (needs matching genuine TU5 title-update content; the available
+`patch_xbox.*` is a non-matching placeholder). Not fixable emulator-side — the
+emulator's file IO is byte-faithful. Diagnostics kept: `NtReadFile` short/failed-read
+warning (`xboxkrnl_io.cc`) and the dirty-disc guest-caller log (`xam_ui.cc`,
+commit `95e917b42`).
+
+## DC3 regression: PASS
+Boots to its render loop (368 swaps), **0 aborts**, never touches `update:` at
+runtime, same pre-existing `0x82311A94/0x100000000` state as baseline. All three
+fixes are inert for DC3 by construction.
