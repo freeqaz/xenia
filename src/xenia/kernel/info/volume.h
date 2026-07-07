@@ -54,6 +54,28 @@ struct X_FILE_FS_ATTRIBUTE_INFORMATION {
 };
 static_assert_size(X_FILE_FS_ATTRIBUTE_INFORMATION, 16);
 
+// NT DEVICE_TYPE values (winioctl.h / ntddk.h). Only the subset the 360
+// filesystem devices actually report is enumerated here.
+enum X_FILE_DEVICE_TYPE : uint32_t {
+  X_FILE_DEVICE_CD_ROM = 0x00000002,
+  X_FILE_DEVICE_DISK = 0x00000007,
+  X_FILE_DEVICE_UNKNOWN = 0x00000022,
+};
+
+// NT device characteristics flags (ntddk.h).
+enum X_FILE_DEVICE_CHARACTERISTICS : uint32_t {
+  X_FILE_REMOVABLE_MEDIA = 0x00000001,
+  X_FILE_READ_ONLY_DEVICE = 0x00000002,
+  X_FILE_REMOTE_DEVICE = 0x00000010,
+};
+
+// https://docs.microsoft.com/en-us/windows-hardware/drivers/ddi/ntddk/ns-ntddk-_file_fs_device_information
+struct X_FILE_FS_DEVICE_INFORMATION {
+  be<uint32_t> device_type;
+  be<uint32_t> characteristics;
+};
+static_assert_size(X_FILE_FS_DEVICE_INFORMATION, 8);
+
 #pragma pack(pop)
 
 }  // namespace kernel

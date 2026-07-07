@@ -245,12 +245,16 @@ X_STATUS VirtualFileSystem::OpenFile(Entry* root_entry,
                      desired_access & FileAccess::kFileAppendData;
   if (wants_write && ((parent_entry && parent_entry->is_read_only()) ||
                       (entry && entry->is_read_only()))) {
-    // Fail if read only device and wants write.
+    // Games routinely open files on the read-only game partition with write
+    // modes (e.g. RB3 retail opens dev-only game:\dx_playlist.dta / log.dta
+    // with kOverwriteIf). On real hardware these would fail ACCESS_DENIED; we
+    // instead downgrade the request to read-only access so the title keeps
+    // running, matching upstream Xenia's data path. This is an expected,
+    // handled condition, so only warn (do not assert_always, which halts
+    // Checked builds on a benign case).
     // return X_STATUS_ACCESS_DENIED;
-    // TODO(benvanik): figure out why games are opening read-only files with
-    // write modes.
-    assert_always();
-    XELOGW("Attempted to open the file/dir for create/write");
+    XELOGW("Downgrading write open of read-only file/dir to read-only: {}",
+           path);
     desired_access = FileAccess::kGenericRead | FileAccess::kFileReadData;
   }
 

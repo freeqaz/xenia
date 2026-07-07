@@ -338,7 +338,28 @@ dword_result_t NtQueryVolumeInformationFile_entry(
       }
       break;
     }
-    case XFileFsDeviceInformation:
+    case XFileFsDeviceInformation: {
+      // Reports the device type + characteristics for the volume a handle
+      // lives on. Titles query this (e.g. on \Device\Harddisk0\partition0)
+      // to discover whether content is on removable media or the fixed HDD.
+      //
+      // Matches mainline/canary Xenia: report FILE_DEVICE_UNKNOWN so titles
+      // don't take a device-class-specific branch (a concrete DISK/CD_ROM
+      // type can send some titles down HDD-cache or disc-swap paths the VFS
+      // can't honor). Characteristics still reflect the device's writability,
+      // which is real 360 behavior (read-only mounts set FILE_READ_ONLY_DEVICE
+      // and, for disc/STFS media, FILE_REMOVABLE_MEDIA).
+      auto device = file->device();
+      auto info = info_ptr.as<X_FILE_FS_DEVICE_INFORMATION*>();
+      info->device_type = X_FILE_DEVICE_UNKNOWN;
+      uint32_t characteristics = 0;
+      if (device->is_read_only()) {
+        characteristics |= X_FILE_READ_ONLY_DEVICE | X_FILE_REMOVABLE_MEDIA;
+      }
+      info->characteristics = characteristics;
+      out_length = sizeof(*info);
+      break;
+    }
     default: {
       // Unsupported, for now.
       assert_always();
