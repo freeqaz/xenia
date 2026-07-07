@@ -14,6 +14,7 @@
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/util/shim_utils.h"
 #include "xenia/kernel/xam/xam_private.h"
+#include "xenia/kernel/xthread.h"
 #include "xenia/xbox.h"
 
 #ifndef XE_HEADLESS_BUILD
@@ -521,6 +522,20 @@ DECLARE_XAM_EXPORT1(XamShowDeviceSelectorUI, kUI, kImplemented);
 
 void XamShowDirtyDiscErrorUI_entry(dword_t user_index) {
 #ifdef XE_HEADLESS_BUILD
+  // Log the guest caller so a title's dirty-disc bail-out can be traced back to
+  // the code that raised it (a content-integrity / disc-read decision made by
+  // the game, not the emulator). Cheap and only fires on this error path.
+  {
+    auto* thread = XThread::GetCurrentThread();
+    if (thread) {
+      auto* ctx = thread->thread_state()->context();
+      XELOGE(
+          "XamShowDirtyDiscErrorUI: raised by guest LR=0x{:08X} SP=0x{:08X} "
+          "(user={})",
+          static_cast<uint32_t>(ctx->lr), static_cast<uint32_t>(ctx->r[1]),
+          (uint32_t)user_index);
+    }
+  }
   XELOGE("XamShowDirtyDiscErrorUI: Dirty disc error in headless mode (ignored)");
   return;
 #else

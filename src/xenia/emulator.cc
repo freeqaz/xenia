@@ -1988,6 +1988,14 @@ X_STATUS Emulator::LaunchXexFile(const std::filesystem::path& path) {
   // Create symlinks to the device.
   file_system_->RegisterSymbolicLink("game:", mount_path);
   file_system_->RegisterSymbolicLink("d:", mount_path);
+  // NOTE: intentionally do NOT symlink "update:" to the game mount. RB3 probes
+  // update:\gen\patch_xbox.hdr for title-update content; if that content is
+  // absent the game falls back to the base arks and boots further (retail
+  // reaches the ESRB screen). Pointing update: at the disc dir exposes the
+  // bundled patch_xbox.* which, in this content set, is a mismatched/placeholder
+  // header ("LOLZ" magic, not the base's encrypted form) that the game rejects
+  // with a "dirty disc" bail-out on BOTH retail and clean TU5. A real update:
+  // mount belongs to a separate, matching title-update package, not the disc.
 
   // Get just the filename (foo.xex).
   auto file_name = path.filename();
