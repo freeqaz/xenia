@@ -193,7 +193,26 @@ X_STATUS ObjectTable::RemoveHandle(X_HANDLE handle) {
   if (entry->object) {
     auto object = entry->object;
     entry->object = nullptr;
-    assert_zero(entry->handle_ref_count);
+    // RemoveHandle force-tears-down a handle slot regardless of its remaining
+    // handle_ref_count. It is reached two ways:
+    //   (1) from ReleaseHandle once the count has already been decremented to 0
+    //       (the common path — count is legitimately 0 here), and
+    //   (2) directly from force-close paths that bypass the count: NtClose of a
+    //       still-referenced object via XObject::Delete(), NtDuplicateObject with
+    //       DUPLICATE_CLOSE_SOURCE (xboxkrnl_ob.cc), and module unload
+    //       (kernel_state.cc). In those cases an outstanding ObReferenceObject*/
+    //       named-object retain leaves handle_ref_count > 0, which is EXPECTED and
+    //       benign — the slot is being reclaimed and the count is about to be
+    //       cleared anyway. Upstream keeps assert_zero here, but it is inert in
+    //       upstream's Release builds; in this Checked build it aborts on the
+    //       legitimate case (2). Log-and-continue instead so a genuine leak is
+    //       still visible while a benign force-close no longer core-dumps.
+    if (entry->handle_ref_count != 0) {
+      XELOGW(
+          "RemoveHandle: force-removing handle {:08X} ({}) with "
+          "handle_ref_count={} (benign force-close; clearing)",
+          handle, typeid(*object).name(), entry->handle_ref_count);
+    }
     entry->handle_ref_count = 0;
 
     // Walk the object's handles and remove this one.
@@ -237,10 +256,26 @@ void ObjectTable::PurgeAllObjects() {
   for (uint32_t slot = 0; slot < table_capacity_; slot++) {
     auto& entry = table_[slot];
     if (entry.object && !entry.object->is_host_object()) {
+      auto object = entry.object;
       entry.handle_ref_count = 0;
-      entry.object->Release();
-
       entry.object = nullptr;
+
+      // Remove this slot's handle from the object's own handle list before
+      // releasing, exactly as RemoveHandle() does for a single handle. A bulk
+      // purge is a bulk RemoveHandle: without this the object's handles_ vector
+      // still lists the (now-dead) handle when its ref count reaches 0, so
+      // ~XObject's `assert_true(handles_.empty())` aborts on TerminateTitle's
+      // teardown (RB3 exercises this; DC3 does too on any title exit). Erasing
+      // per-slot keeps multi-handle objects correct — the vector only empties
+      // on the last slot, right before pointer_ref_count_ hits 0.
+      X_HANDLE handle = XObject::kHandleBase + (slot << 2);
+      auto& handles = object->handles();
+      auto handle_entry = std::find(handles.begin(), handles.end(), handle);
+      if (handle_entry != handles.end()) {
+        handles.erase(handle_entry);
+      }
+
+      object->Release();
     }
   }
 }

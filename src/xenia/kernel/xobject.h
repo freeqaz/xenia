@@ -145,8 +145,14 @@ class XObject {
 
   Type type() const;
 
-  // Returns the primary handle of this object.
-  X_HANDLE handle() const { return handles_[0]; }
+  // Returns the primary handle of this object, or X_INVALID_HANDLE_VALUE if the
+  // object no longer has any handle registered (e.g. its table entry was already
+  // reclaimed during a title teardown / PurgeAllObjects). Guarding here keeps the
+  // teardown path from indexing an empty handles_ vector (a hard abort under the
+  // debug STL, undefined behavior otherwise).
+  X_HANDLE handle() const {
+    return handles_.empty() ? X_INVALID_HANDLE_VALUE : handles_[0];
+  }
 
   // Returns all associated handles with this object.
   std::vector<X_HANDLE> handles() const { return handles_; }

@@ -226,6 +226,14 @@ dword_result_t NtReadFile_entry(dword_t file_handle, dword_t event_handle,
           buffer.guest_address(), buffer_length,
           byte_offset_ptr ? static_cast<uint64_t>(*byte_offset_ptr) : -1,
           &bytes_read, apc_context);
+      if (XFAILED(result) || bytes_read != (uint32_t)buffer_length) {
+        XELOGW(
+            "NtReadFile RESULT handle=0x{:X} req_len={} offset={} -> "
+            "status=0x{:08X} bytes_read={}",
+            (uint32_t)file_handle, (uint32_t)buffer_length,
+            byte_offset_ptr ? (int64_t)*byte_offset_ptr : -1, (uint32_t)result,
+            bytes_read);
+      }
       if (io_status_block) {
         io_status_block->status = result;
         io_status_block->information = bytes_read;

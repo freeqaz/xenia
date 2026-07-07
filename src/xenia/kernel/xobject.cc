@@ -72,11 +72,25 @@ Memory* XObject::memory() const { return kernel_state_->memory(); }
 XObject::Type XObject::type() const { return type_; }
 
 void XObject::RetainHandle() {
+  // No handle to retain if the table entry was already reclaimed (teardown).
+  if (handles_.empty()) {
+    return;
+  }
   kernel_state_->object_table()->RetainHandle(handles_[0]);
 }
 
 bool XObject::ReleaseHandle() {
   // FIXME: Return true when handle is actually released.
+  // During title teardown PurgeAllObjects reclaims table entries and clears each
+  // object's handle list. A running thread then commits suicide via
+  // XThread::Terminate -> ReleaseHandle after it has already been purged, so
+  // handles_ can legitimately be empty here — indexing handles_[0] would abort
+  // under the debug STL. Treat an already-handleless object as "nothing to
+  // release" (upstream leaves handles_ intact and silently decrements a dead
+  // table entry; this is the same net effect without the empty-vector access).
+  if (handles_.empty()) {
+    return false;
+  }
   return kernel_state_->object_table()->ReleaseHandle(handles_[0]) ==
          X_STATUS_SUCCESS;
 }
