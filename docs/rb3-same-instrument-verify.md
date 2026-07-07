@@ -284,3 +284,132 @@ content on the same VFS; the check is in guest code and depends on having genuin
 matching TU5 patch content (which this content set lacks), not on emulator
 behavior. Unblocking requires a correct TU5 title-update package (or a game-side
 patch to skip the check — out of scope for emulator work).
+
+---
+
+# UPDATE (2026-07-07, session 4): dirty-disc bypass APPLIED — boots past the wall; NEW deeper Xenia fault exposed
+
+Session 3 declared the game-side dirty-disc bypass "out of scope for emulator
+work." This session **does** that bypass (a game binary patch, not emulator code)
+and boots past the dirty-disc exit. A new, deeper wall is then exposed and
+precisely diagnosed. **No Xenia source was changed this session.**
+
+## The dirty-disc bypass — what and why
+
+RB3Enhanced (`RB3Enhanced/source/rb3enhanced.c` `ApplyPatches`) neutralises RB3's
+ARK/MID content-integrity check with a single instruction:
+
+```c
+// Patch out PlatformMgr::SetDiskError - this effectively nullifies checksum
+// checks on ARKs and MIDs.
+POKE_32(PORT_SETDISKERROR, BLR);   // ports_xbox360.h: 0x82516320  (retail TU5 v0.0.5.1)
+```
+
+`PlatformMgr::SetDiskError(this, code)` @ `0x82516320` stores `code` into
+`this+0x34` and, when non-zero, walks into the disk-error flow that ultimately
+raises `XamShowDirtyDiscErrorUI` via the "ShowDirtyDiscAndBail" helper
+`0x8283D740`. The trace confirmed the bail chain in clean TU5:
+`check → 0x8273B1E8 (fail wrapper) → 0x8251B870 (li r3,0; b) → 0x8283D740 →
+bl 0x82C4BDEC (XamShowDirtyDiscErrorUI @ import LR 0x8283D750)`. Overwriting
+`SetDiskError` with `BLR` (`0x4E800020`) means the error state (`this+0x34`) is
+never set, so the dirty-disc UI is never triggered and boot proceeds. This is
+RB3E's proven, community-standard bypass and it targets the **exact same retail
+TU5 v0.0.5.1** as `clean_tu5.xex`. (RB3DX's own 170-byte delta does not touch this
+function; RB3DX users have genuine content so it never needs this patch.)
+
+**One 4-byte write.** `clean_tu5.xex` stores its basefile FLAT, so
+`file_off = 0x3000 + (VA − 0x82000000)` → SetDiskError is at XEX offset
+`0x519320`, verified to hold `0x7D8802A6` (`mflr r12`, the true prologue) before
+patching.
+
+## Artifacts (byte-verified)
+
+Script: `rb3-verify/patch/apply_dirtydisc_bypass.py`. Produced under
+`rb3-xenon/_tu5probe/clean/`:
+
+| XEX | sha1 | contents | vs source |
+|---|---|---|---|
+| `clean_tu5_nodd.xex` | `8014b7db…` | bypass only | clean_tu5.xex + 4B BLR @0x519320 |
+| `clean_tu5_nodd_siPATCH.xex` | `6ce44436…` | bypass + same-instrument | clean_tu5_patched.xex + 4B BLR @0x519320 |
+
+Verified: each differs from its source by **exactly the 4 bytes** at `0x519320`
+(→ `4E800020`), and the dirty-disc byte is **disjoint** from all 675
+same-instrument writes (`0x519320` not in that diff set). One patch, byte-compatible
+on clean TU5 exactly as the divergence doc predicted.
+
+## Boot result — PAST the dirty-disc wall (deliverable 2)
+
+`clean_tu5_nodd.xex` (Xenia HEAD, `--local_user_count=2`, Vulkan) **no longer hits
+the dirty-disc exit.** Session 3's signature was 5 threads wedged with `LR=0`
+(the XamShowDirtyDiscErrorUI hang, 0 frames). Now the game **spins up 15 threads**
+(audio/XMA/GPU/worker) and executes deep into early init — decisive proof the
+content check is defeated.
+
+Logs: `rb3-verify/logs/nodd_smoke.log` (bypass only),
+`nodd_si_smoke.log` (bypass+SI), `nodd_nopatch.log` (bypass, patch-ARK removed).
+
+## THE NEW WALL — Xenia `0x100000000` deep fault during `config/band_keep.dta` parse
+
+Immediately past the check, a **deterministic guest SIGSEGV** appears at ~3 s,
+before any frame:
+
+```
+15 threads, SIGSEGV=7  last_fault=0x100000000  crash_guest=0x8275026C  last_rip=0xA00B8451
+```
+
+- **Fault site** `0x8275026C: lbz r7, 0(r10)` inside function `0x82750188`, a
+  recursive **string-keyed map/tree lookup** (12-byte nodes at `r28+0x50/0x54`;
+  `li r26,0xc` stride). `r10` is a node's embedded string pointer
+  (`lwz r10,0x1c(r8)`) that gets incremented in a `strcmp`-style byte loop
+  (`addi r10,r10,1`). The fault at **exactly `0x100000000` (2^32)** means the walk
+  ran off the **top of guest memory** (`0xFFFFFFFF`+1): a map node holds a garbage
+  string pointer and Xenia's 64-bit host pointer arithmetic overflowed bit 32
+  instead of wrapping in 32 bits. Same **`0x100000000` fault family** the doc
+  records for the retail build (`0x8226045C`) and DC3 (`0x82311A94`).
+- **Guest call stack** walks straight back to the entry point:
+  `0x8283CEB0` (just after TU5 entry `0x8283CD20`) → `0x82272E8C` → `0x8227100C`
+  → `0x82741EC4/D94/974` → `0x82750188` (crash). It is on the **main thread during
+  static/early init**.
+- **Subsystem identified:** the caller at `0x82271000` loads the string
+  `config/band_keep.dta` (`0x82000C88`, .rdata) — this is the **DTA/DataArray
+  config parse** at boot, building a symbol map that then contains a corrupt node.
+
+## Verdict: emulator, not content, not the patch (deliverables 4 & 5)
+
+Three controlled boots isolate the cause:
+
+| Build / content | Result |
+|---|---|
+| `clean_tu5_nodd.xex`, full content | fault `0x8275026C` / `0x100000000` |
+| `clean_tu5_nodd_siPATCH.xex`, full content | **byte-identical** fault `0x8275026C` / `0x100000000` |
+| `clean_tu5_nodd.xex`, **placeholder patch ARK removed** (main only) | **byte-identical** fault `0x8275026C` / `0x100000000` |
+
+1. **Not the same-instrument patch:** SI and non-SI builds fault identically →
+   the SI patch is boot-stable and the wall is patch-independent (boot-boundary
+   A/B). No patch region (`0x82516320`; SI cave `0x82C8Axxx`; SI detours
+   `0x826684C0/0x825B6488/0x8276FA08/0x82794740`) is anywhere in the crash path.
+2. **Not the placeholder TU5 patch content:** removing the `LOLZ`-magic
+   placeholder `patch_xbox.hdr`/`patch_xbox_*.ark` (session-3's suspected root
+   cause) changes **nothing** — same fault. This **refutes** the "needs genuine
+   TU5 patch content" theory for this wall; `config/band_keep.dta` and the failing
+   map come from the main ARKs, which the emulator serves byte-correct.
+3. **It is Xenia:** a `0x100000000` guest-pointer-overflow fault in JITted
+   pointer/strcmp arithmetic — the same deep-fault family that already blocks
+   retail RB3 and DC3 on this branch. Fixing it is a Xenia guest-memory-model /
+   JIT masking investigation (deep, uncertain, DC3-regression-risky) — the
+   explicit STOP condition for this task.
+
+## Bottom line
+
+- **Dirty-disc bypass: DONE and proven.** RB3 clean TU5 now boots *past* its own
+  content-integrity check (RB3E's `SetDiskError→BLR`, byte-verified, one 4-byte
+  write, shared by the SI build).
+- **The 2-guitar A/B is still not obtainable headless** on this Xenia: the newly
+  exposed `0x100000000` deep fault kills boot during DTA config init, before any
+  menu renders. It is emulator-side, reproduces without the SI patch and without
+  the placeholder patch content, and is the same fault family blocking retail/DC3.
+- **Path forward:** either fix the Xenia `0x100000000` pointer-arithmetic fault
+  (a JIT/memory-model task, must be validated DC3-safe) or run the definitive
+  2-guitar A/B on real hardware / a Xenia build that already clears this fault
+  family. The patched XEXes (`clean_tu5_nodd_siPATCH.xex` vs `clean_tu5_nodd.xex`)
+  are ready to drive that A/B the moment boot reaches the overshell.
