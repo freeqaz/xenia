@@ -821,12 +821,21 @@ void X64Emitter::CallIndirect(const hir::Instr* instr,
 
 uint64_t UndefinedCallExtern(void* raw_context, uint64_t function_ptr) {
   auto function = reinterpret_cast<Function*>(function_ptr);
+  const auto& name = function->name();
+  // Loud, greppable marker for the CRT/XDK SEH-install + Rtl* path. When guest
+  // page 0 is opened (protect_zero=false) the NULL SEH bookkeeping store/read
+  // no longer faults, but the underlying Rtl* frame-install helper is still an
+  // undefined extern; log it distinctly so the masked-NULL follow-up can judge
+  // whether the missing symbol matters. Does NOT change control flow.
+  if (name.compare(0, 3, "Rtl") == 0) {
+    XELOGW("undefined Rtl* extern call to {:08X} {} (SEH/CRT frame path)",
+           function->address(), name.c_str());
+  }
   if (!cvars::ignore_undefined_externs) {
     xe::FatalError(fmt::format("undefined extern call to {:08X} {}",
-                               function->address(), function->name().c_str()));
+                               function->address(), name.c_str()));
   } else {
-    XELOGE("undefined extern call to {:08X} {}", function->address(),
-           function->name());
+    XELOGE("undefined extern call to {:08X} {}", function->address(), name);
   }
   return 0;
 }

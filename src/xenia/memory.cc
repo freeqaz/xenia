@@ -13,6 +13,11 @@
 #include <cstring>
 #include <utility>
 
+#if defined(__linux__)
+#include <cerrno>
+#include <sys/mman.h>
+#endif
+
 #include "third_party/fmt/include/fmt/format.h"
 #include "xenia/base/assert.h"
 #include "xenia/base/byte_stream.h"
@@ -185,6 +190,37 @@ bool Memory::Initialize() {
       kMemoryAllocationReserve | kMemoryAllocationCommit,
       !cvars::protect_zero ? kMemoryProtectRead | kMemoryProtectWrite
                            : kMemoryProtectNoAccess);
+  if (!cvars::protect_zero) {
+    // Hardware-faithful backing of guest page 0: the real 360 maps a readable
+    // and writable (zeroed) low page, so titles whose compiled CRT/XDK SEH
+    // frame-install path does an unconditional `stw r10, 0(0)` (guest EA 0) —
+    // or a data-dependent NULL read in DTA symbol-map code — do not fault.
+    // Xenia's default protect_zero guard is stricter than the console map;
+    // relaxing it (opt-in) restores console behavior for those titles. This
+    // mirrors DC3's proven page-0 remap (dc3_hack_pack.cc:4533-4568).
+    std::memset(TranslateVirtual<uint8_t*>(0x00000000), 0, 0x10000);
+    XELOGI("Mapped zero page 0x0-0x10000 as R/W (all zeros); protect_zero=false");
+#if defined(__linux__)
+    // Keep host null-pointer derefs trapping: reserve a PROT_READ guard region
+    // 64KB below virtual_membase_ so a host access through a translated guest
+    // NULL still lands in guarded memory rather than reading real host state.
+    {
+      void* guard_base = virtual_membase_ - 0x10000;
+      void* mmap_result =
+          mmap(guard_base, 0x10000, PROT_READ,
+               MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
+      if (mmap_result != MAP_FAILED) {
+        XELOGI("Mapped null-deref guard page at {:p} (64KB below "
+               "virtual_membase {:p})",
+               mmap_result, static_cast<void*>(virtual_membase_));
+      } else {
+        XELOGI("Could not map null-deref guard page below virtual_membase "
+               "(errno={})",
+               errno);
+      }
+    }
+#endif
+  }
   heaps_.physical.AllocFixed(0x1FFF0000, 0x10000, 0x10000,
                              kMemoryAllocationReserve, kMemoryProtectNoAccess);
 
