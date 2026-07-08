@@ -24,6 +24,21 @@ frontier is a **separate** host-side teardown `SIGABRT` (`xobject.cc:52`
 `handles_.empty()`), out of scope for this fault. Details in
 [07](07-fix-and-verification.md); root cause in [06](06-root-cause.md).
 
+## Boot-to-menu phase: BLOCKED at a guest content/flow gate (2026-07-08)
+
+Past the CPU fault, RB3 clean TU5 boots, streams all 10 arks, and renders the
+ESRB splash + a full blue-orb LOADING scene (~77% non-zero px) — then at ~13 s
+stops issuing draws and at ~18 s runs a **clean guest `App::Shutdown()`**;
+`main_hub` never renders. Root-caused as a **guest-side App::Run flow-quit after
+the warm-up scene** — timeout-independent (18015 ms @600 s vs 18014 ms @120 s),
+crash-free, and NOT a capture/dialog/save/movie/dirty-disc bug (`XamShowDirtyDisc
+ErrorUI` never fires). Only file miss is `update:\gen\patch_xbox.hdr` (LOLZ
+placeholder; genuine TU5 update not on disk). **Shipped** `292ea0c18` (two
+DC3-safe default-OFF diag cvars) + `0e70cebbe`/finalize (docs); no XEX gate-patch
+(branch not located, blind NOP risks regression). Same-instrument 2-controller
+A/B **not demonstrated** — both builds die at the same pre-menu gate. DC3
+non-regressed. Full detail + next step in [08](08-boot-to-menu.md).
+
 ## Pages
 
 | Page | Contents | Status |
@@ -36,6 +51,7 @@ frontier is a **separate** host-side teardown `SIGABRT` (`xobject.cc:52`
 | [05-fork-divergence.md](05-fork-divergence.md) | Fork-only commits; EA path verified byte-identical to upstream (not fork-induced) | ✅ |
 | [06-root-cause.md](06-root-cause.md) | **The guest-SEH gap** + **FINAL synthesis (2026-07-08)**: two-mechanism/one-signature family; page-0 accessibility is the single proven lever (E1); canary per-title patch refuted (E2) | ✅ |
 | [07-fix-and-verification.md](07-fix-and-verification.md) | **SHIPPED & VERIFIED (2026-07-08, `fb864e3e`): general cvar-gated zero-page backing** — generalizes DC3's page-0 R/W remap + Linux host null-guard into `memory.cc`, gated by `protect_zero` (default true; RB3 boots with `--protect_zero=false`). + Option C loud `Rtl*` extern logging. RB3 TU5 `0x8275026C` ELIMINATED (A/B identical); DC3 non-regression VERIFIED (default path inert). Chosen over per-title patch (E2-refuted) and write-only soft-fault (unproven for the page-0 read). Full options A–D survey retained. New frontier = host-side teardown SIGABRT (out of scope). | ✅ SHIPPED |
+| [08-boot-to-menu.md](08-boot-to-menu.md) | **Boot-to-menu phase.** RB3 clean TU5 boots past the zero-page fault, streams all 10 arks, and renders the ESRB splash + blue-orb LOADING scene (~77% px) — but **`main_hub` never renders**: at ~13 s draws stop, and at ~18 s the guest runs a clean `App::Shutdown()`. Root-caused as a **guest-side App::Run flow-quit** — timeout-independent (18015 ms @600 s vs 18014 ms @120 s), crash-free, NOT a capture bug (L3), NOT dialog/save/movie (L4), and NOT a dirty-disc bail (`XamShowDirtyDiscErrorUI` never fires). Only file miss = `update:\gen\patch_xbox.hdr` (LOLZ placeholder). **Shipped:** `292ea0c18` two DC3-safe default-OFF diag cvars (`--rb3_trace_shutdown`, `--rb3_mount_update`); `0e70cebbe` docs. No XEX patch (gate branch not located; blind NOP risks regression). Same-instrument A/B **not demonstrated** (both builds die at the identical pre-menu gate). DC3 non-regressed. Next: instrument the App::Run loop-break directly to find the validation branch. | ⚠️ BLOCKED — content/flow gate |
 
 ## Ground rules for the fix
 

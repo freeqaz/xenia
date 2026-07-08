@@ -9,6 +9,90 @@ Cross-links: [01 symptom & evidence](01-symptom-and-evidence.md) ·
 
 ---
 
+## FINAL STATUS (2026-07-08) — main_hub NOT reached; blocker root-caused, diagnostics shipped
+
+**Bottom line: RB3 clean TU5 now boots past the CPU zero-page fault (page [07]),
+streams all 10 `main_xbox_*.ark`, and renders real game content — the ESRB/autosave
+splash and then the full-screen blue-orb "warm-up" LOADING scene — but `main_hub`
+never renders. At ~13 s the App stops issuing GPU draws, presents a black
+frontbuffer for a few seconds, and at ~18 s the guest runs its own orderly
+`App::Shutdown()` and the title exits. The same-instrument 2-controller A/B was
+NOT demonstrated: both builds die at this identical pre-menu gate.**
+
+### The post-splash blocker (root cause, as far as it was narrowed)
+A **guest-side App::Run flow decision to quit after the warm-up/loading scene
+completes.** It is deterministic and **timeout-independent** (teardown at
+**18015 ms** with `--headless_timeout_ms=600000` vs **18014 ms** at `120000` — L1),
+**crash-free** (`SIGSEGV=0`, `last_fault=0x0` throughout), and **not** a capture
+bug (the black frontbuffer is read fresh — `decision=UPLOAD` — and is genuinely
+0% because the game drew nothing; L3), **not** a blocking dialog / save-enum /
+Bink-movie wait (0 runtime `XamShow*`/`XamContent*`/movie calls; L4), and — the
+implementer pass's key correction — **not** a dirty-disc bail:
+`XamShowDirtyDiscErrorUI` never fires at runtime, so `decision.json`'s
+"dirty-disc-family / NOP-a-branch-near-0x8283D740" framing does **not** apply.
+The only file failure in the whole boot is `update:\gen\patch_xbox.hdr`
+(`0xC000000F`, `update:` unmounted). Most consistent mechanism: the post-warmup
+shell/`main_hub` load needs **genuine TU5 title-update content** that is absent
+(the only `patch_xbox.hdr` on disk is the `LOLZ` placeholder), so the flow has no
+valid next state and returns → the App tears itself down. The exact gating branch
+was **not located**.
+
+### What shipped
+| Commit | Files | What |
+|---|---|---|
+| `292ea0c18` | `src/xenia/kernel/xboxkrnl/xboxkrnl_threading.cc`, `src/xenia/emulator.cc` | Two **DC3-safe, default-OFF** diagnostic cvars: `--rb3_trace_shutdown` (logs the first-seen tid-6 `NtSetEvent` caller-chain + shallow guest-stack walk) and `--rb3_mount_update` (registers `update:` → disc dir so RB3 can find `patch_xbox.hdr`). |
+| `0e70cebbe` | `docs/jit-fault-wiki/08-boot-to-menu.md` | Implementer findings + refined frontier (docs-only, inert). |
+
+**No XEX gate-patch was shipped.** The second gate is not a dirty-disc branch, so
+the `_nodd` `mflr→blr` template does not apply and no single gating branch was
+located; a blind NOP risks the documented next-gate / `main_hub` heap-crash
+regression. The SECONDARY lever (mount genuine TU5 update) is **dead**: the on-disk
+`patch_xbox.hdr` is the `LOLZ` placeholder (magic `4c4f4c5a`), and mounting it via
+`--rb3_mount_update` makes the title exit *earlier* (469 vs ~700 swaps) — placeholder
+rejected. A genuine matching TU5 package is not present on disk.
+
+### How far RB3 boots now (honest pixel evidence)
+| Screen | Frames | Non-zero px | Proof PNG |
+|---|---|---|---|
+| ESRB / autosave splash | ~50–300 (~2.6 s) | 6.1% | `/tmp/rb3menu-wf/impl-frames/impl_0100.png`, `drive-frames-clean/view_0100.png` |
+| **Blue-orb "warm-up" LOADING scene** (furthest; real RB3 content, confirms renderer/GPU path works) | ~300–550 (~10.5–13 s) | 66–79% (RSTAB **SCENE 100%**) | `/tmp/rb3menu-wf/impl-frames/impl_0400.png` & `impl_0500.png`, `drive-frames-clean/view_0350.png`, `drive-frames-siPATCH/view_0400.png` |
+| Black (frontbuffer flips `0x1D1C8000→0x1CE30000`, drew nothing) → clean `App::Shutdown()` at ~18 s | 600+ | 0% | `/tmp/rb3menu-wf/impl-frames/impl_0600.png` |
+
+**`main_hub` never renders.** The furthest content-bearing screen is a *loading*
+scene, not the menu.
+
+### Same-instrument A/B result
+**NOT demonstrated.** Both `clean_tu5_nodd.xex` and `clean_tu5_nodd_siPATCH.xex`
+follow a byte-identical frame trajectory and self-exit at the same frame; the
+siPATCH unlock only affects the far-downstream `part_difficulty` screen, so with
+`main_hub` unrendered the two builds are behaviorally identical. Verified control:
+aggressive 2-controller A/START spam (3–29 s, both pads, pad-targeting confirmed
+working) does **not** change the trajectory — the quit is a flow decision, not a
+missing button press. The scripted 2-controller harness is ready and verified;
+it re-runs the moment a gate-patched build renders `main_hub`.
+
+### DC3-safety
+**PASS — no regression** (commit `292ea0c18`; `0e70cebbe` is docs-only, inert).
+Both cvars are `DEFINE_bool` default `false` with every added path guarded by
+`if(cvars::…)`. DC3 (`/srv/torrents/games/arbys/Dance Central 3/default.xex`)
+boots to gameplay and GPU-presents identically at shipped default and with both
+cvars explicitly `=false` (355 vs 355 `VdSwap`, identical first/last frame
+`VdSwap(BF7A56C0,…)`, 0 new-cvar log lines, **no ~18 s self-exit** — that exit is
+RB3-content-specific). Harness files (`command_processor.cc`,
+`nop_input_driver.*`, `rb3-verify/`) left untouched.
+
+### Remaining frontier + single next step
+The NtSetEvent diagnostic angle is **exhausted** (all such chains are downstream
+teardown/getters). **Next step:** instrument the **App::Run loop-break directly** —
+catch where tid-6 stops re-parking at the frame-wait `guest_lr=0x82844CF8` / stops
+issuing `VdSwap` and begins the destructor cascade, i.e. trace the boot-flow state
+machine's `loading → (shell/main_hub | shutdown)` transition to pinpoint the
+validation branch *before* patching it. Only then is a targeted XEX patch (or a
+sourced genuine TU5 update) safe. Sections below preserve the full L1–L4 evidence,
+the synthesis DECISION, and the IMPLEMENTER + DRIVE passes.
+
+---
+
 > **⚠️ CORRECTION (L3, GPU-capture lane, authoritative on this point):** L4's
 > conclusion below that the black frame is a "GPU frontbuffer-capture tracking
 > bug" — that the capture keeps reading the old/wrong resolve target after the
@@ -651,6 +735,27 @@ only; `rb3_mount_update` = one extra symlink DC3 never probes). Verified: DC3
 boots with the new binary, neither cvar fires, and it runs to 30 s+ with **no
 ~18 s self-exit** (the ~18 s self-exit is RB3-content-specific).
 
+**Non-regression re-verified (2026-07-08, commit `292ea0c18`).** Booted DC3
+(`/srv/torrents/games/arbys/Dance Central 3/default.xex`, `--headless_timeout_ms=45000`)
+on the current `headless-vulkan-linux` binary in two configs — flags at shipped
+default, and `--rb3_trace_shutdown=false --rb3_mount_update=false` explicit.
+Both are byte-for-byte equivalent in outcome:
+
+| Run | exit | `VdSwap` (GPU present) | terminal state | new cvars fired |
+|---|---|---|---|---|
+| baseline (`rb3-verify/logs/dc3base.log`, 65 s TO) | — | 362 | full-duration | n/a |
+| default flags | 0 | 355 | `TIMEOUT: 45000ms reached` | 0 |
+| explicit `=false` | 0 | 355 | `TIMEOUT: 45000ms reached` | 0 |
+
+DC3 reaches gameplay and presents frames as before (sustained `VdSwap`; identical
+first/last frame `VdSwap(BF7A56C0,…)`). The 355-vs-362 delta is timeout-duration /
+frame-jitter noise (45 s vs 65 s windows), not a behavior change. Zero
+`rb3_trace_shutdown` / `rb3_mount_update` log lines in either run — the diagnostics
+are inert for DC3. The two `patch_xbox.hdr` NtCreateFile-FAILED lines are **DC3's
+own** update-package probe (also present 2× in `dc3base.log`), not the disabled
+`rb3_mount_update` mount. **VERDICT: PASS, no DC3 regression.** Logs:
+`/tmp/rb3menu-wf/dc3-default.log`, `/tmp/rb3menu-wf/dc3-explicit-off.log`.
+
 ### New frontier (for the next pass)
 The blocker is a **guest-side App::Run flow decision to quit after the loading
 scene completes**, upstream of the teardown, and **not** a dirty-disc branch.
@@ -663,3 +768,62 @@ requires TU5 patch content that is absent/placeholder, so the flow has no valid
 next state and returns — but the exact validation/branch is not yet located.
 Artifacts: `/tmp/rb3menu-wf/diag-run3.log` (trace), `/tmp/rb3menu-wf/upd-run.log`
 (update-mount experiment), `/tmp/rb3menu-wf/disas.py` (flat-image disassembler).
+
+---
+
+## DRIVE PASS (2-controller same-instrument nav attempt) — 2026-07-08
+
+**Result: BLOCKED. Neither build reaches main_hub, so the same-instrument A/B
+proof cannot be captured.** DRIVE is downstream of the pre-menu flow gate above
+and is unblockable until a build renders main_hub.
+
+### What was run
+Both `clean_tu5_nodd.xex` (stock, md5 `42f5798101bd1d758b3f389e91dea4c3`) and
+`clean_tu5_nodd_siPATCH.xex` (same-instrument unlock, md5
+`e53c8316f556d93d1c49770e518d740a`) through the identical harness:
+
+```
+xenia-headless --target=/tmp/rb3_nodd/default.xex --protect_zero=false \
+  --local_user_count=2 --gpu=vulkan \
+  --scripted_input="3s:A@0,3200ms:A@1,5s:A@0,5200ms:A@1,7s:START@0,7200ms:START@1,\
+9s:A@0,9200ms:A@1,11s:A@0,11200ms:A@1,13s:A@0,13200ms:A@1,15s:A@0,15200ms:A@1,\
+17s:A@0,17200ms:A@1,19s:A@0,21s:A@0,23s:A@1,25s:A@0,27s:A@1,29s:A@0" \
+  --dump_frames_path=<DIR> --headless_capture_interval=50 --headless_timeout_ms=45000
+```
+
+The `@N` pad suffix (controller-port targeting) and `--local_user_count=2` are
+**confirmed working**: the log shows every event parsed with the right pad,
+e.g. `Scripted input: 3200ms button=0x1000 hold=200ms pad=1`.
+
+### Frame trajectory — IDENTICAL on both builds
+| frames | nonzero px | content |
+|---|---|---|
+| 50–250/300 | 6.1% | ESRB/autosave splash ("Online Interactions and Music Downloads Not Rated by the ESRB" + autosave orb) |
+| 300/350–550 | 66–79% | RB3 blue-orb energy-wave **loading** scene (fully rendered game content) |
+| 600+ | 0% | black — guest flips to a fresh 0-drawn page, then clean `App::Shutdown()` → SIGABRT teardown |
+
+Money-shot frames read and confirmed:
+- `drive-frames-clean/view_0100.png` = ESRB/autosave splash.
+- `drive-frames-clean/view_0350.png` = blue-orb energy-wave loading scene.
+- `drive-frames-siPATCH/view_0400.png` = blue-orb loading scene (orb centered) —
+  visually the **same scene** as stock.
+
+### Two findings
+1. **Controller input does not change the trajectory.** Aggressive early
+   2-controller A/START spam (3 s…29 s on both pads) was correctly injected but
+   both builds still self-exit at the same frame (~600). The post-warmup quit is
+   a guest-side **flow** decision, independent of controller input during the
+   loading scene. (Rules out "the splash/warmup is just waiting for a button.")
+2. **stock ≡ siPATCH up to the gate.** The siPATCH same-instrument unlock only
+   affects the `part_difficulty`/instrument-select screen, which is far
+   downstream of main_hub. Since main_hub never renders, the two builds are
+   behaviorally identical (identical frame trajectory, identical self-exit). The
+   same-instrument A/B is **not exercisable** at this stage.
+
+### Handoff
+The scripted 2-controller harness is ready and verified. The moment a
+gate-patched build (`clean_tu5_nodd2.xex` per the DECISION fix_spec) renders
+main_hub, re-run this exact harness on `nodd2` and `siPATCH+nodd2` to capture the
+same-instrument proof (both players pick Guitar → gameplay note highway).
+Artifacts: `/tmp/rb3menu-wf/drive-frames-{clean,siPATCH}/`,
+`/tmp/rb3menu-wf/drive-{clean,siPATCH}.log`, `/tmp/rb3menu-wf/drive.json`.
