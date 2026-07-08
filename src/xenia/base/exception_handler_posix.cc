@@ -10,16 +10,31 @@
 #include "xenia/base/exception_handler.h"
 
 #include <signal.h>
+#include <time.h>
 #include <ucontext.h>
 #include <cstdint>
 
 #include <atomic>
 
 #include "xenia/base/assert.h"
+#include "xenia/base/cvar.h"
 #include "xenia/base/host_thread_context.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
 #include "xenia/base/platform.h"
+
+// Livelock circuit-breaker: when a recovered host fault re-executes the SAME
+// guest/host instruction at the SAME faulting address this many times in a row
+// with no forward progress, treat it as a fatal wedge (log once + abort) rather
+// than spinning forever. A legitimate soft-fault (stack-guard read, GPU write
+// watch, DC3 stub-keepalive) always advances rip or changes the address, so it
+// resets the counter and never trips. 0 disables. (RB3 Deluxe title-screen heap
+// OOM falls into MemHeap::Alloc's post-assert dead code and stores to guest
+// 0xFFFFFFFC forever; this surfaces it as a diagnosable crash. DC3-inert.)
+DEFINE_uint64(fault_spin_limit, 4096,
+              "Abort after this many consecutive identical recovered host "
+              "faults (same rip+address, no progress). 0 = disabled.",
+              "CPU");
 
 namespace xe {
 
@@ -27,6 +42,19 @@ namespace xe {
 static std::atomic<uint64_t> sigsegv_count_{0};
 static std::atomic<uint64_t> last_fault_address_{0};
 static std::atomic<uint64_t> last_fault_rip_{0};
+// Livelock diagnostics: when the circuit-breaker trips, we capture the faulting
+// thread's guest PPCContext pointer (Xenia keeps it in host rsi throughout JIT
+// execution) and raise a flag so a safe thread (the headless status loop) can
+// decode the guest registers + heap name and terminate the process cleanly.
+// Calling std::exit() from inside the signal handler hangs (unsafe), so on trip
+// the faulting thread just parks itself here.
+static std::atomic<uint64_t> last_fault_context_{0};
+static std::atomic<bool> livelock_tripped_{false};
+// All 16 host GPRs captured at the livelock trip. The guest r25 (MemHeap*) and
+// r26 (request size) are live in host registers on the failure path but not
+// reliably synced into the in-memory PPCContext (Xenia caches guest regs in host
+// regs mid-block), so we snapshot the raw host register file and scan it.
+static uint64_t last_fault_host_gprs_[16] = {0};
 
 bool signal_handlers_installed_ = false;
 struct sigaction original_sigill_handler_;
@@ -167,6 +195,67 @@ static void ExceptionHandlerCallback(int signal_number, siginfo_t* signal_info,
 #if XE_ARCH_AMD64
       last_fault_rip_.store(uint64_t(mcontext.gregs[REG_RIP]),
                             std::memory_order_relaxed);
+      // Livelock circuit-breaker: detect a recovered fault that re-executes the
+      // same host instruction at the same faulting address with no progress
+      // (e.g. RB3 Deluxe's MemHeap::Alloc post-OOM store to guest 0xFFFFFFFC,
+      // which the soft-fault path "recovers" without advancing the guest PC).
+      if (cvars::fault_spin_limit != 0) {
+        thread_local uint64_t tls_prev_rip = 0;
+        thread_local uint64_t tls_prev_addr = 0;
+        thread_local uint64_t tls_repeat = 0;
+        uint64_t cur_rip = uint64_t(mcontext.gregs[REG_RIP]);
+        uint64_t cur_addr = reinterpret_cast<uint64_t>(signal_info->si_addr);
+        if (cur_rip == tls_prev_rip && cur_addr == tls_prev_addr) {
+          if (++tls_repeat >= cvars::fault_spin_limit) {
+            // Capture the faulting thread's guest context. Xenia's x64 backend
+            // reserves rsi = PPCContext* and rdi = membase for the whole of JIT
+            // execution, so at any in-JIT fault rsi is a live, valid context
+            // pointer. A safe thread (headless status loop) decodes r25/r26 +
+            // the exhausted-heap name from it and terminates the process.
+            last_fault_context_.store(uint64_t(mcontext.gregs[REG_RSI]),
+                                      std::memory_order_relaxed);
+            // Snapshot all host GPRs (order: RAX RCX RDX RBX RSP RBP RSI RDI
+            // R8..R15) for the diagnosis scan.
+            last_fault_host_gprs_[0] = uint64_t(mcontext.gregs[REG_RAX]);
+            last_fault_host_gprs_[1] = uint64_t(mcontext.gregs[REG_RCX]);
+            last_fault_host_gprs_[2] = uint64_t(mcontext.gregs[REG_RDX]);
+            last_fault_host_gprs_[3] = uint64_t(mcontext.gregs[REG_RBX]);
+            last_fault_host_gprs_[4] = uint64_t(mcontext.gregs[REG_RSP]);
+            last_fault_host_gprs_[5] = uint64_t(mcontext.gregs[REG_RBP]);
+            last_fault_host_gprs_[6] = uint64_t(mcontext.gregs[REG_RSI]);
+            last_fault_host_gprs_[7] = uint64_t(mcontext.gregs[REG_RDI]);
+            last_fault_host_gprs_[8] = uint64_t(mcontext.gregs[REG_R8]);
+            last_fault_host_gprs_[9] = uint64_t(mcontext.gregs[REG_R9]);
+            last_fault_host_gprs_[10] = uint64_t(mcontext.gregs[REG_R10]);
+            last_fault_host_gprs_[11] = uint64_t(mcontext.gregs[REG_R11]);
+            last_fault_host_gprs_[12] = uint64_t(mcontext.gregs[REG_R12]);
+            last_fault_host_gprs_[13] = uint64_t(mcontext.gregs[REG_R13]);
+            last_fault_host_gprs_[14] = uint64_t(mcontext.gregs[REG_R14]);
+            last_fault_host_gprs_[15] = uint64_t(mcontext.gregs[REG_R15]);
+            XELOGE(
+                "FAULT LIVELOCK: {} consecutive recovered faults at host rip "
+                "{:016X}, fault addr {:016X} (guest EA {:08X}) with no "
+                "progress -- resume-without-advance wedge. This is a fatal "
+                "guest fault (likely heap OOM); ctx(rsi)={:016X}. Parking "
+                "thread; see jit-fault-wiki/09-rb3dx-title-to-menu.md.",
+                tls_repeat + 1, cur_rip, cur_addr,
+                uint32_t(cur_addr & 0xFFFFFFFFull),
+                uint64_t(mcontext.gregs[REG_RSI]));
+            livelock_tripped_.store(true, std::memory_order_release);
+            // Do NOT std::exit() from a signal handler (unsafe, hangs). Park the
+            // faulting thread so the spin stops; the main/headless thread reads
+            // the flag and terminates cleanly. nanosleep is async-signal-safe.
+            struct timespec park_ts = {0, 100 * 1000 * 1000};  // 100ms
+            while (true) {
+              nanosleep(&park_ts, nullptr);
+            }
+          }
+        } else {
+          tls_prev_rip = cur_rip;
+          tls_prev_addr = cur_addr;
+          tls_repeat = 0;
+        }
+      }
 #endif
       ex.InitializeAccessViolation(
           &thread_context, reinterpret_cast<uint64_t>(signal_info->si_addr),
@@ -330,6 +419,19 @@ uint64_t ExceptionHandler::GetLastFaultAddress() {
 
 uint64_t ExceptionHandler::GetLastFaultRip() {
   return last_fault_rip_.load(std::memory_order_relaxed);
+}
+
+uint64_t ExceptionHandler::GetLastFaultContext() {
+  return last_fault_context_.load(std::memory_order_relaxed);
+}
+
+uint64_t ExceptionHandler::GetLastFaultHostGpr(int index) {
+  if (index < 0 || index >= 16) return 0;
+  return last_fault_host_gprs_[index];
+}
+
+bool ExceptionHandler::IsLivelockTripped() {
+  return livelock_tripped_.load(std::memory_order_acquire);
 }
 
 }  // namespace xe

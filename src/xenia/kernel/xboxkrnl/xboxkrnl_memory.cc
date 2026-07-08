@@ -10,12 +10,33 @@
 #include <cstring>
 
 #include "xenia/base/assert.h"
+#include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/util/shim_utils.h"
 #include "xenia/kernel/xboxkrnl/xboxkrnl_private.h"
 #include "xenia/xbox.h"
+
+// RB3 Deluxe (title 0x45410914) reads an allocation size whose low 16 bits are
+// correct (~5.4KB) but whose HIGH 16 bits are uninitialized guest memory -> the
+// Milo "main" heap gets a garbage ~256MB-1GB request and fails (see
+// jit-fault-wiki/09). On real hardware the backing pages read as zero; under
+// Xenia a NOZERO / already-committed re-commit skips the fill, leaving host
+// garbage. When enabled (and title-gated to RB3DX so DC3 0x373307D9 is inert),
+// force-zero every guest COMMIT regardless of X_MEM_NOZERO / was_commited to
+// match the console's zeroed-page behavior. 0 = stock Xenia behavior.
+// NOTE: tested against the RB3DX title OOM and did NOT eliminate it (~40% of
+// boots still OOM with this ON) -> the corrupted high byte is NOT from a fresh
+// commit Xenia failed to zero (it is guest-internal Milo heap reuse or a
+// timing-sensitive JIT issue). Kept as a console-accuracy option + diagnostic
+// lever, DEFAULT OFF so RB3DX behavior is unchanged until a proven fix lands.
+DEFINE_bool(rb3dx_force_zero_commit, false,
+            "RB3 Deluxe: force-zero all guest memory commits (virtual + "
+            "physical) to match console zeroed-page semantics. Title-gated to "
+            "RB3DX; inert for other titles. Did NOT fix the title OOM; off by "
+            "default.",
+            "Memory");
 
 namespace xe {
 namespace kernel {
@@ -164,14 +185,21 @@ dword_result_t NtAllocateVirtualMemory_entry(lpdword_t base_addr_ptr,
     return X_STATUS_NO_MEMORY;
   }
 
+  // Title-gated force-zero: RB3 Deluxe relies on committed pages reading as
+  // zero (console semantics). Zero every commit regardless of NOZERO /
+  // was_commited so an uninitialized high-halfword size field can't inflate a
+  // Milo "main" heap request into a spurious OOM. Inert for all other titles.
+  bool force_zero = cvars::rb3dx_force_zero_commit &&
+                    kernel_state()->title_id() == 0x45410914u;
+
   // Zero memory, if needed.
-  if (address && !(alloc_type & X_MEM_NOZERO)) {
+  if (address && (force_zero || !(alloc_type & X_MEM_NOZERO))) {
     if (alloc_type & X_MEM_COMMIT) {
       if (!(protect & kMemoryProtectWrite)) {
         heap->Protect(address, adjusted_size,
                       kMemoryProtectRead | kMemoryProtectWrite);
       }
-      if (!was_commited) {
+      if (!was_commited || force_zero) {
         kernel_memory()->Zero(address, adjusted_size);
       }
       if (!(protect & kMemoryProtectWrite)) {
@@ -387,6 +415,16 @@ dword_result_t MmAllocatePhysicalMemoryEx_entry(
     return 0;
   }
   XELOGD("MmAllocatePhysicalMemoryEx = {:08X}", base_address);
+
+  // Console MmAllocatePhysicalMemoryEx hands out zeroed pages; Xenia does not.
+  // RB3 Deluxe reads an uninitialized top byte of an allocation-size field out
+  // of physical-heap memory -> spurious Milo "main" heap OOM (jit-fault-wiki/09).
+  // Zero the region to match console semantics. Title-gated (RB3DX) so DC3 and
+  // all other titles keep stock behavior.
+  if (cvars::rb3dx_force_zero_commit && base_address &&
+      kernel_state()->title_id() == 0x45410914u) {
+    kernel_memory()->Zero(base_address, adjusted_size);
+  }
 
   return base_address;
 }

@@ -231,6 +231,13 @@ class ExceptionHandler {
   static uint64_t GetSigsegvCount();
   static uint64_t GetLastFaultAddress();
   static uint64_t GetLastFaultRip();
+  // Guest PPCContext* (host rsi) captured when the fault-livelock circuit
+  // breaker trips; 0 if it has not tripped. See exception_handler_posix.cc.
+  static uint64_t GetLastFaultContext();
+  static bool IsLivelockTripped();
+  // Host GPR snapshot at the livelock trip. Order: 0=RAX 1=RCX 2=RDX 3=RBX
+  // 4=RSP 5=RBP 6=RSI 7=RDI 8..15=R8..R15.
+  static uint64_t GetLastFaultHostGpr(int index);
 };
 
 }  // namespace xe

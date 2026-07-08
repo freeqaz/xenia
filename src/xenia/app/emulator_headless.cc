@@ -1025,6 +1025,173 @@ void EmulatorHeadless::RunWithTimeout(int32_t timeout_ms) {
       std::_Exit(0);
     }
 
+    // Fault-livelock diagnosis: the exception handler parked the faulting guest
+    // thread and captured its PPCContext* (host rsi). Decode which Milo heap ran
+    // out of memory and how much it wanted, then terminate cleanly. This runs
+    // from the main thread (safe), unlike std::exit() from a signal handler.
+    if (ExceptionHandler::IsLivelockTripped()) {
+      uint64_t ctx_ptr = ExceptionHandler::GetLastFaultContext();
+      auto* mem = emulator_ ? emulator_->memory() : nullptr;
+      fprintf(stderr,
+              "\n=== FAULT LIVELOCK DIAGNOSIS === ctx(rsi)=0x%lX\n", ctx_ptr);
+      if (ctx_ptr && mem) {
+        auto* ctx = reinterpret_cast<xe::cpu::ppc::PPCContext*>(ctx_ptr);
+        // MemHeap::Alloc failure path: r25 = MemHeap*, r26 = requested words.
+        uint32_t r25 = (uint32_t)ctx->r[25];
+        uint32_t r26 = (uint32_t)ctx->r[26];
+        // Also surface the store operands to confirm the sentinel signature.
+        uint32_t r27 = (uint32_t)ctx->r[27];
+        uint32_t r30 = (uint32_t)ctx->r[30];
+        uint32_t r10 = (uint32_t)ctx->r[10];
+        fprintf(stderr,
+                "  r25(MemHeap*)=0x%08X r26(words)=0x%08X wantBytes=%u  "
+                "store: r27=0x%08X r30=0x%08X r10=0x%08X EA=0x%08X\n",
+                r25, r26, r26 << 2, r27, r30, r10, (uint32_t)(r30 + r10));
+        auto read_guest_u32 = [&](uint32_t addr) -> uint32_t {
+          if (addr < 0x1000 || addr >= 0xC0000000) return 0;
+          auto* p = mem->TranslateVirtual(addr);
+          return p ? xe::load_and_swap<uint32_t>(p) : 0;
+        };
+        auto read_guest_str = [&](uint32_t addr) -> std::string {
+          std::string s;
+          if (addr < 0x1000 || addr >= 0xC0000000) return s;
+          auto* p = reinterpret_cast<const char*>(mem->TranslateVirtual(addr));
+          if (!p) return s;
+          for (int i = 0; i < 64 && p[i]; ++i) s.push_back(p[i]);
+          return s;
+        };
+        // The in-memory ctx->r[] copy is unreliable mid-block, so scan the raw
+        // host GPR snapshot: guest r25 (MemHeap*) is live in some host register
+        // on the failure path. A real MemHeap has mName (char* at +8) pointing
+        // at a readable name string ("system"/"physical"/"main"/...).
+        static const char* kHostRegNames[16] = {
+            "rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi",
+            "r8",  "r9",  "r10", "r11", "r12", "r13", "r14", "r15"};
+        fprintf(stderr, "  Scanning host GPRs for the exhausted MemHeap:\n");
+        for (int hi = 0; hi < 16; ++hi) {
+          uint64_t hv = ExceptionHandler::GetLastFaultHostGpr(hi);
+          uint32_t cand = (uint32_t)hv;
+          // Guest heap objects live in the guest data range.
+          if (cand < 0x82000000 || cand >= 0xA0000000) continue;
+          uint32_t name_ptr = read_guest_u32(cand + 8);
+          std::string nm = read_guest_str(name_ptr);
+          if (!nm.empty() && name_ptr >= 0x82000000 && name_ptr < 0xA0000000) {
+            fprintf(stderr,
+                    "  >>> host %s=0x%016lX -> MemHeap*=0x%08X mName=\"%s\" "
+                    "(head:",
+                    kHostRegNames[hi], (unsigned long)hv, cand, nm.c_str());
+            for (int wi = 0; wi < 6; ++wi)
+              fprintf(stderr, " %08X", read_guest_u32(cand + wi * 4));
+            fprintf(stderr, ")\n");
+          }
+        }
+        // Also print the full host GPR file so a real size/heap is recoverable
+        // even if the name heuristic misses.
+        fprintf(stderr, "  host GPRs:");
+        for (int hi = 0; hi < 16; ++hi)
+          fprintf(stderr, " %s=%08X", kHostRegNames[hi],
+                  (uint32_t)ExceptionHandler::GetLastFaultHostGpr(hi));
+        fprintf(stderr, "\n");
+
+        // RELIABLE heap-name/size recovery via the guest stack. In
+        // MemHeap::Alloc (0x827BCA78) r31 == guest SP (r1); the failure path
+        // (0x827BCB94) formats "Allocation failure, heap \"%s\", want %d bytes"
+        // into a Milo String at [SP+0x60], and reads heap-stat locals at
+        // SP+0x50/0x54/0x58/0x5C. r1 is always synced in the context (spilled
+        // at the guest bl, restored, unchanged before the fault), unlike the
+        // dead r25/r26. Follow the String's buffer pointer and print the ASCII.
+        uint32_t guest_sp = (uint32_t)ctx->r[1];
+        fprintf(stderr, "  guest SP(r1)=0x%08X\n", guest_sp);
+        if (guest_sp >= 0x70000000 && guest_sp < 0x80000000) {
+          // Heap-stat locals filled by the pre-failure stats call.
+          fprintf(stderr,
+                  "  stat locals: [sp+0x50]=%u [sp+0x54]=%u [sp+0x58]=%u "
+                  "[sp+0x5C]=%u\n",
+                  read_guest_u32(guest_sp + 0x50),
+                  read_guest_u32(guest_sp + 0x54),
+                  read_guest_u32(guest_sp + 0x58),
+                  read_guest_u32(guest_sp + 0x5C));
+          // Milo String at [sp+0x60]: buffer char* is at offset 0 (and some
+          // builds at +4). Probe both and dump ASCII.
+          fprintf(stderr, "  String obj @sp+0x60 words:");
+          for (int wi = 0; wi < 4; ++wi)
+            fprintf(stderr, " %08X", read_guest_u32(guest_sp + 0x60 + wi * 4));
+          fprintf(stderr, "\n");
+          for (uint32_t soff = 0x58; soff <= 0x74; soff += 4) {
+            uint32_t buf_ptr = read_guest_u32(guest_sp + soff);
+            std::string msg;
+            if (buf_ptr >= 0x1000 && buf_ptr < 0xC0000000) {
+              auto* p =
+                  reinterpret_cast<const char*>(mem->TranslateVirtual(buf_ptr));
+              if (p)
+                for (int i = 0; i < 200 && p[i] >= 0x20 && p[i] < 0x7F; ++i)
+                  msg.push_back(p[i]);
+            }
+            if (msg.size() >= 6) {
+              fprintf(stderr,
+                      "  >>> string via [sp+0x%X]->0x%08X: \"%s\"\n", soff,
+                      buf_ptr, msg.c_str());
+            }
+          }
+          // Walk the guest back-chain to identify the caller chain that
+          // computed the corrupted allocation size.
+          fprintf(stderr, "  guest call stack (back-chain LR walk):\n");
+          auto* proc_walk = emulator_ ? emulator_->processor() : nullptr;
+          uint32_t fsp = guest_sp;
+          for (int depth = 0; depth < 12; ++depth) {
+            if (fsp < 0x70000000 || fsp >= 0x80000000) break;
+            uint32_t back = read_guest_u32(fsp);
+            if (back <= fsp || back >= 0x80000000) break;
+            uint32_t lr = read_guest_u32(back + 4);
+            std::string nm = "?";
+            if (proc_walk && lr >= 0x82000000 && lr < 0x84000000) {
+              auto* fn = proc_walk->QueryFunction(lr);
+              if (fn) nm = fn->name();
+            }
+            fprintf(stderr, "    [%d] LR=0x%08X [%s]\n", depth, lr, nm.c_str());
+            fsp = back;
+          }
+          // Scan the whole Alloc frame (0xD0 bytes) for return-address
+          // candidates: any word that QueryFunction resolves is a saved LR /
+          // caller. The immediate caller of MemHeap::Alloc computed the
+          // corrupted size, so this pins the code to disassemble.
+          fprintf(stderr, "  code pointers in frame (caller candidates):\n");
+          for (uint32_t soff = 0; soff <= 0xE0; soff += 4) {
+            uint32_t w = read_guest_u32(guest_sp + soff);
+            if (w < 0x82000000 || w >= 0x83000000) continue;
+            std::string nm;
+            if (proc_walk) {
+              auto* fn = proc_walk->QueryFunction(w);
+              if (fn) nm = fn->name();
+            }
+            if (!nm.empty())
+              fprintf(stderr, "    [sp+0x%02X]=0x%08X [%s]\n", soff, w,
+                      nm.c_str());
+          }
+          // Raw stack dump (hex + ASCII) around the message String, in case of
+          // small-string optimization (message text inline on the stack).
+          fprintf(stderr, "  guest stack [sp+0x00 .. sp+0xD0]:\n");
+          for (uint32_t soff = 0x00; soff < 0xD0; soff += 16) {
+            fprintf(stderr, "    +0x%02X:", soff);
+            char ascii[17];
+            ascii[16] = 0;
+            for (int b = 0; b < 16; ++b) {
+              auto* bp = reinterpret_cast<const uint8_t*>(
+                  mem->TranslateVirtual(guest_sp + soff + b));
+              uint8_t v = bp ? *bp : 0;
+              fprintf(stderr, " %02X", v);
+              ascii[b] = (v >= 0x20 && v < 0x7F) ? (char)v : '.';
+            }
+            fprintf(stderr, "  |%s|\n", ascii);
+          }
+        }
+      }
+      fprintf(stderr, "=== END FAULT LIVELOCK DIAGNOSIS ===\n");
+      fflush(stderr);
+      std::cout << "FAULT_LIVELOCK_ABORT" << std::endl;
+      std::_Exit(70);
+    }
+
     // Periodic thread state report every 3 seconds
     if (elapsed - last_report_ms >= 3000) {
       last_report_ms = elapsed;
