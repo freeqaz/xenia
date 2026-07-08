@@ -195,11 +195,23 @@ std::unique_ptr<FileHandle> FileHandle::OpenExisting(
 bool GetInfo(const std::filesystem::path& path, FileInfo* out_info) {
   struct stat st;
   if (stat(path.c_str(), &st) == 0) {
+    // NOTE: keep every FileInfo field assigned (mirror filesystem_win.cc,
+    // which zero-fills). total_size was previously left UNINITIALIZED here,
+    // which leaked host stack garbage into guest-visible file sizes via
+    // HostPathEntry::update() -> NtQueryInformationFile(NetworkOpen)
+    // end_of_file -> guest xapilib GetFileSize. RB3DX allocates a buffer of
+    // that size when loading its song cache ('rbdxcache'), producing the
+    // intermittent 0xGG001524 heap-OOM wedge at the title screen (see
+    // docs/jit-fault-wiki/CRASH-REPORT-main-hub-oom.md).
     if (S_ISDIR(st.st_mode)) {
       out_info->type = FileInfo::Type::kDirectory;
+      out_info->total_size = 0;
     } else {
       out_info->type = FileInfo::Type::kFile;
+      out_info->total_size = static_cast<size_t>(st.st_size);
     }
+    out_info->name = path.filename();
+    out_info->path = path.parent_path();
     out_info->create_timestamp = convertUnixtimeToWinFiletime(st.st_ctime);
     out_info->access_timestamp = convertUnixtimeToWinFiletime(st.st_atime);
     out_info->write_timestamp = convertUnixtimeToWinFiletime(st.st_mtime);
