@@ -11,12 +11,14 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cinttypes>
 #include <cstdlib>
 #include <fstream>
 #include <optional>
 #include <string_view>
 #include <set>
+#include <thread>
 #include <unordered_map>
 
 #if XE_PLATFORM_LINUX
@@ -216,6 +218,26 @@ DEFINE_bool(
     "size/align/caller-LR + a guest stack walk for allocation sizes with a "
     "non-zero top byte (main_hub OOM corrupted-size investigation). Pure "
     "observer; no guest state is modified by the handler.",
+    "CPU");
+DEFINE_bool(
+    rb3dx_ui_probe, false,
+    "RB3DX (title 0x45410914) DIAGNOSTIC, default off: passively sample the "
+    "guest UI transition state every ~2s from a host thread (BandUI/UIManager "
+    "@0x82DFD2B0: transition state + current/transition screen names, the "
+    "transition screen's per-panel load states, and the saveload_mgr/net_sync "
+    "objects found via ObjectDir::sMainDir @0x82E054B8). Read-only guest "
+    "memory access; no hooks, no patches; title-gated so DC3-inert. For the "
+    "main_hub load-stall investigation.",
+    "CPU");
+DEFINE_bool(
+    rb3dx_offline_join, false,
+    "RB3DX (title 0x45410914), default off: complete the offline single-local-"
+    "host user join synchronously so the boot advances past splash_screen to "
+    "main_hub. Overrides guest NetSession::IsHost() @0x823CECE0 to return true "
+    "for the offline case (mirrors the RB3 native port's IsHost()==true), which "
+    "sends NetSession::AddLocalUser @0x823D2468 down its host branch and fires "
+    "AddUserResultMsg(1) at once instead of an online request/response that "
+    "never round-trips headless. Title-gated so DC3-inert.",
     "CPU");
 
 namespace xe {
@@ -522,6 +544,276 @@ void Rb3dxSaveGprLr23ProbeExtern(cpu::ppc::PPCContext* ppc_context,
             load32(obj + 0x50), load32(obj + 0x54), load32(obj + 0x58),
             load32(obj + 0x5C), load32(obj + 0x60), load32(obj + 0x64));
       }
+    }
+  }
+}
+
+// RB3DX (0x45410914) offline single-local-host join completion
+// (--rb3dx_offline_join).
+//
+// Overrides the guest NetSession::IsHost() @ 0x823CECE0. Headless with
+// XNet/XSession/Quazal stubbed, a Quazal session object still gets created
+// (mQNet @ this+0x70 != 0) but this machine is not the session's "duplication
+// master", so the real IsHost() (mQNet!=0 -> Quazal::Session::GetInstance()->
+// IsADuplicationMaster()) returns false. That drives NetSession::AddLocalUser
+// @ 0x823D2468 down its NON-host ELSE branch — SetState(kRequestingNewUser=7);
+// build an AddUserRequestMsg; TheNetMessenger.DeliverMsg over the dead network
+// — instead of the host branch (AddLocalToSession + fire AddUserResultMsg(1)
+// synchronously). The AddUserResponseMsg never arrives, so SessionMgr never
+// fires AddLocalUserResultMsg, the overshell slot never reaches allowing-input,
+// overshell_allowing_input(TRUE) never fires, and splash_screen's
+// kSplashScreen_WaitOvershell gate never advances to main_hub. This is the SAME
+// gate the RB3 native port hit and fixed by making IsHost() return true offline
+// ("single local machine", rb3_netsession_native.cpp:195).
+//
+// We replicate the real IsHost() using the target's own field reads (mState @
+// this+0x68 — both offsets and the state constants are taken directly from the
+// guest IsHost disassembly) and diverge ONLY where the real code would consult
+// the (non-existent) Quazal duplication master: offline the local machine IS
+// the host, so return true. kRequestingNewUser(7) and the joining states (3..6)
+// are returned as not-host exactly as the real function would, preserving the
+// session state-machine semantics during any transient online-session setup.
+void Rb3dxIsHostOfflineExtern(cpu::ppc::PPCContext* ppc_context,
+                              kernel::KernelState* kernel_state) {
+  if (!ppc_context || !kernel_state) {
+    return;
+  }
+  uint8_t* base = kernel_state->memory()->virtual_membase();
+  uint32_t self = static_cast<uint32_t>(ppc_context->r[3]);  // NetSession* this
+  uint32_t mState = xe::load_and_swap<uint32_t>(base + self + 0x68);
+  // kRequestingNewUser (7) or joining (3..6): genuinely not host — preserve.
+  bool not_host = (mState == 7 || (mState >= 3 && mState <= 6));
+  static std::atomic<uint32_t> s_calls{0};
+  uint32_t n = s_calls.fetch_add(1, std::memory_order_relaxed);
+  if (n < 8) {
+    XELOGI(
+        "RB3DX offline-join: IsHost hit #{} this=0x{:08X} mState={} "
+        "lr=0x{:08X} -> host={}",
+        n, self, mState, static_cast<uint32_t>(ppc_context->lr),
+        not_host ? 0 : 1);
+  }
+  if (not_host) {
+    ppc_context->r[3] = 0;
+    return;
+  }
+  // Idle/normal (incl. kCreatingHostSession/kRegisteringHostSession) offline:
+  // this machine is the host. The real code asks Quazal only when mQNet!=0
+  // (this+0x70), which headless returns false and causes the join stall.
+  ppc_context->r[3] = 1;
+}
+
+// RB3DX main_hub load-stall investigation (--rb3dx_ui_probe).
+//
+// Passive, read-only sampler thread. Anchors (all TU5/RB3DX-runtime-proven by
+// RB3Enhanced's ports_xbox360.h, which patches this exact xex):
+//   TheBandUI (BandUI instance)     = 0x82DFD2B0
+//   ObjectDir::sMainDir (ObjectDir*) = 0x82E054B8
+// Layouts (rb3-xenon decomp, Ghidra-verified for RB3-360 where noted):
+//   UIManager (virtual Hmx::Object base; vftable@0, vbtbl@8, vbase tail):
+//     mTransitionState @+0x10, mCurrentScreen @+0x2C (matches RB3E
+//     currentScreen), mTransitionScreen @+0x30.
+//   UIScreen (NON-virtual Hmx::Object base): name char* @+0x18 (matches RB3E
+//     screen_name), mPanelList std::list<PanelRef> @+0x2C = embedded dummy
+//     {next,prev}; node = {next@0, prev@4, PanelRef@8 = {UIPanel* @+8,
+//     mActive @+0xC, mAlwaysLoad @+0xD, mLoaded @+0xE}}.
+//   UIPanel (VIRTUAL Hmx::Object base; vfptr@0, vbptr@4): mDir @+0x8,
+//     mLoader @+0xC, mLoaded @+0x1C, mState @+0x20 (0=kUnloaded 1=kUp
+//     2=kDown), mLoadRefs @+0x28. Name via vbase: vbp=[this+4],
+//     vbase=this+4+[vbp+4], name=[vbase+0x18].
+//   ObjectDir: KeylessHash @+0x8 = {Entry* mEntries@+0, int mSize@+4};
+//     Entry = {const char* name, Hmx::Object* obj} (8 bytes).
+//   SaveLoadManager ("saveload_mgr" in main dir): mActivated @+0x1C,
+//     mInitialLoadNotDone @+0x1D, mState @+0x24, mWaiting @+0x69,
+//     unk7c @+0x7C, mAction @+0x80 (layout cross-checked by the alloc probe's
+//     +0x5C/+0x60/+0x64 dumps during the OOM investigation).
+//   NetSync ("net_sync"): unk1c @+0x1C, mDestinationScreen @+0x20,
+//     mDestinationDepth @+0x24, unk28 @+0x28, unk29 @+0x29,
+//     mUILockStep @+0x2C -> LockStepMgr: mLockMachine @+0x1C (InLock() =
+//     mLockMachine != 0), mWaitList.mList vector {begin@+0x20, end@+0x24},
+//     mHasResponded @+0x28, mLockSuccess @+0x29.
+static void Rb3dxUiProbeThread(Memory* memory) {
+  using xe::load_and_swap;
+  uint8_t* base = memory->virtual_membase();
+  auto readable = [&](uint32_t addr) -> bool {
+    if (addr < 0x1000) return false;
+    auto* heap = memory->LookupHeap(addr);
+    if (!heap) return false;
+    uint32_t prot = 0;
+    if (!heap->QueryProtect(addr, &prot)) return false;
+    return (prot & kMemoryProtectRead) != 0;
+  };
+  auto r32 = [&](uint32_t a) -> uint32_t {
+    return readable(a) ? load_and_swap<uint32_t>(base + a) : 0;
+  };
+  auto r8 = [&](uint32_t a) -> uint32_t {
+    return readable(a) ? *(base + a) : 0;
+  };
+  auto rstr = [&](uint32_t a) -> std::string {
+    if (!readable(a)) return "<unreadable>";
+    std::string s;
+    for (int i = 0; i < 48; ++i) {
+      if (!readable(a + i)) break;
+      char c = static_cast<char>(*(base + a + i));
+      if (!c) return s;
+      if (c < 0x20 || c > 0x7E) return "<binary>";
+      s += c;
+    }
+    return s + "...";
+  };
+  auto panel_vbase = [&](uint32_t panel) -> uint32_t {
+    uint32_t vbp = r32(panel + 4);
+    if (!vbp) return 0;
+    uint32_t delta = r32(vbp + 4);
+    if (delta == 0 || delta > 0x400) return 0;
+    return panel + 4 + delta;
+  };
+  const uint32_t kTheBandUI = 0x82DFD2B0;
+  const uint32_t kMainDirPtr = 0x82E054B8;
+  uint32_t saveload_obj = 0, netsync_obj = 0, session_obj = 0;
+  int sample = 0;
+  for (;;) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+    ++sample;
+    // --- UIManager / BandUI ---
+    uint32_t ts = r32(kTheBandUI + 0x10);
+    uint32_t cur = r32(kTheBandUI + 0x2C);
+    uint32_t trans = r32(kTheBandUI + 0x30);
+    std::string cur_name = cur ? rstr(r32(cur + 0x18)) : "<null>";
+    std::string trans_name = trans ? rstr(r32(trans + 0x18)) : "<null>";
+    XELOGE(
+        "RB3DX UI PROBE[{}]: transState={} curScreen=0x{:08X}'{}' "
+        "transScreen=0x{:08X}'{}'",
+        sample, ts, cur, cur_name, trans, trans_name);
+    // --- panels of the transition screen and current screen ---
+    // RB3-360 UIScreen: mPanelList is an EMBEDDED circular {next,prev} dummy
+    // at screen+0x28 (calibrated empirically: walking with s+0x2C as the
+    // sentinel yielded a phantom node at s+0x28 whose "panel" was
+    // mFocusPanel@+0x30). Nodes = {next@0, prev@4, PanelRef@8}.
+    auto dump_panels = [&](uint32_t s, const char* tag) {
+      if (!s) return;
+      uint32_t dummy = s + 0x28;
+      uint32_t node = r32(dummy);
+      int n = 0;
+      while (node && node != dummy && n < 24) {
+        uint32_t panel = r32(node + 0x8);
+        uint32_t active = r8(node + 0xC);
+        uint32_t loaded_ref = r8(node + 0xE);
+        if (panel) {
+          uint32_t vb = panel_vbase(panel);
+          std::string pname = vb ? rstr(r32(vb + 0x18)) : "<?>";
+          uint32_t pstate = r32(panel + 0x20);
+          uint32_t ploaded = r8(panel + 0x1C);
+          uint32_t ploader = r32(panel + 0xC);
+          uint32_t prefs = r32(panel + 0x28);
+          XELOGE(
+              "RB3DX UI PROBE[{}]:   {}panel[{}]@0x{:08X} 0x{:08X}'{}' "
+              "active={} refLoaded={} mState={} mLoaded={} mLoader=0x{:08X} "
+              "mLoadRefs={}",
+              sample, tag, n, node, panel, pname, active, loaded_ref, pstate,
+              ploaded, ploader, prefs);
+        }
+        node = r32(node);
+        ++n;
+      }
+    };
+    dump_panels(trans, "T:");
+    if (cur != trans) dump_panels(cur, "C:");
+    // --- find saveload_mgr / net_sync via main-dir hash (once) ---
+    static bool s_dumped_names = false;
+    if (!saveload_obj || !netsync_obj || !session_obj ||
+        (!s_dumped_names && cur)) {
+      uint32_t dir = r32(kMainDirPtr);
+      if (dir) {
+        uint32_t entries = r32(dir + 0x8);
+        int size = static_cast<int>(r32(dir + 0xC));
+        if (entries && size > 0 && size < 200000) {
+          for (int i = 0; i < size; ++i) {
+            uint32_t name_p = r32(entries + i * 8);
+            uint32_t obj = r32(entries + i * 8 + 4);
+            if (!name_p || !obj) continue;
+            std::string nm = rstr(name_p);
+            if (nm == "saveload_mgr" && !saveload_obj) {
+              saveload_obj = obj;
+              XELOGE("RB3DX UI PROBE: found saveload_mgr obj=0x{:08X}",
+                     saveload_obj);
+            } else if (nm == "net_sync" && !netsync_obj) {
+              netsync_obj = obj;
+              XELOGE("RB3DX UI PROBE: found net_sync obj=0x{:08X}",
+                     netsync_obj);
+            } else if (nm == "session" && !session_obj) {
+              session_obj = obj;
+              XELOGE("RB3DX UI PROBE: found session obj=0x{:08X}", session_obj);
+            }
+            if (saveload_obj && netsync_obj && session_obj) break;
+          }
+          // One-time: dump the whole main-dir name table so session/overshell
+          // objects can be located offline.
+          if (!s_dumped_names && cur) {
+            s_dumped_names = true;
+            for (int i = 0; i < size; ++i) {
+              uint32_t name_p = r32(entries + i * 8);
+              uint32_t obj = r32(entries + i * 8 + 4);
+              if (!name_p || !obj) continue;
+              std::string nm = rstr(name_p);
+              XELOGE("RB3DX UI PROBE: maindir['{}'] = 0x{:08X}", nm, obj);
+            }
+          }
+        }
+      }
+    }
+    // --- saveload_mgr / net_sync raw windows ---
+    // ObjectDir::Entry.obj stores the Hmx::Object* BASE pointer. For classes
+    // with a VIRTUAL Object base (MsgSource-derived SaveLoadManager; NetSync)
+    // that is the vbase at the object's TAIL, so the derived fields live at
+    // NEGATIVE offsets. Dump a raw window below the vbase for offline
+    // calibration; values that change frame-to-frame identify the live state
+    // fields (SaveLoadManager::mState etc.).
+    // Find the DERIVED object head from an Hmx::Object vbase pointer by the
+    // inverse of the vbptr math: head H has vfptr@H, vbptr P@H+4, and
+    // [P+4] == vbase - (H+4). Scan down from the vbase.
+    auto find_derived_head = [&](uint32_t vbase) -> uint32_t {
+      for (uint32_t h = vbase - 8; h + 0x400 >= vbase; h -= 4) {
+        uint32_t vf = r32(h);
+        if (vf < 0x82000000 || vf >= 0x83000000) continue;
+        uint32_t vbp = r32(h + 4);
+        if (vbp < 0x82000000 || vbp >= 0x83000000) continue;
+        uint32_t delta = r32(vbp + 4);
+        if (h + 4 + delta == vbase) return h;
+      }
+      return 0;
+    };
+    auto dump_obj = [&](const char* tag, uint32_t o) {
+      if (!o) return;
+      std::string ident = rstr(r32(o + 0x18));
+      uint32_t head = find_derived_head(o);
+      // Labeled dump relative to the derived head when found, else relative
+      // to the vbase (plain non-virtual Object base: fields ABOVE o).
+      uint32_t base_addr = head ? head : o;
+      XELOGE("RB3DX UI PROBE[{}]:   {}('{}') head=0x{:08X} vbase=0x{:08X}",
+             sample, tag, ident, head, o);
+      for (uint32_t row = 0; row < 0xC0; row += 0x20) {
+        std::string words;
+        for (uint32_t k = 0; k < 0x20; k += 4) {
+          words += fmt::format(" {:08X}", r32(base_addr + row + k));
+        }
+        XELOGE("RB3DX UI PROBE[{}]:   {}[+0x{:02X}]:{}", sample, tag, row,
+               words);
+      }
+    };
+    dump_obj("saveload_mgr", saveload_obj);
+    dump_obj("net_sync", netsync_obj);
+    // session (NetSession): the join gate. mState @head+0x68, mQNet @head+0x70
+    // (offsets from the guest IsHost disassembly). mState kIdle(0) -> not
+    // requesting; kRequestingNewUser(7) -> the online join was issued and is
+    // waiting for a response (the stall the offline-join fix targets).
+    if (session_obj) {
+      uint32_t head = find_derived_head(session_obj);
+      uint32_t b = head ? head : session_obj;
+      XELOGE(
+          "RB3DX UI PROBE[{}]:   session head=0x{:08X} mState={} mQNet=0x{:08X} "
+          "mUsers[begin=0x{:08X} end=0x{:08X}]",
+          sample, b, r32(b + 0x68), r32(b + 0x70), r32(b + 0x14),
+          r32(b + 0x18));
     }
   }
 }
@@ -2879,6 +3171,103 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
           "RB3DX: MemAlloc probe installed via __savegprlr_23 override at "
           "0x{:08X} (filter lr=0x827BCD40)",
           kSaveGprLr23);
+    }
+  }
+
+  // RB3DX (0x45410914) DIAGNOSTIC: passive UI-state sampler for the main_hub
+  // load-stall investigation (--rb3dx_ui_probe). Read-only guest-memory
+  // sampler on a detached host thread; no hooks, no patches. DC3-inert:
+  // title-gated + default-off cvar.
+  if (title_id_.has_value() && title_id_.value() == 0x45410914 &&
+      cvars::rb3dx_ui_probe) {
+    Memory* probe_mem = memory_.get();
+    std::thread([probe_mem]() { Rb3dxUiProbeThread(probe_mem); }).detach();
+    XELOGI("RB3DX: UI probe sampler thread started (--rb3dx_ui_probe)");
+  }
+
+  // RB3DX (0x45410914): offline single-local-host join completion
+  // (--rb3dx_offline_join). Title-gated + default-off => DC3-inert. Overrides
+  // NetSession::IsHost() @0x823CECE0 so the offline overshell local-user join
+  // takes the synchronous host-success path and splash_screen advances to
+  // main_hub (see Rb3dxIsHostOfflineExtern). No guest byte patches.
+  if (title_id_.has_value() && title_id_.value() == 0x45410914 &&
+      cvars::rb3dx_offline_join) {
+    // The running default.xex (retail RB3 + TU5 + RB3DX) is a DIFFERENT build
+    // than the rb3-xenon decomp image, so guest code is relocated and a
+    // hardcoded address is wrong. NetSession::IsHost()'s mState state-machine
+    // body is byte-identical across builds though (same source/compiler), so
+    // locate it by a relocation-independent instruction signature (branch
+    // words are wildcarded to tolerate any layout shift), anchored on the
+    // distinctive `lwz r11,0x68(r3)` (mState) + the 7/3/4/5/6 state compares:
+    //   [+0x00] lwz   r11, 0x68(r3)   0x81630068  (mState)
+    //   [+0x04] cmpwi cr6, r11, 7     0x2F0B0007  (kRequestingNewUser)
+    //   [+0x0C] cmpwi cr6, r11, 3     0x2F0B0003
+    //   [+0x14] cmpwi cr6, r11, 4     0x2F0B0004
+    //   [+0x1C] cmpwi cr6, r11, 5     0x2F0B0005
+    //   [+0x24] cmpwi cr6, r11, 6     0x2F0B0006
+    // IsHost entry = anchor - 0xC (mflr r12 / stw r12,-8 / stwu r1,-0x60).
+    Memory* mem = memory_.get();
+    uint8_t* base = mem->virtual_membase();
+    auto page_readable = [&](uint32_t addr) -> bool {
+      auto* heap = mem->LookupHeap(addr);
+      if (!heap) return false;
+      uint32_t prot = 0;
+      if (!heap->QueryProtect(addr, &prot)) return false;
+      return (prot & kMemoryProtectRead) != 0;
+    };
+    auto w32 = [&](uint32_t a) -> uint32_t {
+      return xe::load_and_swap<uint32_t>(base + a);
+    };
+    uint32_t found = 0;
+    for (uint32_t addr = 0x82000000; addr < 0x83000000 && !found; addr += 0x1000) {
+      if (!page_readable(addr)) continue;
+      uint32_t page_end = addr + 0x1000;
+      // Anchor may straddle a page; require the whole 0x28-byte window to be in
+      // a readable page too (skip the last few words near a boundary — the
+      // real function never sits across an unmapped gap).
+      for (uint32_t a = addr; a + 0x28 <= page_end; a += 4) {
+        if (w32(a) != 0x81630068) continue;
+        if (w32(a + 0x04) != 0x2F0B0007) continue;
+        if (w32(a + 0x0C) != 0x2F0B0003) continue;
+        if (w32(a + 0x14) != 0x2F0B0004) continue;
+        if (w32(a + 0x1C) != 0x2F0B0005) continue;
+        if (w32(a + 0x24) != 0x2F0B0006) continue;
+        // Confirm the prologue 0xC bytes before the anchor.
+        uint32_t entry = a - 0xC;
+        if (page_readable(entry) && w32(entry) == 0x7D8802A6 &&
+            w32(entry + 0x4) == 0x9181FFF8) {
+          found = entry;
+        }
+        break;
+      }
+    }
+    if (!found) {
+      XELOGW(
+          "RB3DX: offline-join NOT installed (NetSession::IsHost signature not "
+          "found in 0x82000000-0x83000000)");
+    } else {
+      // Diagnostic: count `bl found` sites in the code region. If >0, IsHost is
+      // a real call target (not inlined) and 0 runtime hits => AddLocalUser was
+      // never reached; if 0, IsHost was inlined and this override cannot see it.
+      uint32_t bl_callers = 0;
+      for (uint32_t a = 0x82000000; a < 0x83000000; a += 0x1000) {
+        if (!page_readable(a)) continue;
+        for (uint32_t p = a; p < a + 0x1000; p += 4) {
+          uint32_t insn = w32(p);
+          if ((insn >> 26) != 18 || (insn & 1) != 1) continue;  // bl only
+          int32_t li = static_cast<int32_t>(insn & 0x03FFFFFC);
+          if (li & 0x02000000) li -= 0x04000000;
+          uint32_t tgt = (insn & 2) ? static_cast<uint32_t>(li)
+                                    : (p + static_cast<uint32_t>(li));
+          if (tgt == found) ++bl_callers;
+        }
+      }
+      processor_->RegisterGuestFunctionOverride(
+          found, Rb3dxIsHostOfflineExtern, "RB3DX:NetSession::IsHost(offline)");
+      XELOGI(
+          "RB3DX: offline single-host join enabled via NetSession::IsHost "
+          "override at 0x{:08X} (signature-located, {} bl-callers)",
+          found, bl_callers);
     }
   }
 
