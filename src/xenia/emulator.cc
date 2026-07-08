@@ -209,6 +209,14 @@ DEFINE_string(
     "DC3: optional JSON crash snapshot output path written from guest crash "
     "dumps (headless-friendly structured artifact for postmortem tools).",
     "DC3");
+DEFINE_bool(
+    rb3dx_alloc_probe, false,
+    "RB3DX (title 0x45410914) DIAGNOSTIC, default off: bytepatch guest "
+    "MemAlloc@0x827BCD38 with an observe-and-continue trampoline that logs "
+    "size/align/caller-LR + a guest stack walk for allocation sizes with a "
+    "non-zero top byte (main_hub OOM corrupted-size investigation). Pure "
+    "observer; no guest state is modified by the handler.",
+    "CPU");
 
 namespace xe {
 
@@ -340,6 +348,182 @@ void Dc3NuiReturn1Extern(cpu::ppc::PPCContext* ppc_context,
         static_cast<uint32_t>(ppc_context->scratch));
   }
   ppc_context->r[3] = 1;
+}
+
+// RB3DX main_hub OOM investigation (--rb3dx_alloc_probe).
+//
+// We need MemAlloc's entry args (r3=size bytes, r4=align) plus the caller
+// LR, captured while they're live. Synthetic PPC trampolines/caves proved
+// fragile (the JIT's scanner mis-compiles cave functions; a .data cave also
+// corrupted live zero-init statics). Instead we override a REAL, pre-declared
+// guest function on MemAlloc's path: __savegprlr_23 @ 0x82829244 (declared by
+// XexModule::FindSaveRest before any execution). MemAlloc's prologue is
+//   mflr r12 ; bl __savegprlr_23 ; ... ; stwu r1,-0xB0(r1)
+// so at the bl: r3=size, r4=align, r12=caller LR, lr=0x827BCD40 (the return
+// into MemAlloc, our filter key), r1 = the CALLER's SP (stwu not yet done).
+// The handler EXACTLY emulates __savegprlr_23 (std r23..r31 at r1-0x50..-0x10,
+// stw r12 at r1-8) so every other function calling it is unaffected, and logs
+// allocation sizes with a garbage top byte.
+void Rb3dxSaveGprLr23ProbeExtern(cpu::ppc::PPCContext* ppc_context,
+                                 kernel::KernelState* kernel_state) {
+  static std::atomic<uint64_t> s_calls{0};
+  static std::atomic<uint64_t> s_memalloc_calls{0};
+  static std::atomic<uint32_t> s_reports{0};
+  uint64_t n = s_calls.fetch_add(1, std::memory_order_relaxed) + 1;
+  if (!ppc_context || !kernel_state) {
+    return;
+  }
+  Memory* mem_for_emu = kernel_state->memory();
+  uint8_t* base = mem_for_emu->virtual_membase();
+  uint32_t sp = static_cast<uint32_t>(ppc_context->r[1]);
+  // --- exact __savegprlr_23 emulation (must be semantically transparent) ---
+  for (int i = 0; i < 9; ++i) {
+    xe::store_and_swap<uint64_t>(base + sp - 0x50 + i * 8,
+                                 ppc_context->r[23 + i]);
+  }
+  xe::store_and_swap<uint32_t>(base + sp - 8,
+                               static_cast<uint32_t>(ppc_context->r[12]));
+  // --- probe part ---
+  uint32_t lr = static_cast<uint32_t>(ppc_context->lr);
+  if (n <= 3) {
+    XELOGI("RB3DX ALLOC PROBE: savegprlr_23 warmup #{} lr=0x{:08X}", n, lr);
+  }
+  const uint32_t kMemAllocRet = 0x827BCD40;  // bl at 0x827BCD3C in MemAlloc
+  if (lr != kMemAllocRet) {
+    return;
+  }
+  uint64_t m = s_memalloc_calls.fetch_add(1, std::memory_order_relaxed) + 1;
+  uint32_t size = static_cast<uint32_t>(ppc_context->r[3]);
+  if (m <= 5) {
+    XELOGI(
+        "RB3DX ALLOC PROBE: MemAlloc warmup #{} size=0x{:08X} align={} "
+        "callerLR(r12)=0x{:08X} sp=0x{:08X}",
+        m, size, static_cast<int32_t>(static_cast<uint32_t>(ppc_context->r[4])),
+        static_cast<uint32_t>(ppc_context->r[12]), sp);
+  }
+  bool suspicious = (size & 0xFF000000u) != 0;
+  bool big = size >= 0x00400000u;  // >=4MB: context even when top byte clean
+  if (!suspicious && !big) {
+    return;
+  }
+  if (s_reports.fetch_add(1, std::memory_order_relaxed) >= 64) {
+    return;  // cap log volume; the first hits are the interesting ones
+  }
+  uint32_t align = static_cast<uint32_t>(ppc_context->r[4]);
+  uint32_t caller_lr = static_cast<uint32_t>(ppc_context->r[12]);
+  Memory* memory = mem_for_emu;
+  uint8_t* membase = base;
+  auto readable = [&](uint32_t addr) -> bool {
+    if (addr < 0x1000 || (addr & 3)) {
+      return false;
+    }
+    auto* heap = memory->LookupHeap(addr);
+    if (!heap) {
+      return false;
+    }
+    uint32_t prot = 0;
+    if (!heap->QueryProtect(addr, &prot)) {
+      return false;
+    }
+    return (prot & kMemoryProtectRead) != 0;
+  };
+  auto load32 = [&](uint32_t addr) -> uint32_t {
+    return xe::load_and_swap<uint32_t>(membase + addr);
+  };
+  XELOGE(
+      "RB3DX ALLOC PROBE: {} call #{} size=0x{:08X} ({}) align={} "
+      "callerLR=0x{:08X} sp=0x{:08X}",
+      suspicious ? "SUSPICIOUS" : "BIG", m, size, size,
+      static_cast<int32_t>(align), caller_lr, sp);
+  // Guest stack backchain walk. Frame convention (MSVC Xenon):
+  //   prologue = mflr r12 ; bl __savegprlr_N (stw r12,-8(r1)) ; stwu r1,-X(r1)
+  // so from a current SP: entry_sp = [sp], saved return addr = [entry_sp - 8].
+  uint32_t cur = sp;
+  for (int i = 0; i < 10; ++i) {
+    if (!readable(cur)) {
+      break;
+    }
+    uint32_t prev = load32(cur);
+    if (prev <= cur || prev - cur > 0x40000 || !readable(prev - 8)) {
+      break;
+    }
+    uint32_t ret = load32(prev - 8);
+    XELOGE("RB3DX ALLOC PROBE:   frame[{}] entry_sp=0x{:08X} ret=0x{:08X}", i,
+           prev, ret);
+    cur = prev;
+  }
+  // Fallback: raw code-pointer scan of the caller stack window (covers
+  // leaf frames / broken backchains).
+  for (uint32_t a = sp & ~3u; a < sp + 0x180; a += 4) {
+    if (!readable(a)) {
+      break;
+    }
+    uint32_t v = load32(a);
+    if (v >= 0x82000000 && v < 0x82F00000) {
+      XELOGE("RB3DX ALLOC PROBE:   [sp+0x{:03X}]=0x{:08X}", a - sp, v);
+    }
+  }
+  // Full GPR snapshot (context is synced at extern-call time).
+  for (int i = 0; i < 32; i += 8) {
+    XELOGE(
+        "RB3DX ALLOC PROBE:   r{:<2}-r{:<2} {:08X} {:08X} {:08X} {:08X} "
+        "{:08X} {:08X} {:08X} {:08X}",
+        i, i + 7, static_cast<uint32_t>(ppc_context->r[i]),
+        static_cast<uint32_t>(ppc_context->r[i + 1]),
+        static_cast<uint32_t>(ppc_context->r[i + 2]),
+        static_cast<uint32_t>(ppc_context->r[i + 3]),
+        static_cast<uint32_t>(ppc_context->r[i + 4]),
+        static_cast<uint32_t>(ppc_context->r[i + 5]),
+        static_cast<uint32_t>(ppc_context->r[i + 6]),
+        static_cast<uint32_t>(ppc_context->r[i + 7]));
+  }
+  // Live-code integrity dump: detect RB3DX runtime self-patching of the
+  // GetFileSize path (xapilib) that feeds SaveLoadManager::mSaveSize.
+  struct DumpSpec {
+    const char* name;
+    uint32_t addr;
+    int words;
+  };
+  const DumpSpec dumps[] = {
+      {"GetFileSize@82840070", 0x82840070, 8},
+      {"QuerySize64@8284BC68", 0x8284BC68, 14},
+      {"ThreadGetFileSize.store@827DA84C", 0x827DA84C, 4},
+      {"NtQIF.thunk@82C4C46C", 0x82C4C46C, 4},
+      {"NtDispatchTbl@82C7AA78+0x1C", 0x82C7AA98, 4},
+      {"gNtDispatchPtr@82C7AAA8", 0x82C7AAA8, 1},
+  };
+  for (const auto& d : dumps) {
+    if (!readable(d.addr)) {
+      XELOGE("RB3DX ALLOC PROBE:   {} UNREADABLE", d.name);
+      continue;
+    }
+    std::string words;
+    for (int i = 0; i < d.words; ++i) {
+      words += fmt::format(" {:08X}", load32(d.addr + i * 4));
+    }
+    XELOGE("RB3DX ALLOC PROBE:   {}:{}", d.name, words);
+  }
+  // Recover the SaveLoadManager 'this' (r30 of the frame that called
+  // operator new): its __savegprlr_23 spill sits at frame0_entry_sp-0x50..
+  // -0x10 (std r23..r31), so saved r30 = u64 at entry_sp-0x18.
+  if (caller_lr == 0x827BD028 && readable(sp)) {  // via operator new
+    uint32_t f0_entry = load32(sp);               // operator new's caller sp
+    if (readable(f0_entry) && readable(load32(f0_entry) - 0x18)) {
+      uint32_t f1_entry = load32(f0_entry);  // state machine entry sp
+      uint32_t obj = load32(f1_entry - 0x18 + 4);  // low half of saved r30
+      XELOGE("RB3DX ALLOC PROBE:   frame1 saved r30 (state-machine this) = "
+             "0x{:08X}",
+             obj);
+      if (obj >= 0x10000 && readable(obj + 0x50)) {
+        XELOGE(
+            "RB3DX ALLOC PROBE:   obj+0x50(name)=0x{:08X} +0x54(mSaveSize)="
+            "0x{:08X} +0x58=0x{:08X} +0x5C(mCacheID)=0x{:08X} "
+            "+0x60(mCache)=0x{:08X} +0x64(mData)=0x{:08X}",
+            load32(obj + 0x50), load32(obj + 0x54), load32(obj + 0x58),
+            load32(obj + 0x5C), load32(obj + 0x60), load32(obj + 0x64));
+      }
+    }
+  }
 }
 
 void Dc3NuiSequencerExtern(
@@ -2669,6 +2853,34 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
   graphics_system_->InitializeShaderStorage(cache_root_, title_id_.value(),
                                             true);
   on_shader_storage_initialization(false);
+
+  // RB3DX (0x45410914) DIAGNOSTIC: MemAlloc argument probe for the main_hub
+  // corrupted-size OOM investigation. Default off (--rb3dx_alloc_probe).
+  // No guest byte patches: overrides the pre-declared __savegprlr_23 helper
+  // (0x82829244; declared by XexModule::FindSaveRest, not yet compiled at
+  // this point) with an exact host emulation + a probe filtered to
+  // MemAlloc's call site (lr == 0x827BCD40). DC3-inert: title-gated +
+  // default-off cvar.
+  if (title_id_.has_value() && title_id_.value() == 0x45410914 &&
+      cvars::rb3dx_alloc_probe) {
+    const uint32_t kSaveGprLr23 = 0x82829244;
+    auto* mem = memory_->virtual_membase();
+    uint32_t insn0 = xe::load_and_swap<uint32_t>(mem + kSaveGprLr23);
+    if (insn0 != 0xFAE1FFB0) {  // std r23,-0x50(r1)
+      XELOGW(
+          "RB3DX: alloc probe NOT installed (unexpected __savegprlr_23 "
+          "word 0x{:08X})",
+          insn0);
+    } else {
+      processor_->RegisterGuestFunctionOverride(
+          kSaveGprLr23, Rb3dxSaveGprLr23ProbeExtern,
+          "RB3DX:__savegprlr_23(probe)");
+      XELOGI(
+          "RB3DX: MemAlloc probe installed via __savegprlr_23 override at "
+          "0x{:08X} (filter lr=0x827BCD40)",
+          kSaveGprLr23);
+    }
+  }
 
   // DC3 title-specific guest code patches.
   // DC3 Title ID: 0x373307D9 (Dance Central 3)

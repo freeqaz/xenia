@@ -24,6 +24,8 @@
 #include "xenia/vfs/device.h"
 #include "xenia/xbox.h"
 
+DECLARE_bool(rb3dx_alloc_probe);
+
 namespace xe {
 namespace kernel {
 namespace xboxkrnl {
@@ -124,6 +126,15 @@ dword_result_t NtQueryInformationFile_entry(
       info->end_of_file = file->entry()->size();
       info->attributes = file->entry()->attributes();
       out_length = sizeof(*info);
+      if (cvars::rb3dx_alloc_probe) {
+        // RB3DX main_hub OOM diagnostic (--rb3dx_alloc_probe): the guest
+        // GetFileSize (xapilib @ 0x82840070) sources allocation sizes here.
+        XELOGI(
+            "RB3DX QIF PROBE: NtQueryInformationFile(NetworkOpen) path='{}' "
+            "end_of_file={} (0x{:X}) info_ptr=0x{:08X}",
+            file->path(), uint64_t(file->entry()->size()),
+            uint64_t(file->entry()->size()), info_ptr.guest_address());
+      }
       break;
     }
     case XFileAlignmentInformation: {

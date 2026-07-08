@@ -11,17 +11,33 @@
 
 #include <algorithm>
 #include <cstring>
+#include <atomic>
 #include <utility>
 
 #include "xenia/base/assert.h"
 #include "xenia/base/byte_order.h"
+#include "xenia/base/cvar.h"
 #include "xenia/base/exception_handler.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/memory.h"
 #include "xenia/base/platform.h"
 
+DECLARE_bool(rb3dx_alloc_probe);
+
 namespace xe {
 namespace cpu {
+
+// RB3DX OOM investigation (--rb3dx_alloc_probe): one-shot attribution of
+// which recovery branch services faults on guest EAs above every heap top
+// (>= 0xFFD00000, e.g. the MemHeap::Alloc post-OOM store to 0xFFFFFFFC).
+static std::atomic<int> rb3dx_tophole_logs{0};
+static void Rb3dxTopHoleLog(uint32_t guest_ea, bool is_write,
+                            const char* branch, int detail) {
+  if (!cvars::rb3dx_alloc_probe) return;
+  if (rb3dx_tophole_logs.fetch_add(1, std::memory_order_relaxed) >= 8) return;
+  XELOGE("RB3DX TOPHOLE: guest EA {:08X} is_write={} branch={} detail={}",
+         guest_ea, is_write, branch, detail);
+}
 
 MMIOHandler* MMIOHandler::global_handler_ = nullptr;
 
@@ -442,7 +458,15 @@ bool MMIOHandler::ExceptionCallback(Exception* ex) {
         cur_access != memory::PageAccess::kNoAccess &&
         (!is_write || cur_access != memory::PageAccess::kReadOnly)) {
       // Another thread has cleared this watch. Abort.
+      if (fault_guest_virtual_address >= 0xFFD00000u) {
+        Rb3dxTopHoleLog(fault_guest_virtual_address, is_write,
+                        "watch-cleared-abort", int(cur_access));
+      }
       return true;
+    }
+    if (fault_guest_virtual_address >= 0xFFD00000u) {
+      Rb3dxTopHoleLog(fault_guest_virtual_address, is_write,
+                      "past-protect-check", protect_ok ? int(cur_access) : -1);
     }
     // The address is not found within any range, so either a write watch or an
     // actual access violation.
@@ -528,8 +552,16 @@ bool MMIOHandler::ExceptionCallback(Exception* ex) {
         ex->ModifyIntRegister(decoded_load_store.value_reg) = 0;
 #endif
         ex->set_resume_pc(rip + decoded_load_store.length);
+        if (fault_guest_virtual_address >= 0xFFD00000u) {
+          Rb3dxTopHoleLog(fault_guest_virtual_address, is_write,
+                          "read-soft-fault", int(decoded_load_store.length));
+        }
         return true;
       }
+    }
+    if (fault_guest_virtual_address >= 0xFFD00000u) {
+      Rb3dxTopHoleLog(fault_guest_virtual_address, is_write,
+                      "unhandled-return-false", 0);
     }
     return false;
   }
