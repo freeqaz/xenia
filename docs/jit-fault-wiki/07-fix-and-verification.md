@@ -152,11 +152,66 @@ build/bin/Linux/Checked/xenia-headless --gpu=vulkan --protect_zero=false \
 RB3 headless harness scripts must pass `--protect_zero=false --target=…`
 (deliberately a runtime flag, not a per-title hack).
 
-**DC3 non-regression / x64 unit tests:** default `protect_zero=true` makes the
-`memory.cc` change inert (NoAccess page-0 path untouched) and the Option C log
-only fires on the already-undefined `Rtl*` extern path, so no behavior change for
-DC3 or the backend; full DC3 boot spot-check deferred to the coordinator's
-regression lane.
+**DC3 non-regression:** VERIFIED PASS by the V2 lane (own section below) — DC3
+boots deep into gameplay unchanged; default `protect_zero=true` makes the
+`memory.cc` change provably inert (0 occurrences of the new log in the gate runs).
+
+**x64-backend unit tests (milestone c): NOT executed here — deferred to the
+coordinator regression lane.** This is a reasoning-based non-regression claim, not
+a run result: with default `protect_zero=true` the `memory.cc` block is skipped and
+the Option C change is a log-only `XELOGW` on the already-undefined `Rtl*` extern
+path (no control-flow change), so the x64 backend has no behavior change from this
+diff. Running `src/xenia/cpu/testing/` remains a recommended pre-merge check.
+
+### DC3-SAFETY — VERIFIED PASS (V2 lane, 2026-07-08)
+
+**Verdict: PASS — no regression.** DC3 boots deep into gameplay on the fix binary
+exactly as before. Verified with `build/bin/Linux/Checked/xenia-headless` (contains
+the fix — greppable string `Mapped zero page 0x0-0x10000 as R/W` present) via the
+documented parity gate `tools/dc3_runtime_parity_gate.sh` and a direct
+`--protect_zero=false` interaction probe.
+
+**1. Static isolation.** The new `memory.cc` block is entirely inside
+`if (!cvars::protect_zero)`; `protect_zero` defaults `true` (`memory.cc:34`) and
+the DC3 gate/boot does **not** pass the flag → block skipped. Confirmed at runtime:
+`Mapped zero page 0x0-0x10000 as R/W` appears **0 times** in both gate runs
+(`orig.log`, `decomp.log`). The x64_emitter change is a log-only `XELOGW` on the
+`Rtl*` prefix with no control-flow change. Neither touches XEX load, NUI patch
+resolution, or layout fingerprinting.
+
+**2. Default path (protect_zero=true — DC3's actual config) — CLEAN.**
+`orig` case: **PASS** — reaches all NUI milestones, `dc3_nui_patch_apply_complete`,
+and GPU frame present (`VdSwap #9 1280x720` = deep boot/render). DC3's **own**
+title guard still fires unchanged: `DC3: Mapped zero page 0x0-0x10000 (all zeros…)`
++ `DC3: Mapped null-deref guard page at 0xffff0000`. The run then ends in the
+**pre-existing, documented** host teardown core-dump (the `handles_.empty()` /
+`terminate` E1 blocker above) — identical to prior behavior, not introduced by the
+fix.
+
+**3. The one gate FAIL is NOT a regression — it is a pre-existing DC3-decomp
+BUILD/layout issue.** `decomp` case reports `total=59 expected 85; layout=original
+expected decomp`. Root cause is in the log: `DC3: NUI patch layout=original
+reason=zero-padding heuristic (zero-padding 1/59)` — the emulator's NUI layout
+heuristic classifies the decomp `default.xex` (`/home/free/code/milohax/dc3-decomp/
+build/373307D9/default.xex`, dated Feb 28) as an **original-layout image**. This is
+a property of the **xex file bytes** read by NUI layout detection, on a code path
+the fix never touches (memory-init page-0 gate + Rtl log). The decomp image still
+**boots cleanly**: `session_begin` → `dc3_nui_patch_apply_complete` → 15 s runtime
+→ `headless_timeout_reached`, `SIGSEGV=0 last_fault=0x0`, 6 stable threads. The old
+pre-fix Feb binary is not a usable A/B baseline (it SIGSEGVs on `orig`, rc=139); the
+fix binary is strictly better there.
+
+**4. Off-nominal `--protect_zero=false` interaction probe (NOT DC3's shipped
+config).** DC3 `orig` still runs 15 s / 20 threads to `TIMEOUT`. The fix block
+activates (`Mapped null-deref guard page at 0xffff0000`) and does **not** break the
+hack-pack (its later `MAP_FIXED_NOREPLACE` at the same address benignly skips, by
+design). A guest-side `SIGSEGV=4 last_fault=0x17FEA1A80` (guest VA `0x7FEA1A80`,
+high-heap — a masked-null divergence) appears: this is the **expected** consequence
+of relaxing the null guard globally and is precisely why the default stays `true`.
+It is not the DC3 shipped path and not a regression of it.
+
+Artifacts: gate logs `/tmp/xenia_dc3_parity_gate/{orig,decomp}.{log,jsonl}`;
+probe `/tmp/jitfault-wf/dc3-pz-false.log`; checkpoint `/tmp/jitfault-wf/v2-dc3.json`.
 
 ---
 
