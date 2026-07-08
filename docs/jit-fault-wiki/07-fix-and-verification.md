@@ -96,7 +96,7 @@ before.
 
 ## IMPLEMENTED & VERIFIED (2026-07-08)
 
-**Commit:** `8a7792f29b1d52b0e41534c72c6e417ae0725939` on `headless-vulkan-linux`.
+**Commit:** `fb864e3ea7e3390e6d623d70b0314aac303e5768` on `headless-vulkan-linux`.
 
 **What shipped (matches the DECISION exactly):**
 - `src/xenia/memory.cc`:
