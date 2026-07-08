@@ -100,6 +100,11 @@ DEFINE_string(dc3_crt_skip_indices, "",
               "Default empty = use dc3_crt_skip_nui.",
               "DC3");
 DEFINE_bool(dc3_ik_telemetry, false, "DC3: enable IK telemetry", "DC3");
+DEFINE_bool(rb3_mount_update, false,
+            "RB3 boot-to-menu experiment: mount update: at the disc dir so RB3 "
+            "finds update:\\gen\\patch_xbox.hdr (title-update content). Default "
+            "OFF (inert for DC3 and normal runs).",
+            "RB3");
 DEFINE_bool(dc3_enable_gameplay_bootstrap, false,
             "DC3: experimental host-driven guest bootstrap for CreateGame/"
             "SetupAnims/OnSongLoaded/StartGame. Disabled by default because "
@@ -1988,6 +1993,15 @@ X_STATUS Emulator::LaunchXexFile(const std::filesystem::path& path) {
   // Create symlinks to the device.
   file_system_->RegisterSymbolicLink("game:", mount_path);
   file_system_->RegisterSymbolicLink("d:", mount_path);
+  // RB3 boot-to-menu experiment (cvar default OFF -> inert for DC3 and normal
+  // runs): optionally mount update: at the disc dir so RB3 finds
+  // update:\gen\patch_xbox.hdr instead of failing the open. Tests whether the
+  // post-load clean shutdown on clean-TU5 _nodd is the title-update gate.
+  if (cvars::rb3_mount_update) {
+    file_system_->RegisterSymbolicLink("update:", mount_path);
+    XELOGI("rb3_mount_update: update: -> {} (patch_xbox.* now visible)",
+           mount_path);
+  }
   // NOTE: intentionally do NOT symlink "update:" to the game mount. RB3 probes
   // update:\gen\patch_xbox.hdr for title-update content; if that content is
   // absent the game falls back to the base arks and boots further (retail

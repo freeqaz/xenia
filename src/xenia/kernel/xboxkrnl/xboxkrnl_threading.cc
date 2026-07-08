@@ -36,6 +36,13 @@ DEFINE_bool(headless_thread_diagnostics, false,
             "Enable verbose main-thread wait/delay diagnostics in headless mode.",
             "Kernel");
 
+DEFINE_bool(rb3_trace_shutdown, false,
+            "RB3 boot-to-menu diagnostic: on NtSetEvent for the shutdown-decision "
+            "event (handle 0xF80000EC), log the calling guest LR plus a shallow "
+            "guest-stack return-address walk to locate the title-exit decision "
+            "site. Default OFF (inert for DC3 and all non-diagnostic runs).",
+            "Kernel");
+
 namespace xe {
 namespace kernel {
 namespace xboxkrnl {
@@ -559,6 +566,72 @@ uint32_t xeNtSetEvent(uint32_t handle, xe::be<uint32_t>* previous_state_ptr) {
       uint32_t tid = thread ? thread->thread_id() : 0;
       XELOGI("NtSetEvent #{} tid={} handle=0x{:X} obj={}",
              set_event_count, tid, handle, (void*)ev.get());
+    }
+  }
+
+  // RB3 boot-to-menu diagnostic. The App main thread (tid 6) signals many
+  // events per frame from a small set of stable call sites; just before it
+  // runs its orderly Shutdown()/title-exit it signals from a DISTINCT call
+  // site (the content-integrity flow gate that decides to quit). Kernel
+  // handle numbers are NOT stable across runs (the same 0xF80000EC is an
+  // XEvent in one boot and an XMutant in the next), so we key on the guest
+  // *call-site LR* instead: log the guest LR + a shallow return-address walk
+  // the first time each distinct tid-6 NtSetEvent LR is seen. That collapses
+  // thousands of per-frame signals into a handful of unique call sites; the
+  // late/rare one that appears right before the handle-teardown cascade is
+  // the shutdown decision site. cvar default OFF -> inert for DC3.
+  if (cvars::rb3_trace_shutdown) {
+    auto* thread = XThread::GetCurrentThread();
+    uint32_t tid = thread ? thread->thread_id() : 0;
+    if (tid == 6 && thread->thread_state()) {
+      auto* ctx = thread->thread_state()->context();
+      uint32_t guest_lr = ctx ? static_cast<uint32_t>(ctx->lr) : 0;
+      uint32_t guest_sp = ctx ? static_cast<uint32_t>(ctx->r[1]) : 0;
+      // All NtSetEvent calls funnel through one guest wrapper, so the
+      // immediate LR is constant; the *caller chain* is what distinguishes
+      // the per-frame frame-sync signal from the one-shot shutdown-decision
+      // signal. Walk the frames first, build a signature from the return
+      // addresses, and only print the first time each distinct chain appears.
+      auto* memory = kernel_state()->memory();
+      uint32_t chain[16] = {0};
+      uint32_t nframes = 0;
+      uint64_t sig = guest_lr;
+      if (memory && guest_sp) {
+        uint32_t sp = guest_sp;
+        for (int frame = 0; frame < 16 && sp > 0x70000000; frame++) {
+          uint32_t back_chain = xe::load_and_swap<uint32_t>(
+              memory->TranslateVirtual<uint32_t*>(sp));
+          uint32_t saved_lr = 0;
+          if (back_chain > 0x70000000 && back_chain < 0x80000000) {
+            saved_lr = xe::load_and_swap<uint32_t>(
+                memory->TranslateVirtual<uint32_t*>(back_chain - 8));
+          }
+          chain[frame] = saved_lr;
+          nframes = frame + 1;
+          // Fold the higher-level frames (skip the volatile leaf couple) into
+          // the signature so per-frame vs shutdown chains hash differently.
+          if (frame >= 2) sig = sig * 1000003u + saved_lr;
+          if (back_chain == 0 || back_chain == 0xBEBEBEBE ||
+              back_chain <= sp) {
+            break;
+          }
+          sp = back_chain;
+        }
+      }
+      static std::vector<uint64_t> seen_sigs;
+      bool is_new = true;
+      for (uint64_t v : seen_sigs) {
+        if (v == sig) { is_new = false; break; }
+      }
+      if (is_new) {
+        seen_sigs.push_back(sig);
+        XELOGI("RB3_TRACE_SHUTDOWN: NtSetEvent NEW-CHAIN #{} tid=6 "
+               "handle=0x{:X} guest_lr={:08X} guest_sp={:08X}",
+               (int)seen_sigs.size(), handle, guest_lr, guest_sp);
+        for (uint32_t f = 0; f < nframes; f++) {
+          XELOGI("RB3_TRACE_SHUTDOWN:  frame[{}] saved_lr={:08X}", f, chain[f]);
+        }
+      }
     }
   }
   if (ev) {
