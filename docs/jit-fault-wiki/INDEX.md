@@ -39,6 +39,26 @@ DC3-safe default-OFF diag cvars) + `0e70cebbe`/finalize (docs); no XEX gate-patc
 A/B **not demonstrated** — both builds die at the same pre-menu gate. DC3
 non-regressed. Full detail + next step in [08](08-boot-to-menu.md).
 
+## RB3DX title-to-menu phase: BLOCKED at an emulation-induced OOM race (2026-07-08)
+
+RB3DX (the working RB3-**Deluxe** build, not clean TU5) boots past the zero-page
+fault and renders the ESRB + photosensitivity splashes + the **animated Deluxe
+title screen**, then wedges. Root cause: an **emulation-induced heap OOM** inside
+Milo `MemHeap::Alloc` @`0x827bca78`. Retail `MILO_FAIL` is a no-op, so the OOM
+failure branch falls through the inlined free-block split with `FreeBlockInfo`
+sentinels → `stwux r27,r30,r10` @`0x827bcbd8` stores at guest `0xFFFFFFFC`; Xenia's
+recovered-fault path **resumes without advancing the guest PC** → ~11,640/s spin and
+`VdSwap` stalls. The exhausted heap is named **"main"** and the request size has a
+**garbage top byte that varies per run** (uninitialized guest read) — a **race**,
+frame-anchored to VdSwap #600 = `XamContentCreate('rbdxcache'|'globaloptions')`.
+**Shipped** `b803faab1`: `--fault_spin_limit` fault-livelock circuit-breaker (silent
+wedge → clean diagnosable crash) + livelock-gated OOM diagnostics; plus
+`--rb3dx_force_zero_commit` (RAN + REFUTED as the fix, default-off). DC3
+non-regression **PROVEN**. Best screen = animated Deluxe title; **`main_hub` NOT
+reliably reached, instrument-select NOT reached**, same-instrument A/B not
+demonstrated (groundwork verified). Full detail + next step in
+[09](09-rb3dx-title-to-menu.md).
+
 ## Pages
 
 | Page | Contents | Status |
@@ -52,6 +72,7 @@ non-regressed. Full detail + next step in [08](08-boot-to-menu.md).
 | [06-root-cause.md](06-root-cause.md) | **The guest-SEH gap** + **FINAL synthesis (2026-07-08)**: two-mechanism/one-signature family; page-0 accessibility is the single proven lever (E1); canary per-title patch refuted (E2) | ✅ |
 | [07-fix-and-verification.md](07-fix-and-verification.md) | **SHIPPED & VERIFIED (2026-07-08, `fb864e3e`): general cvar-gated zero-page backing** — generalizes DC3's page-0 R/W remap + Linux host null-guard into `memory.cc`, gated by `protect_zero` (default true; RB3 boots with `--protect_zero=false`). + Option C loud `Rtl*` extern logging. RB3 TU5 `0x8275026C` ELIMINATED (A/B identical); DC3 non-regression VERIFIED (default path inert). Chosen over per-title patch (E2-refuted) and write-only soft-fault (unproven for the page-0 read). Full options A–D survey retained. New frontier = host-side teardown SIGABRT (out of scope). | ✅ SHIPPED |
 | [08-boot-to-menu.md](08-boot-to-menu.md) | **Boot-to-menu phase.** RB3 clean TU5 boots past the zero-page fault, streams all 10 arks, and renders the ESRB splash + blue-orb LOADING scene (~77% px) — but **`main_hub` never renders**: at ~13 s draws stop, and at ~18 s the guest runs a clean `App::Shutdown()`. Root-caused as a **guest-side App::Run flow-quit** — timeout-independent (18015 ms @600 s vs 18014 ms @120 s), crash-free, NOT a capture bug (L3), NOT dialog/save/movie (L4), and NOT a dirty-disc bail (`XamShowDirtyDiscErrorUI` never fires). Only file miss = `update:\gen\patch_xbox.hdr` (LOLZ placeholder). **Shipped:** `292ea0c18` two DC3-safe default-OFF diag cvars (`--rb3_trace_shutdown`, `--rb3_mount_update`); `0e70cebbe` docs. No XEX patch (gate branch not located; blind NOP risks regression). Same-instrument A/B **not demonstrated** (both builds die at the identical pre-menu gate). DC3 non-regressed. Next: instrument the App::Run loop-break directly to find the validation branch. | ⚠️ BLOCKED — content/flow gate |
+| [09-rb3dx-title-to-menu.md](09-rb3dx-title-to-menu.md) | **RB3DX title→menu phase.** RB3DX (the working Deluxe build) boots past the zero-page fault, renders ESRB + photosensitivity splashes + the **animated Deluxe title**, then wedges. Root-caused as an **emulation-induced heap OOM** inside Milo `MemHeap::Alloc` @`0x827bca78`: retail `MILO_FAIL` no-op → OOM falls through inlined free-block split with sentinels → `stwux r27,r30,r10` @`0x827bcbd8` stores at guest `0xFFFFFFFC`; Xenia recovers-without-advancing-PC → ~11,640/s spin, `VdSwap` stalls. Heap named **"main"**, request size top-byte garbage/varies per run (uninitialized guest read); race, frame-anchored to VdSwap #600 = `XamContentCreate('rbdxcache'\|'globaloptions')`. Title magenta/green scramble = headless tiled-readback artifact (L3), non-blocking. **Shipped `b803faab1`:** `--fault_spin_limit` circuit-breaker (silent wedge → clean crash) + livelock-gated OOM diagnostics; `--rb3dx_force_zero_commit` (RAN + REFUTED, default-off). DC3 non-regression PROVEN. `main_hub` NOT reliably reached, instrument-select NOT reached, same-instrument A/B not demonstrated (groundwork verified: hook VAs byte-identical, runtime-patch plan ready, nav input = START). Next: trap `MemHeap::Alloc` entry to catch the first garbage-top-byte size + disasm its caller's size math. | ⚠️ BLOCKED — emulation-induced OOM race |
 
 ## Ground rules for the fix
 

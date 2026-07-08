@@ -9,6 +9,12 @@ Cross-links: [08 boot-to-menu (clean TU5)](08-boot-to-menu.md) ·
 [07 fix & verification (zero-page)](07-fix-and-verification.md) ·
 [02 address translation](02-address-translation.md)
 
+**STATUS: BLOCKED at an emulation-induced OOM race. Best screen reached = animated
+Deluxe title (post-splash); `main_hub` NOT reliably reached; instrument-select NOT
+reached.** Root cause named + reproducible; circuit-breaker + diagnostics shipped
+(`b803faab1`, DC3-safe); the OOM root fix is the remaining frontier. Full
+synthesis at the bottom: [FINAL STATUS](#final-status-finalizer-2026-07-08).
+
 ---
 
 ## L2 — Fault-loop mechanism (2026-07-08)
@@ -472,6 +478,27 @@ testing**:
 throughout, the circuit-breaker never fires (it requires 4096 *identical
 consecutive* faults; DC3 has zero). Logs: `/tmp/rb3dx-wf/dc3_safety.log`.
 
+#### DC3 non-regression re-verified for shipped commit `b803faab1` (2026-07-08)
+
+Independent lane re-verification on the built commit (`build/bin/Linux/Checked/xenia-headless`,
+confirmed to contain `fault_spin_limit` / `FAULT LIVELOCK` / `rb3dx_force_zero_commit`).
+Booted retail DC3 (`dc3-decomp/orig/373307D9/default.xex`) headless twice
+(`--gpu=null --stub_nui_functions=true --headless_timeout_ms=20000 --dc3_runtime_telemetry_enable=true`):
+
+| flag | milestones | VdSwap | XE_SWAP | SIGSEGV | FAULT LIVELOCK | rc |
+|---|---|---|---|---|---|---|
+| `--fault_spin_limit=4096` (shipped default) | session_begin → nui_patch_block_begin → nui_patch_apply_complete → headless_timeout_reached | 1041 | 1014 | 0 | 0 | 0 |
+| `--fault_spin_limit=0` (disabled) | *(identical)* | 1042 | 1015 | 0 | 0 | 0 |
+
+Identical milestone sequence, steady present (~50 fps, 1-frame VdSwap delta = 20 s
+wall-clock jitter), clean timeout teardown. All three src changes proven inert for
+DC3: (a) `xboxkrnl_memory.cc` double-gated (`rb3dx_force_zero_commit` default-off **and**
+`title_id()==0x45410914`, DC3 excluded); (b) `emulator_headless.cc` diagnosis block gated
+on `IsLivelockTripped()` (never true for DC3); (c) `exception_handler_posix.cc` counting path
+is a pure TLS observer that only alters flow on trip — and with **0 recovered faults** during
+DC3 boot it is never meaningfully exercised. **VERDICT: PASS, no divergence.**
+Artifacts: `/tmp/rb3dx-wf/dc3.json`, `/tmp/rb3dx-wf/dc3/{a_default,b_disabled}.{log,jsonl}`.
+
 ### Reliable fault diagnostics (new, livelock-gated → DC3-inert)
 
 Added to the exception handler + headless status loop. On the livelock trip we
@@ -549,3 +576,188 @@ Files (this session): `exception_handler_posix.cc`, `exception_handler.h`,
 (force-zero cvar). Logs/frames: `/tmp/rb3dx-wf/boot_cb.log`,
 `boot_msg2_1.log`/`boot_caller_5.log` (failure message + caller frame),
 `dc3_safety.log`, `impl-frames/`. Checkpoint: `/tmp/rb3dx-wf/impl.json`.
+
+---
+
+## L6 — DRIVE lane: nav attempt + OOM localized to VdSwap #600 (rbdxcache/main_hub bring-up)
+
+Ran the title→instrument-select nav on the circuit-breaker build (commit
+`b803faab1`). Result: **instrument-select NOT reached; main_hub not confirmed
+navigable.** But the nav sweep materially *localized* the OOM and proved input
+delivery works.
+
+### The OOM is at the main_hub bring-up, not title load
+
+Frame-indexed correlation across wedge vs non-wedge boots:
+
+| Run | Outcome | VdSwap# of event |
+|---|---|---|
+| `long_2` (wedge) | `FAULT LIVELOCK` heap "main" ~268 MB | **#600** |
+| `long_1` (non-wedge) | `XamContentCreate root='rbdxcache'` then `root='globaloptions'` | **#600** |
+
+The OOM fires at the **exact frame** the game does the rbdxcache + globaloptions
+content-create → UI/main_hub bring-up. So the `0xGG001524` garbage-top-byte
+allocation lives in that path, **not** the title-screen load. (Wall-clock ~13–15 s
+== VdSwap #600; the guest swaps ~46 fps internally while headless readback is
+throttled to ~3.6 fps.) This confirms `decision.json`'s leading suspect
+(rbdxcache / `XamContentCreate`) with a frame anchor.
+
+The race is 50/50: ~half of boots get a clean size at #600 and **proceed past it**;
+half get the garbage top byte and OOM. Both users are signed in
+(`XamUserGetSigninState user0/user1 -> 1`) on both branches.
+
+### A lucky non-wedge boot progresses past the title into UI scenes
+
+`long_1` (START every 4 s ×34 + A, 170 s) ran **9500 VdSwaps with no wedge** and
+left the animated title. It cycles: a **dark 3D scene with a soft teal radial glow**
+(`drive-frames/A_...teal_glow.png`, plausibly the main_hub/overshell backdrop) ↔
+**clean blue diagonal loading-wipe transitions** (`B_loading_wipe...png`) ↔ brief
+title-like flashes. The boot UI-init chain is present (RockCentral::Init,
+HamUserMgrInit, FlowInit, CharInit, SaveLoadManager::Init, UIManager::Init/ctor,
+GotoFirstScreen, App::Run). An interactive/navigable main_hub with legible menu UI
+could **not** be confirmed (dark backdrop + no menu text captured), so A-press nav
+(Quickplay→song_select→instrument) yielded no confirmable menu screens.
+
+### Two confounds cleared
+
+- **Input delivery is NOT the blocker.** Scripted START (`button=0x0010`,
+  `VK=0x5814`) and A (`0x1000`/`0x5800`) keystrokes are injected to guest pad0
+  (`Keystroke KEYDOWN` log lines). The `rb3dx_title_to_guitar.txt` START-at-title
+  premise is sound at the driver level.
+- **`... NOT COMPILED` log spam is harness annotation, not a fault.** It's a
+  symbol-annotation dump for address-only symbols (GotoFirstScreen, NavListSortMgr,
+  LiveCameraInput::PreInit, Splash::PrepareRemaining, the App init chain). Do not
+  mis-read as a JIT/compile failure.
+
+### Readback corruption is title-RT-specific
+
+The L3 magenta/green scanline-interlace scramble is on the **animated title
+render-target** only — the "ROCK BAND 3 DELUXE" logo is legible through it
+(`drive-frames/C_...title_readback_corrupt.png`). Post-title loading/backdrop
+scenes read **clean**. So it's an RT-format/stride issue on that one animated 3D
+target, not a global headless-readback bug.
+
+### Status / next (DRIVE)
+
+- **Reached main_hub: PARTIAL/unconfirmed. instrument-select: NO.** DRIVE is
+  blocked by the OOM race, which is now anchored to VdSwap #600 /
+  `XamContentCreate('rbdxcache'|'globaloptions')`.
+- **Next:** trap `MemHeap::Alloc` entry (`0x827bca78`) or instrument the size math
+  around the #600 allocation (low word `0x1524` is stable → a single garbage top
+  byte is OR'd/added into a good base size). Once the alloc is clean on 100% of
+  boots, re-run `long_1`'s START-spam script (already progresses past title) and
+  navigate main_hub. Fix or ignore the title-RT readback format separately (the
+  backdrop renders clean).
+
+Frames: `/tmp/rb3dx-wf/drive-frames/{A,B,C,D}_*.png`. Logs: `long_1/boot.log`
+(non-wedge, #600 content-create), `long_2/boot.log` (wedge, #600 OOM),
+`nav_boot.log`. Checkpoint: `/tmp/rb3dx-wf/drive.json`.
+
+---
+
+## FINAL STATUS (finalizer, 2026-07-08)
+
+Consolidated close-out for this phase. No aspirational language — this records
+exactly what is proven, what shipped, and the one next step.
+
+### The title-screen blocker (root cause)
+
+RB3DX boots on the fixed fork (`--protect_zero=false`, zero-page fix `fb864e3e`),
+renders the ESRB + photosensitivity splashes and the **animated Deluxe title
+screen**, then wedges. The wedge is a two-layer failure:
+
+- **Root (L1, guest):** an **emulation-induced heap OOM** inside Milo
+  `MemHeap::Alloc` @ `0x827bca78`. Retail `MILO_FAIL` is a no-op, so on allocation
+  failure execution falls through the inlined free-block **split** code carrying the
+  `FreeBlockInfo` sentinels `{mBlock=NULL, mPadWords=0x7FFFFFFF}`. The faulting
+  instruction (real RB3DX bytes, disassembled from the decompressed XEX) is
+  `stwux r27,r30,r10` @ `0x827bcbd8`, EA = `r30(0) + r10(0x7FFFFFFF<<2)` = guest
+  **`0xFFFFFFFC`** (host `0x1FFFFFFFC`). No r2/SDA and no mistranslated register —
+  the bad EA is a deterministic function of *"this heap is out of memory."* The
+  exhausted heap is named **"main"** and the request size is `0xGG001524`: low bits
+  `0x1524` (≈5.4 KB) stable+correct, **top byte garbage and varying per run**
+  (`0x04..0x44` million). Varying-per-run garbage ⇒ **reading uninitialized guest
+  memory** (zero on 360, garbage under Xenia). The OOM is frame-anchored to
+  **VdSwap #600** = `XamContentCreate('rbdxcache'|'globaloptions')` → main_hub
+  bring-up, and it is a **race** (~40–60% of boots wedge; the rest reach the title
+  and sit there).
+- **Amplifier (L2, Xenia):** the recovered-fault path resumes **without advancing
+  the guest PC** → the store re-executes forever at ~11,640/s (constant host rip
+  `0xA00C8B67`, guest PC `0x827BCBD8`). `VdSwap` stops exactly when the spin starts
+  (the presenting thread is the spinning thread) → the render stall.
+- **L3 (title corruption):** the magenta/green scanline scramble on the title RT is
+  a **headless tiled-readback artifact** (8-px period = 32-byte Xenos micro-tile),
+  NOT a render bug, and does **not** block navigation. Post-title scenes read clean.
+
+### What shipped
+
+- **Commit `b803faab1`** (`headless-vulkan-linux`): *"RB3DX title wedge: ship
+  fault-livelock circuit-breaker + name the OOM heap."*
+  - **Part 1 — fault-livelock circuit-breaker** (`exception_handler_posix.cc` +
+    `exception_handler.h`): new cvar **`--fault_spin_limit`** (default 4096, `0`
+    disables). Counts identical consecutive recovered faults (same `(rip,addr)`);
+    at the limit it parks the faulting thread in an async-signal-safe `nanosleep`
+    loop and the main headless thread does a clean `std::_Exit(70)`. (A found-and-
+    fixed defect: `xe::FatalError` from a signal frame HANGS via atexit/dtors — the
+    park+_Exit rework replaced it.) Converts the silent 11,640/s wedge into a
+    one-shot diagnosable crash: `FAULT LIVELOCK: 4097 consecutive recovered faults
+    ... guest EA FFFFFFFC`.
+  - **Reliable OOM diagnostics** (`emulator_headless.cc`, livelock-gated): recovers
+    heap name + size via the guest **stack** (`ctx->r[]` is unreliable at the fault;
+    the failure String at `[SP+0x60]` is reliable) → `Allocation failure, heap
+    "main", want <N> bytes`.
+  - **`--rb3dx_force_zero_commit`** (`xboxkrnl_memory.cc`, title-gated `0x45410914`,
+    default **OFF**): force-zeroes `NtAllocateVirtualMemory` + `MmAllocatePhysicalMemoryEx`
+    commits. **Ran + REFUTED** as the fix (~40% of boots still OOM) → the garbage
+    byte is guest-internal Milo-heap reuse or a JIT edge, not a skipped commit-zero.
+    Left in-tree as a diagnostic/console-accuracy lever, not the fix.
+
+### How far RB3DX boots now (honest pixel evidence)
+
+- **Best screen: the animated Deluxe title** (post-ESRB/photosensitivity). Proof:
+  `rb3-verify/frames/rb3dx-milestone/02_rb3dx_titlescreen_corrupt.png` (logo legible
+  through the L3 readback scramble); non-OOM title frame `/tmp/rb3dx-wf/view_2400.png`.
+- A **lucky non-wedge boot** (`long_1`, 9500 VdSwaps, no wedge) leaves the title and
+  cycles a **dark 3D scene with a soft teal radial glow** ↔ **blue diagonal
+  loading-wipe transitions** (`/tmp/rb3dx-wf/drive-frames/{A,B}_*.png`) with the boot
+  UI-init chain present (RockCentral/HamUserMgr/Flow/Char/SaveLoad/UIManager Init,
+  GotoFirstScreen, App::Run). **An interactive, legible `main_hub` was NOT
+  confirmed** (dark backdrop, no menu text captured). `main_hub` reliably reached =
+  **NO**.
+- **`main_hub` NOT reliably reached; instrument-select NOT reached.**
+
+### Same-instrument A/B status
+
+**NOT demonstrated** — gated on reaching instrument-select, which is behind the OOM
+race. Groundwork is complete and verified: the 4 detour hook VAs + code cave + flag
+are **byte-identical** between RB3DX and clean-TU5 PEs (L4 table), so the existing
+675-entry patch applies unchanged; the recommended delivery is a title-id-gated,
+default-off **Xenia runtime memory patch** (generalizing the NUI guest-memory patch
+loop) — no XEX decompress/repack. Nav input is **START** (not A) for title→hub.
+
+### DC3-safety
+
+**PASS — non-regression PROVEN for `b803faab1`.** DC3 (`0x373307D9`) boots
+identically headless with `--fault_spin_limit=4096` (shipped default) vs `=0`:
+identical milestone sequence (session_begin → nui_patch_apply_complete →
+headless_timeout_reached), steady ~50 fps present (VdSwap 1041 vs 1042),
+`SIGSEGV=0`, `FAULT LIVELOCK=0`, clean teardown. All three src changes are inert for
+DC3: force-zero double-gated (cvar off **and** title-id `0x45410914`); headless
+diagnosis gated on `IsLivelockTripped()` (never true for DC3); the handler counting
+path is a pure TLS observer with 0 recovered faults during DC3 boot. Artifacts:
+`/tmp/rb3dx-wf/dc3.json`, `dc3/{a_default,b_disabled}.{log,jsonl}`, `dc3_safety.log`.
+
+### Remaining frontier + single recommended next step
+
+The OOM is **named and reliably reproducible** but its corruptor (which guest write
+leaves the size's top byte non-zero, in the virtual-call allocator chain
+`bctrl@0x82420078` at VdSwap #600) is unresolved. Fresh-alloc zeroing is refuted.
+
+**Next step:** trap **`MemHeap::Alloc` entry** (`0x827bca78`, where `r3`=`MemHeap*`
+and `r4`=`sizeWords` are live args) via a guest breakpoint or JIT-entry hook and log
+`r4` + caller LR on **every** call, catching the first call whose size top-byte is
+non-zero; then disassemble that caller's size math to find the uninitialized read.
+Once the #600 allocation is clean on 100% of boots, re-run `long_1`'s START-spam
+script (already progresses past the title) to drive main_hub → instrument-select.
+
+Checkpoint: `/tmp/rb3dx-wf/final.json`.
