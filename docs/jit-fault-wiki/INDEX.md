@@ -10,6 +10,14 @@ Every claim carries a `file:line` citation (Xenia source) or a quoted log/
 disassembly artifact. If you learn something that contradicts a page, EDIT the
 page and note the correction inline — don't fork a second page.
 
+> **Start here for the narrative:**
+> [WORKSTREAM-rb3-on-xenia-bringup.md](WORKSTREAM-rb3-on-xenia-bringup.md) — the
+> whole arc end-to-end (boot → title → splash), the deep debugging details, the
+> methodology (report→investigate→implement agent pattern + the diagnostic
+> techniques), the refuted-hypothesis graveyard, the general emulator-correctness
+> lessons, and the open frontier. The pages below are the primary evidence it
+> synthesizes.
+
 ## Status: FIXED (2026-07-08)
 
 Root cause and fix are settled. The fault is a **NULL-guard-policy mismatch**, not
