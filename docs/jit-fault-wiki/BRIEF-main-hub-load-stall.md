@@ -1,6 +1,11 @@
 # BRIEF — RB3DX main_hub load stall (post-OOM-fix)
 
-**Status:** OPEN. New blocker, downstream of the now-fixed heap-OOM.
+**Status:** SPLASH GATE FIXED (2026-07-09, commit `9096dd4d0`) — see
+"Fable investigation #3" + "Fix landed" below. RB3DX now advances
+`splash_screen → first_time_calibration`; the residual blocker moved one
+first-boot flow downstream (interactive `cal_audio_screen` A/V-latency
+calibration, unreachable headless with null audio + fixed-time scripted input).
+Prior status: OPEN, downstream of the now-fixed heap-OOM.
 **For:** a fresh investigator. No prior context assumed.
 **Sources:** the stalled boot log `/tmp/rb3dxnav/hub2/boot.log` (18,540 captured
 frames / 19,413 VdSwaps, cited by line inline), the shorter `/tmp/rb3dxnav/hub/boot.log`,
@@ -542,7 +547,11 @@ modified by this task (their working-tree edits pre-date it).
 
 ---
 
-## Fable investigation #3 (2026-07-09) — splash gate ROOT-CAUSED: fork regression in `XamEnumerate`'s synchronous path
+## Fable investigation #3 (2026-07-09) — splash gate ROOT-CAUSED → FIXED (`9096dd4d0`): fork regression in `XamEnumerate`'s synchronous path
+
+> **FIXED 2026-07-09, commit `9096dd4d0`** — verdict below CONFIRMED and the fix
+> landed + DC3-verified. See "Fix landed (2026-07-09)" at the bottom of this file
+> for the verification matrix and the new downstream first-boot calibration gate.
 
 **VERDICT: candidate (b) — the `saveload_mgr is_idle` poll — is CONFIRMED as the
 gate, and the mechanism is a named, byte-verified FORK BUG, not a game or
@@ -669,3 +678,44 @@ saveload no-save dialogs, first-time-calibration dialog) in
 `/tmp/rb3dx-hub-investigate/probe6-boot.log`, `/tmp/rb3dx-join/boot.log`.
 No emulator source was modified in this pass (evidence gathered from existing
 logs, one flag-only control boot, decomp reads, and band.exe disassembly).
+
+---
+
+## Fix landed (2026-07-09) — investigation #3 verdict CONFIRMED, splash gate CLEARED (commit `9096dd4d0`)
+
+**The investigation #3 root cause is FIXED and VERIFIED.** `src/xenia/kernel/xam/
+xam_enum.cc` now applies the `X_ERROR_NO_MORE_FILES → SUCCESS/0` conversion
+**only on the overlapped completion path** (a `run_overlapped` wrapper); the
+**synchronous** path returns `WriteItems`' result verbatim, restoring stock
+upstream Xenia semantics. This is the exact fix specified in
+[PLAN-splash-confirm-gate.md](PLAN-splash-confirm-gate.md) §2. Regressing commit:
+`a224a6846`.
+
+**Verification (full matrix in the PLAN's "Results (2026-07-09)"):**
+- **Sync contract (no input, 150 s):** the `user=0 flags=4096`
+  `MemcardXbox::FindValidUnit` enumerator now fires **exactly once** and its
+  handle is Removed — no spin; 16,595 VdSwap presents continue after it; sync
+  exhaustion returns `NO_MORE_FILES(0x12)`. Pre-fix it returned SUCCESS/0 forever
+  (infinite Memcard-worker loop → the `saveload_mgr is_idle` stall).
+- **Splash advance (scripted START/A):** UI probe shows
+  `splash_screen → first_time_calibration` — the `{saveload_mgr is_idle}` gate
+  (candidate (b)) is cleared, as predicted.
+- **DC3-SAFE:** retail DC3 boots identically at `--fault_spin_limit` 4096 and 0
+  (same milestone sequence, SIGSEGV plateau unchanged at 4 = pre-existing benign
+  recovered fault, byte-identical to the `b803faab1` baseline); DC3's consumers
+  never exercise the restored sync path. Non-negotiable bar MET.
+
+**Residual blocker (moved one flow downstream — NOT the enumerate fix):** the
+first-boot `first_time_calibration → cal_audio_screen` interactive **A/V-latency
+calibration** (`cal_audio_panel`). Headless with null audio and fixed-time
+scripted `A` presses, the latency measurement cannot complete, so the screen
+never advances (stalls ~74 s to timeout at UI-probe `sample[35]`); input is
+proven still live on that screen (`XamInputGetState` user=0 `0x1000` during the
+stall). `main_hub_screen`/`instrument_screen` appear only in the maindir
+screen-registry, never as `curScreen`. An attempted opt2-skip (`DOWN`+`A` on the
+`first_time_calibration` dialog, §"Fable investigation" (b)/PLAN §3.5 watch-item
+5) regressed to staying on `first_time_calibration` — not trivially scriptable.
+Next-pass leads (cheapest first): prime `get_has_seen_first_time_calibration`
+true (skip calibration on first boot), drive the exact `cal_audio` skip-button
+focus sequence, or feed a headless calibration-complete signal. Logs:
+`/tmp/wf-splash-confirm-gate/`.

@@ -7,11 +7,15 @@ one instrument) with a headless two-controller A/B. The mod itself was already
 built and byte-verified; this work stream is about the **emulator + boot path**,
 not the patch.
 
-**Status at time of writing (2026-07-08).** Three distinct, load-bearing bugs
-found and fixed; RB3 now boots **deterministically** from cold start through the
-title/splash. One blocker remains — the game sits on `splash_screen` and never
-reaches `main_hub`. Root cause of that last gate is still open (the leading
-hypothesis was found and *refuted* with direct instrumentation; see §4.D).
+**Status at time of writing (2026-07-09).** Four distinct, load-bearing bugs
+found and fixed; RB3 boots **deterministically** from cold start through the
+title/splash and now **leaves `splash_screen`** into the first-boot flow. The
+splash gate (bug D) is FIXED (`9096dd4d0`): the `XamEnumerate` sync-path
+regression is corrected, DC3 non-regression proven. `main_hub`/instrument-select
+still not reached — the residual blocker moved one flow downstream to the
+first-boot `first_time_calibration → cal_audio_screen` interactive A/V-latency
+calibration, which cannot complete headless with null audio + fixed-time
+scripted input (see §4.D + §8).
 
 **How to read this.** §1 is the arc in one table. §2 is the goal and why the
 emulator matters. §3 is the methodology (the agent pattern + the diagnostic
@@ -29,9 +33,11 @@ open frontier. §9 links everything.
 | A | `0x100000000` "JIT fault" | ~15 threads into init | **Guest SEH gap**: unimplemented `__try/__except` path stores to guest page 0; Xenia's `protect_zero` guard makes it fatal (real 360 backs page 0) | **FIXED** `fb864e3e` (+ circuit-breaker `b803faab1`) |
 | B | Which executable to run | n/a | Content on disk is **RB3 Deluxe (RB3DX)**; its `patch_xbox` ark uses `LOLZ` encryption that vanilla TU5 can't read → clean_tu5 self-exits at 18 s | **RESOLVED**: use RB3DX `default.xex` |
 | C | Title-screen wedge (~1-in-2 race) | animated Deluxe title | **Host-side uninitialized memory**: POSIX `GetInfo()` never set `FileInfo::total_size` → host-ASLR stack garbage became the guest file size of `rbdxcache` → multi-hundred-MB `MemHeap::Alloc` → OOM → store to `0xFFFFFFFC` | **FIXED** `e248d624c` (8/8 broken → 13/13 clean) |
-| D | Splash never advances to `main_hub` | `splash_screen` (idle) | **Open.** Leading hypothesis (NetSession online-join stall) **refuted for this build**; real gate is *upstream* of the join, in the splash `Confirm → StartOvershell` step | **OPEN** — `--rb3dx_offline_join` built but inactive |
+| D | Splash never advances past `splash_screen` | `splash_screen` (idle) | Fork regression `a224a6846`: `xeXamEnumerate` converted `NO_MORE_FILES → SUCCESS/0` on the **synchronous** path too, so RB3's byte-verified `MemcardXbox::FindValidUnit` `while (XEnumerate(...)==0)` loop never exits → `SaveLoadManager` never idles → the splash `{saveload_mgr is_idle}` poll never passes. (NetSession online-join hypothesis was refuted first.) | **FIXED** `9096dd4d0` (conversion restricted to overlapped path; DC3-safe, verified) |
+| E | `main_hub`/instrument-select not reached | `first_time_calibration → cal_audio_screen` | First-boot interactive A/V-latency calibration (`cal_audio_panel`) can't complete headless (null audio + fixed-time scripted `A`) | **OPEN** — next gate; downstream of D |
 
-Each fix peeled off one layer and revealed the next: **boot → title → splash**.
+Each fix peeled off one layer and revealed the next: **boot → title → splash →
+first-boot calibration**.
 
 ---
 
@@ -238,14 +244,33 @@ identified and then also **refuted for this build**:
   join is never attempted (and with `mQNet==0` the real `IsHost()` already returns
   true, so there was no online stall to fix).
 
-**Current understanding.** The gate is **upstream of the join**, in the splash's
-own `Entered → Confirm → ActivateSaveLoad → StartOvershell → AddUser` chain. A/START
-input demonstrably reaches the guest (`XamInputGetState` shows user-0 `0x1000`/
-`0x0010`) but the splash sub-state does not advance. Leading candidates: (a) RB3DX
-confirm needs an *active profile sign-in* (`dialog_need_signin_screen` /
-`XamShowSigninUI`), not just `SigninState==1`; (b) a `saveload_mgr is_idle` poll
-that never completes headless; (c) the confirm landing on a different pad/user-slot
-than the overshell watches. Full detail: [BRIEF-main-hub-load-stall.md](BRIEF-main-hub-load-stall.md).
+**Root cause found and FIXED (investigation #3, 2026-07-09, `9096dd4d0`).** The
+gate is **upstream of the join** as suspected, and it is candidate (b): the
+splash's `{saveload_mgr is_idle}` poll. `SaveLoadManager`'s auto-load parks a
+Memcard worker in an **infinite guest loop** — `MemcardXbox::FindValidUnit`
+(100% byte-verified vs retail) does a **synchronous** `while (XEnumerate(...) ==
+0)`, and fork commit `a224a6846` (DC3 headless work) made `xeXamEnumerate`
+convert `X_ERROR_NO_MORE_FILES → SUCCESS`+0-items on **both** completion paths,
+so an exhausted synchronous enumerator returned `0` forever. Candidates (a)
+sign-in and (c) pad/user-slot are REFUTED (no `XamShowSigninUI` call ever; real
+`ReadSingleXinputJoypad` bytes accept the nop pad as `kJoypadAnalog`; and a
+**no-input control boot** stalls identically — the flow is input-independent).
+
+**The fix** (`src/xenia/kernel/xam/xam_enum.cc`, `9096dd4d0`): restrict the
+`NO_MORE_FILES → SUCCESS/0` conversion to the **overlapped** path (a
+`run_overlapped` wrapper); the synchronous path returns `WriteItems`' result
+verbatim, restoring stock upstream Xenia semantics. DC3-safe by construction
+(its enumerate consumers use the overlapped path, preserved bit-for-bit) AND
+verified empirically (identical DC3 milestones/SIGSEGV at `--fault_spin_limit`
+4096/0). **Verified on RB3DX:** the `flags=4096` `FindValidUnit` enumerator now
+fires once and is Removed (no spin), 16,595 presents continue, and scripted
+START advances `splash_screen → first_time_calibration`.
+
+**New frontier (bug E, §8):** the boot now stalls one flow downstream on the
+first-boot `first_time_calibration → cal_audio_screen` interactive A/V-latency
+calibration — unreachable headless with null audio + fixed-time scripted input.
+Full detail: [PLAN-splash-confirm-gate.md](PLAN-splash-confirm-gate.md) "Results
+(2026-07-09)" + [BRIEF-main-hub-load-stall.md](BRIEF-main-hub-load-stall.md) §#3.
 
 ---
 
@@ -265,6 +290,12 @@ Recording these so they are not re-derived:
   does not leave the title/splash.
 - **NetSession online-join stall** (§4.D) — `AddLocalUser` never reached
   (`mState==0`, `IsHost` 0 calls); the join isn't the active gate for this build.
+- **Splash needs active profile sign-in** (§4.D cand. (a)) — `XamShowSigninUI`
+  never invoked at runtime; no signin predicate in `OvershellSlot::AddUser`; the
+  real gate was the `is_idle` enumerate loop.
+- **Confirm lands on wrong pad/user-slot** (§4.D cand. (c)) — real
+  `ReadSingleXinputJoypad` bytes accept the nop pad as `kJoypadAnalog`; a
+  no-input control boot stalls identically (flow is input-independent).
 
 ---
 
@@ -298,9 +329,10 @@ Bugs found here are not RB3-specific; several are upstream-relevant:
 | `b803faab1` | `--fault_spin_limit` fault-livelock circuit-breaker + OOM diagnostics + signal-handler-hang fix |
 | `292ea0c18` | Clean-TU5 phase diag cvars (`--rb3_trace_shutdown`, `--rb3_mount_update`), default-off |
 | `e248d624c` | **POSIX `GetInfo()` `total_size` init — the title-screen OOM fix** |
+| `9096dd4d0` | **`xeXamEnumerate` sync-path `NO_MORE_FILES` restore — the splash-gate fix** (regresses `a224a6846`; DC3-safe, verified) |
 | `0c0f291b4` | `--rb3dx_alloc_probe` diagnostics, default-off, DC3-inert |
 | `5e118d415` | Crash-report doc |
-| (uncommitted) | `--rb3dx_offline_join` + `--rb3dx_ui_probe` in `emulator.cc` — correct but inactive for the current gate; held for review |
+| (uncommitted) | `--rb3dx_offline_join` + `--rb3dx_ui_probe` in `emulator.cc` — kept as default-off, title-gated diagnostics (the `ui_probe` sampler was the tool that verified this fix); held for review, not folded into the fix commit |
 
 All emulator behavior changes are cvar-gated and/or title-gated (`0x45410914`) and
 default-off or default-inert; **DC3 non-regression verified** at each step.
@@ -309,19 +341,39 @@ default-off or default-inert; **DC3 non-regression verified** at each step.
 
 ## 8. Open frontier + next step
 
-**UPDATE 2026-07-09 — the splash gate is ROOT-CAUSED (investigation #3).** The
-pre-join splash step was traced: the gate is the splash's `{saveload_mgr
-is_idle}` poll (candidate (b)), and the mechanism is a **fork regression**:
-commit `a224a6846` (DC3 headless work) made `xeXamEnumerate` convert
-`X_ERROR_NO_MORE_FILES` → `SUCCESS`+0 items on BOTH completion paths; RB3's
-save-container search `MemcardXbox::FindValidUnit` (100% byte-verified) does a
-**synchronous** `while (XEnumerate(...) == 0)` loop that therefore never exits →
-`SaveLoadManager` never idles → `attempt_to_add_user`/`AddUser` never run.
-Sign-in (a) and pad/user-slot (c) are refuted (no `XamShowSigninUI` call ever;
-real bytes accept the nop pad as `kJoypadAnalog`; a **no-input control boot**
-stalls identically, and the intro-movie skip proves input consumption). Fix +
-task list + DC3-safety matrix: **[PLAN-splash-confirm-gate.md](PLAN-splash-confirm-gate.md)**;
-full evidence: [BRIEF-main-hub-load-stall.md](BRIEF-main-hub-load-stall.md) §#3.
+**UPDATE 2026-07-09 — the splash gate is FIXED (`9096dd4d0`); next gate =
+first-boot calibration.** Investigation #3 traced the pre-join splash step to the
+`{saveload_mgr is_idle}` poll (candidate (b)) and named a **fork regression**:
+commit `a224a6846` made `xeXamEnumerate` convert `X_ERROR_NO_MORE_FILES` →
+`SUCCESS`+0 items on BOTH paths, so RB3's byte-verified synchronous
+`MemcardXbox::FindValidUnit` `while (XEnumerate(...)==0)` loop never exited.
+Sign-in (a) and pad/user-slot (c) refuted. **The fix landed** (`9096dd4d0`):
+restrict the conversion to the overlapped path; the synchronous path returns
+`WriteItems`' result verbatim. Verified: the `flags=4096` enumerator fires once
+and is Removed (no spin), 16,595 presents continue, scripted START advances
+`splash_screen → first_time_calibration`. **DC3 non-regression PROVEN** (identical
+milestones/SIGSEGV at `--fault_spin_limit` 4096/0; DC3 never exercises the sync
+path). Fix + verification matrix:
+**[PLAN-splash-confirm-gate.md](PLAN-splash-confirm-gate.md)** "Results
+(2026-07-09)"; evidence: [BRIEF-main-hub-load-stall.md](BRIEF-main-hub-load-stall.md)
+§#3 + "Fix landed".
+
+**The next gate (bug E) — first-boot A/V-latency calibration.** With the splash
+cleared, the boot advances `splash_screen → first_time_calibration →
+cal_welcome_screen → cal_audio_screen`, then stalls (~74 s to timeout). Input is
+proven still live on `cal_audio_screen` (`XamInputGetState` user-0 `0x1000`
+during the stall), but `cal_audio_panel` is an **interactive** output-vs-input
+latency calibration — headless with null audio and fixed-time scripted `A`
+presses it cannot complete, so the screen never advances.
+`main_hub_screen`/`instrument_screen` appear only in the maindir screen-registry,
+never as `curScreen`. An opt2-skip attempt (`DOWN`+`A` on the
+`first_time_calibration` dialog) regressed to staying on
+`first_time_calibration` — not trivially scriptable. Next-pass leads (cheapest
+first): (i) prime `get_has_seen_first_time_calibration` true so first boot skips
+calibration → `main_hub`; (ii) drive the exact `cal_audio` skip-button focus
+sequence; (iii) feed a headless calibration-complete signal. All are downstream
+of, and independent of, the now-fixed enumerate contract.
+
 The same-instrument two-controller A/B remains staged and ready the moment
 `main_hub` → instrument-select is reachable; the patch's hook VAs are
 byte-verified for RB3DX and delivered as a title-gated runtime memory patch (no

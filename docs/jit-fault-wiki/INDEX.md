@@ -67,18 +67,28 @@ reliably reached, instrument-select NOT reached**, same-instrument A/B not
 demonstrated (groundwork verified). Full detail + next step in
 [09](09-rb3dx-title-to-menu.md).
 
-## Splash-gate phase: ROOT-CAUSED, fix planned (2026-07-09)
+## Splash-gate phase: FIXED (2026-07-09, `9096dd4d0`) — splash cleared; next gate = first-boot calibration
 
-Post-OOM-fix, RB3DX boots deterministically to `splash_screen` and stalls on the
-splash's `{saveload_mgr is_idle}` poll: fork commit `a224a6846` made
+Post-OOM-fix, RB3DX booted deterministically to `splash_screen` and stalled on
+the splash's `{saveload_mgr is_idle}` poll: fork commit `a224a6846` made
 `xeXamEnumerate` return `SUCCESS`+0-items instead of `X_ERROR_NO_MORE_FILES` on
 the **synchronous** path too, so RB3's byte-verified save-container search
-(`MemcardXbox::FindValidUnit`, `while (XEnumerate(...)==0)`) never exits →
-SaveLoadManager never idles → the overshell user-join is never attempted.
-Sign-in and pad/slot hypotheses refuted. Fix (split the conversion to the
-overlapped path only, DC3-preserving) + acceptance test (instrument-select
-headless) in **[PLAN-splash-confirm-gate.md](PLAN-splash-confirm-gate.md)**;
-evidence in [BRIEF-main-hub-load-stall.md](BRIEF-main-hub-load-stall.md) §#3.
+(`MemcardXbox::FindValidUnit`, `while (XEnumerate(...)==0)`) never exited →
+SaveLoadManager never idled → the overshell user-join was never attempted.
+Sign-in and pad/slot hypotheses refuted. **FIXED** `9096dd4d0`: the
+`NO_MORE_FILES → SUCCESS/0` conversion is now restricted to the overlapped path
+(`run_overlapped` wrapper); the synchronous path returns `WriteItems`' result
+verbatim (stock upstream). **Verified:** the `flags=4096` enumerator fires once
+and is Removed (no spin), 16,595 presents continue after it, and scripted START
+advances `splash_screen → first_time_calibration`. **DC3 non-regression PROVEN**
+(identical milestones at `--fault_spin_limit` 4096/0, SIGSEGV plateau unchanged,
+sync path never exercised). Instrument-select **NOT** reached: the boot now
+stalls one flow downstream on the first-boot `first_time_calibration →
+cal_audio_screen` interactive A/V-latency calibration (unreachable headless with
+null audio + fixed-time scripted input). Fix + full verification matrix +
+next-gate leads in **[PLAN-splash-confirm-gate.md](PLAN-splash-confirm-gate.md)**
+("Results (2026-07-09)"); evidence in
+[BRIEF-main-hub-load-stall.md](BRIEF-main-hub-load-stall.md) §#3 + "Fix landed".
 
 ## Pages
 

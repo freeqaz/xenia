@@ -1,6 +1,14 @@
 # PLAN — RB3DX splash `Confirm → StartOvershell` gate: fix `XamEnumerate` sync-path regression, reach `main_hub` → instrument-select
 
-**Status:** READY FOR IMPLEMENTATION (root cause confirmed 2026-07-09).
+**Status:** FIX LANDED & VERIFIED (2026-07-09), commit `9096dd4d0`. The core
+objective — the `XamEnumerate` sync-path regression (`a224a6846`) — is FIXED:
+the splash `{saveload_mgr is_idle}` gate is cleared and RB3DX now advances
+`splash_screen → first_time_calibration`. The instrument-select acceptance test
+(T4) was **NOT** reached: the boot now stalls one flow further on, at the
+**first-boot `first_time_calibration` → `cal_audio_screen`** interactive A/V
+latency calibration, which fixed-time scripted `A` presses + null audio cannot
+complete headless. That is a downstream first-boot flow, not the fix. See
+"Results (2026-07-09)" below.
 **For:** a follow-on multi-agent Workflow (planning → implementation → review
 segmentation; see §6).
 **Prereqs:** none beyond the current `headless-vulkan-linux` tree. All prior
@@ -183,6 +191,10 @@ watch-items, cheapest evidence first:
 
 ## 4. Implementation task list
 
+> **Status (2026-07-09): T1–T3 + T5 DONE and VERIFIED; T4 PARTIAL; T7 DONE.**
+> The fix landed as commit `9096dd4d0`. See "Results (2026-07-09)" after the
+> task list for the per-task evidence and the new downstream gate.
+
 - [ ] **T0 — (optional, 2 lines) decisive pre-fix confirmation.** Add a
   temporary rate-limited `XELOGI` (or atomic counter dumped by the headless
   status loop) in `xeXamEnumerate`'s synchronous branch when it converts
@@ -190,12 +202,12 @@ watch-items, cheapest evidence first:
   unbounded call rate on one handle after the last content op = the infinite
   loop observed directly. Skippable — the static evidence is already strong;
   do it if the reviewer wants a live smoking gun. Remove before commit.
-- [ ] **T1 — the fix.** Edit `src/xenia/kernel/xam/xam_enum.cc` per §2. Keep
+- [x] **T1 — the fix.** DONE (`9096dd4d0`). Edit `src/xenia/kernel/xam/xam_enum.cc` per §2. Keep
   the overlapped conversion + its comment; add a comment on the sync path
   citing this plan + `MemcardXbox::FindValidUnit`. Build
   (`xb build --config Checked` / the fork's normal build; binary
   `build/bin/Linux/Checked/xenia-headless`).
-- [ ] **T2 — RB3DX boot A/B.** Boot with the standard flags
+- [x] **T2 — RB3DX boot A/B.** PASS. Boot with the standard flags
   (`--target=/tmp/rb3dxboot/default.xex --protect_zero=false --gpu=vulkan
   --local_user_count=2 --fault_spin_limit=4096 --rb3dx_ui_probe=true`) and NO
   scripted input, 150 s. **Expect:** content ops now CONTINUE past the
@@ -203,21 +215,22 @@ watch-items, cheapest evidence first:
   profile-settings calls appear); `--rb3dx_ui_probe` still shows
   `splash_screen` (no input yet) but SaveLoadManager work completes. Grep for
   new `XamShow*` calls (watch-item §3.1).
-- [ ] **T3 — splash advance.** Re-run with scripted input
+- [x] **T3 — splash advance.** PASS. Re-run with scripted input
   (`--scripted_input="20s:START@0,30s:START@0,40s:A@0,50s:A@0,60s:A@0"`,
   re-tuned from the observed movie-end time; START must land AFTER the splash
   is current). **Acceptance:** `--rb3dx_ui_probe` shows `curScreen` leaving
   `splash_screen` (→ `first_time_calibration` dialog or `main_hub_screen`),
   and the probe's `session` dump shows the local-user join (mUsers non-empty
   and/or IsHost hits if `--rb3dx_offline_join` armed for observability).
-- [ ] **T4 — reach main_hub + instrument-select.** Extend the nav script
+- [~] **T4 — reach main_hub + instrument-select.** PARTIAL (blocked one flow
+  downstream — see Results). Extend the nav script
   (title→hub is START; menu selects are A; P2 join `START@1`; per
   `rb3-verify/scripts/rb3dx_title_to_guitar.txt`, re-timed on the working
   boot). Capture frames (`--dump_frames_path --headless_capture_interval=40`).
   **Milestone:** instrument-select screen reached headless = the acceptance
   test for this whole plan. (Same-instrument A/B is the NEXT phase, staged in
   [09](09-rb3dx-title-to-menu.md) §L4.)
-- [ ] **T5 — DC3 non-regression (MANDATORY).** Boot retail DC3
+- [x] **T5 — DC3 non-regression (MANDATORY).** PASS — DC3-SAFE. Boot retail DC3
   (`dc3-decomp/orig/373307D9/default.xex`) headless twice (fix ON = the only
   build; compare vs pre-fix binary or `git stash`-free A/B via a second build
   dir): `--gpu=null --stub_nui_functions=true --headless_timeout_ms=20000
@@ -227,11 +240,11 @@ watch-items, cheapest evidence first:
   matrix as the `b803faab1` verification ([09](09-rb3dx-title-to-menu.md)
   §L5). DC3's enumerate consumers use the OVERLAPPED path (preserved
   bit-for-bit), so no divergence is expected; prove it anyway.
-- [ ] **T6 — clean-TU5 spot check (cheap, optional).** The sync-path
+- [x] **T6 — clean-TU5 spot check (cheap, optional).** PASS — unchanged. The sync-path
   restoration is title-global; a clean-TU5 boot
   ([08](08-boot-to-menu.md)) should be unchanged (it self-exits on the LOLZ
   ark regardless).
-- [ ] **T7 — docs + commit.** Update
+- [x] **T7 — docs + commit.** DONE (this pass). Update
   [BRIEF-main-hub-load-stall.md](BRIEF-main-hub-load-stall.md) (#3 section →
   "FIXED, commit <sha>"), [INDEX.md](INDEX.md) status banner,
   [WORKSTREAM](WORKSTREAM-rb3-on-xenia-bringup.md) §1/§4.D/§8, and the memory
@@ -272,3 +285,49 @@ watch-items, cheapest evidence first:
 **Constraints carried over (HARD):** DC3-safety mandatory; no XDK/copyrighted
 downloads; harness files untouched; no `git add -A`/stash; commit only files
 the workflow changed.
+
+---
+
+## Results (2026-07-09) — fix landed `9096dd4d0`, splash gate CLEARED, T4 blocked one flow downstream
+
+**Bottom line:** the plan's core objective is **FULLY VERIFIED**. The
+`XamEnumerate` sync-path regression (`a224a6846`) is fixed and RB3DX is no longer
+pinned on `splash_screen`. The instrument-select acceptance test was **not**
+reached — but the new blocker is a first-boot **calibration flow** downstream of
+the fix, not the fix itself.
+
+The fix (`src/xenia/kernel/xam/xam_enum.cc`) matches §2 verbatim: the
+`NO_MORE_FILES → SUCCESS/0` conversion now lives in a `run_overlapped` wrapper on
+the overlapped path only; the synchronous path returns `WriteItems`' result
+verbatim.
+
+| Task | Verdict | Evidence |
+|---|---|---|
+| **T2** sync enumerate contract | **PASS** | No-input, 150 s: the `user=0 device=0x0 type=1 flags=4096` enumerator (`MemcardXbox::FindValidUnit`) fires EXACTLY ONCE (`t2-noinput.log:9071`), handle immediately Removed, no spin; **16,595** runtime ops (VdSwap presents) continue AFTER it; sync exhaustion returns `NO_MORE_FILES(0x12)`. `grep flags=4096` count = 1. Pre-fix this returned SUCCESS/0 forever (infinite Memcard-worker loop). |
+| **T3** splash advance | **PASS** | UI probe `sample[22]=splash_screen → sample[23]=first_time_calibration`; the splash `Confirm→StartOvershell` gate fired on scripted `START@0`; scripted input confirmed delivered (6 events, `0x0010`=START / `0x1000`=A). |
+| **T4** main_hub + instrument-select | **PARTIAL** | Reached `splash → first_time_calibration → cal_welcome_screen → cal_audio_screen` (`sample[35]`), then STALLED ~74 s to timeout. `main_hub_screen`/`instrument_screen` appear ONLY in the maindir screen-registry dump, NEVER as `curScreen`. Input IS delivered+consumed on `cal_audio_screen` (`XamInputGetState` user=0 `0x1000` registered repeatedly during the stall) — so input is live; the interactive `cal_audio_panel` latency-calibration logic is the gate. 386 real 1280×720 P6 frames captured. |
+| **T5** DC3 non-regression | **PASS — DC3-SAFE** | Retail DC3 booted headless twice (`--fault_spin_limit` 4096 and 0). Identical milestone sequence (`session_begin → dc3_nui_patch_block_begin → dc3_nui_patch_apply_complete → headless_timeout_reached`, ~19.74 s) vs the `b803faab1` baseline. SIGSEGV plateaus at **4** in both with an IDENTICAL fault signature to baseline (pre-existing benign recovered fault, byte-identical in the `b803faab1` log — NOT a regression). FAULT LIVELOCK=0. DC3's enumerate consumers only exercise the overlapped path (import-table registration only; no sync-exhaustion signature) → fix empirically inert for DC3. |
+| **T6** clean-TU5 spot check | **PASS** | RB3 clean-TU5 nodd boot self-exits ~18015 ms via its own `App::Shutdown()` exactly as documented in [08](08-boot-to-menu.md); SIGSEGV=0; fix inert for this lane. |
+
+**The new downstream gate (watch-item for the next pass):** first-boot
+`first_time_calibration → cal_audio_screen`. `cal_audio_panel` is an interactive
+A/V-latency calibration (measure output-vs-input lag by having the player tap to
+a click). Headless with **null audio** and **fixed-time scripted `A` presses**,
+that measurement cannot complete, so the screen never advances. An attempted
+T4b opt2-skip (`DOWN`+`A` on the `first_time_calibration` `dialog_small_panel`,
+per §3.5 watch-item 5 opt2→`main_hub`) **regressed** to staying on
+`first_time_calibration` — the skip path is not trivially scriptable. Per the
+HARD "don't stack speculative fixes" constraint, no further nav/code was stacked.
+
+Next-pass candidates (cheapest first): (i) set
+`get_has_seen_first_time_calibration` true (a saved-settings / globaloptions
+prime, or a title-gated default-off guest override) so first boot skips
+calibration entirely → straight to `main_hub`; (ii) drive the `cal_audio` skip
+button correctly (needs the exact `opt2.btn` focus/nav sequence, not blind
+`DOWN`+`A`); (iii) provide a headless calibration-complete signal. All three are
+downstream of, and independent of, the now-fixed enumerate contract.
+
+**Logs:** `/tmp/wf-splash-confirm-gate/{t2-noinput,t3-scripted,t4-nav,t4b-nav}.log`,
+frames `/tmp/wf-splash-confirm-gate/t4-frames/`, DC3
+`/tmp/wf-splash-confirm-gate/dc3/{a_default,b_disabled}.{log,jsonl}`,
+checkpoints `rb3dx.json` / `dc3.json` / `finalize.json`.
