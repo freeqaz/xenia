@@ -309,16 +309,23 @@ default-off or default-inert; **DC3 non-regression verified** at each step.
 
 ## 8. Open frontier + next step
 
-RB3DX boots deterministically and renders the animated Deluxe title, but sits on
-`splash_screen` forever: input reaches the guest, yet the splash `Confirm →
-StartOvershell` sub-state never advances (the NetSession join it would eventually
-reach is *not* the active gate — §4.D). **Next:** trace the pre-join splash step
-directly (entry-hook the splash-panel state machine / `saveload_mgr` idle poll /
-the sign-in gate) to find which sub-condition never becomes true headless, using
-the native port as the oracle for what should happen. The same-instrument
-two-controller A/B remains staged and ready the moment `main_hub` → instrument-
-select is reachable; the patch's hook VAs are byte-verified for RB3DX and delivered
-as a title-gated runtime memory patch (no XEX repack).
+**UPDATE 2026-07-09 — the splash gate is ROOT-CAUSED (investigation #3).** The
+pre-join splash step was traced: the gate is the splash's `{saveload_mgr
+is_idle}` poll (candidate (b)), and the mechanism is a **fork regression**:
+commit `a224a6846` (DC3 headless work) made `xeXamEnumerate` convert
+`X_ERROR_NO_MORE_FILES` → `SUCCESS`+0 items on BOTH completion paths; RB3's
+save-container search `MemcardXbox::FindValidUnit` (100% byte-verified) does a
+**synchronous** `while (XEnumerate(...) == 0)` loop that therefore never exits →
+`SaveLoadManager` never idles → `attempt_to_add_user`/`AddUser` never run.
+Sign-in (a) and pad/user-slot (c) are refuted (no `XamShowSigninUI` call ever;
+real bytes accept the nop pad as `kJoypadAnalog`; a **no-input control boot**
+stalls identically, and the intro-movie skip proves input consumption). Fix +
+task list + DC3-safety matrix: **[PLAN-splash-confirm-gate.md](PLAN-splash-confirm-gate.md)**;
+full evidence: [BRIEF-main-hub-load-stall.md](BRIEF-main-hub-load-stall.md) §#3.
+The same-instrument two-controller A/B remains staged and ready the moment
+`main_hub` → instrument-select is reachable; the patch's hook VAs are
+byte-verified for RB3DX and delivered as a title-gated runtime memory patch (no
+XEX repack).
 
 ---
 

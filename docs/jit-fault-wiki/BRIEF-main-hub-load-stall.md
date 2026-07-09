@@ -539,3 +539,133 @@ install block, plus a `session mState/mQNet` dump added to the existing
 `--rb3dx_ui_probe` sampler (diagnostic, default-off). Harness files
 (`command_processor.cc`, `nop_input_driver.*`) and `xam_input.cc` were **not**
 modified by this task (their working-tree edits pre-date it).
+
+---
+
+## Fable investigation #3 (2026-07-09) — splash gate ROOT-CAUSED: fork regression in `XamEnumerate`'s synchronous path
+
+**VERDICT: candidate (b) — the `saveload_mgr is_idle` poll — is CONFIRMED as the
+gate, and the mechanism is a named, byte-verified FORK BUG, not a game or
+content problem. Candidates (a) sign-in and (c) pad/user-slot are REFUTED.**
+
+The splash never leaves `kSplashScreen_ActivateSaveLoad`'s `{saveload_mgr
+is_idle}` poll because `SaveLoadManager`'s auto-load parks a Memcard worker
+thread in an **infinite guest loop**: `MemcardXbox::FindValidUnit` (the save-
+container search, **100% byte-verified vs retail** in rb3-xenon
+`build/45410914/report.json`) loops `while (XEnumerate(h, &buffer, 0x134,
+&dw1bc, nullptr) == 0)` — a **synchronous** enumerate — and this fork's
+`xeXamEnumerate` (commit **`a224a6846`**, "progress", 2026-02-21 DC3-headless
+work) converts `X_ERROR_NO_MORE_FILES` → `X_ERROR_SUCCESS` + 0 items inside the
+shared `run` lambda (`src/xenia/kernel/xam/xam_enum.cc:50-58`). The conversion
+was written for the **overlapped** path (comment: real-360 `XGetOverlappedResult`
+semantics; "Games like Dance Central 3 only handle result codes 0 and 0x65B")
+but it also rewrites the **synchronous** return, so an exhausted enumerator
+returns `0` forever and the guest loop **never exits**. Stock upstream Xenia
+returns `ERROR_NO_MORE_FILES` (0x12) synchronously — which this exact guest code
+handles (`FindValidUnit` checks `enumRes == 0x12` on the create; the while-loop
+exits on any non-zero).
+
+### The full causal chain (each link cited)
+
+1. **RB3DX activates saveload at splash entry, before any confirm.** The
+   RB3DX ark **overrides the base splash script**
+   (`patch-extract/ui/splash/gen/splash.dtb`, decoded at
+   `/tmp/rb3dx-hub-investigate/dta/ui_splash_gen_splash.dtb.dta`). Its
+   `dx_splash_screen_enter` handler (dx handles `:4-14`) runs `{ui goto_screen
+   splash_screen}` + `{saveload_mgr activate}` on intro-movie end/skip. The
+   observed splash-entry content ops (probe6 `:6097-6234`) are this activate.
+2. **The auto-load's cache searches complete fine.** The two
+   `XamContentCreateEnumerator user=254 flags=0` calls are
+   `CacheMgrXbox::SearchAsync` (`rb3-xenon src/system/utl/CacheMgr_Xbox.cpp:67`,
+   `XContentCreateEnumerator(0xFE,0,1,0,1,…)`), and each is followed by a
+   successful `xeXamContentCreate` mount (`rbdxcache`, `globaloptions`) — the
+   **overlapped** enumerate path works.
+3. **The save-container search then hangs.** The LAST kernel op of every boot is
+   `XamContentCreateEnumerator user=0 device=0 type=1 flags=4096 items=1
+   added=2` (probe6 `:6234`; no-input control `:9026`) = `MemcardXbox::
+   FindValidUnit` (`rb3-xenon src/system/os/Memcard_Xbox.cpp:482`, flags
+   `0x1000`), called from `MemcardMgr::ThreadCall_SearchForDevice`
+   (`src/system/meta/MemcardMgr_Xbox.cpp:295`) on a Memcard worker thread. The
+   enumerator holds exactly 2 items — `rbdxcache` + `globaloptions`, the
+   packages the game itself created (`added=2`; `xam_content.cc:111`) — neither
+   matches the profile-save container name, so after 2 successful iterations
+   `WriteItems` yields `NO_MORE_FILES` (`src/xenia/kernel/xenumerator.cc:63-66`;
+   `current_item_` is never reset, so exhaustion is permanent) → fork converts
+   to SUCCESS/0 items → **infinite loop**. This is why there is ZERO further
+   I/O, no
+   `XamShowDeviceSelectorUI`, no `XamShowMessageBoxUIEx`, no
+   `XamUserReadProfileSettings` for the rest of the boot (all confirmed
+   never-invoked at runtime), and why the earlier Thread Status Report showed
+   worker threads with live deep chains while VdSwap kept presenting.
+4. **SaveLoadManager therefore never reaches idle** (`IsIdle()` = `mState==
+   kS_Idle && mRequestFlags==0`, rb3 Wii `src/band3/meta_band/SaveLoadManager.cpp:76`),
+   so the splash `poll` gate (`splash.dtb.dta:256-262`: state==ActivateSaveLoad
+   && `{saveload_mgr is_idle}` → StartOvershell) never passes →
+   `{overshell attempt_to_add_user}` never runs → `OvershellSlot::AddUser` /
+   `SessionMgr::AddLocalUserImpl` / `NetSession::AddLocalUser` never reached —
+   exactly matching the #2 investigation's "IsHost called 0 times / 20 callers".
+   `main_hub` is never loaded.
+
+### Why (a) and (c) are refuted
+
+- **(a) sign-in:** `XamShowSigninUI` is **never invoked at runtime** in any boot
+  log (import-table entry only); the decomp shows **no signin gate anywhere** in
+  the Entered→StartOvershell chain (no `dialog_need_signin_screen` in game
+  code; `XShowSigninUI` unreferenced); the native-port oracle joins profileless
+  users via `kState_JoinedDefault`/`kState_ChooseProfile` where signin is an
+  *optional menu choice* (`slot_states.dta`), and `OvershellSlot::AddUser`
+  has no signin predicate (`rb3 src/band3/meta_band/OvershellSlot.cpp:1740`).
+- **(c) wrong pad/user-slot:** two-part refutation. (i) The "pad rejected"
+  variant: real retail bytes of `ReadSingleXinputJoypad` (@`0x8251EB24` in
+  band.exe, disassembled this session) show an unknown caps SubType — including
+  the `0x01` Xenia's nop HID reports — **falls through to `kJoypadAnalog`**, and
+  even a caps-read failure continues as kJoypadAnalog; only
+  `dwPacketNumber==-1` yields kJoypadNone. (The rb3-xenon decomp source of this
+  function is only 81.8% matched and wrongly returns kJoypadNone on those
+  paths — do not trust it here.) (ii) The "input never dispatched" variant: a
+  **no-input control boot** (`/tmp/rb3dx-splash-gate/noinput-boot.log`) shows
+  the intro movie playing ~2.5× longer (probe samples [5]-[9] vs [5]-[6])
+  than the scripted boot, where the transition follows the 6071-line START
+  within ~70 log lines — i.e. the guest UI **did consume the START as a movie
+  skip**, so ButtonDownMsg dispatch works end-to-end. And decisively: the
+  control boot stalls **identically with zero input** and the identical
+  content-op signature (`:8891-9026`) — the parked flow is input-independent,
+  so no input/slot theory can be the gate.
+
+### Supporting facts
+
+- The `Keystroke KEYDOWN VK=0x58xx` log lines are consumed by
+  `Keyboard_Xbox.cpp:50` (`XInputGetKeystroke(0xFF,…)`, the chatpad layer), not
+  the joypad path; the joypad path is the poll thread reading `XamInputGetState`
+  (the DIAG lines). Both deliver.
+- `XamShowDeviceSelectorUI` headless already completes immediately with dummy
+  device `0x00000001` (`src/xenia/kernel/xam/xam_ui.cc:509-521`), so the
+  post-fix no-save path will not hang on a device picker.
+- The splash's two gates are SERIAL: (G1) BUTTON_DOWN→`SELECT_MSG` flips
+  Entered→ActivateSaveLoad (this works, or will — input is proven consumed);
+  (G2) `is_idle` (the broken one). Fixing G2 is necessary; G1 needs no fix.
+
+### The fix (implemented by the follow-on workflow; see PLAN)
+
+Restrict the `NO_MORE_FILES → SUCCESS` rewrite in `xeXamEnumerate` to the
+**overlapped** completion path only, restoring stock synchronous semantics
+(`X_ERROR_NO_MORE_FILES` returned to the caller). DC3-safe by construction AND
+by parity: DC3's consumers are the overlapped/`XGetOverlappedResult` path the
+conversion was written for — preserved bit-for-bit (the deferred-completion
+machinery `kernel_state.cc:748-800` is untouched and proven working by the
+successful rbdxcache/globaloptions mounts) — and DC3 ships the **identical**
+synchronous `FindValidUnit` loop (`dc3-decomp/src/system/os/Memcard_Xbox.cpp:496`),
+so the sync restoration is what DC3's own code wants too. Independent Opus
+verification pass concurred at ~90% confidence, ranking (b)≫(c)≫(a); its one
+open question — whether the spinning thread `F8000100` is a worker or the game
+logic thread (in which case the spin also starved input processing) — does not
+change the fix, only whether G1 needs any follow-up. Full task breakdown,
+verification matrix, and residual watch-items (overshell join eligibility,
+saveload no-save dialogs, first-time-calibration dialog) in
+**[PLAN-splash-confirm-gate.md](PLAN-splash-confirm-gate.md)**.
+
+**Logs (this investigation):** `/tmp/rb3dx-splash-gate/noinput-boot.log`
+(no-input control, 74 probe samples, same stall); prior logs
+`/tmp/rb3dx-hub-investigate/probe6-boot.log`, `/tmp/rb3dx-join/boot.log`.
+No emulator source was modified in this pass (evidence gathered from existing
+logs, one flag-only control boot, decomp reads, and band.exe disassembly).

@@ -67,6 +67,19 @@ reliably reached, instrument-select NOT reached**, same-instrument A/B not
 demonstrated (groundwork verified). Full detail + next step in
 [09](09-rb3dx-title-to-menu.md).
 
+## Splash-gate phase: ROOT-CAUSED, fix planned (2026-07-09)
+
+Post-OOM-fix, RB3DX boots deterministically to `splash_screen` and stalls on the
+splash's `{saveload_mgr is_idle}` poll: fork commit `a224a6846` made
+`xeXamEnumerate` return `SUCCESS`+0-items instead of `X_ERROR_NO_MORE_FILES` on
+the **synchronous** path too, so RB3's byte-verified save-container search
+(`MemcardXbox::FindValidUnit`, `while (XEnumerate(...)==0)`) never exits →
+SaveLoadManager never idles → the overshell user-join is never attempted.
+Sign-in and pad/slot hypotheses refuted. Fix (split the conversion to the
+overlapped path only, DC3-preserving) + acceptance test (instrument-select
+headless) in **[PLAN-splash-confirm-gate.md](PLAN-splash-confirm-gate.md)**;
+evidence in [BRIEF-main-hub-load-stall.md](BRIEF-main-hub-load-stall.md) §#3.
+
 ## Pages
 
 | Page | Contents | Status |
