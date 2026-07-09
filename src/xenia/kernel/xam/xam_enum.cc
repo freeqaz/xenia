@@ -37,6 +37,10 @@ uint32_t xeXamEnumerate(uint32_t handle, uint32_t flags, lpvoid_t buffer_ptr,
     return X_ERROR_INVALID_HANDLE;
   }
 
+  // Raw enumerate step: returns XEnumerator::WriteItems' result verbatim,
+  // including X_ERROR_NO_MORE_FILES (0x12) on exhaustion (stock upstream Xenia
+  // behavior). The NO_MORE_FILES -> SUCCESS/0-items conversion is applied ONLY
+  // on the overlapped path below (run_overlapped), never on the sync path.
   auto run = [e, buffer_ptr](uint32_t& extended_error,
                              uint32_t& length) -> X_RESULT {
     X_RESULT result;
@@ -47,21 +51,20 @@ uint32_t xeXamEnumerate(uint32_t handle, uint32_t flags, lpvoid_t buffer_ptr,
       result = e->WriteItems(buffer_ptr.guest_address(),
                              buffer_ptr.as<uint8_t*>(), &item_count);
     }
-    if (result == X_ERROR_NO_MORE_FILES) {
-      // Enumeration complete with no more items. On real Xbox 360, the
-      // overlapped completes with SUCCESS and count=0 rather than
-      // propagating ERROR_NO_MORE_FILES (0x12) through XGetOverlappedResult.
-      // Games like Dance Central 3 only handle result codes 0 and 0x65B.
-      extended_error = 0;
-      length = 0;
-      return X_ERROR_SUCCESS;
-    }
     extended_error = X_HRESULT_FROM_WIN32(result);
     length = item_count;
     return result;
   };
 
   if (items_returned) {
+    // Synchronous path: propagate WriteItems' result verbatim. On exhaustion
+    // this is X_ERROR_NO_MORE_FILES (0x12) with *items_returned = 0 -- the
+    // stock Xenia contract that synchronous enumerate-until-done callers
+    // depend on to terminate. RB3's MemcardXbox::FindValidUnit spins
+    // `while (XEnumerate(...) == 0)`; converting exhaustion to SUCCESS/0 here
+    // loops it forever (the RB3DX splash `saveload_mgr is_idle` hang, regressed
+    // by commit a224a6846). Do NOT convert on this path. See
+    // docs/jit-fault-wiki/PLAN-splash-confirm-gate.md.
     assert_true(!overlapped_ptr);
     uint32_t extended_error;
     uint32_t item_count;
@@ -70,7 +73,22 @@ uint32_t xeXamEnumerate(uint32_t handle, uint32_t flags, lpvoid_t buffer_ptr,
     return result;
   } else if (overlapped_ptr) {
     assert_true(!items_returned);
-    kernel_state()->CompleteOverlappedDeferredEx(run, overlapped_ptr);
+    // Overlapped path: on real Xbox 360 the overlapped completes with SUCCESS
+    // and count=0 rather than propagating ERROR_NO_MORE_FILES (0x12) through
+    // XGetOverlappedResult. Games like Dance Central 3 only handle result
+    // codes 0 and 0x65B. Keep that conversion HERE ONLY (overlapped path).
+    auto run_overlapped = [run](uint32_t& extended_error,
+                                uint32_t& length) -> X_RESULT {
+      X_RESULT result = run(extended_error, length);
+      if (result == X_ERROR_NO_MORE_FILES) {
+        extended_error = 0;
+        length = 0;
+        return X_ERROR_SUCCESS;
+      }
+      return result;
+    };
+    kernel_state()->CompleteOverlappedDeferredEx(run_overlapped,
+                                                 overlapped_ptr);
     return X_ERROR_IO_PENDING;
   } else {
     assert_always();
