@@ -46,6 +46,8 @@
 #include "xenia/cpu/backend/null_backend.h"
 #include "xenia/cpu/cpu_flags.h"
 #include "xenia/cpu/milo_trace.h"
+#include "xenia/cpu/ppc/ppc_context.h"
+#include "xenia/cpu/processor.h"
 #include "xenia/cpu/thread_state.h"
 #include "xenia/dc3_hack_pack.h"
 #include "xenia/dc3_nui_patch_resolver.h"
@@ -251,6 +253,102 @@ DEFINE_bool(
     "get_has_seen_first_time_calibration}} then routes to main_hub_screen). "
     "Single guest byte written; title-gated so DC3-inert.",
     "CPU");
+DEFINE_bool(
+    rb3dx_clamp_alloc, false,
+    "RB3DX / RB3 TU5 (title 0x45410914), default off: mitigate the "
+    "emulation-induced main_hub-load OOM race (doc-09). At MemAlloc's "
+    "__savegprlr_23 call site (lr==0x827BCD40) the request size occasionally "
+    "arrives as 0xGG001524 -- a correct small size in the low 24 bits with a "
+    "garbage NON-ZERO top byte (an uninitialized guest read that is zero on "
+    "real hardware but garbage under Xenia). When the top byte is non-zero AND "
+    "the low 24 bits are < 1 MiB (the documented small-alloc signature), clamp "
+    "r3 to its low 24 bits so MemHeap::Alloc gets the intended size instead of "
+    "OOMing. Legit multi-MiB allocations (low-24 >= 1 MiB) are never touched. "
+    "Reuses the alloc-probe __savegprlr_23 override; title-gated so DC3-inert.",
+    "CPU");
+DEFINE_bool(
+    si_probe, false,
+    "RB3DX / RB3 TU5 (title 0x45410914), default off: passively log, from a "
+    "host thread, the runtime bytes of the static same-instrument (SI) patch "
+    "in guest RAM -- the enable flag @0x82C8AAA0 (expect 1), the IsActive "
+    "detour word @0x826684C0 (expect 0x48621BC0 = b 0x82c8a080), and the first "
+    "cave-stub words @0x82C8A080 / @0x82C8A000. Read-only; proves the static "
+    "XEX cave survived decrypt/load and whether a runtime writer zeroes the "
+    "flag. Title-gated so DC3-inert.",
+    "CPU");
+DEFINE_bool(
+    si_selftest, false,
+    "RB3DX / RB3 TU5 (title 0x45410914), default off: once during boot, "
+    "synthetically invoke OvershellPartSelectProvider::IsActive @0x826684C0 "
+    "(the same-instrument detour site) with a crafted empty `this` and log the "
+    "return value, to test whether Xenia's JIT executes the .data code cave and "
+    "the SI logic fires (r3==1 => cave executed + SI active; r3==0 => inert). "
+    "Runs on a live guest-thread context (reuses the alloc-probe "
+    "__savegprlr_23 override) with full register snapshot/restore; title-gated "
+    "so DC3-inert.",
+    "CPU");
+DEFINE_bool(
+    si_hook_verify, false,
+    "RB3DX / RB3 TU5 (title 0x45410914), default off: read-only host-thread "
+    "verifier for the RB3Enhanced-DLL same-instrument GAMEPLAY hooks (H1 "
+    "ProcessConfig @0x8276FA08, H2 RecalcGemList @0x82794740). Samples the "
+    "first instruction word at each site and decodes it: if it is a `b` "
+    "(primary opcode 18) whose target lands in DLL space [0x84000000,"
+    "0x84040000) and within +/-32MB of the site, the RB3E HookFunction detour "
+    "is INSTALLED (PASS); if it is still the stock prologue 0x7D8802A6 "
+    "(mflr r12), the DLL is not loaded / hooks not installed (NEGATIVE "
+    "control). Also scans for a loaded user module based at 0x84000000. "
+    "Read-only, no writes; title-gated so DC3-inert. Works regardless of HOW "
+    "the DLL got mapped: verified control matrix (2026-07-09) -- stock TU5 "
+    "reads 0x7D8802A6 (mflr r12); the dead static-.data-cave build reads a b "
+    "into 0x82C8xxxx (correctly flagged NON-DLL); the RB3Enhanced.dll build "
+    "must read a b into [0x84000000,0x84040000) = PASS. To load the DLL in "
+    "Xenia, KernelState::LoadUserModule(\"game:\\\\RB3Enhanced.dll\") maps it "
+    "at its preferred base 0x84000000 and runs its entry (a --si_load_dll cvar "
+    "wiring this is the next harness step, pending the packed DLL artifact).",
+    "CPU");
+DEFINE_bool(
+    si_load_dll, false,
+    "RB3DX / RB3 TU5 (title 0x45410914), default off: load the produced "
+    "RB3Enhanced.dll (game:\\RB3Enhanced.dll) at its preferred base 0x84000000 "
+    "via KernelState::LoadUserModule(call_entry=false), then invoke the "
+    "self-contained SI hook installer InitSameInstrument @0x8402DFA8 on the "
+    "live boot guest-thread (reuses the MemAlloc __savegprlr_23 override, full "
+    "register snapshot/restore). InitSameInstrument's inlined RB3E HookFunction "
+    "rewrites the first instruction of the four SI target sites to a `b` into "
+    "DLL space -- crucially H1 PlayerTrackConfigList::ProcessConfig @0x8276FA08 "
+    "(kills the vector[-1] track-number-reuse crash) and H2 "
+    "TrackWatcherImpl::RecalcGemList @0x82794740 (per-watcher gem-list clone). "
+    "call_entry=false deliberately skips RB3E's full CRT/DllMain boot (its "
+    "socket/event init is unsafe headless); only the deterministic hook "
+    "installer runs. Fires once well into boot. Pair with --si_hook_verify to "
+    "observe the installed detours. Title-gated + default-off => DC3-inert.",
+    "CPU");
+DEFINE_uint64(
+    si_init_va, 0,
+    "RB3DX / RB3 TU5 (title 0x45410914), default 0 (disabled): guest VA of the "
+    "from-source RB3Enhanced.dll's InitSameInstrument() entry (void)(void), "
+    "taken from the DLL's link map (Phase-2 mapdeploy.json initVA, e.g. "
+    "0x84019830). When --si_load_dll is set and this is non-zero, Xenia does NOT "
+    "host-emulate the four HookFunction detours with hardcoded old-DLL targets; "
+    "instead it calls InitSameInstrument on the live boot guest-thread (via the "
+    "__savegprlr_23 override + full register snapshot/restore), so the DLL's own "
+    "HookFunction computes the detour targets and rewrites the four SI game "
+    "sites. This is the from-source-DLL path -- addresses come from the DLL, not "
+    "constants. Title-gated + default-off => DC3-inert.",
+    "CPU");
+DEFINE_uint64(
+    si_force_allow_va, 0,
+    "RB3DX / RB3 TU5 (title 0x45410914), default 0 (disabled): guest VA of the "
+    "from-source RB3Enhanced.dll's config.AllowSameInstrument flag (Phase-2 "
+    "mapdeploy.json allowFlagVA = config base + 0x50, e.g. 0x84829590). Because "
+    "--si_load_dll uses LoadUserModule(call_entry=false), the DLL's DllMain/ini "
+    "load never runs, so AllowSameInstrument stays 0 and the installed SI hooks "
+    "run pass-through (install verified but behaviorally inert). When non-zero, "
+    "Xenia pokes 1 to this VA right after the DLL loads, arming the hook bodies. "
+    "REQUIRED for behavioral (Phase-5) runs; harmless for install-only (Phase-3) "
+    "verification. Title-gated + default-off => DC3-inert.",
+    "CPU");
 
 namespace xe {
 
@@ -428,6 +526,187 @@ void Rb3dxSaveGprLr23ProbeExtern(cpu::ppc::PPCContext* ppc_context,
   }
   uint64_t m = s_memalloc_calls.fetch_add(1, std::memory_order_relaxed) + 1;
   uint32_t size = static_cast<uint32_t>(ppc_context->r[3]);
+  // --- OOM-race mitigation (--rb3dx_clamp_alloc) ---
+  // doc-09: the main_hub-load OOM allocation arrives as 0xGG001524 -- a correct
+  // small size in the low 24 bits with a garbage NON-ZERO top byte (an
+  // uninitialized guest read; zero on hardware, garbage under Xenia). Clamp
+  // ONLY that signature (top byte set AND low-24 < 1 MiB) so legit multi-MiB
+  // allocations are never touched. Modifying r3 here is safe: __savegprlr_23
+  // returns into MemAlloc before its stwu, and size flows straight to the
+  // MemHeap::Alloc call.
+  if (cvars::rb3dx_clamp_alloc && (size & 0xFF000000u) != 0u &&
+      (size & 0x00FFFFFFu) < 0x00100000u) {
+    static std::atomic<uint32_t> s_clamps{0};
+    uint32_t clamped = size & 0x00FFFFFFu;
+    ppc_context->r[3] = clamped;
+    if (s_clamps.fetch_add(1, std::memory_order_relaxed) < 32) {
+      XELOGW(
+          "RB3DX clamp-alloc: MemAlloc size 0x{:08X} -> 0x{:08X} (garbage top "
+          "byte masked; call #{})",
+          size, clamped, m);
+    }
+    size = clamped;
+  }
+  // --- Same-instrument cave-execution self-test (--si_selftest) ---
+  // Fire ONCE, well into boot (guest heaps up, 0x826684C0 resolvable), on this
+  // valid guest-thread context: synthetically call the detour site
+  // OvershellPartSelectProvider::IsActive @0x826684C0 with a crafted, zeroed
+  // scratch `this` (mSlots.begin==end==0 => the original body's empty-check
+  // early-returns 0 with no vcall / no globals touched). Because 0x826684C0's
+  // first instruction is our `b 0x82C8A080`, Execute() forces Xenia's JIT to
+  // translate + run the .data cave (trampoline -> orig(returns 0) -> flag(=1)
+  // -> force r3=1). Return value discriminates: r3==1 => the cave EXECUTED and
+  // the SI logic fires under Xenia (patch works modulo NX); r3==0 => inert
+  // (cave not reached / flag path fell through) => in-emulator root-cause; a
+  // fault => Xenia mis-translates the .data cave. Full volatile+nonvolatile
+  // register snapshot/restore keeps the intercepted MemAlloc undisturbed.
+  if (cvars::si_selftest) {
+    static std::atomic<bool> s_fired{false};
+    bool expected = false;
+    if (m >= 800 && s_fired.compare_exchange_strong(expected, true)) {
+      uint8_t* mbase = mem_for_emu->virtual_membase();
+      // Snapshot the whole GPR file + link/count/cr so MemAlloc continues as if
+      // nothing happened.
+      uint64_t saved_r[32];
+      for (int i = 0; i < 32; ++i) saved_r[i] = ppc_context->r[i];
+      uint64_t saved_lr = ppc_context->lr;
+      uint64_t saved_ctr = ppc_context->ctr;
+      // Craft a zeroed scratch object far below the current SP (won't collide
+      // with IsActive's small frame at r1-0x60).
+      uint32_t scratch = (static_cast<uint32_t>(ppc_context->r[1]) - 0x2000u) &
+                         ~0xFu;
+      for (uint32_t off = 0; off < 0x40; off += 4) {
+        xe::store_and_swap<uint32_t>(mbase + scratch + off, 0);
+      }
+      auto* proc = ppc_context->processor;
+      auto* ts = ppc_context->thread_state;
+      auto describe = [](uint32_t r3, uint32_t self) -> const char* {
+        if (r3 == 1) return "SI ACTIVE (cave forced r3=1)";
+        if (r3 == 0) return "STOCK/INERT (orig 0 passed through)";
+        if (r3 == self) return "UNCHANGED (branch not followed / no-op)";
+        if (r3 == 0xDEADBABEu) return "resolve/exec FAILED";
+        return "ANOMALY";
+      };
+      // (A) Detour site: Execute(0x826684C0). First insn is `b 0x82C8A080`;
+      // tests whether the JIT follows the .text->.data detour branch.
+      {
+        uint64_t args[1] = {scratch};
+        uint32_t r3 = static_cast<uint32_t>(proc->Execute(ts, 0x826684C0, args,
+                                                           1));
+        XELOGW("SI SELFTEST (A) detour@0x826684C0 empty this=0x{:08X} -> "
+               "r3=0x{:08X}  [{}]",
+               scratch, r3, describe(r3, scratch));
+      }
+      // (B) Cave entry direct: Execute(0x82C8A080). Tests whether the .data
+      // cave CODE itself translates + executes under the JIT (independent of
+      // the detour branch). Rezero the scratch (A may have written the frame).
+      {
+        for (uint32_t off = 0; off < 0x40; off += 4)
+          xe::store_and_swap<uint32_t>(mbase + scratch + off, 0);
+        uint64_t args[1] = {scratch};
+        uint32_t r3 = static_cast<uint32_t>(proc->Execute(ts, 0x82C8A080, args,
+                                                          1));
+        XELOGW("SI SELFTEST (B) cave@0x82C8A080  empty this=0x{:08X} -> "
+               "r3=0x{:08X}  [{}]  (1 => cave code executes + SI logic fires "
+               "under Xenia JIT)",
+               scratch, r3, describe(r3, scratch));
+      }
+      // Restore the intercepted MemAlloc's register state exactly.
+      for (int i = 0; i < 32; ++i) ppc_context->r[i] = saved_r[i];
+      ppc_context->lr = saved_lr;
+      ppc_context->ctr = saved_ctr;
+    }
+  }
+  // --- from-source SI DLL: call InitSameInstrument on the guest thread ---
+  // (--si_load_dll --si_init_va). The DLL was already mapped at the stable
+  // pre-LaunchModule point in CompleteLaunch (loading a module from this
+  // mid-boot callback, with the guest heaps live, races and crashes the
+  // loader). What CAN'T run there is guest CODE: InitSameInstrument's inlined
+  // RB3E HookFunction rewrites the first instruction of the four SI game sites
+  // and wires trampolines -- guest stores that must execute on a live guest
+  // context so Xenia's self-modifying-code path invalidates the JIT. So we fire
+  // it here, ONCE, well into boot (heaps up, sites resolvable), from this valid
+  // guest-thread context, exactly like --si_selftest. Unlike the retired
+  // hardcoded old-DLL kHooks table, the detour TARGETS are computed by the DLL's
+  // own HookFunction from its link-time addresses -- the from-source path. Full
+  // GPR/LR/CTR snapshot+restore keeps the intercepted MemAlloc undisturbed.
+  if (cvars::si_load_dll) {
+    static std::atomic<bool> s_si_init_fired{false};
+    bool expected = false;
+    if (m >= 800 && s_si_init_fired.compare_exchange_strong(expected, true)) {
+      uint8_t* mb2 = mem_for_emu->virtual_membase();
+      if (cvars::si_init_va != 0) {
+        // Approach (a): call the DLL's own InitSameInstrument on this live
+        // guest thread (targets come from the DLL, nothing hardcoded). NOTE:
+        // under Xenia headless this currently faults inside the DLL (Risk #3 --
+        // guest-thread ABI/r13 sdata-base); use approach (b) below for the
+        // validated install-verify harness.
+        uint32_t init_va = static_cast<uint32_t>(cvars::si_init_va);
+        uint64_t saved_r[32];
+        for (int i = 0; i < 32; ++i) saved_r[i] = ppc_context->r[i];
+        uint64_t saved_lr = ppc_context->lr;
+        uint64_t saved_ctr = ppc_context->ctr;
+        auto* proc = ppc_context->processor;
+        auto* ts = ppc_context->thread_state;
+        XELOGW(
+            "SI LOADDLL: (a) invoking InitSameInstrument @0x{:08X} on guest "
+            "thread (MemAlloc call #{})",
+            init_va, m);
+        bool ok = proc->Execute(ts, init_va);
+        for (int i = 0; i < 32; ++i) ppc_context->r[i] = saved_r[i];
+        ppc_context->lr = saved_lr;
+        ppc_context->ctr = saved_ctr;
+        uint32_t h1 = xe::load_and_swap<uint32_t>(mb2 + 0x8276FA08u);
+        uint32_t h2 = xe::load_and_swap<uint32_t>(mb2 + 0x82794740u);
+        XELOGW(
+            "SI LOADDLL: (a) InitSameInstrument returned ok={}. H1@0x8276FA08="
+            "0x{:08X} H2@0x82794740=0x{:08X}",
+            ok, h1, h2);
+      } else {
+        // Approach (b), validated harness path: host-emulate RB3E's
+        // first-instruction relocating detour, writing `b <dll-hook>` at each SI
+        // game site -- HERE, mid-boot, on a live guest thread. The .text pages
+        // are now committed and stable, so (unlike a pre-LaunchModule write, which
+        // the loader's lazy .text commit reverts) the write is seen by the guest
+        // and the verifier. Targets are the FROM-SOURCE DLL hook VAs from the
+        // Phase-2 link map (checkpoints/rb3dx-finish/mapdeploy.json hookVAs), not
+        // the retired old-spliced-DLL constants. Trampoline callbacks into
+        // <hook>Orig are not populated (behavioral Phase-5 work); the gameplay
+        // sites aren't reached before the hub, so boot-to-ceiling is unaffected.
+        struct SiHook {
+          uint32_t site, hook;
+          const char* tag;
+        };
+        const SiHook kFromSrcHooks[4] = {
+            {0x826684C0u, 0x840191A8u, "IsActive"},
+            {0x825B6488u, 0x840191E8u, "ResolveWaitStates"},
+            {0x8276FA08u, 0x84019780u, "H1 ProcessConfig"},
+            {0x82794740u, 0x84019450u, "H2 RecalcGemList"},
+        };
+        const size_t host_pg = xe::memory::page_size();
+        for (const auto& h : kFromSrcHooks) {
+          uint8_t* host_addr = mb2 + h.site;
+          uint8_t* host_page = reinterpret_cast<uint8_t*>(
+              reinterpret_cast<uintptr_t>(host_addr) & ~(host_pg - 1));
+          xe::memory::Protect(host_page, host_pg,
+                              xe::memory::PageAccess::kExecuteReadWrite);
+          uint32_t br = 0x48000000u | ((h.hook - h.site) & 0x03FFFFFCu);
+          xe::store_and_swap<uint32_t>(mb2 + h.site, br);
+          XELOGW(
+              "SI LOADDLL: (b) mid-boot detour {} 0x{:08X} -> 0x{:08X} "
+              "(word=0x{:08X}, MemAlloc #{})",
+              h.tag, h.site, h.hook, br, m);
+        }
+        uint32_t h1 = xe::load_and_swap<uint32_t>(mb2 + 0x8276FA08u);
+        uint32_t h2 = xe::load_and_swap<uint32_t>(mb2 + 0x82794740u);
+        XELOGW(
+            "SI LOADDLL: (b) from-source detours installed mid-boot. "
+            "H1@0x8276FA08=0x{:08X} H2@0x82794740=0x{:08X} (verify with "
+            "--si_hook_verify)",
+            h1, h2);
+      }
+    }
+  }
   if (m <= 5) {
     XELOGI(
         "RB3DX ALLOC PROBE: MemAlloc warmup #{} size=0x{:08X} align={} "
@@ -713,6 +992,181 @@ static void Rb3dxSkipCalibrationPokeThread(Memory* memory) {
       }
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(150));
+  }
+}
+
+// Same-instrument static-patch runtime observer (--si_probe).
+//
+// Passive, read-only. Logs the runtime bytes of the static SI patch that our
+// default_tu5_patched.xex bakes into guest RAM, so we can prove (a) the cave
+// survived XEX decrypt/load, (b) the IsActive detour word is present, and
+// (c) whether a runtime writer zeroes the enable flag. Addresses (retarget /
+// wave2 pins.json): enable flag @0x82C8AAA0 (expect 1), IsActive detour site
+// @0x826684C0 (expect 0x48621BC0 = b 0x82c8a080), cave stub @0x82C8A080, cave
+// base @0x82C8A000. Title-gated + default-off => DC3-inert; no writes.
+static void Rb3dxSiProbeThread(Memory* memory) {
+  using xe::load_and_swap;
+  uint8_t* base = memory->virtual_membase();
+  auto readable = [&](uint32_t addr) -> bool {
+    if (addr < 0x1000) return false;
+    auto* heap = memory->LookupHeap(addr);
+    if (!heap) return false;
+    uint32_t prot = 0;
+    if (!heap->QueryProtect(addr, &prot)) return false;
+    return (prot & kMemoryProtectRead) != 0;
+  };
+  auto r32 = [&](uint32_t a) -> uint32_t {
+    return readable(a) ? load_and_swap<uint32_t>(base + a) : 0xEEEEEEEEu;
+  };
+  auto r8 = [&](uint32_t a) -> int {
+    return readable(a) ? static_cast<int>(*(base + a)) : -1;
+  };
+  const uint32_t kFlag = 0x82C8AAA0;
+  const uint32_t kIsActiveSite = 0x826684C0;
+  const uint32_t kCaveStub = 0x82C8A080;
+  const uint32_t kCaveBase = 0x82C8A000;
+  uint32_t n = 0;
+  int last_flag = -2;
+  uint32_t last_flagw = 0xEEEEEEEEu;
+  uint32_t last_detour = 0;
+  bool dumped = false;
+  for (;;) {
+    int flag = r8(kFlag);
+    uint32_t flagw = r32(kFlag);
+    uint32_t detour = r32(kIsActiveSite);
+    uint32_t cave_stub = r32(kCaveStub);
+    uint32_t cave_base = r32(kCaveBase);
+    // One-time hex dump of the IsActive cave stub (0x82C8A080..0x82C8A0C0) so
+    // the flag-read instruction (lwz vs lbz) can be disassembled offline.
+    if (!dumped && cave_stub != 0xEEEEEEEEu) {
+      for (uint32_t off = 0; off < 0x40; off += 0x10) {
+        XELOGI("SI PROBE stub[0x{:08X}]: {:08X} {:08X} {:08X} {:08X}",
+               kCaveStub + off, r32(kCaveStub + off), r32(kCaveStub + off + 4),
+               r32(kCaveStub + off + 8), r32(kCaveStub + off + 12));
+      }
+      // Original IsActive body (0x826684C0.. ; +0 is now the detour word).
+      for (uint32_t off = 0; off < 0x80; off += 0x10) {
+        XELOGI("SI PROBE orig[0x{:08X}]: {:08X} {:08X} {:08X} {:08X}",
+               0x826684C0 + off, r32(0x826684C0 + off),
+               r32(0x826684C0 + off + 4), r32(0x826684C0 + off + 8),
+               r32(0x826684C0 + off + 12));
+      }
+      // Trampoline region (stolen instr + jump back), just past the flag.
+      for (uint32_t off = 0; off < 0x40; off += 0x10) {
+        XELOGI("SI PROBE tramp[0x{:08X}]: {:08X} {:08X} {:08X} {:08X}",
+               0x82C8AAC0 + off, r32(0x82C8AAC0 + off),
+               r32(0x82C8AAC0 + off + 4), r32(0x82C8AAC0 + off + 8),
+               r32(0x82C8AAC0 + off + 12));
+      }
+      dumped = true;
+    }
+    bool changed = (flag != last_flag) || (detour != last_detour) ||
+                   (flagw != last_flagw);
+    if (n < 4 || changed || (n % 15) == 0) {
+      XELOGI(
+          "SI PROBE[{}]: flagByte@0x82C8AAA0={} flagWord@0x82C8AAA0=0x{:08X} "
+          "detour@0x826684C0=0x{:08X}(expect 0x48621BC0) "
+          "caveStub@0x82C8A080=0x{:08X} caveBase@0x82C8A000=0x{:08X}{}",
+          n, flag, flagw, detour, cave_stub, cave_base,
+          changed && n ? "  <-- CHANGED" : "");
+    }
+    last_flag = flag;
+    last_flagw = flagw;
+    last_detour = detour;
+    ++n;
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+  }
+}
+
+// RB3Enhanced-DLL same-instrument GAMEPLAY-hook install verifier
+// (--si_hook_verify).
+//
+// Passive, read-only. Where --si_probe watches the DEAD static .data cave, this
+// watches the LIVE DLL-delivery path: the two runtime HookFunction detours the
+// RB3Enhanced.dll installs at the H1/H2 gameplay sites once it is loaded at
+// 0x84000000. RB3E's HookFunction rewrites the FIRST instruction of the target
+// to `b <stub-in-DLL>` (a first-instruction relocating detour). So the pass
+// condition is purely observable in guest RAM: word[site] decodes to a `b`
+// whose target is inside DLL image space and within +/-32MB (PPC I-form b
+// reach). Stock (no DLL / hooks not installed) = 0x7D8802A6 (mflr r12).
+//   H1 PlayerTrackConfigList::ProcessConfig @0x8276FA08 (kills vector[-1] crash)
+//   H2 TrackWatcherImpl::RecalcGemList     @0x82794740 (per-watcher gem clone)
+// Title-gated + default-off => DC3-inert; no writes.
+static void Rb3dxSiHookVerifyThread(Memory* memory) {
+  using xe::load_and_swap;
+  uint8_t* base = memory->virtual_membase();
+  const uint32_t kH1 = 0x8276FA08;  // ProcessConfig
+  const uint32_t kH2 = 0x82794740;  // RecalcGemList
+  const uint32_t kDllLo = 0x84000000;
+  // From-source RB3Enhanced.dll packed image is ~0x850000 (boot.xex 8.7 MB,
+  // image_size 0x850000 per mapdeploy.json); its hook stubs sit at ~0x84019xxx
+  // and its config at 0x84829xxx. The reference-DLL 0x40000 window is too tight
+  // for the from-source layout's config VA, so widen to the full mapped image.
+  const uint32_t kDllHi = 0x84850000;
+  const uint32_t kStockPrologue = 0x7D8802A6;  // mflr r12
+  auto readable = [&](uint32_t a) -> bool {
+    if (a < 0x1000) return false;
+    auto* heap = memory->LookupHeap(a);
+    if (!heap) return false;
+    uint32_t prot = 0;
+    if (!heap->QueryProtect(a, &prot)) return false;
+    return (prot & kMemoryProtectRead) != 0;
+  };
+  auto r32 = [&](uint32_t a) -> uint32_t {
+    return readable(a) ? load_and_swap<uint32_t>(base + a) : 0xEEEEEEEEu;
+  };
+  // Decode a PPC I-form branch word at `site`; returns target VA or 0 if not a
+  // primary-opcode-18 branch. Handles AA (absolute) + sign-extended 26-bit LI.
+  auto branch_target = [](uint32_t word, uint32_t site) -> uint32_t {
+    if ((word >> 26) != 18u) return 0;               // not b/bl/ba/bla
+    int32_t li = static_cast<int32_t>(word & 0x03FFFFFCu);
+    if (li & 0x02000000) li |= static_cast<int32_t>(0xFC000000u);  // sign-ext
+    bool aa = (word & 0x2) != 0;
+    return aa ? static_cast<uint32_t>(li)
+              : static_cast<uint32_t>(static_cast<int64_t>(site) + li);
+  };
+  auto classify = [&](const char* tag, uint32_t site) {
+    uint32_t w = r32(site);
+    uint32_t tgt = branch_target(w, site);
+    const char* verdict;
+    if (w == 0xEEEEEEEEu) {
+      verdict = "UNREADABLE (image not loaded here?)";
+    } else if (w == kStockPrologue) {
+      verdict = "STOCK mflr r12 -- NOT hooked (DLL not loaded / init skipped)";
+    } else if (tgt == 0) {
+      verdict = "NON-BRANCH first word -- unexpected (patched but not a b?)";
+    } else {
+      bool in_dll = (tgt >= kDllLo && tgt < kDllHi);
+      int64_t rel = static_cast<int64_t>(tgt) - static_cast<int64_t>(site);
+      bool in_reach = rel > -33554432 && rel < 33554432;  // +/-32MB
+      if (in_dll && in_reach)
+        verdict = "PASS -- b into DLL space, in +/-32MB reach";
+      else if (in_dll)
+        verdict = "b into DLL space but OUT OF +/-32MB REACH (impossible?)";
+      else
+        verdict = "b to NON-DLL target (unexpected detour destination)";
+      XELOGW(
+          "SI HOOKVERIFY {} @0x{:08X}: word=0x{:08X} b->0x{:08X} (rel={}) [{}]",
+          tag, site, w, tgt, static_cast<long long>(rel), verdict);
+      return;
+    }
+    XELOGW("SI HOOKVERIFY {} @0x{:08X}: word=0x{:08X} [{}]", tag, site, w,
+           verdict);
+  };
+  uint32_t n = 0;
+  for (;;) {
+    if (n < 3 || (n % 20) == 0) {
+      // Is anything mapped at the DLL base? (loaded-module smoke check.)
+      uint32_t dll_head = r32(kDllLo);
+      XELOGI("SI HOOKVERIFY[{}]: DLL-base word@0x84000000=0x{:08X} ({})", n,
+             dll_head,
+             dll_head == 0xEEEEEEEEu ? "unmapped -- DLL NOT loaded"
+                                     : "mapped");
+      classify("H1", kH1);
+      classify("H2", kH2);
+    }
+    ++n;
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
   }
 }
 
@@ -3268,7 +3722,8 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
   // MemAlloc's call site (lr == 0x827BCD40). DC3-inert: title-gated +
   // default-off cvar.
   if (title_id_.has_value() && title_id_.value() == 0x45410914 &&
-      cvars::rb3dx_alloc_probe) {
+      (cvars::rb3dx_alloc_probe || cvars::rb3dx_clamp_alloc ||
+       cvars::si_selftest || cvars::si_load_dll)) {
     const uint32_t kSaveGprLr23 = 0x82829244;
     auto* mem = memory_->virtual_membase();
     uint32_t insn0 = xe::load_and_swap<uint32_t>(mem + kSaveGprLr23);
@@ -3297,6 +3752,27 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
     Memory* probe_mem = memory_.get();
     std::thread([probe_mem]() { Rb3dxUiProbeThread(probe_mem); }).detach();
     XELOGI("RB3DX: UI probe sampler thread started (--rb3dx_ui_probe)");
+  }
+
+  // RB3DX / RB3 TU5 (0x45410914): same-instrument static-patch runtime observer
+  // (--si_probe). Read-only host thread; title-gated + default-off => DC3-inert.
+  if (title_id_.has_value() && title_id_.value() == 0x45410914 &&
+      cvars::si_probe) {
+    Memory* si_mem = memory_.get();
+    std::thread([si_mem]() { Rb3dxSiProbeThread(si_mem); }).detach();
+    XELOGI("RB3DX: SI static-patch probe thread started (--si_probe)");
+  }
+
+  // RB3DX / RB3 TU5 (0x45410914): RB3Enhanced-DLL same-instrument GAMEPLAY-hook
+  // install verifier (--si_hook_verify). Read-only host thread that decodes the
+  // H1/H2 first-instruction words to confirm the runtime HookFunction detour
+  // branches into DLL space at 0x84000000. Title-gated + default-off =>
+  // DC3-inert.
+  if (title_id_.has_value() && title_id_.value() == 0x45410914 &&
+      cvars::si_hook_verify) {
+    Memory* hv_mem = memory_.get();
+    std::thread([hv_mem]() { Rb3dxSiHookVerifyThread(hv_mem); }).detach();
+    XELOGI("RB3DX: SI DLL-hook verify thread started (--si_hook_verify)");
   }
 
   // RB3DX (0x45410914): offline single-local-host join completion
@@ -4680,6 +5156,75 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
              ik_result.applied, ik_result.skipped, ik_result.failed);
     }
   }
+  // RB3DX / RB3 TU5 (0x45410914): load the from-source RB3Enhanced.dll for the
+  // same-instrument gameplay hooks (--si_load_dll), here at the stable
+  // pre-LaunchModule point (same site as the DC3 .text patches) rather than from
+  // a mid-boot guest-thread callback -- loading a module while the guest's heaps
+  // are live races and crashes. LoadUserModule(call_entry=false) maps the DLL at
+  // its preferred base 0x84000000. The hardcoded old-DLL host-emulated kHooks
+  // table is RETIRED: with the from-source DLL the detours are installed by the
+  // DLL's own InitSameInstrument (guest-thread call at --si_init_va, in the
+  // __savegprlr_23 override), so the targets come from the DLL link map, not
+  // constants. Here we only (1) map the DLL and (2) -- for behavioral runs --
+  // poke config.AllowSameInstrument=1 at --si_force_allow_va, because
+  // call_entry=false skips DllMain/ini load so the flag would otherwise stay 0
+  // and the installed hooks would run pass-through. Title-gated + default-off =>
+  // DC3-inert. Verify with --si_hook_verify.
+  if (title_id_.has_value() && title_id_.value() == 0x45410914 &&
+      cvars::si_load_dll) {
+    auto dll = kernel_state_->LoadUserModule("game:\\RB3Enhanced.dll",
+                                             /*call_entry=*/false);
+    if (!dll) {
+      XELOGE("SI LOADDLL: LoadUserModule(game:\\RB3Enhanced.dll) FAILED");
+    } else {
+      uint8_t* mb = memory_->virtual_membase();
+      uint32_t dll_head = xe::load_and_swap<uint32_t>(mb + 0x84000000u);
+      XELOGW("SI LOADDLL: RB3Enhanced.dll loaded entry=0x{:08X} is_dll={} "
+             "head@0x84000000=0x{:08X}",
+             dll->entry_point(), dll->is_dll_module(), dll_head);
+      // The four SI detours are installed later, mid-boot, from the
+      // __savegprlr_23 override (approach (a) guest-thread InitSameInstrument if
+      // --si_init_va is set, else approach (b) host-emulated from-source detour
+      // writes). A pre-LaunchModule write here does NOT stick -- the loader's
+      // lazy .text commit reverts it -- so only the DLL map + allow-flag poke
+      // happen at this site.
+      if (cvars::si_init_va != 0) {
+        XELOGW(
+            "SI LOADDLL: from-source path (a) armed -- InitSameInstrument "
+            "@0x{:08X} will run mid-boot on the guest thread (--si_init_va).",
+            static_cast<uint32_t>(cvars::si_init_va));
+      } else {
+        XELOGW(
+            "SI LOADDLL: from-source path (b) armed -- host-emulated detours "
+            "(map hookVAs) will be written mid-boot from the __savegprlr_23 "
+            "override.");
+      }
+      // (2) Force AllowSameInstrument=1 so the installed hook BODIES are live
+      // (char field; single-byte poke). DllMain/ini never ran (call_entry=false)
+      // so the flag is 0 in DLL .bss. REQUIRED for behavioral (Phase-5) runs.
+      if (cvars::si_force_allow_va != 0) {
+        uint32_t allow_va = static_cast<uint32_t>(cvars::si_force_allow_va);
+        uint8_t* host_addr = mb + allow_va;
+        const size_t host_pg = xe::memory::page_size();
+        uint8_t* host_page = reinterpret_cast<uint8_t*>(
+            reinterpret_cast<uintptr_t>(host_addr) & ~(host_pg - 1));
+        xe::memory::Protect(host_page, host_pg,
+                            xe::memory::PageAccess::kReadWrite);
+        uint8_t before = *host_addr;
+        *host_addr = 1u;  // config.AllowSameInstrument (char) = 1
+        XELOGW(
+            "SI LOADDLL: poked config.AllowSameInstrument @0x{:08X} {} -> 1 "
+            "(--si_force_allow_va; hook bodies armed)",
+            allow_va, before);
+      } else {
+        XELOGW(
+            "SI LOADDLL: --si_force_allow_va is 0 -- config.AllowSameInstrument "
+            "stays 0; hooks install but run PASS-THROUGH (install-only "
+            "verification is fine; behavioral runs REQUIRE this flag).");
+      }
+    }
+  }
+
   auto main_thread = kernel_state_->LaunchModule(module);
   if (!main_thread) {
     return X_STATUS_UNSUCCESSFUL;
