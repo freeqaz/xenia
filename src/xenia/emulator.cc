@@ -239,6 +239,18 @@ DEFINE_bool(
     "AddUserResultMsg(1) at once instead of an online request/response that "
     "never round-trips headless. Title-gated so DC3-inert.",
     "CPU");
+DEFINE_bool(
+    rb3dx_skip_calibration, false,
+    "RB3DX / RB3 TU5 (title 0x45410914), default off: make first-boot skip the "
+    "interactive first_time_calibration -> cal_audio_screen A/V-latency "
+    "calibration (uncompletable headless with null audio + fixed-time input) so "
+    "the splash advances straight to main_hub. A host thread resolves the guest "
+    "profile_mgr singleton via the main-dir name hash and sets "
+    "ProfileMgr::mHasSeenFirstTimeCalibration @+0x54 = 1 (the splash "
+    "kSplashScreen_EndOvershell condition {!{profile_mgr "
+    "get_has_seen_first_time_calibration}} then routes to main_hub_screen). "
+    "Single guest byte written; title-gated so DC3-inert.",
+    "CPU");
 
 namespace xe {
 
@@ -600,6 +612,108 @@ void Rb3dxIsHostOfflineExtern(cpu::ppc::PPCContext* ppc_context,
   // this machine is the host. The real code asks Quazal only when mQNet!=0
   // (this+0x70), which headless returns false and causes the join stall.
   ppc_context->r[3] = 1;
+}
+
+// RB3DX / RB3 TU5 first-boot calibration skip (--rb3dx_skip_calibration).
+//
+// The splash flow, at kSplashScreen_EndOvershell, evaluates the DTA condition
+// `{! {profile_mgr get_has_seen_first_time_calibration}}` (ui/splash/splash.dta):
+// false-on-a-fresh-profile routes to `push_screen first_time_calibration` (the
+// interactive cal_audio_screen A/V-latency calibration, uncompletable headless
+// with null audio + fixed-time scripted input); true routes to
+// `goto_screen main_hub_screen`. The message handler (ProfileMgr::Handle) reads
+// the bool member mHasSeenFirstTimeCalibration @+0x54 INLINE (verified: the
+// standalone GetHasSeenFirstTimeCalibration() leaf getter is never entered at
+// boot), so a guest-function override cannot intercept it. Instead we set the
+// backing byte directly.
+//
+// This thread resolves the `profile_mgr` object (the game's ProfileMgr /
+// TheProfileMgr singleton) through the same ObjectDir::sMainDir @0x82E054B8
+// name-hash walk the UI probe uses, then writes 1 to obj+0x54 repeatedly until
+// the decision is taken (and beyond — cheap, idempotent, and robust to the
+// GlobalOptions load re-zeroing the field before EndOvershell fires). The
+// member offset (0x54) is the RB3 xbox360 layout verified from the ProfileMgr
+// ctor (rb3-xenon). Guest-memory write is confined to this single bool byte;
+// title-gated + default-off so DC3-inert.
+static void Rb3dxSkipCalibrationPokeThread(Memory* memory) {
+  using xe::load_and_swap;
+  uint8_t* base = memory->virtual_membase();
+  auto prot = [&](uint32_t addr, uint32_t flag) -> bool {
+    if (addr < 0x1000) return false;
+    auto* heap = memory->LookupHeap(addr);
+    if (!heap) return false;
+    uint32_t p = 0;
+    if (!heap->QueryProtect(addr, &p)) return false;
+    return (p & flag) != 0;
+  };
+  auto readable = [&](uint32_t a) { return prot(a, kMemoryProtectRead); };
+  auto writable = [&](uint32_t a) { return prot(a, kMemoryProtectWrite); };
+  auto r32 = [&](uint32_t a) -> uint32_t {
+    return readable(a) ? load_and_swap<uint32_t>(base + a) : 0;
+  };
+  auto rstr = [&](uint32_t a) -> std::string {
+    if (!readable(a)) return std::string();
+    std::string s;
+    for (int i = 0; i < 48; ++i) {
+      if (!readable(a + i)) break;
+      char c = static_cast<char>(*(base + a + i));
+      if (!c) return s;
+      if (c < 0x20 || c > 0x7E) return std::string();
+      s += c;
+    }
+    return s;
+  };
+  const uint32_t kMainDirPtr = 0x82E054B8;
+  // The ObjectDir stores the Hmx::Object VBASE pointer (object tail) for the
+  // MsgSource-derived ProfileMgr, so mHasSeenFirstTimeCalibration (this+0x54)
+  // sits at a NEGATIVE offset from that pointer. Empirically pinned: on
+  // first_time_calibration.enter the setter flips two adjacent bytes together
+  // at obj-0x90 and obj-0x74 (spacing 0x1C == 0x54-0x38 = flag vs
+  // mGlobalOptionsDirty), fixing this = obj-0xC8, so the flag byte is obj-0x74
+  // (a mapping cross-checked by obj-0x60 == this+0x68 == mOverscan).
+  const int32_t kFlagOffset = -0x74;  // ProfileMgr::mHasSeenFirstTimeCalibration
+  uint32_t profile_mgr = 0;
+  uint32_t pokes = 0;
+  for (;;) {
+    // Resolve profile_mgr once via the main-dir name hash.
+    if (!profile_mgr) {
+      uint32_t dir = r32(kMainDirPtr);
+      if (dir) {
+        uint32_t entries = r32(dir + 0x8);
+        int size = static_cast<int>(r32(dir + 0xC));
+        if (entries && size > 0 && size < 200000) {
+          for (int i = 0; i < size; ++i) {
+            uint32_t name_p = r32(entries + i * 8);
+            uint32_t obj = r32(entries + i * 8 + 4);
+            if (!name_p || !obj) continue;
+            if (rstr(name_p) == "profile_mgr") {
+              profile_mgr = obj;
+              XELOGE(
+                  "RB3DX skip-calibration: resolved profile_mgr obj=0x{:08X} "
+                  "(flag byte @0x{:08X})",
+                  profile_mgr, profile_mgr + kFlagOffset);
+              break;
+            }
+          }
+        }
+      }
+    }
+    // Poke the flag byte to 1 while it is writable (idempotent; robust to the
+    // GlobalOptions load or a transient re-zero before the splash decision).
+    if (profile_mgr) {
+      uint32_t flag_addr = profile_mgr + kFlagOffset;
+      if (writable(flag_addr)) {
+        uint8_t before = *(base + flag_addr);
+        *(base + flag_addr) = 1;
+        if (pokes < 8 || (before == 0 && pokes < 200)) {
+          XELOGI("RB3DX skip-calibration: poke #{} [0x{:08X}] {} -> 1", pokes,
+                 flag_addr, before);
+        }
+        ++pokes;
+      }
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+  }
 }
 
 // RB3DX main_hub load-stall investigation (--rb3dx_ui_probe).
@@ -3269,6 +3383,26 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
           "override at 0x{:08X} (signature-located, {} bl-callers)",
           found, bl_callers);
     }
+  }
+
+  // RB3DX / RB3 TU5 (0x45410914): first-boot calibration skip
+  // (--rb3dx_skip_calibration). Title-gated + default-off => DC3-inert.
+  // Spawns a host thread that resolves the guest `profile_mgr` singleton via
+  // the main-dir name hash and writes mHasSeenFirstTimeCalibration@+0x54 = 1
+  // repeatedly, so the splash's kSplashScreen_EndOvershell decision
+  // `{! {profile_mgr get_has_seen_first_time_calibration}}` sees "already
+  // calibrated" and routes to main_hub_screen instead of the uncompletable
+  // headless cal_audio_screen (see Rb3dxSkipCalibrationPokeThread). The handler
+  // reads the field inline, so a guest-function override cannot catch it — a
+  // direct memory poke does. Single-byte guest write.
+  if (title_id_.has_value() && title_id_.value() == 0x45410914 &&
+      cvars::rb3dx_skip_calibration) {
+    Memory* poke_mem = memory_.get();
+    std::thread([poke_mem]() { Rb3dxSkipCalibrationPokeThread(poke_mem); })
+        .detach();
+    XELOGI(
+        "RB3DX: first-boot calibration skip thread started "
+        "(--rb3dx_skip_calibration)");
   }
 
   // DC3 title-specific guest code patches.
