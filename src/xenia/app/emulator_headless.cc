@@ -63,6 +63,17 @@ DEFINE_bool(
     "DC3: pause target execution when a GDB client connects to the headless "
     "RSP stub.",
     "DC3");
+DEFINE_bool(
+    rb3dx_hub_teardown_trace, false,
+    "RB3DX / RB3 TU5 (title 0x45410914), default off: de-mask the periodic "
+    "headless Thread Status Report so it stops attributing the main_hub stall "
+    "to the benign XMA-decoder MMIO soft-fault at 0x82BCEFE4. When on (and the "
+    "running title is 0x45410914), the report additionally prints the count of "
+    "benign XMA-aperture [0x7FEA0000,0x7FEB0000) soft-faults and the last "
+    "*non-XMA* (genuine) fault address/rip resolved to its guest function -- "
+    "the field to watch for the real ~30s terminator. Read-only diagnostic; no "
+    "guest state changed; title-gated so DC3-inert.",
+    "CPU");
 
 #ifdef __linux__
 // Signal-based JIT IP sampler: sends SIGUSR2 to a target thread,
@@ -1218,6 +1229,36 @@ void EmulatorHeadless::RunWithTimeout(int32_t timeout_ms) {
           }
         }
         fprintf(stderr, "\n");
+        // De-mask (RB3DX title 0x45410914, --rb3dx_hub_teardown_trace): the raw
+        // last_fault/crash_guest above are almost always the benign XMA-decoder
+        // MMIO poke (0x82BCEFE4 -> EA 0x7FEAxxxx) once audio starts, which masks
+        // the genuine last fault. Print the XMA-benign count and the last
+        // *non-XMA* fault resolved to its guest function -- the field to watch
+        // for the real main_hub terminator.
+        if (cvars::rb3dx_hub_teardown_trace &&
+            emulator_->title_id() == 0x45410914u) {
+          auto xma_faults = ExceptionHandler::GetXmaSoftFaultCount();
+          auto real_fault = ExceptionHandler::GetLastRealFaultAddress();
+          auto real_rip = ExceptionHandler::GetLastRealFaultRip();
+          fprintf(stderr,
+                  "  [demask] XMA-benign-faults=%lu  last_REAL_fault=0x%lX "
+                  "last_REAL_rip=0x%lX",
+                  xma_faults, real_fault, real_rip);
+          if (real_rip != 0 && processor) {
+            auto* backend = processor->backend();
+            auto* code_cache = backend ? backend->code_cache() : nullptr;
+            if (code_cache) {
+              auto* jit_fn = code_cache->LookupFunction(real_rip);
+              if (jit_fn) {
+                uint32_t real_guest =
+                    jit_fn->MapMachineCodeToGuestAddress(real_rip);
+                fprintf(stderr, " real_guest=0x%08X [%s]", real_guest,
+                        jit_fn->name().c_str());
+              }
+            }
+          }
+          fprintf(stderr, "\n");
+        }
         fflush(stderr);
         for (auto& thread : threads) {
           auto* ppc_ctx = thread->thread_state() ? thread->thread_state()->context() : nullptr;

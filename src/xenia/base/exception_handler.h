@@ -231,6 +231,16 @@ class ExceptionHandler {
   static uint64_t GetSigsegvCount();
   static uint64_t GetLastFaultAddress();
   static uint64_t GetLastFaultRip();
+  // De-mask trackers: every guest write into the XMA decoder MMIO aperture
+  // [0x7FEA0000,0x7FEB0000) is a benign, recovered-by-construction device
+  // register poke (XmaDecoder::WriteRegister). In a running title these
+  // dominate the raw last-fault fields and mask the last *real* fault. These
+  // trackers exclude the XMA aperture so diagnostics can show the genuine
+  // last fault (and count the benign XMA soft-faults separately). See the
+  // main_hub teardown investigation (HUBCRASH-ROOTCAUSE-82BCEFE4.md).
+  static uint64_t GetXmaSoftFaultCount();
+  static uint64_t GetLastRealFaultAddress();
+  static uint64_t GetLastRealFaultRip();
   // Guest PPCContext* (host rsi) captured when the fault-livelock circuit
   // breaker trips; 0 if it has not tripped. See exception_handler_posix.cc.
   static uint64_t GetLastFaultContext();

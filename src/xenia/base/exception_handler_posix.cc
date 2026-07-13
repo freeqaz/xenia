@@ -42,6 +42,14 @@ namespace xe {
 static std::atomic<uint64_t> sigsegv_count_{0};
 static std::atomic<uint64_t> last_fault_address_{0};
 static std::atomic<uint64_t> last_fault_rip_{0};
+// De-mask trackers (see exception_handler.h): writes into the XMA decoder MMIO
+// aperture [0x7FEA0000,0x7FEB0000) are benign recovered device-register pokes
+// and swamp the raw last-fault fields once a title starts audio. Count them
+// separately and remember the last fault whose guest EA is NOT in that
+// aperture, so diagnostics show the genuine last fault rather than XMA noise.
+static std::atomic<uint64_t> xma_soft_fault_count_{0};
+static std::atomic<uint64_t> last_real_fault_address_{0};
+static std::atomic<uint64_t> last_real_fault_rip_{0};
 // Livelock diagnostics: when the circuit-breaker trips, we capture the faulting
 // thread's guest PPCContext pointer (Xenia keeps it in host rsi throughout JIT
 // execution) and raise a flag so a safe thread (the headless status loop) can
@@ -192,9 +200,29 @@ static void ExceptionHandlerCallback(int signal_number, siginfo_t* signal_info,
       sigsegv_count_.fetch_add(1, std::memory_order_relaxed);
       last_fault_address_.store(reinterpret_cast<uint64_t>(signal_info->si_addr),
                                 std::memory_order_relaxed);
+      // De-mask: classify this fault's guest EA. The XMA decoder MMIO aperture
+      // [0x7FEA0000,0x7FEB0000) is intentionally PROT_NONE so Xenia can trap +
+      // emulate device-register writes; those recover every time and otherwise
+      // hide the last genuine fault. Guest EA = low 32 bits of the host si_addr.
+      const uint32_t fault_guest_ea =
+          uint32_t(reinterpret_cast<uint64_t>(signal_info->si_addr) &
+                   0xFFFFFFFFull);
+      const bool fault_is_xma_aperture =
+          fault_guest_ea >= 0x7FEA0000u && fault_guest_ea < 0x7FEB0000u;
+      if (fault_is_xma_aperture) {
+        xma_soft_fault_count_.fetch_add(1, std::memory_order_relaxed);
+      } else {
+        last_real_fault_address_.store(
+            reinterpret_cast<uint64_t>(signal_info->si_addr),
+            std::memory_order_relaxed);
+      }
 #if XE_ARCH_AMD64
       last_fault_rip_.store(uint64_t(mcontext.gregs[REG_RIP]),
                             std::memory_order_relaxed);
+      if (!fault_is_xma_aperture) {
+        last_real_fault_rip_.store(uint64_t(mcontext.gregs[REG_RIP]),
+                                   std::memory_order_relaxed);
+      }
       // Livelock circuit-breaker: detect a recovered fault that re-executes the
       // same host instruction at the same faulting address with no progress
       // (e.g. RB3 Deluxe's MemHeap::Alloc post-OOM store to guest 0xFFFFFFFC,
@@ -419,6 +447,18 @@ uint64_t ExceptionHandler::GetLastFaultAddress() {
 
 uint64_t ExceptionHandler::GetLastFaultRip() {
   return last_fault_rip_.load(std::memory_order_relaxed);
+}
+
+uint64_t ExceptionHandler::GetXmaSoftFaultCount() {
+  return xma_soft_fault_count_.load(std::memory_order_relaxed);
+}
+
+uint64_t ExceptionHandler::GetLastRealFaultAddress() {
+  return last_real_fault_address_.load(std::memory_order_relaxed);
+}
+
+uint64_t ExceptionHandler::GetLastRealFaultRip() {
+  return last_real_fault_rip_.load(std::memory_order_relaxed);
 }
 
 uint64_t ExceptionHandler::GetLastFaultContext() {
