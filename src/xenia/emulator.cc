@@ -10,11 +10,15 @@
 #include "xenia/emulator.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <cinttypes>
+#include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <memory>
+#include <mutex>
 #include <optional>
 #include <string_view>
 #include <set>
@@ -220,6 +224,36 @@ DEFINE_bool(
     "size/align/caller-LR + a guest stack walk for allocation sizes with a "
     "non-zero top byte (main_hub OOM corrupted-size investigation). Pure "
     "observer; no guest state is modified by the handler.",
+    "CPU");
+DEFINE_string(
+    rb3dx_alloc_trace_path, "",
+    "RB3DX (title 0x45410914) DIAGNOSTIC, default off (empty): write a 32-byte "
+    "binary record for EVERY guest MemAlloc@0x827BCD38 entry (tag 1: "
+    "size/align/caller-LR/caller-SP), for its RETURN (tag 2: the pointer it "
+    "handed back, joined by seq), and -- with --rb3dx_free_trace -- for every "
+    "MemFree@0x827BC430 entry (tag 3: pointer, block header, caller-LR). "
+    "Offline attribution of heap-\"main\" fragmentation by call site. Text "
+    "logging is far too slow at the real call rate (~876 allocs/s mean, 1900/s "
+    "peak); this is a buffered binary sink. Implies the __savegprlr_23 probe "
+    "override. Title-gated so DC3-inert.",
+    "CPU");
+DEFINE_bool(
+    rb3dx_free_trace, true,
+    "RB3DX: with --rb3dx_alloc_trace_path, also trace MemFree@0x827BC430 (via "
+    "an exact override of its prologue helper __savegprlr_26 @0x82829250, "
+    "filter lr==0x827BC438) so allocations can be paired with their frees and "
+    "block lifetimes attributed. No effect without the trace path.",
+    "CPU");
+DEFINE_bool(
+    rb3dx_ret_trace, true,
+    "RB3DX: with --rb3dx_alloc_trace_path, also capture MemAlloc's RETURN "
+    "VALUE (the allocated pointer -- which says where in the arena the block "
+    "landed, i.e. FirstFit-bottom vs LastFit-top) by overriding the epilogue "
+    "helper __restgprlr_23 @0x82829294 that MemAlloc tail-branches through, "
+    "matching on (r1 == the entry SP recorded for this thread AND the "
+    "about-to-be-restored LR == that call's caller LR). Set false if the "
+    "epilogue override destabilises the guest; the alloc-entry trace still "
+    "works without it, only pointer-exact alloc/free pairing is lost.",
     "CPU");
 DEFINE_bool(
     rb3dx_ui_probe, false,
@@ -482,6 +516,213 @@ void Dc3NuiReturn1Extern(cpu::ppc::PPCContext* ppc_context,
   ppc_context->r[3] = 1;
 }
 
+// RB3DX heap-"main" fragmentation attribution (--rb3dx_alloc_trace_path).
+//
+// A per-allocation binary trace. Every record is 32 bytes, little-endian host
+// order, appended to one file:
+//
+//   u8  tag    1 = MemAlloc entry, 2 = MemAlloc return, 3 = MemFree entry
+//   u8  pad
+//   u16 tid    guest thread id (low 16 bits)
+//   u32 seq    MemAlloc ordinal (tags 1 and 2 share it; MemFree ordinal for 3)
+//   u64 ns     steady_clock ns since the sink opened
+//   u32 a      tag1: size (r3)      tag2: returned pointer (r3)  tag3: ptr (r3)
+//   u32 b      tag1: align (r4)     tag2: 0                      tag3: header
+//   u32 lr     caller LR (r12 at the callee's entry)
+//   u32 sp     caller SP (r1 at the callee's entry, before its stwu)
+//
+// Why binary: the measured rate is ~876 MemAlloc/s mean and 1900/s peak, so a
+// formatted log line per call would cost more than the emulation. A record is
+// a memcpy under a mutex into a 1 MiB-buffered FILE.
+namespace {
+
+struct Rb3dxTraceRec {
+  uint8_t tag;
+  uint8_t pad;
+  uint16_t tid;
+  uint32_t seq;
+  uint64_t ns;
+  uint32_t a;
+  uint32_t b;
+  uint32_t lr;
+  uint32_t sp;
+};
+static_assert(sizeof(Rb3dxTraceRec) == 32, "trace record must stay 32 bytes");
+
+class Rb3dxAllocTraceSink {
+ public:
+  explicit Rb3dxAllocTraceSink(const std::string& path)
+      : f_(fopen(path.c_str(), "wb")),
+        t0_(std::chrono::steady_clock::now()) {
+    if (f_) {
+      setvbuf(f_, nullptr, _IOFBF, 1 << 20);
+    }
+  }
+  ~Rb3dxAllocTraceSink() {
+    if (f_) {
+      fflush(f_);
+      fclose(f_);
+    }
+  }
+  bool ok() const { return f_ != nullptr; }
+  uint64_t written() const { return count_.load(std::memory_order_relaxed); }
+
+  void Emit(uint8_t tag, uint32_t tid, uint32_t seq, uint32_t a, uint32_t b,
+            uint32_t lr, uint32_t sp) {
+    if (!f_) {
+      return;
+    }
+    Rb3dxTraceRec r{};
+    r.tag = tag;
+    r.tid = static_cast<uint16_t>(tid);
+    r.seq = seq;
+    r.ns = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - t0_)
+            .count());
+    r.a = a;
+    r.b = b;
+    r.lr = lr;
+    r.sp = sp;
+    std::lock_guard<std::mutex> g(m_);
+    fwrite(&r, sizeof(r), 1, f_);
+    count_.fetch_add(1, std::memory_order_relaxed);
+  }
+  void Flush() {
+    std::lock_guard<std::mutex> g(m_);
+    if (f_) {
+      fflush(f_);
+    }
+  }
+
+ private:
+  FILE* f_;
+  std::chrono::steady_clock::time_point t0_;
+  std::mutex m_;
+  std::atomic<uint64_t> count_{0};
+};
+
+// Owned by the emulator for the process lifetime once CompleteLaunch installs
+// it; read without synchronisation from the guest-thread handlers (published
+// before the guest module is launched, never torn down while the guest runs).
+std::unique_ptr<Rb3dxAllocTraceSink> rb3dx_alloc_trace_sink;
+
+// Per-guest-thread record of the MemAlloc call currently in flight, so that
+// the __restgprlr_23 epilogue override can attribute the returned pointer back
+// to the entry record. MemAlloc cannot recurse into itself, so one slot per
+// thread is exact.
+struct Rb3dxPendingAlloc {
+  bool active = false;
+  uint32_t sp = 0;   // MemAlloc's entry SP (== r1 at the epilogue restore)
+  uint32_t lr = 0;   // caller LR (== the word reloaded from [sp-8])
+  uint32_t seq = 0;  // MemAlloc ordinal of the entry record
+};
+thread_local Rb3dxPendingAlloc t_rb3dx_pending_alloc;
+
+// Free-side ordinal (tag 3).
+std::atomic<uint32_t> rb3dx_memfree_calls{0};
+// Diagnostics for the epilogue override: how many returns we matched.
+std::atomic<uint64_t> rb3dx_ret_matches{0};
+
+}  // namespace
+
+// RB3DX: MemFree@0x827BC430 entry probe (--rb3dx_free_trace).
+//
+// Same recipe as the MemAlloc side, one helper down the save chain: MemFree's
+// prologue is `mflr r12 ; bl 0x82829250 ; addi r31,r1,-0x90 ; stwu r1,-0x90(r1)`,
+// i.e. it calls __savegprlr_26 and returns to 0x827BC438 -- a unique filter key.
+// The handler emulates __savegprlr_26 exactly (std r26..r31 at r1-0x38..r1-0x10,
+// stw r12 at r1-8) so every other caller of that helper is unaffected.
+// At the filter point r3 = the pointer being freed, r12 = the caller LR.
+void Rb3dxSaveGprLr26ProbeExtern(cpu::ppc::PPCContext* ppc_context,
+                                 kernel::KernelState* kernel_state) {
+  if (!ppc_context || !kernel_state) {
+    return;
+  }
+  uint8_t* base = kernel_state->memory()->virtual_membase();
+  uint32_t sp = static_cast<uint32_t>(ppc_context->r[1]);
+  // --- exact __savegprlr_26 emulation (must be semantically transparent) ---
+  for (int i = 0; i < 6; ++i) {
+    xe::store_and_swap<uint64_t>(base + sp - 0x38 + i * 8,
+                                 ppc_context->r[26 + i]);
+  }
+  xe::store_and_swap<uint32_t>(base + sp - 8,
+                               static_cast<uint32_t>(ppc_context->r[12]));
+  // --- probe part ---
+  const uint32_t kMemFreeRet = 0x827BC438;  // bl at 0x827BC434 in MemFree
+  if (static_cast<uint32_t>(ppc_context->lr) != kMemFreeRet) {
+    return;
+  }
+  auto* sink = rb3dx_alloc_trace_sink.get();
+  if (!sink) {
+    return;
+  }
+  uint32_t ptr = static_cast<uint32_t>(ppc_context->r[3]);
+  // The allocated-block header is the word immediately below the payload:
+  // (totalUsedWords << 8) | (padWords << 4) | flags. Only read it for pointers
+  // that plausibly live in a guest heap arena, so a MemFree(NULL) or a wild
+  // pointer can never fault the host.
+  uint32_t header = 0;
+  if (ptr >= 0x30000000u && ptr < 0x60000000u && (ptr & 3u) == 0u) {
+    header = xe::load_and_swap<uint32_t>(base + ptr - 4);
+  }
+  uint32_t seq = rb3dx_memfree_calls.fetch_add(1, std::memory_order_relaxed);
+  uint32_t tid =
+      ppc_context->thread_state ? ppc_context->thread_state->thread_id() : 0;
+  sink->Emit(3, tid, seq, ptr, header,
+             static_cast<uint32_t>(ppc_context->r[12]), sp);
+}
+
+// RB3DX: MemAlloc RETURN probe (--rb3dx_ret_trace).
+//
+// MemAlloc's epilogue is `mr r3,r30 ; addi r1,r31,0xb0 ; b 0x82c5ffc0`, and
+// that thunk lands in __restgprlr_23 @0x82829294 (the shared restore chain:
+// ld r23..r31 from r1-0x50..r1-0x10, lwz r12,-8(r1), mtlr r12, blr). Overriding
+// it gives us the one thing the entry hook cannot see: r3, the pointer handed
+// back -- which is what says whether a caller's blocks land at the FirstFit
+// bottom or the LastFit top of the arena.
+//
+// The override is exact (it performs the same reloads and sets LR), and Xenia
+// compiles the guest tail-branch as CallExtern + jmp epilog, so control still
+// unwinds through the host call chain to MemAlloc's caller.
+//
+// Attribution filter: this helper is shared by every function that saved
+// r23..r31, so we match against the per-thread pending slot -- r1 must equal
+// the SP recorded at MemAlloc's entry (callees are strictly below it, callers
+// strictly above) AND the LR being restored must equal that call's caller LR
+// (a different call site from the same frame would restore a different one).
+void Rb3dxRestGprLr23TraceExtern(cpu::ppc::PPCContext* ppc_context,
+                                 kernel::KernelState* kernel_state) {
+  if (!ppc_context || !kernel_state) {
+    return;
+  }
+  uint8_t* base = kernel_state->memory()->virtual_membase();
+  uint32_t sp = static_cast<uint32_t>(ppc_context->r[1]);
+  // --- exact __restgprlr_23 emulation ---
+  for (int i = 0; i < 9; ++i) {
+    ppc_context->r[23 + i] =
+        xe::load_and_swap<uint64_t>(base + sp - 0x50 + i * 8);
+  }
+  uint32_t restored_lr = xe::load_and_swap<uint32_t>(base + sp - 8);
+  ppc_context->r[12] = restored_lr;
+  ppc_context->lr = restored_lr;
+  // --- probe part ---
+  auto& p = t_rb3dx_pending_alloc;
+  if (!p.active || p.sp != sp || p.lr != restored_lr) {
+    return;
+  }
+  p.active = false;
+  auto* sink = rb3dx_alloc_trace_sink.get();
+  if (!sink) {
+    return;
+  }
+  rb3dx_ret_matches.fetch_add(1, std::memory_order_relaxed);
+  uint32_t tid =
+      ppc_context->thread_state ? ppc_context->thread_state->thread_id() : 0;
+  sink->Emit(2, tid, p.seq, static_cast<uint32_t>(ppc_context->r[3]), 0,
+             restored_lr, sp);
+}
+
 // RB3DX main_hub OOM investigation (--rb3dx_alloc_probe).
 //
 // We need MemAlloc's entry args (r3=size bytes, r4=align) plus the caller
@@ -546,6 +787,22 @@ void Rb3dxSaveGprLr23ProbeExtern(cpu::ppc::PPCContext* ppc_context,
           size, clamped, m);
     }
     size = clamped;
+  }
+  // --- per-allocation binary trace (--rb3dx_alloc_trace_path) ---
+  // Emitted BEFORE the suspicious/big filter below, so the trace is complete;
+  // also arms this thread's pending slot so the __restgprlr_23 epilogue
+  // override can attach the returned pointer to this record.
+  if (auto* sink = rb3dx_alloc_trace_sink.get()) {
+    uint32_t tid =
+        ppc_context->thread_state ? ppc_context->thread_state->thread_id() : 0;
+    uint32_t seq32 = static_cast<uint32_t>(m);
+    sink->Emit(1, tid, seq32, size, static_cast<uint32_t>(ppc_context->r[4]),
+               static_cast<uint32_t>(ppc_context->r[12]), sp);
+    auto& p = t_rb3dx_pending_alloc;
+    p.active = true;
+    p.sp = sp;
+    p.lr = static_cast<uint32_t>(ppc_context->r[12]);
+    p.seq = seq32;
   }
   // --- Same-instrument cave-execution self-test (--si_selftest) ---
   // Fire ONCE, well into boot (guest heaps up, 0x826684C0 resolvable), on this
@@ -3723,7 +3980,8 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
   // default-off cvar.
   if (title_id_.has_value() && title_id_.value() == 0x45410914 &&
       (cvars::rb3dx_alloc_probe || cvars::rb3dx_clamp_alloc ||
-       cvars::si_selftest || cvars::si_load_dll)) {
+       cvars::si_selftest || cvars::si_load_dll ||
+       !cvars::rb3dx_alloc_trace_path.empty())) {
     const uint32_t kSaveGprLr23 = 0x82829244;
     auto* mem = memory_->virtual_membase();
     uint32_t insn0 = xe::load_and_swap<uint32_t>(mem + kSaveGprLr23);
@@ -3740,6 +3998,79 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
           "RB3DX: MemAlloc probe installed via __savegprlr_23 override at "
           "0x{:08X} (filter lr=0x827BCD40)",
           kSaveGprLr23);
+    }
+  }
+
+  // RB3DX (0x45410914): per-allocation binary trace for the heap-"main"
+  // fragmentation attribution (--rb3dx_alloc_trace_path). Opens the sink and
+  // registers the two extra overrides -- MemFree's prologue helper
+  // __savegprlr_26 and MemAlloc's epilogue helper __restgprlr_23 -- both of
+  // which are exact emulations of the pre-declared save/restore stubs, same
+  // recipe as the alloc-entry probe above. Title-gated + empty-by-default =>
+  // DC3-inert.
+  if (title_id_.has_value() && title_id_.value() == 0x45410914 &&
+      !cvars::rb3dx_alloc_trace_path.empty()) {
+    rb3dx_alloc_trace_sink =
+        std::make_unique<Rb3dxAllocTraceSink>(cvars::rb3dx_alloc_trace_path);
+    if (!rb3dx_alloc_trace_sink->ok()) {
+      XELOGE("RB3DX: alloc trace could NOT open '{}' -- tracing disabled",
+             cvars::rb3dx_alloc_trace_path);
+      rb3dx_alloc_trace_sink.reset();
+    } else {
+      XELOGI("RB3DX: alloc trace -> '{}' (32-byte records)",
+             cvars::rb3dx_alloc_trace_path);
+      auto* mem = memory_->virtual_membase();
+      if (cvars::rb3dx_free_trace) {
+        const uint32_t kSaveGprLr26 = 0x82829250;
+        uint32_t w = xe::load_and_swap<uint32_t>(mem + kSaveGprLr26);
+        if (w != 0xFB41FFC8) {  // std r26,-0x38(r1)
+          XELOGW(
+              "RB3DX: MemFree trace NOT installed (unexpected __savegprlr_26 "
+              "word 0x{:08X})",
+              w);
+        } else {
+          processor_->RegisterGuestFunctionOverride(
+              kSaveGprLr26, Rb3dxSaveGprLr26ProbeExtern,
+              "RB3DX:__savegprlr_26(free probe)");
+          XELOGI(
+              "RB3DX: MemFree probe installed via __savegprlr_26 override at "
+              "0x{:08X} (filter lr=0x827BC438)",
+              kSaveGprLr26);
+        }
+      }
+      if (cvars::rb3dx_ret_trace) {
+        const uint32_t kRestGprLr23 = 0x82829294;
+        uint32_t w = xe::load_and_swap<uint32_t>(mem + kRestGprLr23);
+        if (w != 0xEAE1FFB0) {  // ld r23,-0x50(r1)
+          XELOGW(
+              "RB3DX: MemAlloc return trace NOT installed (unexpected "
+              "__restgprlr_23 word 0x{:08X})",
+              w);
+        } else {
+          processor_->RegisterGuestFunctionOverride(
+              kRestGprLr23, Rb3dxRestGprLr23TraceExtern,
+              "RB3DX:__restgprlr_23(alloc return)");
+          XELOGI(
+              "RB3DX: MemAlloc return probe installed via __restgprlr_23 "
+              "override at 0x{:08X}",
+              kRestGprLr23);
+        }
+      }
+      // Periodic flush + progress so a run that is killed on a wall-clock
+      // deadline still leaves a complete-to-the-second trace on disk.
+      std::thread([]() {
+        while (true) {
+          std::this_thread::sleep_for(std::chrono::seconds(10));
+          auto* sink = rb3dx_alloc_trace_sink.get();
+          if (!sink) {
+            return;
+          }
+          sink->Flush();
+          XELOGI("RB3DX alloc trace: {} records ({} alloc returns matched)",
+                 sink->written(),
+                 rb3dx_ret_matches.load(std::memory_order_relaxed));
+        }
+      }).detach();
     }
   }
 
