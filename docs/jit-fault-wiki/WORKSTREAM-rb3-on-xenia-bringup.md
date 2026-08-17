@@ -379,6 +379,178 @@ The same-instrument two-controller A/B remains staged and ready the moment
 byte-verified for RB3DX and delivered as a title-gated runtime memory patch (no
 XEX repack).
 
+**UPDATE 2026-07-09 (wave 3) — calibration bypass landed; a NEW gate (doc-09
+main_hub-load abort) blocks instrument-select; the SI verdict was obtained
+WITHOUT reaching it, via a direct guest-function self-test.** Three new
+default-off, title-gated (`0x45410914`) cvars were added to `emulator.cc`
+(uncommitted, additive-only; harness files `command_processor.cc`,
+`nop_input_driver.{cc,h}`, `xam_input.cc` untouched by this lane):
+
+- **`--rb3dx_skip_calibration`** — lead (ii) from the "next-pass leads" above
+  (poke, not the getter-override in lead (i): `ProfileMgr::Handle` inlines the
+  `mHasSeenFirstTimeCalibration` read at `-inline noauto`, so overriding the
+  standalone leaf `GetHasSeenFirstTimeCalibration@0x82794838` fires 0 times —
+  a trap for this title). A detached host thread resolves `profile_mgr` via
+  `ObjectDir::sMainDir` and writes `1` to the flag byte every 150 ms
+  (`obj_vbase - 0x74`, i.e. `this + 0x54`; the dir stores the `Hmx::Object`
+  vbase for `MsgSource`-derived classes, so derived fields sit at *negative*
+  offsets from the dir pointer — not `+0x54` from the dir pointer as a naive
+  header-offset read would suggest). Result: `splash_screen` routes straight to
+  `main_hub_screen`; `first_time_calibration` never becomes `curScreen` (0/N
+  across all runs, 3/3 reproduced). This retires lead (i) and confirms (ii);
+  lead (iii) (exact `cal_audio` skip-button sequence) is now moot for our goal.
+- **`--si_probe`** — read-only host thread logging the same-instrument flag
+  word (`0x82C8AAA0`), the `IsActive` detour word (`0x826684C0`), and one-time
+  hex dumps of the cave stub / original body / trampoline. Confirmed the flag
+  is a correct, stable `1` at runtime (never zeroed) and the detour word is
+  live in guest RAM — both via passive reads, no execution.
+- **`--si_selftest`** — fires once (title-gated, mid-boot) inside the existing
+  `__savegprlr_23` MemAlloc override: snapshots the live guest-thread PPC
+  context, calls `processor->Execute()` directly against the detour site
+  (`0x826684C0`) and the cave entry (`0x82C8A080`) with a crafted empty `this`,
+  logs `r3`, then restores registers so the intercepted call continues
+  undisturbed. This is what produced the SI verdict below — **it does not
+  require reaching instrument-select**, sidestepping the new doc-09 blocker
+  entirely.
+- A fourth cvar, **`--rb3dx_clamp_alloc`**, was added as an attempted mitigation
+  for the doc-09 main_hub-load abort but never fired (that crash path emits
+  `XamAlloc: unk=268435456` — a different signature than the garbage-top-byte
+  size this cvar clamps — and "proceeds anyway"). The doc-09 gate is unsolved;
+  see `09-rb3dx-title-to-menu.md` and the wave-3 verdict doc referenced below.
+
+**SI verdict (headline): the static `.data` code cave is INERT under Xenia too**
+— `Execute()` on the `.text→.data` detour branch returns unchanged (branch not
+followed), and `Execute()` on the cave entry itself fails to resolve
+(`Processor::ResolveFunction`: "failed to find function", `0xDEADBABE` sentinel)
+because Xenia's function analyzer only translates addresses a module claims as
+code. A `.text`-resident positive control (`IsActive → li r3,1; blr`) executes
+correctly (`r3=1`), isolating the `.data` location as the sole cause — flag- and
+logic-independent (`default_tu5_forceall.xex`, all 4 cave flag-loads forced,
+gives an identical inert result). Full evidence, artifact hashes, and the console implication:
+`/tmp/si-hw-fix/WAVE3-XENIA-VERDICT.md` (scratch path, not checked into this
+repo) and `/tmp/si-hw-fix/wave3-xenia/` (`recon.json`, `calskip.json`,
+`twopad.json`, `drive.json`, `logs/`).
+
+---
+
+## 8b. The `0x82BCEFE4` "hub-load crash" — REFUTED, it is a recovered XMA-MMIO red herring (2026-07-13)
+
+**Framing that was handed off.** The 2026-07-12 reference-capture pass reported
+that with `--rb3dx_skip_calibration` the boot routes `splash_screen →
+main_hub_screen` (curScreen 2/2) and then "the hub 3D scene load **crashes the
+guest**: SIGSEGV at guest PC `0x82BCEFE4`, fault EA `0x7FEA1A80`, identical on
+both boots; SIGSEGV count climbs 2→8 then host `terminate` at ~30 s." This was
+taken to be *the wall* to in-game reference capture.
+
+**Verdict: that crash is a red herring.** `0x82BCEFE4` is a **guest XMA hardware
+MMIO register write that Xenia catches and recovers correctly** — expected,
+by-design MMIO emulation, not a fault that stops the guest. Evidence and
+mechanism below.
+
+**Disassembly (real RB3DX bytes, `xex1tool -b` image `/tmp/rb3dx-wf/rb3dx_decomp.bin`,
+base `0x82000000`).** The faulting function is at `0x82BCEF04` (an XDK/libXMA
+audio-context routine statically linked into `band.exe`; not in the partial
+rb3-xenon decomp, and not Deluxe-injected). It manages an array of 0x60-stride
+audio contexts and pokes the Xbox 360 XMA decoder registers directly:
+
+```
+; helper @0x82BCEEA8 — read XMA ContextArrayAddress (reg 0x1800) and cache it
+0x82bceea8  lis   r11,0x7fea ; ori r11,r11,0x1800   ; r11 = 0x7FEA1800
+0x82bceeb4  lwbrx r11,0,r11                          ; MMIO READ (little-endian)
+0x82bceeb8  stw   r11,-0x3098(r10)                   ; cache @0x82E4CF68
+
+; main loop @0x82BCEF04 — per context, compute a value and kick a register
+0x82bcefe0  slwi   r10,r9,2                          ; r10 = 0x7FEA1A80
+0x82bcefe4  stwbrx r11,0,r10                         ; MMIO WRITE  <<< FAULT
+0x82bcefe8  eieio                                    ; enforce in-order I/O
+```
+
+`stwbrx`+`eieio` (store-word-byte-reversed then enforce-in-order-IO) is the
+textbook PPC idiom for a memory-mapped **device register write**. The EA is the
+constant `0x7FEA1A80` (= host `0x17FEA1A80` = the reported `last_fault`), computed
+purely from an `addis 0x1ffb / addi -0x7960 / slwi 2` sequence — no register
+mistranslation involved.
+
+**Why it faults and why that is fine.** `0x7FEA0000` is the **XMA decoder MMIO
+range**, registered by `apu/xma_decoder.cc:114`
+(`AddVirtualMappedRange(0x7FEA0000, 0xFFFF0000, 0x0000FFFF, …)`). The guest page
+isn't backed by RAM, so the host store SIGSEGVs; `MMIOHandler::ExceptionCallback`
+(`cpu/mmio_handler.cc`) matches `0x7FEA1A80 & 0xFFFF0000 == 0x7FEA0000`, decodes
+the JIT's `MOVBE` store, and dispatches to `XmaDecoder::WriteRegister` (reg
+`0x1A80/4 = 0x6A0`; the `0x1800` read → reg `0x600 = ContextArrayAddress`). **The
+guest PC is advanced and execution resumes.** This is exactly how *every* XMA
+register access is emulated on this fork.
+
+**Direct proof it is not the wall:**
+- `run1.log` (95 s timeout): after the fault, VdSwaps keep climbing to **#5000+**
+  while **SIGSEGV plateaus at 18** — the game renders to timeout, no livelock (cf.
+  the doc-09 OOM's ~11,640/s resume-without-progress spin, which this is NOT).
+- Fresh 2026-07-13 run (`/tmp/xhc/sw2.log`, swiftshader): the fault fires, **SIGSEGV
+  plateaus at 8 and is stable from 36 s → 90 s** (a *one-time* XMA-init burst, not
+  continuous), the process stays alive, and the `splash → main_hub` transition
+  proceeds throughout.
+- "`terminate called without an active exception`" at the run's end is the
+  **known-benign teardown** (`xobject.cc:52` `handles_.empty()` assert on process
+  exit) — it fires identically on a clean timeout *and* on an external kill, and
+  is unrelated to the guest. The "2→8 then terminate at ~30 s" was simply the
+  30 s `--headless_timeout_ms` teardown; the SIGSEGV counter merely tallies the
+  recovered MMIO faults.
+
+**Fix classification: (c) — nothing to fix here.** The XMA MMIO recovery is
+working as designed; there is no host uninitialized-leak (not class a) and no
+guest/emu-gap workaround is warranted (not class b). *No code change made.* (A
+possible future *quality* improvement — teach the JIT to route known MMIO ranges
+without a fault/recover round-trip, and/or stop the headless harness counting
+recovered MMIO faults as "SIGSEGV" so they stop masquerading as crashes — is
+optional and out of scope.)
+
+**The ACTUAL wall (unchanged from the doc-09 gate): the `main_hub_panel` async
+load never completes.** With `--rb3dx_skip_calibration`, the boot advances to the
+`splash → main_hub_screen` transition (confirmed: `run3.log` reaches
+`transState=2 curScreen=main_hub_screen`; the 2026-07-13 swiftshader run reaches
+`transState=1 … transScreen=main_hub_screen`). But `--rb3dx_ui_probe` shows the
+hub panel wedged mid-load:
+
+```
+T/C:panel[..] 'main_hub_panel' active=1 refLoaded=1 mState=2 mLoaded=0 mLoader=0x00000000 mLoadRefs=1
+```
+
+i.e. a load is *requested* (`mLoadRefs=1`) but `mLoaded=0` and **no Loader object
+exists** (`mLoader=NULL`) — the scene load stalls. Companion signature during the
+transition: repeated `XamAlloc: unk=268435456 (expected 0); proceeding anyway`
+(flags `0x10000000` ignored by `xam_info.cc:328`; `SystemHeapAlloc(size)` still
+succeeds, so this is a symptom, not proven-causal). This is the same
+"doc-09 main_hub-load abort" gate flagged in §8 wave 3 — still open.
+
+**Environment caveat for capture.** In-game reference capture (task 3) could NOT
+be completed this pass: the host **NVIDIA Vulkan driver is version-mismatched**
+(kernel NVRM `610.43.02` vs userspace `libGLX_nvidia.so 610.43.03`, updated
+2026-07-09/12 — needs a reboot), so hardware Vulkan returns
+`ERROR_INCOMPATIBLE_DRIVER`. Software Vulkan (chromium swiftshader,
+`VK_ICD_FILENAMES=/usr/lib/chromium/vk_swiftshader_icd.json`) boots and renders
+but (a) is far too slow to confirm hub-load completion and (b) reproduces the L3
+tiled-readback scramble worse than hardware, so captured frames are unusable as
+references (`/tmp/rb3dx-wf/hub_transition_stuck_swiftshader.png`).
+
+**Next cheapest levers for the real wall (main_hub_panel load):**
+1. Add a read-only `--rb3dx_ui_probe` extension that also dumps the panel's
+   `Loader`/`FileStream` state and the file/ark the loader is blocked on (mirror
+   the native port's `main_hub` `.milo` load list) — the panel shows `mLoader=NULL`,
+   so first establish *whether the Loader is never created* vs *created-and-freed
+   without setting `mLoaded`*.
+2. Attribute the `XamAlloc unk=0x10000000` calls: log caller VA + returned ptr +
+   whether the guest treats the (flags-ignored, virtual not physical) allocation
+   as physical/contiguous — a wrong heap type there could fault the loader
+   downstream. This is the one concrete emulation-gap lead.
+3. Restore hardware Vulkan (reboot to sync the NVIDIA kernel/userspace versions)
+   before any capture attempt — the swiftshader path cannot yield usable refs.
+
+Artifacts: disasm scripts `/tmp/rb3dx-wf/disasm*.py` (image regenerated via
+`xex1tool -b`, `reverse-compiler-refs/idaxex/xex1tool/build/xex1tool`); logs
+`/tmp/xhc/sw2.log`, `/tmp/xenia-refcap/run{1,3}.log`; evidence frame
+`/tmp/rb3dx-wf/hub_transition_stuck_swiftshader.png`. No commits; no cvar changes
+(the crash needed neither).
+
 ---
 
 ## 9. Related docs

@@ -563,8 +563,10 @@ uint32_t CommandProcessor::ExecutePrimaryBuffer(uint32_t read_index,
   do {
     if (!ExecutePacket(&reader)) {
       // This probably should be fatal - but we're going to continue anyways.
+      // RB3 (headless) hits transient ring-buffer packet desyncs during menu
+      // transitions; aborting here (Checked build) kills the session. Log and
+      // break out of this primary-buffer pass; the next VdSwap re-primes.
       XELOGE("**** PRIMARY RINGBUFFER: Failed to execute packet.");
-      assert_always();
       break;
     }
     // Incremental read pointer writeback after each primary buffer packet.

@@ -7,6 +7,8 @@
  ******************************************************************************
  */
 
+#include <atomic>
+
 #include "xenia/base/logging.h"
 #include "xenia/emulator.h"
 #include "xenia/hid/input.h"
@@ -102,7 +104,31 @@ dword_result_t XamInputGetState_entry(dword_t user_index, dword_t flags,
   }
 
   auto input_system = kernel_state()->emulator()->input_system();
-  return input_system->GetState(user_index, input_state);
+  X_RESULT input_result = input_system->GetState(user_index, input_state);
+  // TEMP DIAGNOSTIC (RB3DX main_hub stall investigation): log the first polls
+  // per user and any button-state transitions delivered to the guest so
+  // headless scripted-input delivery is observable end-to-end. Only logs on
+  // warmup + transitions. TODO(rb3dx): remove after investigation.
+  {
+    static std::atomic<uint32_t> s_polls[4] = {};
+    static std::atomic<uint16_t> s_last_buttons[4] = {};
+    uint32_t ui = user_index & 0xFF;
+    if (ui >= 4) ui = 0;
+    uint32_t n = s_polls[ui].fetch_add(1, std::memory_order_relaxed);
+    uint16_t buttons = (input_result == X_ERROR_SUCCESS && input_state)
+                           ? static_cast<uint16_t>(input_state->gamepad.buttons)
+                           : 0;
+    if (n < 3) {
+      XELOGI("XamInputGetState DIAG: user={} poll#{} result=0x{:08X}",
+             static_cast<uint32_t>(user_index & 0xFF), n,
+             static_cast<uint32_t>(input_result));
+    }
+    if (buttons != s_last_buttons[ui].exchange(buttons)) {
+      XELOGI("XamInputGetState DIAG: user={} buttons 0x{:04X}",
+             static_cast<uint32_t>(user_index & 0xFF), buttons);
+    }
+  }
+  return input_result;
 }
 DECLARE_XAM_EXPORT2(XamInputGetState, kInput, kImplemented, kHighFrequency);
 

@@ -176,6 +176,19 @@ void NopInputDriver::SetScriptedInput(const std::string& script) {
       }
     }
 
+    // Parse optional pad-target suffix "@N" (default pad 0), e.g. "A@1".
+    uint8_t pad = 0;
+    size_t at = button_str.find('@');
+    if (at != std::string::npos) {
+      std::string pad_str = button_str.substr(at + 1);
+      button_str = button_str.substr(0, at);
+      try {
+        int p = std::stoi(pad_str);
+        if (p >= 0 && p < static_cast<int>(kMaxPads)) pad = static_cast<uint8_t>(p);
+      } catch (...) {
+      }
+    }
+
     // Parse button (support + for combos like "A+START")
     uint16_t buttons = 0;
     std::istringstream btn_ss(button_str);
@@ -185,9 +198,9 @@ void NopInputDriver::SetScriptedInput(const std::string& script) {
     }
 
     if (buttons) {
-      scripted_events_.push_back({time_ms, buttons, duration_ms});
-      XELOGI("Scripted input: {}ms button=0x{:04X} hold={}ms", time_ms,
-             buttons, duration_ms);
+      scripted_events_.push_back({time_ms, buttons, duration_ms, pad});
+      XELOGI("Scripted input: {}ms button=0x{:04X} hold={}ms pad={}", time_ms,
+             buttons, duration_ms, pad);
     }
   }
 
@@ -914,11 +927,11 @@ uint16_t NopInputDriver::GetScreenAwareButtons() {
 
 X_RESULT NopInputDriver::GetCapabilities(uint32_t user_index, uint32_t flags,
                                          X_INPUT_CAPABILITIES* out_caps) {
-  if (!scripted_mode_ || user_index != 0) {
+  if (!scripted_mode_ || user_index >= kMaxPads) {
     return X_ERROR_DEVICE_NOT_CONNECTED;
   }
 
-  // Report a standard wired gamepad on port 0
+  // Report a standard wired gamepad on this port
   std::memset(reinterpret_cast<void*>(out_caps), 0, sizeof(*out_caps));
   out_caps->type = 0x01;      // XINPUT_DEVTYPE_GAMEPAD
   out_caps->sub_type = 0x01;  // XINPUT_DEVSUBTYPE_GAMEPAD
@@ -936,12 +949,16 @@ X_RESULT NopInputDriver::GetCapabilities(uint32_t user_index, uint32_t flags,
   return X_ERROR_SUCCESS;
 }
 
-uint16_t NopInputDriver::GetCurrentButtons() {
-  UpdateDc3HostBeatDrive();
+uint16_t NopInputDriver::GetCurrentButtons(uint32_t pad) {
+  // DC3 host-beat drive + screen-aware nav + dynamic injection are all global
+  // (single-driver) state; only evaluate them once, on the primary pad.
+  if (pad == 0) {
+    UpdateDc3HostBeatDrive();
+  }
 
   uint16_t active_buttons = 0;
 
-  // Time-based scripted events
+  // Time-based scripted events (filtered by target pad)
   if (!scripted_events_.empty()) {
     auto now = std::chrono::steady_clock::now();
     auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -949,6 +966,7 @@ uint16_t NopInputDriver::GetCurrentButtons() {
                           .count();
 
     for (const auto& event : scripted_events_) {
+      if (event.pad != pad) continue;
       if (elapsed_ms >= (int64_t)event.time_ms &&
           elapsed_ms < (int64_t)(event.time_ms + event.duration_ms)) {
         active_buttons |= event.buttons;
@@ -956,13 +974,13 @@ uint16_t NopInputDriver::GetCurrentButtons() {
     }
   }
 
-  // Screen-aware scripted events
-  if (screen_aware_mode_) {
-    active_buttons |= GetScreenAwareButtons();
-  }
+  if (pad == 0) {
+    // Screen-aware scripted events (DC3 nav, primary pad only)
+    if (screen_aware_mode_) {
+      active_buttons |= GetScreenAwareButtons();
+    }
 
-  // Dynamic injected events
-  {
+    // Dynamic injected events
     std::lock_guard<std::mutex> lock(inject_mutex_);
     auto now = std::chrono::steady_clock::now();
     for (auto it = injected_events_.begin(); it != injected_events_.end();) {
@@ -1018,15 +1036,15 @@ uint16_t NopInputDriver::ButtonToVK(uint16_t button) const {
 
 X_RESULT NopInputDriver::GetState(uint32_t user_index,
                                   X_INPUT_STATE* out_state) {
-  if (!scripted_mode_ || user_index != 0) {
+  if (!scripted_mode_ || user_index >= kMaxPads) {
     return X_ERROR_DEVICE_NOT_CONNECTED;
   }
 
-  uint16_t active_buttons = GetCurrentButtons();
+  uint16_t active_buttons = GetCurrentButtons(user_index);
 
   // Generate keystroke events for button transitions
-  uint16_t pressed = active_buttons & ~prev_buttons_;
-  uint16_t released = prev_buttons_ & ~active_buttons;
+  uint16_t pressed = active_buttons & ~prev_buttons_[user_index];
+  uint16_t released = prev_buttons_[user_index] & ~active_buttons;
 
   // Check each button bit for transitions
   for (uint16_t bit = 1; bit != 0; bit <<= 1) {
@@ -1034,24 +1052,24 @@ X_RESULT NopInputDriver::GetState(uint32_t user_index,
       X_INPUT_KEYSTROKE ks = {};
       ks.virtual_key = ButtonToVK(bit);
       ks.flags = X_INPUT_KEYSTROKE_KEYDOWN;
-      ks.user_index = 0;
+      ks.user_index = static_cast<uint8_t>(user_index);
       if (ks.virtual_key) {
-        keystroke_queue_.push_back(ks);
-        XELOGI("Keystroke KEYDOWN: VK=0x{:04X} button=0x{:04X}",
-               (uint16_t)ks.virtual_key, bit);
+        keystroke_queue_[user_index].push_back(ks);
+        XELOGI("Keystroke KEYDOWN: VK=0x{:04X} button=0x{:04X} pad={}",
+               (uint16_t)ks.virtual_key, bit, user_index);
       }
     }
     if (released & bit) {
       X_INPUT_KEYSTROKE ks = {};
       ks.virtual_key = ButtonToVK(bit);
       ks.flags = X_INPUT_KEYSTROKE_KEYUP;
-      ks.user_index = 0;
+      ks.user_index = static_cast<uint8_t>(user_index);
       if (ks.virtual_key) {
-        keystroke_queue_.push_back(ks);
+        keystroke_queue_[user_index].push_back(ks);
       }
     }
   }
-  prev_buttons_ = active_buttons;
+  prev_buttons_[user_index] = active_buttons;
 
   std::memset(reinterpret_cast<void*>(out_state), 0, sizeof(*out_state));
   out_state->packet_number = packet_number_++;
@@ -1062,7 +1080,7 @@ X_RESULT NopInputDriver::GetState(uint32_t user_index,
 
 X_RESULT NopInputDriver::SetState(uint32_t user_index,
                                   X_INPUT_VIBRATION* vibration) {
-  if (!scripted_mode_ || user_index != 0) {
+  if (!scripted_mode_ || user_index >= kMaxPads) {
     return X_ERROR_DEVICE_NOT_CONNECTED;
   }
   return X_ERROR_SUCCESS;
@@ -1070,40 +1088,40 @@ X_RESULT NopInputDriver::SetState(uint32_t user_index,
 
 X_RESULT NopInputDriver::GetKeystroke(uint32_t user_index, uint32_t flags,
                                       X_INPUT_KEYSTROKE* out_keystroke) {
-  if (!scripted_mode_ || user_index != 0) {
+  if (!scripted_mode_ || user_index >= kMaxPads) {
     return X_ERROR_DEVICE_NOT_CONNECTED;
   }
 
   // Poll current state to generate any pending keystroke events
   // (in case GetKeystroke is called without GetState)
-  uint16_t active_buttons = GetCurrentButtons();
-  uint16_t pressed = active_buttons & ~prev_buttons_;
-  uint16_t released = prev_buttons_ & ~active_buttons;
+  uint16_t active_buttons = GetCurrentButtons(user_index);
+  uint16_t pressed = active_buttons & ~prev_buttons_[user_index];
+  uint16_t released = prev_buttons_[user_index] & ~active_buttons;
   for (uint16_t bit = 1; bit != 0; bit <<= 1) {
     if (pressed & bit) {
       X_INPUT_KEYSTROKE ks = {};
       ks.virtual_key = ButtonToVK(bit);
       ks.flags = X_INPUT_KEYSTROKE_KEYDOWN;
-      ks.user_index = 0;
+      ks.user_index = static_cast<uint8_t>(user_index);
       if (ks.virtual_key) {
-        keystroke_queue_.push_back(ks);
-        XELOGI("Keystroke KEYDOWN: VK=0x{:04X} button=0x{:04X}",
-               (uint16_t)ks.virtual_key, bit);
+        keystroke_queue_[user_index].push_back(ks);
+        XELOGI("Keystroke KEYDOWN: VK=0x{:04X} button=0x{:04X} pad={}",
+               (uint16_t)ks.virtual_key, bit, user_index);
       }
     }
     if (released & bit) {
       X_INPUT_KEYSTROKE ks = {};
       ks.virtual_key = ButtonToVK(bit);
       ks.flags = X_INPUT_KEYSTROKE_KEYUP;
-      ks.user_index = 0;
-      if (ks.virtual_key) keystroke_queue_.push_back(ks);
+      ks.user_index = static_cast<uint8_t>(user_index);
+      if (ks.virtual_key) keystroke_queue_[user_index].push_back(ks);
     }
   }
-  prev_buttons_ = active_buttons;
+  prev_buttons_[user_index] = active_buttons;
 
-  if (!keystroke_queue_.empty()) {
-    *out_keystroke = keystroke_queue_.front();
-    keystroke_queue_.pop_front();
+  if (!keystroke_queue_[user_index].empty()) {
+    *out_keystroke = keystroke_queue_[user_index].front();
+    keystroke_queue_[user_index].pop_front();
     return X_ERROR_SUCCESS;
   }
 

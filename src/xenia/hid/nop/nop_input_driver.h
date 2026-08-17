@@ -62,10 +62,13 @@ class NopInputDriver final : public InputDriver {
   void InjectButtonPress(uint16_t buttons, uint64_t duration_ms = 200);
 
  private:
+  static constexpr uint32_t kMaxPads = 2;
+
   struct ScriptedEvent {
     uint64_t time_ms;      // Milliseconds after start
     uint16_t buttons;      // Button flags to press
     uint64_t duration_ms;  // How long to hold (default 200ms)
+    uint8_t pad = 0;       // Target controller port (0 or 1)
   };
 
   // Screen-aware script directive
@@ -84,7 +87,7 @@ class NopInputDriver final : public InputDriver {
     uint16_t buttons;
   };
 
-  uint16_t GetCurrentButtons();
+  uint16_t GetCurrentButtons(uint32_t pad);
   uint16_t ButtonToVK(uint16_t button) const;
 
   // Read the current screen name from guest memory (TheUI->mCurrentScreen->mName)
@@ -102,8 +105,8 @@ class NopInputDriver final : public InputDriver {
   std::vector<ScriptedEvent> scripted_events_;
   std::chrono::steady_clock::time_point start_time_;
   uint32_t packet_number_ = 0;
-  uint16_t prev_buttons_ = 0;  // For keystroke edge detection
-  std::deque<X_INPUT_KEYSTROKE> keystroke_queue_;
+  uint16_t prev_buttons_[kMaxPads] = {0, 0};  // Per-pad keystroke edge detection
+  std::deque<X_INPUT_KEYSTROKE> keystroke_queue_[kMaxPads];
 
   // Screen-aware scripting state
   bool screen_aware_mode_ = false;
