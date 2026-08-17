@@ -245,6 +245,16 @@ DEFINE_bool(
     "block lifetimes attributed. No effect without the trace path.",
     "CPU");
 DEFINE_bool(
+    rb3dx_stack_trace, true,
+    "RB3DX: with --rb3dx_alloc_trace_path, also emit a tag-4 record per "
+    "MemAlloc carrying the next FOUR guest return addresses above the "
+    "immediate caller, walked from the stack backchain (each frame's saved LR "
+    "is at [caller_sp - 8] under the __savegprlr idiom). Needed because the "
+    "top allocation site is XMemAlloc -- a shim -- so the immediate caller LR "
+    "names the allocator, not the subsystem. Fully range-checked; unresolvable "
+    "frames are reported as 0. No effect without the trace path.",
+    "CPU");
+DEFINE_bool(
     rb3dx_ret_trace, true,
     "RB3DX: with --rb3dx_alloc_trace_path, also capture MemAlloc's RETURN "
     "VALUE (the allocated pointer -- which says where in the arena the block "
@@ -798,6 +808,41 @@ void Rb3dxSaveGprLr23ProbeExtern(cpu::ppc::PPCContext* ppc_context,
     uint32_t seq32 = static_cast<uint32_t>(m);
     sink->Emit(1, tid, seq32, size, static_cast<uint32_t>(ppc_context->r[4]),
                static_cast<uint32_t>(ppc_context->r[12]), sp);
+    // --- caller-of-caller backtrace (tag 4, --rb3dx_stack_trace) ---
+    // The immediate caller LR alone is not enough when the caller is a thin
+    // shim: the dominant idle-churn site turned out to be XMemAlloc's
+    // `bl MemAlloc`, which tells you the XDK allocator was used but not by
+    // whom. Four more frames are recoverable for free from the guest stack.
+    //
+    // Idiom: every non-leaf here starts `mflr r12 ; bl __savegprlr_N ;
+    // stwu r1,-F(r1)`, and __savegprlr_N stores r12 at [entry_r1 - 8]. So for
+    // a frame at F_sp, the backchain word [F_sp] is the SP of that function's
+    // CALLER, and that function's own return address sits at (caller_sp - 8)
+    // -- frame-size independent, which is what makes this walk cheap.
+    //
+    // Everything is range-checked and the walk stops on the first implausible
+    // link, so a frameless/leaf caller yields 0 rather than a wild host read.
+    if (cvars::rb3dx_stack_trace) {
+      uint32_t frames[4] = {0, 0, 0, 0};
+      uint32_t f_sp = sp;
+      for (int k = 0; k < 4; ++k) {
+        // Guest stacks live well below the code; require a plausible, aligned,
+        // strictly-upward backchain link (the stack grows down).
+        if (f_sp < 0x40000000u || f_sp >= 0x80000000u || (f_sp & 3u)) {
+          break;
+        }
+        uint32_t parent = xe::load_and_swap<uint32_t>(base + f_sp);
+        if (parent <= f_sp || parent < 0x40000000u || parent >= 0x80000000u ||
+            (parent & 3u)) {
+          break;
+        }
+        uint32_t ret = xe::load_and_swap<uint32_t>(base + parent - 8);
+        // Only accept something that looks like a guest .text return address.
+        frames[k] = (ret >= 0x82000000u && ret < 0x83000000u) ? ret : 0;
+        f_sp = parent;
+      }
+      sink->Emit(4, tid, seq32, frames[0], frames[1], frames[2], frames[3]);
+    }
     auto& p = t_rb3dx_pending_alloc;
     p.active = true;
     p.sp = sp;
