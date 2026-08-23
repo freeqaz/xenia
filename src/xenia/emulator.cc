@@ -4261,8 +4261,13 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
   // DC3 Title ID: 0x373307D9 (Dance Central 3)
   bool dc3_is_decomp_layout = false;
   std::optional<Dc3NuiPatchManifest> dc3_patch_manifest;
-  if (title_id_.has_value() && title_id_.value() == 0x373307D9 &&
-      dc3_is_decomp_layout) {
+  // Title-gated only: dc3_is_decomp_layout is not known yet (layout detection
+  // runs ~500 lines below), so gating on it here made this whole block dead
+  // code -- the manifest never loaded and Dc3PopulateAddressesFromCatalog
+  // never ran, leaving kAddr on compiled-in defaults for every boot.  Loading
+  // the manifest for an original-layout image is harmless: every consumer
+  // (hack pack, kAddr populate) is separately gated on the detected layout.
+  if (title_id_.has_value() && title_id_.value() == 0x373307D9) {
     Dc3MaybeCleanStaleContentCache(content_root_);
 
     // Load the patch manifest early so it's available for both NUI patching

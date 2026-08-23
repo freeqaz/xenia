@@ -14,4 +14,8 @@
 # Runtime-validated on 2026-02-28 via xenia-headless + dc3-decomp build.
 # Note: these are Xenia runtime .text fingerprints, not static PE .text hashes.
 original=0x5E827ACDEE70CB4F
-decomp=0xBCB563BCF2605E2E
+# 2026-08-23 rebuild (pristine-XEX target + link repair); previous decomp
+# fingerprint 0xBCB563BCF2605E2E belonged to the Feb 28 build.  The
+# fingerprint changes on every relink -- update this from the runtime log
+# line "DC3: .text fingerprint ... fnv1a64=..." after each XEX rebuild.
+decomp=0x70E4409032E427C1
