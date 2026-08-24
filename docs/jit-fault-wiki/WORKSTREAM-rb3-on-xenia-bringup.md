@@ -553,6 +553,63 @@ Artifacts: disasm scripts `/tmp/rb3dx-wf/disasm*.py` (image regenerated via
 
 ---
 
+## 8c. 2026-08-24 — GAMEPLAY REACHED; the "main_hub_panel load stall" was two host crashes in disguise
+
+Resuming after the August alloc-trace detour, a fresh reproduction under the
+2026-08-24 binary (same branch, now carrying the July cvars as committed code)
+showed the boot **aborting** ~30 s in at the splash → main_hub transition —
+not stalling. Two independent Checked-build host crashes, peeled in order:
+
+1. **Thread-suicide terminate** (`25c506505`). A fire-and-forget guest worker
+   whose handle the guest had already closed reached `XThread::Exit`; its own
+   `ReleaseHandle()` dropped the LAST reference, so `~XThread` ran **on the
+   exiting thread** and destroyed its own `xe::threading::Thread`.
+   `~PosixCondition<Thread>` then did `pthread_cancel(self)` +
+   `pthread_join(self)` — and since `ThreadStartRoutine` sets ASYNCHRONOUS
+   cancel type, the self-cancel force-unwound through the noexcept destructor
+   → `std::terminate` ("terminate called without an active exception", core
+   Thread-1 stack: `~PosixCondition ← ~PosixThread ← ~XThread ←
+   ObjectTable::RemoveHandle ← XThread::Exit`). Fix: self-destruction detaches
+   instead of cancel/join and clears the TLS `current_thread_` so
+   `Thread::Exit` falls through to plain `pthread_exit` instead of calling
+   `Terminate()` on the freed object. Same teardown family as `ef5025af9`,
+   one link deeper; Windows never sees it (`~Thread` there just closes a
+   handle).
+2. **XConfig Checked assert** (`6fff0996a`). RB3DX queries user-category
+   XConfig setting `0x000F` once; `assert_unhandled_case` aborted the Checked
+   build where Release would return `X_STATUS_INVALID_PARAMETER_2` (which the
+   guest handles fine). All three unhandled arms now XELOGW + return.
+
+**Result: RB3DX boots headless into song GAMEPLAY.** With
+`--protect_zero=false --rb3dx_skip_calibration --rb3dx_ui_probe` and a plain
+timed A-press script, the flow runs `intro_movie → splash → dx_welcome_screen
+→ dx_settings_error_screen → main_hub_screen → song_select_screen →
+part_difficulty_screen → preloading_screen → tv3_d_screen → game_screen`, and
+`game_screen` holds for the rest of a 360 s run: ~59 fps (21,177 VdSwaps),
+recovered-fault count flat at 63 (all the §8b benign XMA MMIO writes), XMA
+audio contexts streaming, zero aborts (probe: `/tmp/rb3-probe4`). `dx_welcome`
+and `dx_settings_error` each dismiss with A (the settings error is the known
+graceful dx_playlist/values absence).
+
+**The §8b "main_hub_panel load stall" is REFUTED as a gate.** The probe still
+reports `mLoader=NULL mLoaded=0` for `main_hub_panel`, yet navigation
+proceeds through it into gameplay — the stalled-looking panel state was the
+*aftermath of the crashed loader worker*, and in the July binaries the same
+underlying thread crash (or its shallower ancestors fixed in `ef5025af9`)
+killed the process before the flow could advance. The `XamAlloc
+unk=268435456` spam remains, harmless as suspected.
+
+DC3 non-regression for both commits: verified 2026-08-24 (identical boot
+frontier to the session-52 baseline — CRT + XapiInitProcess complete, main()
+runs, AsyncFile::Read stall unchanged, no new traps/aborts).
+
+Still open for the original same-instrument goal: two-pad join + instrument
+select scripting (the P2 join presses in the old script fire during
+dx_welcome and are wasted), and video-out capture for pixel evidence (runs
+above are NullGPU).
+
+---
+
 ## 9. Related docs
 
 Inside this wiki (`docs/jit-fault-wiki/`):
