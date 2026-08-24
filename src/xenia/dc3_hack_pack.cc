@@ -5205,14 +5205,12 @@ void ApplyCrtPatches(const Dc3HackContext& ctx,
           }
         }
 
-        // Read .CRT$XCU entries.
-        auto* xcu_heap = memory->LookupHeap(kXcuStart);
-        if (xcu_heap) {
-          uint32_t xcu_page_start = kXcuStart & ~0xFFFu;
-          uint32_t xcu_page_end = (kXcuEnd + 0xFFFu) & ~0xFFFu;
-          xcu_heap->Protect(xcu_page_start, xcu_page_end - xcu_page_start,
-                            kMemoryProtectRead);
-        }
+        // Read .CRT$XCU entries.  No Protect() needed: host-side
+        // TranslateVirtual reads bypass guest page protection.  A previous
+        // Protect(..., kMemoryProtectRead) here stripped WRITE from the whole
+        // 64K page around the XCU range — which in the current PE layout is
+        // packed with live RW globals (SynthFad et al.) — and _cinit then
+        // write-faulted on the first constructor touching that page.
 
         int injected = 0;
         int skipped_null = 0;
