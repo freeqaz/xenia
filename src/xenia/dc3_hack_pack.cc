@@ -38,6 +38,17 @@ DECLARE_string(dc3_debug_findarray_override_mode);
 DECLARE_bool(fake_kinect_data);
 DECLARE_bool(dc3_ik_telemetry);
 
+DEFINE_bool(
+    dc3_clean_content_cache, true,
+    "DC3 (0x373307D9) only: on every launch, recursively delete the whole "
+    "<content_root>/373307D9 directory before the title starts. This DESTROYS "
+    "DC3 save games, profiles and downloaded content -- it is not a cache "
+    "scrub, it is remove_all() on the title's entire content tree. It exists "
+    "because the decomp bring-up box wants a clean slate each boot and the "
+    "DC3 boot probe's 627-trap baseline assumes it. Anyone who is not doing "
+    "decomp bring-up should set this to false.",
+    "DC3");
+
 namespace xe {
 
 namespace kernel {
@@ -6682,13 +6693,21 @@ const char* Dc3HackCategoryName(Dc3HackCategory category) {
 }
 
 void Dc3MaybeCleanStaleContentCache(const std::filesystem::path& content_root) {
+  if (!cvars::dc3_clean_content_cache) {
+    return;
+  }
   auto dc3_content = content_root / "373307D9";
   if (std::filesystem::exists(dc3_content)) {
-    XELOGI("DC3: Cleaning stale content cache at {}", xe::path_to_utf8(dc3_content));
+    XELOGW(
+        "DC3: --dc3_clean_content_cache is set: recursively DELETING the "
+        "entire DC3 content tree at {} (saves and all). Pass "
+        "--dc3_clean_content_cache=false to keep it.",
+        xe::path_to_utf8(dc3_content));
     std::error_code ec;
     std::filesystem::remove_all(dc3_content, ec);
     if (ec) {
-      XELOGI("DC3: Failed to clean content cache: {}", ec.message());
+      XELOGW("DC3: Failed to clean content cache at {}: {}",
+             xe::path_to_utf8(dc3_content), ec.message());
     }
   }
 }

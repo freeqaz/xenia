@@ -1,11 +1,11 @@
 /**
-******************************************************************************
-* Xenia : Xbox 360 Emulator Research Project                                 *
-******************************************************************************
-* Copyright 2022 Ben Vanik. All rights reserved.                             *
-* Released under the BSD license - see LICENSE in the root for more details. *
-******************************************************************************
-*/
+ ******************************************************************************
+ * Xenia : Xbox 360 Emulator Research Project                                 *
+ ******************************************************************************
+ * Copyright 2022 Ben Vanik. All rights reserved.                             *
+ * Released under the BSD license - see LICENSE in the root for more details. *
+ ******************************************************************************
+ */
 
 #include "xenia/gpu/graphics_system.h"
 
@@ -254,6 +254,15 @@ void GraphicsSystem::DispatchInterruptCallback(uint32_t source, uint32_t cpu) {
 
   auto thread = kernel::XThread::GetCurrentThread();
   if (!thread) {
+    // Upstream asserts here (assert_not_null(thread)). Demoted to a return so
+    // a Checked build does not abort, but it must not be silent: the guest's
+    // GPU interrupt callback is being DROPPED, and a title that waits on that
+    // callback will hang in a way that looks like a GPU stall rather than a
+    // missing dispatch.
+    XELOGW(
+        "DispatchInterruptCallback: no current XThread, dropping the GPU "
+        "interrupt callback at {:08X} (source {}, cpu {})",
+        interrupt_callback_, source, cpu);
     return;
   }
 
