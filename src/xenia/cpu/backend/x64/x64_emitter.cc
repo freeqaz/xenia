@@ -47,6 +47,19 @@ DEFINE_bool(ignore_undefined_externs, true,
 DEFINE_bool(emit_source_annotations, false,
             "Add extra movs and nops to make disassembly easier to read.",
             "CPU");
+DEFINE_bool(
+    tolerate_null_guest_calls, true,
+    "Treat a call through a null or unresolvable guest function pointer as a "
+    "no-op that returns an undefined value, instead of asserting. This is a "
+    "decomp-support flag: the DC3 (0x373307D9) and RB3DX (0x45410914) decomp "
+    "targets are /FORCE-linked with unresolved externs and null vtable slots "
+    "and cannot boot without it. UPSTREAM SEMANTICS ARE false -- for a retail "
+    "title a null vtable slot means the object graph is already corrupt and "
+    "the emulator should say so rather than silently continue. Turning this "
+    "off restores upstream's assert_not_zero/assert_not_null and lets the "
+    "null call reach the host. Diagnostics (the rate-limited ResolveFunction "
+    "XELOGE) are emitted either way.",
+    "CPU");
 
 namespace xe {
 namespace cpu {
@@ -562,6 +575,12 @@ void X64Emitter::UnimplementedInstr(const hir::Instr* i) {
 
 // No-op stub: a single x86 'ret' instruction placed in the code cache.
 // Used when a function can't be resolved (e.g. XAM COM vtable entries).
+//
+// Only reachable with --tolerate_null_guest_calls (default true). See finding
+// C4 in docs/fork-cleanup-review.md: substituting a stub for an unresolvable
+// call is what lets the /FORCE-linked decomp targets boot, and is exactly the
+// wrong answer for a retail title, where it converts a corrupt object graph
+// into "the game behaved oddly".
 static std::atomic<uint64_t> noop_return_stub_addr_{0};
 
 static uint64_t GetNoopReturnStub(ThreadState* thread_state) {
@@ -598,6 +617,14 @@ uint64_t ResolveFunction(void* raw_context, uint64_t target_address) {
     }
     xe::Dc3RuntimeTelemetryRecordUnresolvedCallStubHit("null_target", 0,
                                                        callsite_pc);
+    if (!cvars::tolerate_null_guest_calls) {
+      // Upstream: assert_not_zero(target_address), then fall through to a
+      // resolve that cannot succeed. Returning 0 hands the null target back to
+      // the resolve thunk's `jmp rax`, which faults at PC 0 -- diagnosable,
+      // and the same outcome upstream produced.
+      assert_not_zero(target_address);
+      return 0;
+    }
     return GetNoopReturnStub(thread_state);
   }
 
@@ -631,6 +658,11 @@ uint64_t ResolveFunction(void* raw_context, uint64_t target_address) {
     }
     xe::Dc3RuntimeTelemetryRecordUnresolvedCallStubHit(
         "resolve_failed", static_cast<uint32_t>(target_address), callsite_pc);
+    if (!cvars::tolerate_null_guest_calls) {
+      // Upstream: assert_not_null(fn), then dereference it anyway.
+      assert_not_null(fn);
+      return 0;
+    }
     return GetNoopReturnStub(thread_state);
   }
 
@@ -644,6 +676,10 @@ uint64_t ResolveFunction(void* raw_context, uint64_t target_address) {
     xe::Dc3RuntimeTelemetryRecordUnresolvedCallStubHit(
         "resolved_no_machine_code", static_cast<uint32_t>(target_address),
         callsite_pc);
+    if (!cvars::tolerate_null_guest_calls) {
+      assert_not_zero(addr);
+      return 0;
+    }
     return GetNoopReturnStub(thread_state);
   }
 
@@ -688,16 +724,18 @@ void X64Emitter::Call(const hir::Instr* instr, GuestFunction* function) {
     // or a thunk to ResolveAddress.
     mov(ebx, function->address());
     mov(eax, dword[ebx]);
-    // Guard against uninitialized indirection table entries (0) — if the
-    // entry is null, skip the call to avoid SIGSEGV at address 0.
-    test(eax, eax);
-    Xbyak::Label has_target;
-    jnz(has_target);
-    // Null entry: use the resolve function thunk which handles failure
-    // gracefully by returning a noop stub.
-    mov(eax, static_cast<uint32_t>(reinterpret_cast<uint64_t>(
-        backend_->resolve_function_thunk())));
-    L(has_target);
+    if (cvars::tolerate_null_guest_calls) {
+      // Guard against uninitialized indirection table entries (0) — if the
+      // entry is null, route through the resolve thunk (which substitutes a
+      // no-op stub) instead of jumping to address 0. Upstream emitted no such
+      // guard; see finding C4.
+      test(eax, eax);
+      Xbyak::Label has_target;
+      jnz(has_target);
+      mov(eax, static_cast<uint32_t>(reinterpret_cast<uint64_t>(
+          backend_->resolve_function_thunk())));
+      L(has_target);
+    }
   } else {
     // Old-style resolve.
     // Not too important because indirection table is almost always available.
@@ -744,11 +782,20 @@ void X64Emitter::CallIndirect(const hir::Instr* instr,
     // null virtual dispatch (e.g., 78M+ calls from uninitialized objects).
     // For tail calls, null target → return to caller via epilogue.
     // For non-tail calls, null target → skip the call and continue.
-    test(ebx, ebx);
-    if (instr->flags & hir::CALL_TAIL) {
-      je(epilog_label(), CodeGenerator::T_NEAR);
-    } else {
-      jz(skip_null_call, CodeGenerator::T_NEAR);
+    //
+    // Finding C4: this is decomp support, not general emulation. With
+    // --tolerate_null_guest_calls=false we emit no guard, so a null indirect
+    // target falls into the bounds check below, misses the indirection table
+    // and reaches ResolveFunction -- which then asserts, as upstream did.
+    // (The volume noted above is also why ResolveFunction's own logging has to
+    // stay rate-limited: this path is not rare in a decomp guest.)
+    if (cvars::tolerate_null_guest_calls) {
+      test(ebx, ebx);
+      if (instr->flags & hir::CALL_TAIL) {
+        je(epilog_label(), CodeGenerator::T_NEAR);
+      } else {
+        jz(skip_null_call, CodeGenerator::T_NEAR);
+      }
     }
     // Bounds check: the indirection table only covers guest addresses
     // [0x80000000, 0x9FFFFFFF].  Addresses outside this range (e.g. XAM
@@ -772,14 +819,16 @@ void X64Emitter::CallIndirect(const hir::Instr* instr,
     jmp(resolved, CodeGenerator::T_NEAR);
     L(in_range);
     mov(eax, dword[ebx]);
-    // Guard against null indirection table entries — use resolve thunk
-    // instead of jumping to address 0.
-    test(eax, eax);
-    Xbyak::Label has_indirect_target;
-    jnz(has_indirect_target);
-    mov(eax, static_cast<uint32_t>(reinterpret_cast<uint64_t>(
-        backend_->resolve_function_thunk())));
-    L(has_indirect_target);
+    if (cvars::tolerate_null_guest_calls) {
+      // Guard against null indirection table entries — use resolve thunk
+      // instead of jumping to address 0. Upstream emitted no such guard.
+      test(eax, eax);
+      Xbyak::Label has_indirect_target;
+      jnz(has_indirect_target);
+      mov(eax, static_cast<uint32_t>(reinterpret_cast<uint64_t>(
+          backend_->resolve_function_thunk())));
+      L(has_indirect_target);
+    }
     L(resolved);
   } else {
     // Old-style resolve.
@@ -816,6 +865,7 @@ void X64Emitter::CallIndirect(const hir::Instr* instr,
   // For null targets, calling a no-op stub and returning is equivalent
   // to skipping the call entirely (no side effects, return value undefined).
   // For tail calls, skipping means we fall through to the epilogue.
+  // Unreferenced (and therefore inert) when --tolerate_null_guest_calls=false.
   L(skip_null_call);
 }
 
