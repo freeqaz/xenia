@@ -85,6 +85,15 @@ static const size_t kMaxCodeSize = 1_MiB;
 static const size_t kStashOffset = 32;
 // static const size_t kStashOffsetHigh = 32 + 32;
 
+// Purely diagnostic: names the PE section an executable call target landed in
+// when it is not .text. NEVER affects control flow -- the result is only fed to
+// the DC3 telemetry sink and a rate-limited warning.
+//
+// Not cheap. Processor::GetModules() takes the global critical region and
+// copies the module list, and dynamic_cast + GetPESection follow. Do not call
+// this unconditionally from ResolveFunction -- see
+// ShouldClassifyNonTextTarget below and docs/fork-cleanup-review.md, section 2,
+// x64_emitter.cc:604-616.
 const char* ClassifyNonTextExecutableTarget(Processor* processor,
                                             uint32_t target_address) {
   if (!processor) {
@@ -115,6 +124,17 @@ const char* ClassifyNonTextExecutableTarget(Processor* processor,
     return "exec_non_text";
   }
   return nullptr;
+}
+
+// Gate for the above. The classification has exactly two consumers -- the DC3
+// telemetry sink and a rate-limited XELOGW -- so it is only worth running while
+// at least one of them can still use the answer. Once the warning budget for a
+// site is spent and telemetry is not recording, the global-critical-region walk
+// stops happening entirely.
+static bool ShouldClassifyNonTextTarget(const std::atomic<int>& seen_count,
+                                        int log_limit) {
+  return seen_count.load(std::memory_order_relaxed) <= log_limit ||
+         xe::Dc3RuntimeTelemetryIsActive();
 }
 
 const uint32_t X64Emitter::gpr_reg_map_[X64Emitter::GPR_COUNT] = {
@@ -628,20 +648,29 @@ uint64_t ResolveFunction(void* raw_context, uint64_t target_address) {
     return GetNoopReturnStub(thread_state);
   }
 
-  if (auto* reason =
-          ClassifyNonTextExecutableTarget(thread_state->processor(),
-                                         static_cast<uint32_t>(target_address))) {
-    std::string telemetry_reason = "resolved_non_text_";
-    telemetry_reason += reason;
-    xe::Dc3RuntimeTelemetryRecordUnresolvedCallStubHit(
-        telemetry_reason, static_cast<uint32_t>(target_address), callsite_pc);
-    static std::atomic<int> non_text_count{0};
-    int n = non_text_count.fetch_add(1, std::memory_order_relaxed);
-    if (n < 10 || (n < 100 && (n % 10) == 0) || (n % 1000) == 0) {
-      XELOGW(
-          "ResolveFunction({:08X}) from {:08X}: executable target outside .text "
-          "({})",
-          static_cast<uint32_t>(target_address), callsite_pc, reason);
+  static constexpr int kNonTextLogLimit = 32;
+  static std::atomic<int> non_text_count{0};
+  if (ShouldClassifyNonTextTarget(non_text_count, kNonTextLogLimit)) {
+    if (auto* reason = ClassifyNonTextExecutableTarget(
+            thread_state->processor(),
+            static_cast<uint32_t>(target_address))) {
+      std::string telemetry_reason = "resolved_non_text_";
+      telemetry_reason += reason;
+      xe::Dc3RuntimeTelemetryRecordUnresolvedCallStubHit(
+          telemetry_reason, static_cast<uint32_t>(target_address), callsite_pc);
+      int n = non_text_count.fetch_add(1, std::memory_order_relaxed);
+      if (n < kNonTextLogLimit) {
+        XELOGW(
+            "ResolveFunction({:08X}) from {:08X}: executable target outside "
+            ".text ({})",
+            static_cast<uint32_t>(target_address), callsite_pc, reason);
+      } else if (n == kNonTextLogLimit) {
+        XELOGW(
+            "ResolveFunction({:08X}) from {:08X}: executable target outside "
+            ".text ({}) -- hit {} times, suppressing further reports",
+            static_cast<uint32_t>(target_address), callsite_pc, reason,
+            kNonTextLogLimit + 1);
+      }
     }
   }
 
@@ -688,19 +717,32 @@ uint64_t ResolveFunction(void* raw_context, uint64_t target_address) {
 
 void X64Emitter::Call(const hir::Instr* instr, GuestFunction* function) {
   assert_not_null(function);
-  if (auto* reason =
-          ClassifyNonTextExecutableTarget(processor_, function->address())) {
-    uint32_t caller_fn = (trace_data_ && trace_data_->is_valid()) ? trace_data_->start_address() : 0;
-    std::string telemetry_reason = "direct_call_non_text_";
-    telemetry_reason += reason;
-    xe::Dc3RuntimeTelemetryRecordUnresolvedCallStubHit(telemetry_reason,
-                                                       function->address(),
-                                                       caller_fn);
-    static std::atomic<int> direct_non_text_count{0};
-    int n = direct_non_text_count.fetch_add(1, std::memory_order_relaxed);
-    if (n < 20 || (n < 200 && (n % 10) == 0) || (n % 1000) == 0) {
-      XELOGW("JIT direct call to executable non-.text target {:08X} from fn {:08X} ({})",
-             function->address(), caller_fn, reason);
+  static constexpr int kDirectNonTextLogLimit = 32;
+  static std::atomic<int> direct_non_text_count{0};
+  if (ShouldClassifyNonTextTarget(direct_non_text_count,
+                                  kDirectNonTextLogLimit)) {
+    if (auto* reason =
+            ClassifyNonTextExecutableTarget(processor_, function->address())) {
+      uint32_t caller_fn = (trace_data_ && trace_data_->is_valid())
+                               ? trace_data_->start_address()
+                               : 0;
+      std::string telemetry_reason = "direct_call_non_text_";
+      telemetry_reason += reason;
+      xe::Dc3RuntimeTelemetryRecordUnresolvedCallStubHit(
+          telemetry_reason, function->address(), caller_fn);
+      int n = direct_non_text_count.fetch_add(1, std::memory_order_relaxed);
+      if (n < kDirectNonTextLogLimit) {
+        XELOGW(
+            "JIT direct call to executable non-.text target {:08X} from fn "
+            "{:08X} ({})",
+            function->address(), caller_fn, reason);
+      } else if (n == kDirectNonTextLogLimit) {
+        XELOGW(
+            "JIT direct call to executable non-.text target {:08X} from fn "
+            "{:08X} ({}) -- hit {} times, suppressing further reports",
+            function->address(), caller_fn, reason,
+            kDirectNonTextLogLimit + 1);
+      }
     }
   }
   if (function->behavior() == Function::Behavior::kExtern) {
@@ -872,15 +914,6 @@ void X64Emitter::CallIndirect(const hir::Instr* instr,
 uint64_t UndefinedCallExtern(void* raw_context, uint64_t function_ptr) {
   auto function = reinterpret_cast<Function*>(function_ptr);
   const auto& name = function->name();
-  // Loud, greppable marker for the CRT/XDK SEH-install + Rtl* path. When guest
-  // page 0 is opened (protect_zero=false) the NULL SEH bookkeeping store/read
-  // no longer faults, but the underlying Rtl* frame-install helper is still an
-  // undefined extern; log it distinctly so the masked-NULL follow-up can judge
-  // whether the missing symbol matters. Does NOT change control flow.
-  if (name.compare(0, 3, "Rtl") == 0) {
-    XELOGW("undefined Rtl* extern call to {:08X} {} (SEH/CRT frame path)",
-           function->address(), name.c_str());
-  }
   if (!cvars::ignore_undefined_externs) {
     xe::FatalError(fmt::format("undefined extern call to {:08X} {}",
                                function->address(), name.c_str()));
