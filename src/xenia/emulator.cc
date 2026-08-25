@@ -60,6 +60,7 @@
 #include "xenia/gpu/graphics_system.h"
 #include "xenia/hid/input_driver.h"
 #include "xenia/hid/input_system.h"
+#include "xenia/hid/nop/nop_input_driver.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/user_module.h"
 #include "xenia/kernel/util/gameinfo_utils.h"
@@ -274,6 +275,19 @@ DEFINE_bool(
     "objects found via ObjectDir::sMainDir @0x82E054B8). Read-only guest "
     "memory access; no hooks, no patches; title-gated so DC3-inert. For the "
     "main_hub load-stall investigation.",
+    "CPU");
+DEFINE_bool(
+    rb3dx_autoconfirm_parts, false,
+    "RB3DX (title 0x45410914), default off, requires --rb3dx_ui_probe: "
+    "closed-loop autopilot for the two-player part/difficulty confirm. "
+    "Fixed-time --scripted_input presses cannot hit the part_difficulty_"
+    "screen window reliably (menu/ark load times vary tens of seconds "
+    "between runs; measured si6..si10). When the probe sees "
+    "song_select_screen it injects A on pad 0 (advance/pick song); on "
+    "part_difficulty_screen it alternates A on pad 1 / pad 0 each ~2s "
+    "sample so both players confirm part and difficulty regardless of when "
+    "the cards appear. Injection goes through the nop HID driver's "
+    "per-pad InjectButtonPress; no guest writes. Title-gated => DC3-inert.",
     "CPU");
 DEFINE_bool(
     rb3dx_offline_join, false,
@@ -1610,11 +1624,26 @@ static void Rb3dxUiProbeThread(Memory* memory) {
   uint8_t* base = memory->virtual_membase();
   auto readable = [&](uint32_t addr) -> bool {
     if (addr < 0x1000) return false;
+    // The title image and any user DLL image are not tracked by the guest
+    // heap page table (QueryProtect reads 0x0 / QueryRegionInfo reads
+    // uncommitted the moment a user module loads -- see jit-fault wiki 8f),
+    // which blinded every probe read for the whole --si_load_dll family of
+    // runs. Their host pages are resident for the entire run (the JIT
+    // executes from them), so treat those windows as readable and gate the
+    // rest on commit state.
+    if ((addr >= 0x82000000u && addr < 0x83000000u) ||
+        (addr >= 0x84000000u && addr < 0x84860000u)) {
+      return true;
+    }
     auto* heap = memory->LookupHeap(addr);
     if (!heap) return false;
     uint32_t prot = 0;
-    if (!heap->QueryProtect(addr, &prot)) return false;
-    return (prot & kMemoryProtectRead) != 0;
+    if (heap->QueryProtect(addr, &prot) && (prot & kMemoryProtectRead)) {
+      return true;
+    }
+    HeapAllocationInfo info = {};
+    if (!heap->QueryRegionInfo(addr, &info)) return false;
+    return (info.state & kMemoryAllocationCommit) != 0;
   };
   auto r32 = [&](uint32_t a) -> uint32_t {
     return readable(a) ? load_and_swap<uint32_t>(base + a) : 0;
@@ -1659,6 +1688,23 @@ static void Rb3dxUiProbeThread(Memory* memory) {
         "RB3DX UI PROBE[{}]: transState={} curScreen=0x{:08X}'{}' "
         "transScreen=0x{:08X}'{}'",
         sample, ts, cur, cur_name, trans, trans_name);
+    // --- closed-loop part/difficulty autopilot (--rb3dx_autoconfirm_parts).
+    // Screen-conditional so it is immune to the tens-of-seconds menu-load
+    // variance that made fixed-time A@1 presses land at the hub (opening
+    // P2's overshell menu) or after the cards were gone (si6..si10).
+    if (cvars::rb3dx_autoconfirm_parts && ts == 0) {
+      if (cur_name == "part_difficulty_screen") {
+        uint32_t pad = (sample & 1) ? 1u : 0u;
+        xe::hid::nop::NopInjectButtonPress(pad, 0x1000 /*X_INPUT_GAMEPAD_A*/,
+                                           250);
+        XELOGW("RB3DX UI PROBE[{}]: autopilot A@{} (part_difficulty_screen)",
+               sample, pad);
+      } else if (cur_name == "song_select_screen" && (sample & 1)) {
+        xe::hid::nop::NopInjectButtonPress(0, 0x1000, 250);
+        XELOGW("RB3DX UI PROBE[{}]: autopilot A@0 (song_select_screen)",
+               sample);
+      }
+    }
     // --- panels of the transition screen and current screen ---
     // RB3-360 UIScreen: mPanelList is an EMBEDDED circular {next,prev} dummy
     // at screen+0x28 (calibrated empirically: walking with s+0x2C as the

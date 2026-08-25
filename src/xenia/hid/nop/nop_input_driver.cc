@@ -108,10 +108,26 @@ std::string ReadGuestScreenName(Memory* memory, uint32_t screen_ptr,
 
 }  // namespace
 
-NopInputDriver::NopInputDriver(xe::ui::Window* window, size_t window_z_order)
-    : InputDriver(window, window_z_order) {}
+// Singleton bridge for NopInjectButtonPress (one nop driver per process in
+// practice; last-created wins, cleared on destruction).
+static std::atomic<NopInputDriver*> s_nop_driver_instance{nullptr};
 
-NopInputDriver::~NopInputDriver() = default;
+void NopInjectButtonPress(uint32_t pad, uint16_t buttons,
+                          uint64_t duration_ms) {
+  NopInputDriver* driver = s_nop_driver_instance.load(std::memory_order_acquire);
+  if (driver) {
+    driver->InjectButtonPress(buttons, duration_ms, pad);
+  }
+}
+
+NopInputDriver::NopInputDriver(xe::ui::Window* window, size_t window_z_order)
+    : InputDriver(window, window_z_order) {
+  s_nop_driver_instance.store(this, std::memory_order_release);
+}
+
+NopInputDriver::~NopInputDriver() {
+  s_nop_driver_instance.store(nullptr, std::memory_order_release);
+}
 
 X_STATUS NopInputDriver::Setup() { return X_STATUS_SUCCESS; }
 
@@ -322,12 +338,17 @@ void NopInputDriver::LoadScriptFile(const std::string& path) {
          script_directives_.size(), path);
 }
 
-void NopInputDriver::InjectButtonPress(uint16_t buttons, uint64_t duration_ms) {
+void NopInputDriver::InjectButtonPress(uint16_t buttons, uint64_t duration_ms,
+                                       uint32_t pad) {
+  if (pad >= kMaxPads) {
+    return;
+  }
   std::lock_guard<std::mutex> lock(inject_mutex_);
   InjectedEvent ev;
   ev.start = std::chrono::steady_clock::now();
   ev.duration_ms = duration_ms;
   ev.buttons = buttons;
+  ev.pad = static_cast<uint8_t>(pad);
   injected_events_.push_back(ev);
 }
 
@@ -1003,20 +1024,24 @@ uint16_t NopInputDriver::GetCurrentButtons(uint32_t pad) {
     if (screen_aware_mode_) {
       active_buttons |= GetScreenAwareButtons();
     }
+  }
 
-    // Dynamic injected events
+  {
+    // Dynamic injected events (per-pad)
     std::lock_guard<std::mutex> lock(inject_mutex_);
     auto now = std::chrono::steady_clock::now();
     for (auto it = injected_events_.begin(); it != injected_events_.end();) {
       auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                          now - it->start)
                          .count();
-      if (elapsed < (int64_t)it->duration_ms) {
-        active_buttons |= it->buttons;
-        ++it;
-      } else {
+      if (elapsed >= (int64_t)it->duration_ms) {
         it = injected_events_.erase(it);
+        continue;
       }
+      if (it->pad == pad) {
+        active_buttons |= it->buttons;
+      }
+      ++it;
     }
   }
 
