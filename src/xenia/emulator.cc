@@ -393,6 +393,19 @@ DEFINE_uint64(
     "REQUIRED for behavioral (Phase-5) runs; harmless for install-only (Phase-3) "
     "verification. Title-gated + default-off => DC3-inert.",
     "CPU");
+DEFINE_string(
+    si_hook_vas, "",
+    "RB3DX / RB3 TU5 (title 0x45410914), default empty: comma-separated FOUR "
+    "from-source RB3Enhanced.dll hook VAs, in fixed site order "
+    "IsActiveHook,ResolveWaitStatesHook,ProcessConfigHook,RecalcGemListHook "
+    "(hex, e.g. 0x84027B88,0x84027BC8,0x84027E30,0x84028FC8). Read from the "
+    "current build's K-link/RB3Enhanced.map -- the hook VAs move on EVERY DLL "
+    "rebuild, so the 2026-07 kFromSrcHooks constants in approach (b) are stale "
+    "the moment the DLL is relinked. When set, overrides those constants; when "
+    "empty, the retired 2026-07 constants are used unchanged (only correct for "
+    "the July fromsource.dll artifact). The four game-site addresses are "
+    "title-side and stable. Title-gated + default-off => DC3-inert.",
+    "CPU");
 
 namespace xe {
 
@@ -979,12 +992,40 @@ void Rb3dxSaveGprLr23ProbeExtern(cpu::ppc::PPCContext* ppc_context,
           uint32_t site, hook;
           const char* tag;
         };
-        const SiHook kFromSrcHooks[4] = {
+        SiHook kFromSrcHooks[4] = {
             {0x826684C0u, 0x840191A8u, "IsActive"},
             {0x825B6488u, 0x840191E8u, "ResolveWaitStates"},
             {0x8276FA08u, 0x84019780u, "H1 ProcessConfig"},
             {0x82794740u, 0x84019450u, "H2 RecalcGemList"},
         };
+        // The hook VAs above are the July 2026 fromsource.dll layout and go
+        // stale on every DLL relink; --si_hook_vas carries the current
+        // build's addresses (site order fixed: IsActive, ResolveWaitStates,
+        // ProcessConfig, RecalcGemList).
+        if (!cvars::si_hook_vas.empty()) {
+          uint32_t vas[4] = {};
+          int n = 0;
+          const char* p = cvars::si_hook_vas.c_str();
+          while (n < 4 && *p) {
+            char* endp = nullptr;
+            vas[n] = static_cast<uint32_t>(std::strtoul(p, &endp, 16));
+            if (endp == p) break;
+            ++n;
+            p = (*endp == ',') ? endp + 1 : endp;
+          }
+          if (n == 4) {
+            for (int i = 0; i < 4; ++i) kFromSrcHooks[i].hook = vas[i];
+            XELOGW(
+                "SI LOADDLL: (b) hook VAs overridden from --si_hook_vas: "
+                "0x{:08X} 0x{:08X} 0x{:08X} 0x{:08X}",
+                vas[0], vas[1], vas[2], vas[3]);
+          } else {
+            XELOGE(
+                "SI LOADDLL: (b) --si_hook_vas parsed {} of 4 required VAs "
+                "('{}') -- falling back to the stale 2026-07 constants",
+                n, cvars::si_hook_vas);
+          }
+        }
         const size_t host_pg = xe::memory::page_size();
         for (const auto& h : kFromSrcHooks) {
           uint8_t* host_addr = mb2 + h.site;
