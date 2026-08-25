@@ -22,6 +22,16 @@
 #include "xenia/memory.h"
 #include "xenia/ui/virtual_key.h"
 
+DEFINE_string(
+    scripted_pad_subtypes, "",
+    "Comma-separated XINPUT_DEVSUBTYPE per scripted pad, e.g. \"1,8\" = pad0 "
+    "gamepad, pad1 drums. Empty entries / missing pads default to 1 "
+    "(XINPUT_DEVSUBTYPE_GAMEPAD). RB3 maps controllers to overshell slots by "
+    "subtype (6/11=guitar, 8=drums, 15=keytar, 25=pro guitar), and only ONE "
+    "slot accepts plain gamepads -- two scripted pads can only both join a "
+    "band if they present as different instrument subtypes.",
+    "HID");
+
 namespace xe {
 namespace hid {
 namespace nop {
@@ -931,10 +941,24 @@ X_RESULT NopInputDriver::GetCapabilities(uint32_t user_index, uint32_t flags,
     return X_ERROR_DEVICE_NOT_CONNECTED;
   }
 
-  // Report a standard wired gamepad on this port
+  // Report a wired pad on this port. Subtype defaults to plain gamepad but is
+  // overridable per pad via --scripted_pad_subtypes (RB3 slot-maps by subtype;
+  // see the cvar help).
+  static uint8_t s_pad_subtypes[kMaxPads] = {0};
+  static bool s_subtypes_parsed = false;
+  if (!s_subtypes_parsed) {
+    s_subtypes_parsed = true;
+    for (uint32_t i = 0; i < kMaxPads; ++i) s_pad_subtypes[i] = 0x01;
+    std::stringstream ss(cvars::scripted_pad_subtypes);
+    std::string item;
+    for (uint32_t i = 0; i < kMaxPads && std::getline(ss, item, ','); ++i) {
+      int v = item.empty() ? 1 : std::atoi(item.c_str());
+      if (v > 0 && v < 256) s_pad_subtypes[i] = static_cast<uint8_t>(v);
+    }
+  }
   std::memset(reinterpret_cast<void*>(out_caps), 0, sizeof(*out_caps));
-  out_caps->type = 0x01;      // XINPUT_DEVTYPE_GAMEPAD
-  out_caps->sub_type = 0x01;  // XINPUT_DEVSUBTYPE_GAMEPAD
+  out_caps->type = 0x01;  // XINPUT_DEVTYPE_GAMEPAD
+  out_caps->sub_type = s_pad_subtypes[user_index];
   out_caps->flags = 0;
   out_caps->gamepad.buttons = 0xFFFF;  // All buttons supported
   out_caps->gamepad.left_trigger = 0xFF;
