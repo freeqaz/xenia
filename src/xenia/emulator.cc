@@ -1715,6 +1715,54 @@ static void Rb3dxUiProbeThread(Memory* memory) {
       }
       XELOGE("RB3DX UI PROBE[{}]:   SI claims: claimCount={} implCount={}{}",
              sample, claim_count, impl_count, claims);
+      // --- band/pad snapshot: TheBandUserMgr slot-map guids, the
+      // participants vector (BandUser subobjects), and the Joypad
+      // pad->LocalUser association table. Layouts re-derived from
+      // GetBandUserFromSlot @0x82682B60 (slot guids at mgr+0x50 stride
+      // 0x10, empty == all-zero; participants vector begin/end at
+      // mgr+0x28/+0x2C of BandUser*, guid on the vbase-adjusted subobject
+      // +0x30) and RB3E ports_xbox360.h (PORT_THEBANDUSERMGR,
+      // PORT_JOYPAD_USERPTR_BASE/PADFLAG_BASE; button messages self-filter
+      // on pad-stamped LocalUser identity, so two same-instrument players
+      // need two distinct connected pads with distinct LocalUsers).
+      const uint32_t kTheBandUserMgr = 0x82E023B8;
+      const uint32_t kJoypadUserBase = 0x82CCB30C;  // + p*0xD4
+      const uint32_t kJoypadFlagBase = 0x82CCB2A0;  // + p; 0 == connected
+      uint32_t mgr = r32(kTheBandUserMgr);
+      if (mgr) {
+        std::string slots;
+        for (uint32_t s = 0; s < 4; ++s) {
+          uint32_t g0 = r32(mgr + 0x50 + s * 0x10);
+          uint32_t g1 = r32(mgr + 0x50 + s * 0x10 + 4);
+          slots += fmt::format(" slot{}={:08X}{:08X}", s, g0, g1);
+        }
+        uint32_t vb = r32(mgr + 0x28);
+        uint32_t ve = r32(mgr + 0x2C);
+        uint32_t n = (ve > vb && ve - vb < 0x100) ? (ve - vb) / 4 : 0;
+        std::string parts;
+        for (uint32_t i = 0; i < n && i < 4; ++i) {
+          uint32_t u = r32(vb + i * 4);
+          if (!u) continue;
+          uint32_t inner = r32(u + 4);
+          uint32_t adj = inner ? r32(inner + 4) : 0;
+          uint32_t lb = (adj < 0x400) ? u + adj : u;
+          parts += fmt::format(
+              " user{}={{bu=0x{:08X} track={} diff={} shell={} "
+              "guid={:08X}{:08X}}}",
+              i, u, static_cast<int32_t>(r32(u + 0x10)),
+              static_cast<int32_t>(r32(u + 0x8)), r32(u + 0x20),
+              r32(lb + 0x30), r32(lb + 0x34));
+        }
+        std::string pads;
+        for (uint32_t p = 0; p < 4; ++p) {
+          uint32_t flag = r8(kJoypadFlagBase + p);
+          uint32_t lu = r32(kJoypadUserBase + p * 0xD4);
+          pads += fmt::format(" pad{}={{conn={} lu=0x{:08X}}}", p,
+                              flag == 0 ? 1 : 0, lu);
+        }
+        XELOGE("RB3DX UI PROBE[{}]:   band: mgr=0x{:08X} n={}{} |{} |{}",
+               sample, mgr, n, slots, parts, pads);
+      }
     }
     // --- closed-loop part/difficulty autopilot (--rb3dx_autoconfirm_parts).
     // Screen-conditional so it is immune to the tens-of-seconds menu-load
