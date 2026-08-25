@@ -41,7 +41,7 @@ static_assert(sizeof(X_NUI_DEVICE_STATUS) == 24, "Size matters");
 void XamNuiGetDeviceStatus_entry(pointer_t<X_NUI_DEVICE_STATUS> status_ptr) {
   static uint32_t nui_call_count = 0;
   if (++nui_call_count <= 10 || (nui_call_count % 500) == 0)
-    XELOGI("XamNuiGetDeviceStatus called (count={}) - reporting connected",
+    XELOGD("XamNuiGetDeviceStatus called (count={}) - reporting connected",
            nui_call_count);
   status_ptr.Zero();
   status_ptr->status = 1;  // Report connected for DC3 Kinect init.
