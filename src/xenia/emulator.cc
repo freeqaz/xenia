@@ -1862,10 +1862,15 @@ static void Rb3dxUiProbeThread(Memory* memory) {
         static int s_hub_samples = 0;
         if (cur_name != "main_hub_screen") s_hub_samples = 0;
         if (cur_name == "song_select_screen" && (sample & 1)) {
-          // Hold the song pick until pad 1's LocalUser is bound: confirming
-          // with P2 still unjoined hands the empty slot to
-          // AutoAssignMissingSlots, the exact auto-assign+SI path that
-          // livelocks at track -1 (si12).
+          // P2 joins HERE, state-driven: a join initiated from the hub (si30)
+          // resolves the instrument inside the join overshell (u1 went
+          // straight to ChooseDiff on BASS before the part screen could be
+          // navigated), while a join from song_select defers the part pick to
+          // part_difficulty_screen -- the si18/si26 shape the p2_up
+          // navigation was built for. Alternate START/A on pad 1 until its
+          // LocalUser binds, and only then confirm the song: confirming with
+          // P2 unjoined hands the empty slot to AutoAssignMissingSlots, the
+          // auto-assign+SI track_-1 livelock (si12).
           const uint32_t kJoypadUserBaseNav = 0x82CCB30C;  // + p*0xD4
           uint32_t p2_lu = r32(kJoypadUserBaseNav + 1 * 0xD4);
           if (p2_lu != 0) {
@@ -1873,10 +1878,12 @@ static void Rb3dxUiProbeThread(Memory* memory) {
             XELOGW("RB3DX UI PROBE[{}]: autopilot A@0 (song_select_screen)",
                    sample);
           } else {
+            uint32_t mask = (sample & 2) ? 0x0010u /*START*/ : 0x1000u /*A*/;
+            xe::hid::nop::NopInjectButtonPress(1, mask, 250);
             XELOGW(
-                "RB3DX UI PROBE[{}]: autopilot HOLD (song_select_screen, pad1 "
-                "user not bound yet)",
-                sample);
+                "RB3DX UI PROBE[{}]: autopilot {}@1 (song_select_screen, "
+                "joining P2)",
+                sample, (mask == 0x0010u) ? "START" : "A");
           }
         } else if (cur_name == "intro_movie_screen" ||
                    cur_name == "splash_screen" ||
