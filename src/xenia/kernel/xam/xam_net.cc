@@ -8,8 +8,11 @@
  */
 
 #include <cstring>
+#include <mutex>
+#include <random>
 
 #include "xenia/base/clock.h"
+#include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/util/shim_utils.h"
@@ -32,6 +35,15 @@
 #include <netinet/ip.h>
 #include <sys/socket.h>
 #endif
+
+DEFINE_bool(
+    xnet_random_constant_fill, false,
+    "Fill XNetRandom output with constant 0xBB bytes (the historical xenia "
+    "stub behavior) instead of real entropy. Only useful to replicate old "
+    "runs; constant fill collapses every XNetRandom-derived identity/guid to "
+    "the same value (e.g. Rock Band 3 player guids -- second local player "
+    "can never own a part).",
+    "Kernel");
 
 namespace xe {
 namespace kernel {
@@ -224,10 +236,38 @@ DECLARE_XAM_EXPORT1(NetDll_XNetGetOpt, kNetworking, kSketchy);
 
 dword_result_t NetDll_XNetRandom_entry(dword_t caller, lpvoid_t buffer_ptr,
                                        dword_t length) {
-  // For now, constant values.
-  // This makes replicating things easier.
-  std::memset(buffer_ptr, 0xBB, length);
-
+  if (cvars::xnet_random_constant_fill) {
+    // Historical upstream-stub behavior: constant fill, for run replication.
+    std::memset(buffer_ptr, 0xBB, length);
+    return 0;
+  }
+  // Real entropy. The constant 0xBB fill is not just lazy -- it is wrong in a
+  // way that silently breaks titles: Rock Band 3 generates its per-player
+  // UserGuid from XNetRandom, keys BandUserMgr::mSlotMap by that guid, and
+  // resolves slot->user by guid equality. With a constant fill every local
+  // player gets the SAME guid, every occupied slot resolves to the first
+  // user, and the second player can never own a part/track (diagnosed
+  // 2026-08-25, si15/si16: both part cards labeled 'Player1', slot0 and
+  // slot3 both 0xBB..BB). Any title that derives an identity, session
+  // nonce, or key from XNetRandom has an equivalent failure.
+  static std::mutex s_rng_mutex;
+  static std::mt19937_64 s_rng = []() {
+    std::random_device rd;
+    std::seed_seq seq{rd(), rd(), rd(), rd()};
+    return std::mt19937_64(seq);
+  }();
+  {
+    std::lock_guard<std::mutex> lock(s_rng_mutex);
+    uint8_t* out = buffer_ptr.as<uint8_t*>();
+    uint32_t remaining = length;
+    while (remaining) {
+      uint64_t word = s_rng();
+      uint32_t chunk = remaining < 8 ? remaining : 8;
+      std::memcpy(out, &word, chunk);
+      out += chunk;
+      remaining -= chunk;
+    }
+  }
   return 0;
 }
 DECLARE_XAM_EXPORT1(NetDll_XNetRandom, kNetworking, kStub);

@@ -26,6 +26,24 @@ not treated as slop. Checked-config assert demotions that mirror Release semanti
 a warning are also not flagged; demotions that are silent, or that mutate state rather than
 merely continuing, are.
 
+**Remediation status (2026-08-25, same day).** Four fix lanes landed on
+`frag-alloc-trace` (merges: fork-cleanup-cpu, -mem, -kernel; -gpu pending):
+C1-C4, C7-C10 (kernel+emulator halves), C12, C14-C17 and the section-2
+cleanup are addressed -- gates default to fork behavior, diagnostics
+restored, DC3 627-trap bar re-verified. Corrections found while fixing:
+the C16 "no matching ExFreePool" claim is FALSE (`xboxkrnl_memory.cc:645`
+exists and frees); the "GetRtl*CsCount read by nothing" claim is FALSE
+(`app/emulator_headless.cc:1684-1686` reads them); C17's
+"unreachable via memory.cc:885" reasoning cited the wrong function (the
+clamps are still dead/corrupt-only, argued per-path in the lane commit);
+the C4 dead-guard count is 16, not 14; and upstream's own POSIX
+`AllocFixed` is a latent JIT-code-cache wipe (see the fork-cleanup-mem
+merge message) -- "restore upstream" would have been a regression. Also
+fixed same-day, found by the RB3 work rather than this review: upstream's
+`NetDll_XNetRandom` constant 0xBB fill collapses every XNetRandom-derived
+identity (RB3 UserGuids -> second local player can never own a part);
+now real entropy behind `--xnet_random_constant_fill`.
+
 **The headline.** The fork's *title-specific* work is, with a handful of exceptions,
 correctly gated behind cvars and `title_id_` checks -- that part was done well. The risk is
 concentrated somewhere else: a set of **ungated "make the guest stop crashing" changes in the

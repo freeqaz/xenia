@@ -772,6 +772,92 @@ probe cascade, each run advancing one layer:
   fine and the failure is specific to guitar-family P2 under two local
   users.
 
+### 8g. ROOT CAUSE FOUND AND FIXED: XNetRandom's constant fill collapsed every UserGuid (si15..si17, 2026-08-25)
+
+The "shared identity" suspicion was right; the layer was wrong. It was never
+the XAM profile surface — it was **xenia's `NetDll_XNetRandom` stub, which
+memsets the output buffer with constant `0xBB`** ("makes replicating things
+easier", inherited from upstream). RB3 generates each local player's
+16-byte `UserGuid` from XNetRandom, keys `BandUserMgr::mSlotMap` by guid,
+and resolves slot→user by guid equality (`GetBandUserFromSlot` @0x82682B60
+→ guid-match walk @0x82682AB8, both re-derived by disasm this session). With
+every guid identical, **every occupied slot resolves to the first
+participant**: P2's overshell card belongs to P1's BandUser (hence both
+cards labeled "Player1"), P2's own BandUser never owns a slot, its
+trackType never leaves 10, and no second track/watcher can exist. Fixed in
+`xam_net.cc` with real entropy (`--xnet_random_constant_fill=true` restores
+the old fill for replicating historical runs). Upstreamable: any title
+deriving an identity/nonce/key from XNetRandom fails equivalently.
+
+The evidence chain, for the record:
+
+- **si15** (fresh save — `band3/save.dat` from earlier runs carried
+  remembered parts and was retired as a confound; new band/pad snapshot in
+  the ui-probe): pads carry DISTINCT LocalUsers (0x4362C648/0x4362C758 =
+  BandUser+0x94), so the July "shared LocalUser" input-collision theory is
+  dead under xenia. But frame 5200 showed both CHOOSE INSTRUMENT cards
+  labeled "Player1", P2's list = BASS/KEYS/SOLO/HARMONY (no GUITAR), P2
+  trackType stuck at 10 while P1 confirmed. Slot map: slot0 == slot3 ==
+  `BBBB…` (8 bytes read).
+- **si16** (full 16-byte guid reads + first-8 logging on the XAM identity
+  surface): `XamUserGetSigninInfo(user=1)` correctly returns
+  xuid=E00000000000BABF name='Player2' — the XAM layer was NEVER the
+  problem — while slot0 and slot3 both read the full
+  `BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB`. That + the RB3E MULTI-INPUT notes
+  (ports_xbox360.h: slot resolution is guid-keyed) pinned XNetRandom.
+- **si17** (fix live): slot guids random and distinct
+  (2B0AB1B3… / C1A24188…), TWO watchers constructed (track 3 AND track 1),
+  `claimCount=2 implCount=2 {track=3,cnt=1}{track=1,cnt=1}`, gameplay with
+  both players scoring — the first true two-track two-player run under
+  xenia. Note this is still *vanilla* guitar+bass (blind A@1 confirms take
+  P2's default first-free part); the SI same-track twin
+  (`{track=3,cnt=2}` + "cloned gem DB") needs P2 navigated up to GUITAR —
+  `--rb3dx_autoconfirm_p2_up=1`, run si18.
+
+Also this session: the si13/si14 "claimCount=1 proves P2 is not a track
+player" read was reframed — the claim table counts TrackWatcherImpl
+constructions (vocals produce none), and the persisted save was steering
+remembered parts. Both mattered, but the guid collapse was the root.
+
+### 8h. Post-fix frontier: the RB3DX ChoosePart duplicate-confirm gate (si18..si27)
+
+With identities fixed, the remaining gap to the full 2×-guitar proof is a
+**part-select confirm gate that RB3E's Layer A/B do not cover under RB3DX**:
+
+- **si18** (`--rb3dx_autoconfirm_p2_up=1`): UP navigated P2 onto GUITAR
+  (frame 5100: card says "Player2", GUITAR in list and highlighted — the SI
+  un-grey works with distinct users), but A on the taken part never left
+  kState_ChoosePart(10). Per SI-INTERNALS the intended flow is confirm →
+  ChoosePartWait(11) → Layer B advances; under RB3DX the confirm is
+  rejected BEFORE the wait state, where no hook lives. (Enum:
+  ChoosePart=10, ChoosePartWait=11, ChooseDiff=12; BandUser ty: GUITAR=1
+  BASS=2 DRUMS=0 VOCALS=3.)
+- **si22/si24/si25 seeds + si23/si26 proofs**: solo seed runs CAN pick any
+  free part (si24: P2 solo picked GUITAR EXPERT via UP; si25: P1 solo
+  defaulted GUITAR) and the profile remembers it — but in the two-player
+  run the remembered-duplicate arbitration runs BEFORE the cards show
+  (loser drops to a fresh pick defaulting BASS), also outside Layer B's
+  reach: si26 ended guitar+bass again. NOTE the slot-keyed default:
+  slot 0 defaults GUITAR, the second slot defaults BASS even when guitar
+  is free (si22 proved this solo).
+- **si27**: clean TU5 (the July hardware target,
+  rb3-xenon/_tu5probe/clean/clean_tu5_nodd.xex staged at /tmp/rb3tu5boot)
+  boots, DLL installs, band mgr present — but the flow never advances and
+  the UI probe reads no screens (TU5's pre-hub flow differs from DX;
+  needs its own bring-up pass before it can arbitrate this).
+
+**Meanwhile the identity fix already bought real hardware parity:** si17/
+si23/si26 are the first two-player two-track runs under xenia — two
+watchers, both scoring, distinct cards ("Player2"), full gameplay loop.
+
+**Open next steps:** (a) bring up the clean-TU5 menu flow headless and
+rerun the 2×-guitar pick there (the RB3E-designed envelope); (b) or find
+RB3DX's ChoosePart confirm validator (dx overshell rework) and extend the
+SI harness with a host-side detour for it; (c) the intermittent ~130s
+silent clean exits (si16/si19/si20 pattern, exit code 0, no core, run-
+dependent) deserve one dedicated session — si21 proved a full 300s run
+with exit 0 on the same binary/config.
+
 ---
 
 ## 9. Related docs
