@@ -608,6 +608,58 @@ select scripting (the P2 join presses in the old script fire during
 dx_welcome and are wasted), and video-out capture for pixel evidence (runs
 above are NullGPU).
 
+## 8d. 2026-08-25 — Vulkan pixel-proof + TWO-PLAYER gameplay; the one-gamepad slot model
+
+**Vulkan works.** The July NVIDIA kernel/userspace mismatch is gone (610.43.3
+both sides); `--gpu=vulkan --dump_frames_path=<dir>` renders and captures
+correctly on the RTX 3090. Pixel evidence (all fully legible): the CHOOSE
+INSTRUMENT part-select card, CHOOSE DIFFICULTY with per-instrument icons, the
+main_hub 3D venue with the RB3 logo and menu stack, and in-song gameplay —
+vocals HUD for "Du Hast" (Rammstein), guitar fret highway under the RB3
+DELUXE logo, and finally a TWO-TRACK drums+second-player stage. Probes:
+`/tmp/rb3-vk1`, `/tmp/rb3-2pad2`, `/tmp/rb3-2pad9`.
+
+**Why a second scripted pad could never join (five probe passes):** the input
+arm was healthy end-to-end — pad-1 keystrokes delivered per-user, guest
+`gJoypadData[1]` conn=1 with a bound LocalUser, held buttons visible in guest
+memory. The gate was RB3's slot model: `OvershellPanel::RefreshJoinableUsers`
+assigns each candidate to a slot accepting its ConnectedControllerType, and
+only ONE overshell slot accepts plain gamepads. Probe evidence: pre-join both
+users listed in slot2 (npot=2, both kMetaJoinOK); after P1's gamepad takes
+that slot, every join list is empty forever. Vanilla one-instrument-per-slot
+design, not an emulator bug. Two prerequisites are real, though:
+`--local_user_count=2` (else the join dies at XamShowSigninUI), and keeping
+the presses out of dialogs (`HasActiveDialogEvent` eats overshell buttons
+while the dx settings-error dialog is up).
+
+**Lever (b831e2e23): `--scripted_pad_subtypes=1,8`** — the nop HID driver now
+reports a per-pad XINPUT_DEVSUBTYPE; subtype 8 routes pad 1 through
+`SetupHXDrums` (guest type 9, standard drums), it lands in the DRUMS slot's
+join list, and START@1 joins it: the slot's state object advances, the user
+leaves the join list, and gameplay renders TWO track highways (drum lanes +
+kick bar on the left). New probe instrumentation under `--rb3dx_ui_probe`:
+per-sample `gJoypadData[0..3]` (base 0x82CCB2C8 stride 0xD4, decoded from
+`JoypadGetPadData` @0x82524998 = RB3E PORT_JOYPADGETPADDATA) and per-slot
+overshell join lists (mSlots auto-located; offsets from rb3-xenon
+OvershellSlot.h).
+
+**New frontier — song playback never starts.** Every headless in-song run
+(vocals, guitar, two-player) holds game_screen at position 0:00: score 0,
+static gems, XMA contexts resetting. Suspect the offline
+`NetSession::StartGame → Poll → EnterInGameState → SyncStartGameMsg →
+Game::Go → MasterAudio::Play` chain — exactly the chain the RB3 native port
+had to shim offline (`rb3/native/src/rb3_netsession_native.cpp` V3 notes: the
+sync_audio_net_panel waits on mState 4→5). Next lever: probe
+`SyncGameStartPanel`/`NetSession::mGameState` at song start under xenia.
+
+**Same-instrument A/B status:** the SI feature was meanwhile proven ON REAL
+HARDWARE (RB3Enhanced `docs/plans/same-instrument-live-diagnosis.md`: live
+song, two watchers on track 2, second claimant got a private cloned DB), so
+the Xenia A/B is corroboration now, not the primary proof. The in-tree
+`--si_load_dll` harness carries hook VAs from the older Phase-2 DLL layout;
+the current from-source DLL moved them (map addendum in that doc) — refresh
+before any Xenia SI run.
+
 ---
 
 ## 9. Related docs
