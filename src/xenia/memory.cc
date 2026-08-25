@@ -1084,10 +1084,21 @@ bool BaseHeap::AllocRange(uint32_t low_address, uint32_t high_address,
 
   // Set page state.
   {
-    uint32_t max_page = uint32_t(page_table_.size());
-    uint32_t clamped_end = std::min(end_page_number, max_page - 1);
-    for (uint32_t page_number = start_page_number; page_number <= clamped_end;
-         ++page_number) {
+    // This used to clamp end_page_number to the last page and carry on, which
+    // half-succeeded: the caller got *out_address and believed it owned `size`
+    // bytes while the page table only recorded the clamped prefix. The search
+    // above bounds end_page_number by high_page_number, which is itself
+    // clamped to page_table_.size() - 1, so this is unreachable in practice --
+    // but if it ever does trip, fail loudly rather than lie.
+    if (end_page_number >= page_table_.size()) {
+      XELOGE(
+          "BaseHeap::AllocRange: page range [{}, {}] exceeds page table "
+          "({} pages); refusing to half-allocate",
+          start_page_number, end_page_number, page_table_.size());
+      return false;
+    }
+    for (uint32_t page_number = start_page_number;
+         page_number <= end_page_number; ++page_number) {
       auto& page_entry = page_table_[page_number];
       page_entry.base_address = start_page_number;
       page_entry.region_page_count = page_count;
@@ -1191,7 +1202,16 @@ bool BaseHeap::Release(uint32_t base_address, uint32_t* out_region_size) {
   uint32_t end_page_number =
       base_page_number + base_page_entry.region_page_count - 1;
   if (end_page_number >= page_table_.size()) {
-    end_page_number = uint32_t(page_table_.size()) - 1;
+    // Was a silent clamp. region_page_count comes out of the page table, which
+    // only ever gets it from a successful Alloc*, so a region that runs off the
+    // end means the table is already corrupt -- clearing a truncated prefix
+    // would leave a phantom region behind. Match the error convention of the
+    // other Release failures and refuse.
+    XELOGE(
+        "BaseHeap::Release({:08X}): region [{}, {}] exceeds page table "
+        "({} pages); page table is corrupt",
+        base_address, base_page_number, end_page_number, page_table_.size());
+    return false;
   }
   for (uint32_t page_number = base_page_number; page_number <= end_page_number;
        ++page_number) {
