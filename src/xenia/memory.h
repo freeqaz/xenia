@@ -206,6 +206,12 @@ class BaseHeap {
   uint32_t heap_size_;
   uint32_t page_size_;
   uint32_t host_address_offset_;
+  // Whether a commit through this heap should zero the newly committed pages
+  // (--posix_allocfixed_zero_commit). Cleared for PhysicalHeap, which is an
+  // aliasing VIEW of the parent physical heap's pages: the parent already
+  // zeroed them on the way through, and re-zeroing here would wipe data a
+  // title wrote through one alias when it commits another.
+  bool zero_on_commit_ = true;
   xe::global_critical_region global_critical_region_;
   std::vector<PageEntry> page_table_;
 };

@@ -50,6 +50,7 @@
 #include "xenia/cpu/backend/null_backend.h"
 #include "xenia/cpu/cpu_flags.h"
 #include "xenia/cpu/milo_trace.h"
+#include "xenia/cpu/mmio_handler.h"
 #include "xenia/cpu/ppc/ppc_context.h"
 #include "xenia/cpu/processor.h"
 #include "xenia/cpu/thread_state.h"
@@ -4298,6 +4299,12 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
                                             true);
   on_shader_storage_initialization(false);
 
+  // Push --rb3dx_alloc_probe down into the MMIO fault handler. src/xenia/cpu
+  // used to DECLARE_bool this cvar, which made the CPU library depend on a
+  // symbol DEFINEd here; the setter keeps the dependency pointing downwards.
+  // Unconditional (not title-gated) to match the previous cvar read.
+  cpu::MMIOHandler::SetAllocProbeEnabled(cvars::rb3dx_alloc_probe);
+
   // RB3DX (0x45410914) DIAGNOSTIC: MemAlloc argument probe for the main_hub
   // corrupted-size OOM investigation. Default off (--rb3dx_alloc_probe).
   // No guest byte patches: overrides the pre-declared __savegprlr_23 helper
@@ -4551,6 +4558,23 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
   // (hack pack, kAddr populate) is separately gated on the detected layout.
   if (title_id_.has_value() && title_id_.value() == 0x373307D9) {
     Dc3MaybeCleanStaleContentCache(content_root_);
+
+    // Opt this title in to the MMIO write soft-fault (64KB-vs-4KB protect
+    // granularity conflict in the XEX image data region). These two constants
+    // track the DC3 debug build's data layout and used to be hardcoded inside
+    // the shared fault handler, where they applied to every game; they are the
+    // exact values that were in mmio_handler.cc, kept verbatim so DC3 boot
+    // behavior is unchanged. Log the module's .data bounds next to them so
+    // drift is visible after a relink (the range deliberately spans more than
+    // .data alone, so it is not derived from the section table).
+    cpu::MMIOHandler::SetSoftFaultWritableRange(0x83320000, 0x836C0000);
+    if (auto* xex = module->xex_module()) {
+      if (auto* data = xex->GetPESection(".data")) {
+        XELOGI("DC3: module .data is [{:08X}, {:08X}) (soft-fault writable "
+               "range is [83320000, 836C0000))",
+               data->address, data->address + data->size);
+      }
+    }
 
     // Load the patch manifest early so it's available for both NUI patching
     // and the hack pack (which runs independently of --stub_nui_functions).

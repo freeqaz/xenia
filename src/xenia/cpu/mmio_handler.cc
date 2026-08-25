@@ -22,7 +22,17 @@
 #include "xenia/base/memory.h"
 #include "xenia/base/platform.h"
 
-DECLARE_bool(rb3dx_alloc_probe);
+DEFINE_bool(
+    soft_fault_unmapped_reads, true,
+    "Decomp/stub-guest support, ON by default in this fork: a read access "
+    "violation on unmapped guest memory zeroes the destination register and "
+    "resumes at the next instruction instead of crashing. Upstream semantics "
+    "are OFF -- the fault propagates and the emulator reports it with a PC. "
+    "The first occurrences are logged at warning level either way. Turn this "
+    "off to find real uninitialised-pointer and stack-overrun bugs; leave it "
+    "on for the DC3 (0x373307D9) and RB3DX (0x45410914) decomp targets, which "
+    "rely on it.",
+    "CPU");
 
 namespace xe {
 namespace cpu {
@@ -30,14 +40,46 @@ namespace cpu {
 // RB3DX OOM investigation (--rb3dx_alloc_probe): one-shot attribution of
 // which recovery branch services faults on guest EAs above every heap top
 // (>= 0xFFD00000, e.g. the MemHeap::Alloc post-OOM store to 0xFFFFFFFC).
+// The cvar is DEFINEd in emulator.cc; src/xenia/cpu must not read it, so the
+// launch path pushes its value in via MMIOHandler::SetAllocProbeEnabled().
+static std::atomic<bool> rb3dx_alloc_probe_enabled{false};
 static std::atomic<int> rb3dx_tophole_logs{0};
 static void Rb3dxTopHoleLog(uint32_t guest_ea, bool is_write,
                             const char* branch, int detail) {
-  if (!cvars::rb3dx_alloc_probe) return;
+  if (!rb3dx_alloc_probe_enabled.load(std::memory_order_relaxed)) return;
   if (rb3dx_tophole_logs.fetch_add(1, std::memory_order_relaxed) >= 8) return;
   XELOGE("RB3DX TOPHOLE: guest EA {:08X} is_write={} branch={} detail={}",
          guest_ea, is_write, branch, detail);
 }
+
+void MMIOHandler::SetAllocProbeEnabled(bool enabled) {
+  rb3dx_alloc_probe_enabled.store(enabled, std::memory_order_relaxed);
+}
+
+// Guest virtual range registered by the launch path in which a write fault on
+// a read-only host page re-enables write access and resumes. Empty by default
+// (lo >= hi), so this recovery branch is inert for every title that does not
+// opt in. See MMIOHandler::SetSoftFaultWritableRange().
+static std::atomic<uint32_t> soft_fault_writable_lo{1};
+static std::atomic<uint32_t> soft_fault_writable_hi{0};
+
+void MMIOHandler::SetSoftFaultWritableRange(uint32_t guest_lo,
+                                            uint32_t guest_hi) {
+  soft_fault_writable_lo.store(guest_lo, std::memory_order_relaxed);
+  soft_fault_writable_hi.store(guest_hi, std::memory_order_relaxed);
+  if (guest_lo < guest_hi) {
+    XELOGI("MMIO: soft-fault writable range registered [{:08X}, {:08X})",
+           guest_lo, guest_hi);
+  } else {
+    XELOGI("MMIO: soft-fault writable range cleared");
+  }
+}
+
+// Rate limits for the two soft-fault recovery branches. These are diagnostics
+// only -- the branches keep working after the log budget is exhausted.
+static constexpr int kSoftFaultLogLimit = 20;
+static std::atomic<int> soft_fault_write_logs{0};
+static std::atomic<int> soft_fault_read_logs{0};
 
 MMIOHandler* MMIOHandler::global_handler_ = nullptr;
 
@@ -451,7 +493,9 @@ bool MMIOHandler::ExceptionCallback(Exception* ex) {
     // clears the watch we just hit).
     // Do this under the lock so we don't introduce another race condition.
     auto lock = global_critical_region_.Acquire();
-    memory::PageAccess cur_access;
+    // Initialised: QueryProtect leaves it untouched when it fails, and the
+    // recovery branches below test it.
+    memory::PageAccess cur_access = memory::PageAccess::kNoAccess;
     size_t page_length = memory::page_size();
     bool protect_ok = memory::QueryProtect(fault_host_address, page_length, cur_access);
     if (protect_ok &&
@@ -478,25 +522,38 @@ bool MMIOHandler::ExceptionCallback(Exception* ex) {
         return true;
       }
     }
-    // DC3 workaround: write faults in the XEX DATA range caused by 64KB page
-    // granularity mismatch.  The game calls NtAllocateVirtualMemory /
+    // Registered-range workaround: write faults caused by 64KB page
+    // granularity mismatch.  The guest calls NtAllocateVirtualMemory /
     // NtProtectVirtualMemory with READ_ONLY on a 4KB sub-range, which makes
     // the entire 64KB heap page read-only.  Other addresses in the same 64KB
     // page lose write access.  Fix: re-enable write on the host page.
-    if (is_write && cur_access == memory::PageAccess::kReadOnly) {
-      uint64_t fault_addr = ex->fault_address();
-      // XEX image DATA range: host base + 0x83320000 to host base + 0x836C0000
-      uint64_t data_start = reinterpret_cast<uint64_t>(virtual_membase_) + 0x83320000;
-      uint64_t data_end = reinterpret_cast<uint64_t>(virtual_membase_) + 0x836C0000;
-      if (fault_addr >= data_start && fault_addr < data_end) {
+    //
+    // The range used to be two DC3 build constants hardcoded here, applied to
+    // every title.  It is now registered by the launch path
+    // (MMIOHandler::SetSoftFaultWritableRange) and is empty unless a title
+    // opts in, so no other game's read-only page faults are swallowed.
+    if (is_write && protect_ok && cur_access == memory::PageAccess::kReadOnly) {
+      uint32_t writable_lo =
+          soft_fault_writable_lo.load(std::memory_order_relaxed);
+      uint32_t writable_hi =
+          soft_fault_writable_hi.load(std::memory_order_relaxed);
+      if (writable_lo < writable_hi &&
+          fault_guest_virtual_address >= writable_lo &&
+          fault_guest_virtual_address < writable_hi) {
+        uint64_t fault_addr = ex->fault_address();
         // Re-enable write on this host page
         void* page_base = reinterpret_cast<void*>(
             fault_addr & ~(static_cast<uint64_t>(memory::page_size()) - 1));
         memory::Protect(page_base, memory::page_size(),
                         memory::PageAccess::kReadWrite, nullptr);
-        XELOGW("DC3: Re-enabled write at host {:016X} (guest {:08X}) "
-               "after 64KB granularity conflict",
-               fault_addr, fault_guest_virtual_address);
+        if (soft_fault_write_logs.fetch_add(1, std::memory_order_relaxed) <
+            kSoftFaultLogLimit) {
+          XELOGW(
+              "MMIO soft-fault write: re-enabled write at host {:016X} (guest "
+              "{:08X}, host RIP {:016X}) after 64KB granularity conflict",
+              fault_addr, fault_guest_virtual_address,
+              uint64_t(ex->pc()));
+        }
         return true;
       }
     }
@@ -542,21 +599,39 @@ bool MMIOHandler::ExceptionCallback(Exception* ex) {
     // Soft fault: for reads from unmapped guest memory (e.g. stack guard
     // pages), zero the destination register and skip the faulting instruction
     // instead of crashing.  This keeps decomp/stub guests alive.
+    //
+    // --soft_fault_unmapped_reads (default true here, false upstream): when
+    // off, fall through to the crash path so the fault is reported with a PC.
+    // Either way the first kSoftFaultLogLimit occurrences are logged, since an
+    // ungated version of this branch can hide real memory-corruption bugs.
     if (!is_write) {
       auto rip = ex->pc();
       auto p = reinterpret_cast<const uint8_t*>(rip);
       DecodedLoadStore decoded_load_store;
       if (TryDecodeLoadStore(p, decoded_load_store) &&
           decoded_load_store.is_load) {
-#if XE_ARCH_AMD64
-        ex->ModifyIntRegister(decoded_load_store.value_reg) = 0;
-#endif
-        ex->set_resume_pc(rip + decoded_load_store.length);
-        if (fault_guest_virtual_address >= 0xFFD00000u) {
-          Rb3dxTopHoleLog(fault_guest_virtual_address, is_write,
-                          "read-soft-fault", int(decoded_load_store.length));
+        bool soft_fault = cvars::soft_fault_unmapped_reads;
+        if (soft_fault_read_logs.fetch_add(1, std::memory_order_relaxed) <
+            kSoftFaultLogLimit) {
+          XELOGW(
+              "MMIO soft-fault read from unmapped guest {:08X} (host {:016X}, "
+              "host RIP {:016X}, len {}): {}",
+              fault_guest_virtual_address, ex->fault_address(), uint64_t(rip),
+              decoded_load_store.length,
+              soft_fault ? "zeroing destination register and resuming"
+                         : "not handled (--soft_fault_unmapped_reads=false)");
         }
-        return true;
+        if (soft_fault) {
+#if XE_ARCH_AMD64
+          ex->ModifyIntRegister(decoded_load_store.value_reg) = 0;
+#endif
+          ex->set_resume_pc(rip + decoded_load_store.length);
+          if (fault_guest_virtual_address >= 0xFFD00000u) {
+            Rb3dxTopHoleLog(fault_guest_virtual_address, is_write,
+                            "read-soft-fault", int(decoded_load_store.length));
+          }
+          return true;
+        }
       }
     }
     if (fault_guest_virtual_address >= 0xFFD00000u) {

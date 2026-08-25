@@ -69,6 +69,23 @@ class MMIOHandler {
   bool CheckLoad(uint32_t virtual_address, uint32_t* out_value);
   bool CheckStore(uint32_t virtual_address, uint32_t value);
 
+  // Registers a single guest virtual range inside which a write fault landing
+  // on a read-only host page re-enables write access on that page and resumes,
+  // instead of being reported as an access violation.
+  //
+  // This exists for guests that call NtProtectVirtualMemory with READ_ONLY on a
+  // 4 KiB sub-range of a 64 KiB guest page: the whole host page loses write
+  // access and unrelated addresses in it start faulting. No range is registered
+  // by default; the launch path installs one for the titles that need it (see
+  // Emulator::CompleteLaunch). Pass an empty range (lo >= hi) to clear.
+  static void SetSoftFaultWritableRange(uint32_t guest_lo, uint32_t guest_hi);
+
+  // Arms/disarms the RB3DX top-of-address-space fault attribution logging.
+  // Set from the launch path where the rest of the --rb3dx_alloc_probe
+  // machinery is armed; the cvar itself lives in emulator.cc and must not be
+  // read from src/xenia/cpu.
+  static void SetAllocProbeEnabled(bool enabled);
+
  protected:
   MMIOHandler(uint8_t* virtual_membase, uint8_t* physical_membase,
               uint8_t* membase_end, HostToGuestVirtual host_to_guest_virtual,
