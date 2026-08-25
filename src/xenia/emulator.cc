@@ -1832,24 +1832,45 @@ static void Rb3dxUiProbeThread(Memory* memory) {
       // explicitly so auto-assign+SI was never exercised). Give P2 the first
       // three samples (part + difficulty confirms), then bring P1 along.
       static int s_part_screen_samples = 0;
+      static int s_p2_ups_done = 0;
+      // Occupied slots in BandUserMgr's guid-keyed slot map: the real "who
+      // has joined the band" signal (pad-table LocalUser binding is just
+      // sign-in and is nonzero for every --local_user_count user).
+      auto slots_occupied = [&]() {
+        uint32_t mgr = r32(0x82E023B8 /*kTheBandUserMgr*/);
+        if (!mgr) return 0;
+        int n = 0;
+        for (uint32_t s = 0; s < 4; ++s) {
+          uint32_t base = mgr + 0x50 + s * 0x10;
+          if (r32(base) | r32(base + 4) | r32(base + 8) | r32(base + 12)) ++n;
+        }
+        return n;
+      };
       if (cur_name == "part_difficulty_screen") {
         ++s_part_screen_samples;
-        // Optional pad-1 list navigation before the confirms: press UP on the
-        // first N part-screen samples (--rb3dx_autoconfirm_p2_up). With the
-        // XNetRandom identity fix P2 owns its own card; its CHOOSE INSTRUMENT
-        // list defaults to the first free part (BASS when P1 took GUITAR), so
-        // selecting the same instrument needs N=1 UP when the SI un-grey puts
-        // GUITAR back in the list above BASS.
-        if (s_part_screen_samples <= cvars::rb3dx_autoconfirm_p2_up) {
+        // si33: an A on pad 1 at the part screen JOINS P2 directly (no START
+        // dance needed), so the join happens here -- late enough that the
+        // instrument pick stays in this screen instead of resolving inside
+        // the hub join overshell (si30). Sequence: A@1 until the slot map
+        // shows a second member, then N UPs (--rb3dx_autoconfirm_p2_up) to
+        // walk P2's CHOOSE INSTRUMENT list off its slot default (BASS even
+        // when guitar is free, si22) onto the SI-un-greyed duplicate, then
+        // the confirm cadence.
+        if (slots_occupied() < 2) {
+          xe::hid::nop::NopInjectButtonPress(1, 0x1000 /*A*/, 250);
+          XELOGW(
+              "RB3DX UI PROBE[{}]: autopilot A@1 join (part_difficulty_screen "
+              "sample {}, slots={})",
+              sample, s_part_screen_samples, slots_occupied());
+        } else if (s_p2_ups_done < cvars::rb3dx_autoconfirm_p2_up) {
+          ++s_p2_ups_done;
           xe::hid::nop::NopInjectButtonPress(1, 0x0001 /*DPAD_UP*/, 250);
           XELOGW(
               "RB3DX UI PROBE[{}]: autopilot UP@1 (part_difficulty_screen "
-              "sample {})",
-              sample, s_part_screen_samples);
+              "up {}/{})",
+              sample, s_p2_ups_done, cvars::rb3dx_autoconfirm_p2_up);
         } else {
-          int confirm_sample =
-              s_part_screen_samples - cvars::rb3dx_autoconfirm_p2_up;
-          uint32_t pad = (confirm_sample <= 3 || (sample & 1)) ? 1u : 0u;
+          uint32_t pad = (s_part_screen_samples <= 6 || (sample & 1)) ? 1u : 0u;
           xe::hid::nop::NopInjectButtonPress(pad, 0x1000 /*X_INPUT_GAMEPAD_A*/,
                                              250);
           XELOGW(
@@ -1859,6 +1880,7 @@ static void Rb3dxUiProbeThread(Memory* memory) {
         }
       } else {
         s_part_screen_samples = 0;
+        s_p2_ups_done = 0;
         static int s_hub_samples = 0;
         if (cur_name != "main_hub_screen") s_hub_samples = 0;
         if (cur_name == "song_select_screen" && (sample & 1)) {
