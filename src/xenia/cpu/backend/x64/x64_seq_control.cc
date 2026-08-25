@@ -12,7 +12,12 @@
 #include <algorithm>
 #include <cstring>
 
+#include "xenia/base/assert.h"
+#include "xenia/base/cvar.h"
 #include "xenia/cpu/backend/x64/x64_op.h"
+
+// Defined in x64_emitter.cc. See docs/fork-cleanup-review.md, finding C4.
+DECLARE_bool(tolerate_null_guest_calls);
 
 namespace xe {
 namespace cpu {
@@ -20,6 +25,42 @@ namespace backend {
 namespace x64 {
 
 volatile int anchor_control = 0;
+
+// Returns true if a call whose target is known at emit time to be null should
+// be dropped from the generated code entirely.
+//
+// The fork added these checks ungated, which turns every null guest call in
+// every title into a silent no-op returning an undefined value. That is
+// correct for the /FORCE-linked decomp targets and exactly wrong for a retail
+// title, where a null vtable slot means the object graph is already corrupt
+// (docs/fork-cleanup-review.md, C4). --tolerate_null_guest_calls defaults to
+// true so the fork's behaviour is the default; with it off the assert fires
+// and, in a Release build where the assert compiles away, we still cannot
+// emit a call to a target that does not exist -- so the drop happens either
+// way and the difference is purely whether it is announced.
+//
+// These run at EMIT time against compile-time-constant operands, so the cvar
+// read costs nothing at guest runtime, and JIT compilation always happens
+// after cvar parsing.
+static bool DropNullGuestCall(const Function* target) {
+  if (target) {
+    return false;
+  }
+  if (!cvars::tolerate_null_guest_calls) {
+    assert_not_null(target);
+  }
+  return true;
+}
+
+static bool DropNullGuestCall(uint64_t target_address) {
+  if (target_address) {
+    return false;
+  }
+  if (!cvars::tolerate_null_guest_calls) {
+    assert_not_zero(target_address);
+  }
+  return true;
+}
 
 // ============================================================================
 // OPCODE_DEBUG_BREAK
@@ -184,7 +225,7 @@ EMITTER_OPCODE_TABLE(OPCODE_TRAP_TRUE, TRAP_TRUE_I8, TRAP_TRUE_I16,
 // ============================================================================
 struct CALL : Sequence<CALL, I<OPCODE_CALL, VoidOp, SymbolOp>> {
   static void Emit(X64Emitter& e, const EmitArgType& i) {
-    if (!i.src1.value) return;
+    if (DropNullGuestCall(i.src1.value)) return;
     assert_true(i.src1.value->is_guest());
     e.Call(i.instr, static_cast<GuestFunction*>(i.src1.value));
   }
@@ -197,7 +238,7 @@ EMITTER_OPCODE_TABLE(OPCODE_CALL, CALL);
 struct CALL_TRUE_I8
     : Sequence<CALL_TRUE_I8, I<OPCODE_CALL_TRUE, VoidOp, I8Op, SymbolOp>> {
   static void Emit(X64Emitter& e, const EmitArgType& i) {
-    if (!i.src2.value) return;
+    if (DropNullGuestCall(i.src2.value)) return;
     assert_true(i.src2.value->is_guest());
     e.test(i.src1, i.src1);
     Xbyak::Label skip;
@@ -209,7 +250,7 @@ struct CALL_TRUE_I8
 struct CALL_TRUE_I16
     : Sequence<CALL_TRUE_I16, I<OPCODE_CALL_TRUE, VoidOp, I16Op, SymbolOp>> {
   static void Emit(X64Emitter& e, const EmitArgType& i) {
-    if (!i.src2.value) return;
+    if (DropNullGuestCall(i.src2.value)) return;
     assert_true(i.src2.value->is_guest());
     e.test(i.src1, i.src1);
     Xbyak::Label skip;
@@ -221,7 +262,7 @@ struct CALL_TRUE_I16
 struct CALL_TRUE_I32
     : Sequence<CALL_TRUE_I32, I<OPCODE_CALL_TRUE, VoidOp, I32Op, SymbolOp>> {
   static void Emit(X64Emitter& e, const EmitArgType& i) {
-    if (!i.src2.value) return;
+    if (DropNullGuestCall(i.src2.value)) return;
     assert_true(i.src2.value->is_guest());
     e.test(i.src1, i.src1);
     Xbyak::Label skip;
@@ -233,7 +274,7 @@ struct CALL_TRUE_I32
 struct CALL_TRUE_I64
     : Sequence<CALL_TRUE_I64, I<OPCODE_CALL_TRUE, VoidOp, I64Op, SymbolOp>> {
   static void Emit(X64Emitter& e, const EmitArgType& i) {
-    if (!i.src2.value) return;
+    if (DropNullGuestCall(i.src2.value)) return;
     assert_true(i.src2.value->is_guest());
     e.test(i.src1, i.src1);
     Xbyak::Label skip;
@@ -245,7 +286,7 @@ struct CALL_TRUE_I64
 struct CALL_TRUE_F32
     : Sequence<CALL_TRUE_F32, I<OPCODE_CALL_TRUE, VoidOp, F32Op, SymbolOp>> {
   static void Emit(X64Emitter& e, const EmitArgType& i) {
-    if (!i.src2.value) return;
+    if (DropNullGuestCall(i.src2.value)) return;
     assert_true(i.src2.value->is_guest());
     e.vptest(i.src1, i.src1);
     Xbyak::Label skip;
@@ -257,7 +298,7 @@ struct CALL_TRUE_F32
 struct CALL_TRUE_F64
     : Sequence<CALL_TRUE_F64, I<OPCODE_CALL_TRUE, VoidOp, F64Op, SymbolOp>> {
   static void Emit(X64Emitter& e, const EmitArgType& i) {
-    if (!i.src2.value) return;
+    if (DropNullGuestCall(i.src2.value)) return;
     assert_true(i.src2.value->is_guest());
     e.vptest(i.src1, i.src1);
     Xbyak::Label skip;
@@ -278,7 +319,7 @@ struct CALL_INDIRECT
   static void Emit(X64Emitter& e, const EmitArgType& i) {
     if (i.src1.is_constant) {
       auto constant = i.src1.constant();
-      if (constant == 0) return;
+      if (DropNullGuestCall(constant)) return;
       e.mov(e.rax, constant);
       e.CallIndirect(i.instr, e.rax);
     } else {
@@ -299,7 +340,10 @@ struct CALL_INDIRECT_TRUE_I8
     Xbyak::Label skip;
     e.jz(skip, CodeGenerator::T_NEAR);
     if (i.src2.is_constant) {
-      if (i.src2.constant() == 0) { e.L(skip); return; }
+      if (DropNullGuestCall(i.src2.constant())) {
+        e.L(skip);
+        return;
+      }
       e.mov(e.rax, i.src2.constant());
       e.CallIndirect(i.instr, e.rax);
     } else {
@@ -316,7 +360,10 @@ struct CALL_INDIRECT_TRUE_I16
     Xbyak::Label skip;
     e.jz(skip, CodeGenerator::T_NEAR);
     if (i.src2.is_constant) {
-      if (i.src2.constant() == 0) { e.L(skip); return; }
+      if (DropNullGuestCall(i.src2.constant())) {
+        e.L(skip);
+        return;
+      }
       e.mov(e.rax, i.src2.constant());
       e.CallIndirect(i.instr, e.rax);
     } else {
@@ -333,7 +380,10 @@ struct CALL_INDIRECT_TRUE_I32
     Xbyak::Label skip;
     e.jz(skip, CodeGenerator::T_NEAR);
     if (i.src2.is_constant) {
-      if (i.src2.constant() == 0) { e.L(skip); return; }
+      if (DropNullGuestCall(i.src2.constant())) {
+        e.L(skip);
+        return;
+      }
       e.mov(e.rax, i.src2.constant());
       e.CallIndirect(i.instr, e.rax);
     } else {
@@ -350,7 +400,10 @@ struct CALL_INDIRECT_TRUE_I64
     Xbyak::Label skip;
     e.jz(skip, CodeGenerator::T_NEAR);
     if (i.src2.is_constant) {
-      if (i.src2.constant() == 0) { e.L(skip); return; }
+      if (DropNullGuestCall(i.src2.constant())) {
+        e.L(skip);
+        return;
+      }
       e.mov(e.rax, i.src2.constant());
       e.CallIndirect(i.instr, e.rax);
     } else {
@@ -367,7 +420,10 @@ struct CALL_INDIRECT_TRUE_F32
     Xbyak::Label skip;
     e.jz(skip, CodeGenerator::T_NEAR);
     if (i.src2.is_constant) {
-      if (i.src2.constant() == 0) { e.L(skip); return; }
+      if (DropNullGuestCall(i.src2.constant())) {
+        e.L(skip);
+        return;
+      }
       e.mov(e.rax, i.src2.constant());
       e.CallIndirect(i.instr, e.rax);
     } else {
@@ -384,7 +440,10 @@ struct CALL_INDIRECT_TRUE_F64
     Xbyak::Label skip;
     e.jz(skip, CodeGenerator::T_NEAR);
     if (i.src2.is_constant) {
-      if (i.src2.constant() == 0) { e.L(skip); return; }
+      if (DropNullGuestCall(i.src2.constant())) {
+        e.L(skip);
+        return;
+      }
       e.mov(e.rax, i.src2.constant());
       e.CallIndirect(i.instr, e.rax);
     } else {

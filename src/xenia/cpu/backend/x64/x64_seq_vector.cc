@@ -799,13 +799,8 @@ static __m128i EmulateVectorShl(void*, const vec128_t* src1_ptr,
   alignas(16) T value[16 / sizeof(T)];
   alignas(16) T shamt[16 / sizeof(T)];
 
-  if (!src1_ptr || !src2_ptr) {
-    std::memset(value, 0, sizeof(value));
-    std::memset(shamt, 0, sizeof(shamt));
-  } else {
-    std::memcpy(value, src1_ptr, sizeof(value));
-    std::memcpy(shamt, src2_ptr, sizeof(shamt));
-  }
+  std::memcpy(value, src1_ptr, sizeof(value));
+  std::memcpy(shamt, src2_ptr, sizeof(shamt));
 
   for (size_t i = 0; i < (16 / sizeof(T)); ++i) {
     value[i] = value[i] << (shamt[i] & ((sizeof(T) * 8) - 1));
@@ -1012,13 +1007,8 @@ static __m128i EmulateVectorShr(void*, const vec128_t* src1_ptr,
   alignas(16) T value[16 / sizeof(T)];
   alignas(16) T shamt[16 / sizeof(T)];
 
-  if (!src1_ptr || !src2_ptr) {
-    std::memset(value, 0, sizeof(value));
-    std::memset(shamt, 0, sizeof(shamt));
-  } else {
-    std::memcpy(value, src1_ptr, sizeof(value));
-    std::memcpy(shamt, src2_ptr, sizeof(shamt));
-  }
+  std::memcpy(value, src1_ptr, sizeof(value));
+  std::memcpy(shamt, src2_ptr, sizeof(shamt));
 
   for (size_t i = 0; i < (16 / sizeof(T)); ++i) {
     value[i] = value[i] >> (shamt[i] & ((sizeof(T) * 8) - 1));
@@ -1387,13 +1377,8 @@ static __m128i EmulateVectorRotateLeft(void*, const vec128_t* src1_ptr,
   alignas(16) T value[16 / sizeof(T)];
   alignas(16) T shamt[16 / sizeof(T)];
 
-  if (!src1_ptr || !src2_ptr) {
-    std::memset(value, 0, sizeof(value));
-    std::memset(shamt, 0, sizeof(shamt));
-  } else {
-    std::memcpy(value, src1_ptr, sizeof(value));
-    std::memcpy(shamt, src2_ptr, sizeof(shamt));
-  }
+  std::memcpy(value, src1_ptr, sizeof(value));
+  std::memcpy(shamt, src2_ptr, sizeof(shamt));
 
   for (size_t i = 0; i < (16 / sizeof(T)); ++i) {
     value[i] = xe::rotate_left<T>(value[i], shamt[i] & ((sizeof(T) * 8) - 1));
@@ -1487,13 +1472,8 @@ static __m128i EmulateVectorAverage(void*, const vec128_t* src1_ptr,
   alignas(16) T src2v[16 / sizeof(T)];
   alignas(16) T value[16 / sizeof(T)];
 
-  if (!src1_ptr || !src2_ptr) {
-    std::memset(src1v, 0, sizeof(src1v));
-    std::memset(src2v, 0, sizeof(src2v));
-  } else {
-    std::memcpy(src1v, src1_ptr, sizeof(src1v));
-    std::memcpy(src2v, src2_ptr, sizeof(src2v));
-  }
+  std::memcpy(src1v, src1_ptr, sizeof(src1v));
+  std::memcpy(src2v, src2_ptr, sizeof(src2v));
 
   for (size_t i = 0; i < (16 / sizeof(T)); ++i) {
     auto t = (uint64_t(src1v[i]) + uint64_t(src2v[i]) + 1) / 2;
@@ -2142,11 +2122,7 @@ struct PACK : Sequence<PACK, I<OPCODE_PACK, V128Op, V128Op, V128Op>> {
   static __m128i EmulateFLOAT16_2(void*, const vec128_t* src1_ptr) {
     alignas(16) float a[4];
     alignas(16) uint16_t b[8];
-    if (src1_ptr) {
-      std::memcpy(a, src1_ptr, sizeof(a));
-    } else {
-      std::memset(a, 0, sizeof(a));
-    }
+    std::memcpy(a, src1_ptr, sizeof(a));
     std::memset(b, 0, sizeof(b));
 
     for (int i = 0; i < 2; i++) {
@@ -2185,11 +2161,7 @@ struct PACK : Sequence<PACK, I<OPCODE_PACK, V128Op, V128Op, V128Op>> {
   static __m128i EmulateFLOAT16_4(void*, const vec128_t* src1_ptr) {
     alignas(16) float a[4];
     alignas(16) uint16_t b[8];
-    if (src1_ptr) {
-      std::memcpy(a, src1_ptr, sizeof(a));
-    } else {
-      std::memset(a, 0, sizeof(a));
-    }
+    std::memcpy(a, src1_ptr, sizeof(a));
     std::memset(b, 0, sizeof(b));
 
     for (int i = 0; i < 4; i++) {
@@ -2322,13 +2294,8 @@ struct PACK : Sequence<PACK, I<OPCODE_PACK, V128Op, V128Op, V128Op>> {
     alignas(16) uint16_t a[8];
     alignas(16) uint16_t b[8];
     alignas(16) uint8_t c[16];
-    if (!src1_ptr || !src2_ptr) {
-      std::memset(a, 0, sizeof(a));
-      std::memset(b, 0, sizeof(b));
-    } else {
-      std::memcpy(a, src1_ptr, sizeof(a));
-      std::memcpy(b, src2_ptr, sizeof(b));
-    }
+    std::memcpy(a, src1_ptr, sizeof(a));
+    std::memcpy(b, src2_ptr, sizeof(b));
     for (int i = 0; i < 8; ++i) {
       c[i] = uint8_t(std::max(uint16_t(0), std::min(uint16_t(255), a[i])));
       c[i + 8] = uint8_t(std::max(uint16_t(0), std::min(uint16_t(255), b[i])));
@@ -2340,13 +2307,8 @@ struct PACK : Sequence<PACK, I<OPCODE_PACK, V128Op, V128Op, V128Op>> {
     alignas(16) uint8_t a[16];
     alignas(16) uint8_t b[16];
     alignas(16) uint8_t c[16];
-    if (!src1_ptr || !src2_ptr) {
-      std::memset(a, 0, sizeof(a));
-      std::memset(b, 0, sizeof(b));
-    } else {
-      std::memcpy(a, src1_ptr, sizeof(a));
-      std::memcpy(b, src2_ptr, sizeof(b));
-    }
+    std::memcpy(a, src1_ptr, sizeof(a));
+    std::memcpy(b, src2_ptr, sizeof(b));
     for (int i = 0; i < 8; ++i) {
       c[i] = a[i * 2];
       c[i + 8] = b[i * 2];
