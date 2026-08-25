@@ -20,6 +20,13 @@
 #   MAX         - Upper bound of search range (default: 389)
 #   TIMEOUT_MS  - Timeout per test run in ms (default: 20000)
 #
+# Environment overrides (all optional, matching the sibling dc3_* scripts):
+#   XENIA_DIR               - repo root (default: this script's parent dir)
+#   XENIA_BIN               - xenia-headless binary
+#   DC3_DECOMP_XEX          - DC3 decomp XEX to bisect
+#   DC3_BISECT_RESULTS_FILE - results log (default: /tmp/bisect_results.txt)
+#   DC3_BISECT_LOG_DIR      - per-run log dir (default: /tmp/bisect_logs)
+#
 # Detection logic:
 #   - Exit code 0 (clean timeout via std::_Exit) = NO CRASH (success)
 #   - Exit code != 0 (signal 11 / SIGSEGV, or other nonzero) = CRASH
@@ -33,11 +40,11 @@ set -euo pipefail
 
 # ── Configuration ──────────────────────────────────────────────────────
 
-XENIA_DIR="/home/free/code/milohax/xenia"
-XENIA_BIN="${XENIA_DIR}/build/bin/Linux/Checked/xenia-headless"
-XEX_PATH="/home/free/code/milohax/dc3-decomp/build/373307D9/default.xex"
-RESULTS_FILE="/tmp/bisect_results.txt"
-LOG_DIR="/tmp/bisect_logs"
+XENIA_DIR="${XENIA_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
+XENIA_BIN="${XENIA_BIN:-$XENIA_DIR/build/bin/Linux/Checked/xenia-headless}"
+XEX_PATH="${DC3_DECOMP_XEX:-/home/free/code/milohax/dc3-decomp/build/373307D9/default.xex}"
+RESULTS_FILE="${DC3_BISECT_RESULTS_FILE:-/tmp/bisect_results.txt}"
+LOG_DIR="${DC3_BISECT_LOG_DIR:-/tmp/bisect_logs}"
 
 LO=${1:-0}
 HI=${2:-389}
