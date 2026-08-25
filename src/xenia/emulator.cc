@@ -1582,6 +1582,20 @@ static void Rb3dxUiProbeThread(Memory* memory) {
               "mLoadRefs={}",
               sample, tag, n, node, panel, pname, active, loaded_ref, pstate,
               ploaded, ploader, prefs);
+          // SyncGameStartPanel ('sync_audio_net_panel'): the song-start sync
+          // gate. Retail layout (rb3-xenon SyncGameStartPanel.h, verified vs
+          // retail ctor): own mState @0x3C (0..3 lockstep, 4=StartGame issued,
+          // 5=synced/IsLoaded), LockStepMgr member @0x40 with mLockMachine
+          // @+0x1C (InLock != 0), mHasResponded @+0x28, mLockSuccess @+0x29.
+          if (pname == "sync_audio_net_panel") {
+            XELOGE(
+                "RB3DX UI PROBE[{}]:     syncstart mState={} "
+                "lockMachine=0x{:08X} hasResponded={} lockSuccess={} "
+                "externalBlock={}",
+                sample, r32(panel + 0x3C), r32(panel + 0x40 + 0x1C),
+                r8(panel + 0x40 + 0x28), r8(panel + 0x40 + 0x29),
+                r8(panel + 0x80));
+          }
         }
         node = r32(node);
         ++n;
