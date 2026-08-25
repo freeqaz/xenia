@@ -566,6 +566,14 @@ uint32_t CommandProcessor::ExecutePrimaryBuffer(uint32_t read_index,
       // RB3 (headless) hits transient ring-buffer packet desyncs during menu
       // transitions; aborting here (Checked build) kills the session. Log and
       // break out of this primary-buffer pass; the next VdSwap re-primes.
+      //
+      // FLOW CHANGE vs upstream, for every title, not just RB3: upstream is
+      // `XELOGE(...); assert_always(); break;`. The `break` is upstream's --
+      // what this fork removed is the assert_always(), so a Checked build no
+      // longer aborts on a bad packet and a genuine PM4 parsing regression
+      // will now scroll past as an XELOGE instead of stopping the run. The
+      // two sibling loops below (INDIRECT RINGBUFFER, ExecutePacket) still
+      // have their assert_always().
       XELOGE("**** PRIMARY RINGBUFFER: Failed to execute packet.");
       break;
     }
