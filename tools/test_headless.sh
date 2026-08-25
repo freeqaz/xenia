@@ -4,10 +4,15 @@
 
 set -e
 
-XENIA_DIR="/tmp/claude/xenia"
-HEADLESS_BIN="$XENIA_DIR/build/bin/Linux/Checked/xenia-headless"
-TEST_XEX="/home/free/code/milohax/milo-executable-library/dc1/TU0/default.xex"
-TIMEOUT_MS=5000
+# Environment overrides (all optional):
+#   XENIA_DIR    - repo root (default: this script's parent dir)
+#   HEADLESS_BIN - xenia-headless binary to validate
+#   TEST_XEX     - XEX for the optional load test; skipped if absent
+#   TIMEOUT_MS   - guest timeout for the load test
+XENIA_DIR="${XENIA_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
+HEADLESS_BIN="${HEADLESS_BIN:-$XENIA_DIR/build/bin/Linux/Checked/xenia-headless}"
+TEST_XEX="${TEST_XEX:-/home/free/code/milohax/milo-executable-library/dc1/TU0/default.xex}"
+TIMEOUT_MS="${TIMEOUT_MS:-5000}"
 
 echo "=== Xenia Headless Validation ==="
 echo ""

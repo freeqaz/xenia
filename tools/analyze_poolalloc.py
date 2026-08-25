@@ -4,10 +4,26 @@ Detailed PE/COFF analysis of PoolAlloc.obj
 Little-endian on disk (Xbox 360 / PowerPC target).
 """
 
+import os
 import struct
 import sys
 
-OBJ_PATH = "/home/free/code/milohax/dc3-decomp/build/373307D9/obj/system/utl/PoolAlloc.obj"
+# Path to the .obj to analyse. Resolution order:
+#   1. argv[1]
+#   2. $POOLALLOC_OBJ
+#   3. $DC3_DECOMP_DIR (default /home/free/code/milohax/dc3-decomp) + the
+#      standard build-tree location.
+DC3_DECOMP_DIR = os.environ.get(
+    "DC3_DECOMP_DIR", "/home/free/code/milohax/dc3-decomp"
+)
+DEFAULT_OBJ_PATH = os.path.join(
+    DC3_DECOMP_DIR, "build", "373307D9", "obj", "system", "utl", "PoolAlloc.obj"
+)
+OBJ_PATH = (
+    sys.argv[1]
+    if len(sys.argv) > 1
+    else os.environ.get("POOLALLOC_OBJ", DEFAULT_OBJ_PATH)
+)
 
 # --- Constants ---
 STORAGE_CLASS_NAMES = {
@@ -127,9 +143,19 @@ def decode_section_flags(flags):
 
 
 def main():
+    if not os.path.exists(OBJ_PATH):
+        print(f"error: no such .obj: {OBJ_PATH}", file=sys.stderr)
+        print(
+            "usage: analyze_poolalloc.py [OBJ_PATH]   "
+            "(or set $POOLALLOC_OBJ / $DC3_DECOMP_DIR)",
+            file=sys.stderr,
+        )
+        return 1
+
     with open(OBJ_PATH, "rb") as f:
         data = f.read()
 
+    print(f"Analysing: {OBJ_PATH}")
     print(f"File size: {len(data)} bytes")
     print("=" * 100)
 
@@ -449,4 +475,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main() or 0)
