@@ -728,8 +728,49 @@ lazy compilation reads the patched bytes.
 current build's ProcessConfigHook/RecalcGemListHook — the from-source DLL
 wires its own hooks on the live guest thread, nothing hardcoded host-side.
 
-**Behavioral run (two guitars, `--scripted_pad_subtypes=6,6`, flag armed):**
-`/tmp/rb3-si6` — see below.
+**Behavioral runs (two guitars, `--scripted_pad_subtypes=6,6`):** a long
+probe cascade, each run advancing one layer:
+
+- **si6** — allow-flag poke went to the WRONG byte: the config struct grew
+  since July (RawfilesDir/DisableSelfGen/QuazalLogging/ContentLogging land
+  before AllowSameInstrument), so `config+0x50` now hits DisableSelfGen's
+  high byte. Ground truth re-derived from the built IsActiveHook
+  (`lbz r11,0x56(r11)` off config 0x8485D0C0) → flag = **0x8485D116**.
+  Run still valuable: two guitar-type pads both joined vanilla (guitar+bass
+  slots both accept them), split-screen two-highway gameplay, P2 on BASS.
+- **si7** — flag correct → hook bodies live (`InitSmasherPlates` scanned
+  the authored *2 plates) but SIGABRT ~24s: a guest thread died in
+  `RtlLeaveCriticalSection → xeKeSetEvent assert_always` (+ sibling in the
+  contended Enter path). The DLL's critical sections are zero-init .bss
+  (call_entry=false, no DllMain/CRT), so their event headers can't be
+  typed. Demoted both to Release semantics + log-once (b77f0fa27).
+- **si8** — survived; `watcher constructed for track 3` fired in-song (the
+  hook's per-watcher log). But only ONE: the two scripted UP@1 presses had
+  wrapped P2's part list to HARMONY (vocals — no track watcher).
+- **si9/si10** — fixed-time A@1 confirms cannot hit the part cards: menu
+  load variance moved the window by tens of seconds between runs; si10's
+  A@1 burst landed at the hub. Fix: closed-loop autopilot (probe injects A
+  per current screen through the new per-pad NopInjectButtonPress bridge),
+  plus the probe itself had to be un-blinded first (title/DLL image pages
+  vanish from the guest heap page table once a user module loads).
+- **si12** — autopilot worked but P1-first confirm let P2 fall to
+  `AutoAssignMissingSlots`, and song load wedged in a 4097-fault livelock
+  at guest EA 0xFFFFFFFC — the classic SI track_-1 vector[-1] family,
+  reachable because hardware runs always picked explicitly and never
+  exercised auto-assign+SI. New `--rb3dx_si_claim_anchor` probe (reads the
+  DLL's own gClaims/gImpls; anchor decoded from SIInstallClone =
+  0x84055FD8) proved P2 never became a track player: claimCount=1
+  {track=3,cnt=1}.
+- **si13** — pad-1-first autopilot; cards visible at CHOOSE DIFFICULTY
+  for BOTH players (instrument stage skipped — remembered-part flow), both
+  confirmed EXPERT, gameplay reached, still claimCount=1. **Open frontier:**
+  P2 confirms its card yet never lands on a scoring track. Both cards read
+  "Player1" — prime suspect is local-user profile identity (both xenia
+  fake users may present the same identity, and the session builder dedups
+  by XUID). Next: si14 discriminator (guitar+drums, the 2pad9-proven
+  config, SI armed) — if drums-P2 claims a track, the claim machinery is
+  fine and the failure is specific to guitar-family P2 under two local
+  users.
 
 ---
 
