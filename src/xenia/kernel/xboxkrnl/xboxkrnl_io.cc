@@ -7,6 +7,9 @@
  ******************************************************************************
  */
 
+#include <atomic>
+
+#include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/memory.h"
 #include "xenia/base/mutex.h"
@@ -22,6 +25,21 @@
 #include "xenia/kernel/xthread.h"
 #include "xenia/vfs/device.h"
 #include "xenia/xbox.h"
+
+DEFINE_bool(
+    io_force_synchronous_completion, true,
+    "NtReadFile/NtReadFileScatter/NtWriteFile always complete the transfer "
+    "before returning; with this enabled they also suppress the "
+    "STATUS_PENDING return upstream produced for files opened for "
+    "asynchronous IO. Required by the XAPILIB ReadFile wrapper, which sets "
+    "OVERLAPPED.Internal = STATUS_PENDING before the syscall and passes a "
+    "separate stack IO_STATUS_BLOCK -- if we return PENDING, its "
+    "GetOverlappedResult never observes completion and spins forever (this "
+    "is what stalled the DC3 decomp in AsyncFile::Read -> "
+    "AsyncFileWin::_ReadDone). Disable to restore the upstream STATUS_PENDING "
+    "return for non-synchronous files; the transfer still completes eagerly "
+    "and the caller's IO_STATUS_BLOCK still receives the final status.",
+    "Kernel");
 
 namespace xe {
 namespace kernel {
@@ -121,7 +139,7 @@ dword_result_t NtCreateFile_entry(lpdword_t handle_out, dword_t desired_access,
   // Compute path, possibly attrs relative.
   auto target_path = util::TranslateAnsiString(kernel_memory(), object_name);
 
-  XELOGI("NtCreateFile: {} disp={}", target_path,
+  XELOGD("NtCreateFile: {} disp={}", target_path,
          uint32_t(creation_disposition));
 
   // Enforce that the path is ASCII.
@@ -193,15 +211,16 @@ dword_result_t NtReadFile_entry(dword_t file_handle, dword_t event_handle,
                                 pointer_t<X_IO_STATUS_BLOCK> io_status_block,
                                 lpvoid_t buffer, dword_t buffer_length,
                                 lpqword_t byte_offset_ptr) {
-  // Track all reads
+  // Track all reads. Guest threads call this concurrently, so the counter has
+  // to be atomic (it was a plain static uint32_t).
   {
-    static uint32_t read_count = 0;
-    read_count++;
+    static std::atomic<uint32_t> read_count{0};
+    uint32_t n = read_count.fetch_add(1, std::memory_order_relaxed) + 1;
     auto* thread = XThread::GetCurrentThread();
     uint32_t tid = thread ? thread->thread_id() : 0;
-    if (read_count <= 100 || (read_count % 500) == 0) {
-      XELOGI("NtReadFile #{} tid={} handle=0x{:X} len={} offset={}",
-             read_count, tid, (uint32_t)file_handle, (uint32_t)buffer_length,
+    if (n <= 100 || (n % 500) == 0) {
+      XELOGD("NtReadFile #{} tid={} handle=0x{:X} len={} offset={}", n, tid,
+             (uint32_t)file_handle, (uint32_t)buffer_length,
              byte_offset_ptr ? (int64_t)*byte_offset_ptr : -1);
     }
   }
@@ -219,6 +238,11 @@ dword_result_t NtReadFile_entry(dword_t file_handle, dword_t event_handle,
   }
 
   if (XSUCCEEDED(result)) {
+    // The transfer itself is always performed eagerly here, for synchronous
+    // and asynchronous files alike -- Xenia has no async file backend, and
+    // upstream's `else` branch returned PENDING having read nothing at all.
+    // Only the *return contract* is configurable; see
+    // --io_force_synchronous_completion below.
     if (true || file->is_synchronous()) {
       // Synchronous.
       uint32_t bytes_read = 0;
@@ -250,12 +274,19 @@ dword_result_t NtReadFile_entry(dword_t file_handle, dword_t event_handle,
         }
       }
 
-      // Note: We always complete synchronously (even for async files),
-      // so we should NOT return STATUS_PENDING. The XAPILIB ReadFile wrapper
-      // may set OVERLAPPED.Internal = STATUS_PENDING before calling us,
-      // and uses a separate stack IO_STATUS_BLOCK. If we return PENDING,
-      // GetOverlappedResult will see OVERLAPPED.Internal is still PENDING
-      // and spin forever. Since we completed the read, return SUCCESS.
+      // Note: We always complete synchronously (even for async files), so by
+      // default we do NOT return STATUS_PENDING. The XAPILIB ReadFile wrapper
+      // may set OVERLAPPED.Internal = STATUS_PENDING before calling us, and
+      // uses a separate stack IO_STATUS_BLOCK. If we return PENDING,
+      // GetOverlappedResult will see OVERLAPPED.Internal is still PENDING and
+      // spin forever. Since we completed the read, return SUCCESS.
+      //
+      // Either way io_status_block above already holds the FINAL status and
+      // byte count, so a caller that polls the status block (rather than the
+      // return value) observes a completed request in both modes.
+      if (!cvars::io_force_synchronous_completion && !file->is_synchronous()) {
+        result = X_STATUS_PENDING;
+      }
 
       // Mark that we should signal the event now. We do this after
       // we have written the info out.
@@ -318,7 +349,11 @@ dword_result_t NtReadFileScatter_entry(
       }
 
       // Note: We always complete synchronously (even for async files),
-      // so we should NOT return STATUS_PENDING. See NtReadFile for details.
+      // so by default we do NOT return STATUS_PENDING. io_status_block still
+      // carries the final status either way. See NtReadFile for details.
+      if (!cvars::io_force_synchronous_completion && !file->is_synchronous()) {
+        result = X_STATUS_PENDING;
+      }
 
       // Mark that we should signal the event now. We do this after
       // we have written the info out.
@@ -387,7 +422,11 @@ dword_result_t NtWriteFile_entry(dword_t file_handle, dword_t event_handle,
       }
 
       // Note: We always complete synchronously (even for async files),
-      // so we should NOT return STATUS_PENDING. See NtReadFile for details.
+      // so by default we do NOT return STATUS_PENDING. io_status_block still
+      // carries the final status either way. See NtReadFile for details.
+      if (!cvars::io_force_synchronous_completion && !file->is_synchronous()) {
+        result = X_STATUS_PENDING;
+      }
 
       // Mark that we should signal the event now. We do this after
       // we have written the info out.
