@@ -703,7 +703,11 @@ DECLARE_XBOXKRNL_EXPORT1(XeKeysSetKey, kNone, kStub);
 
 dword_result_t XeKeysGetConsoleID_entry(lpvoid_t console_id_ptr,
                                          lpdword_t id_size_ptr) {
-  // Return a dummy console ID
+  // Return a dummy console ID. 5 bytes is the documented XBOX_CONSOLE_ID
+  // length, but the caller's buffer size is not passed in, so this is still a
+  // fixed-size write into a guest pointer we cannot validate -- see C16 in
+  // docs/fork-cleanup-review.md, and XeKeysConsolePrivateKeySign below for the
+  // stricter alternative (decline to write when the size is uncertain).
   if (console_id_ptr) {
     std::memset(console_id_ptr, 0x42, 5);  // 5-byte console ID
   }

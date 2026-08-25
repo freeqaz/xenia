@@ -692,7 +692,16 @@ DECLARE_XBOXKRNL_EXPORT1(MmDeleteKernelStack, kMemory, kImplemented);
 
 // Pool allocation stub
 pointer_result_t ExAllocatePoolWithTag_entry(dword_t size, dword_t tag) {
-  // TODO: real pool allocation - use system heap for now
+  // TODO: real pool allocation - use system heap for now.
+  //
+  // The matching free DOES exist: ExFreePool_entry above forwards to
+  // SystemHeapFree, so a guest that pairs its calls is not leaking. What is
+  // unaccounted for is anything the guest allocates and never frees, plus the
+  // fact that this entry does not apply the size rounding / alignment that its
+  // sibling ExAllocatePoolTypeWithTag does (deliberately left alone: changing
+  // the returned addresses and sizes would perturb the DC3/RB3 boot traces
+  // that are used as regression baselines). No tag accounting either -- the
+  // tag is accepted and dropped.
   uint32_t addr = kernel_state()->memory()->SystemHeapAlloc(size);
   return addr;
 }
