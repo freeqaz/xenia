@@ -819,6 +819,45 @@ player" read was reframed — the claim table counts TrackWatcherImpl
 constructions (vocals produce none), and the persisted save was steering
 remembered parts. Both mattered, but the guid collapse was the root.
 
+### 8h. Post-fix frontier: the RB3DX ChoosePart duplicate-confirm gate (si18..si27)
+
+With identities fixed, the remaining gap to the full 2×-guitar proof is a
+**part-select confirm gate that RB3E's Layer A/B do not cover under RB3DX**:
+
+- **si18** (`--rb3dx_autoconfirm_p2_up=1`): UP navigated P2 onto GUITAR
+  (frame 5100: card says "Player2", GUITAR in list and highlighted — the SI
+  un-grey works with distinct users), but A on the taken part never left
+  kState_ChoosePart(10). Per SI-INTERNALS the intended flow is confirm →
+  ChoosePartWait(11) → Layer B advances; under RB3DX the confirm is
+  rejected BEFORE the wait state, where no hook lives. (Enum:
+  ChoosePart=10, ChoosePartWait=11, ChooseDiff=12; BandUser ty: GUITAR=1
+  BASS=2 DRUMS=0 VOCALS=3.)
+- **si22/si24/si25 seeds + si23/si26 proofs**: solo seed runs CAN pick any
+  free part (si24: P2 solo picked GUITAR EXPERT via UP; si25: P1 solo
+  defaulted GUITAR) and the profile remembers it — but in the two-player
+  run the remembered-duplicate arbitration runs BEFORE the cards show
+  (loser drops to a fresh pick defaulting BASS), also outside Layer B's
+  reach: si26 ended guitar+bass again. NOTE the slot-keyed default:
+  slot 0 defaults GUITAR, the second slot defaults BASS even when guitar
+  is free (si22 proved this solo).
+- **si27**: clean TU5 (the July hardware target,
+  rb3-xenon/_tu5probe/clean/clean_tu5_nodd.xex staged at /tmp/rb3tu5boot)
+  boots, DLL installs, band mgr present — but the flow never advances and
+  the UI probe reads no screens (TU5's pre-hub flow differs from DX;
+  needs its own bring-up pass before it can arbitrate this).
+
+**Meanwhile the identity fix already bought real hardware parity:** si17/
+si23/si26 are the first two-player two-track runs under xenia — two
+watchers, both scoring, distinct cards ("Player2"), full gameplay loop.
+
+**Open next steps:** (a) bring up the clean-TU5 menu flow headless and
+rerun the 2×-guitar pick there (the RB3E-designed envelope); (b) or find
+RB3DX's ChoosePart confirm validator (dx overshell rework) and extend the
+SI harness with a host-side detour for it; (c) the intermittent ~130s
+silent clean exits (si16/si19/si20 pattern, exit code 0, no core, run-
+dependent) deserve one dedicated session — si21 proved a full 300s run
+with exit 0 on the same binary/config.
+
 ---
 
 ## 9. Related docs
