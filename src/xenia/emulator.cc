@@ -60,6 +60,7 @@
 #include "xenia/gpu/graphics_system.h"
 #include "xenia/hid/input_driver.h"
 #include "xenia/hid/input_system.h"
+#include "xenia/hid/nop/nop_input_driver.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/user_module.h"
 #include "xenia/kernel/util/gameinfo_utils.h"
@@ -275,6 +276,31 @@ DEFINE_bool(
     "memory access; no hooks, no patches; title-gated so DC3-inert. For the "
     "main_hub load-stall investigation.",
     "CPU");
+DEFINE_uint64(
+    rb3dx_si_claim_anchor, 0,
+    "RB3DX (title 0x45410914), default 0 (off), requires --rb3dx_ui_probe: "
+    "guest VA of the RB3Enhanced.dll SI claim-table anchor (the lis/addi "
+    "base register in SIInstallClone; wt-integration build: 0x84055FD8, "
+    "decoded from the packed DLL with capstone). Layout from "
+    "SameInstrumentHooks.c: gClaims[] {track,count} pairs at +0 stride 8, "
+    "gImpls[] at +0xC0 stride 0xC, gClaimCount at +0x1C8, gImplCount at "
+    "+0x1CC. When set, the ui probe logs these each sample -- the "
+    "machine-readable twin evidence (two players on one track => a claim "
+    "with count 2 and implCount 2). Read-only. Title-gated => DC3-inert.",
+    "CPU");
+DEFINE_bool(
+    rb3dx_autoconfirm_parts, false,
+    "RB3DX (title 0x45410914), default off, requires --rb3dx_ui_probe: "
+    "closed-loop autopilot for the two-player part/difficulty confirm. "
+    "Fixed-time --scripted_input presses cannot hit the part_difficulty_"
+    "screen window reliably (menu/ark load times vary tens of seconds "
+    "between runs; measured si6..si10). When the probe sees "
+    "song_select_screen it injects A on pad 0 (advance/pick song); on "
+    "part_difficulty_screen it alternates A on pad 1 / pad 0 each ~2s "
+    "sample so both players confirm part and difficulty regardless of when "
+    "the cards appear. Injection goes through the nop HID driver's "
+    "per-pad InjectButtonPress; no guest writes. Title-gated => DC3-inert.",
+    "CPU");
 DEFINE_bool(
     rb3dx_offline_join, false,
     "RB3DX (title 0x45410914), default off: complete the offline single-local-"
@@ -392,6 +418,19 @@ DEFINE_uint64(
     "Xenia pokes 1 to this VA right after the DLL loads, arming the hook bodies. "
     "REQUIRED for behavioral (Phase-5) runs; harmless for install-only (Phase-3) "
     "verification. Title-gated + default-off => DC3-inert.",
+    "CPU");
+DEFINE_string(
+    si_hook_vas, "",
+    "RB3DX / RB3 TU5 (title 0x45410914), default empty: comma-separated FOUR "
+    "from-source RB3Enhanced.dll hook VAs, in fixed site order "
+    "IsActiveHook,ResolveWaitStatesHook,ProcessConfigHook,RecalcGemListHook "
+    "(hex, e.g. 0x84027B88,0x84027BC8,0x84027E30,0x84028FC8). Read from the "
+    "current build's K-link/RB3Enhanced.map -- the hook VAs move on EVERY DLL "
+    "rebuild, so the 2026-07 kFromSrcHooks constants in approach (b) are stale "
+    "the moment the DLL is relinked. When set, overrides those constants; when "
+    "empty, the retired 2026-07 constants are used unchanged (only correct for "
+    "the July fromsource.dll artifact). The four game-site addresses are "
+    "title-side and stable. Title-gated + default-off => DC3-inert.",
     "CPU");
 
 namespace xe {
@@ -944,6 +983,63 @@ void Rb3dxSaveGprLr23ProbeExtern(cpu::ppc::PPCContext* ppc_context,
         // guest-thread ABI/r13 sdata-base); use approach (b) below for the
         // validated install-verify harness.
         uint32_t init_va = static_cast<uint32_t>(cvars::si_init_va);
+        // InitSameInstrument's RB3E_PokeBranch/HookFunction are plain guest
+        // stores into title .text (game hook sites) and DLL .text (call-stub
+        // pokes, trampoline second halves) with NO dcbst/icbi -- on hardware
+        // the pages are writable, under Xenia they are mapped read-only and
+        // the first SI_POKE_B guest-faults (proven /tmp/rb3-si2: guest crash
+        // PC inside RB3E_PokeBranch @0x8402B458+0x40, wedging the hijacked
+        // boot thread; the July "r13/sdata ABI" suspicion was wrong). Same
+        // cure as the DC3 patch procedure: guest-heap Protect the committed
+        // regions to R+W first. At MemAlloc #800 none of the poked sites has
+        // been JIT-compiled yet (pre-UI), so lazy compilation picks up the
+        // patched bytes and no invalidation is needed.
+        auto make_writable = [&](uint32_t lo, uint32_t hi, const char* tag) {
+          uint32_t a = lo, pages = 0;
+          while (a < hi) {
+            auto* heap = mem_for_emu->LookupHeap(a);
+            if (!heap) {
+              a += 0x10000;
+              continue;
+            }
+            HeapAllocationInfo info = {};
+            if (!heap->QueryRegionInfo(a, &info) || !info.region_size) {
+              a += 0x10000;
+              continue;
+            }
+            uint32_t region_end = static_cast<uint32_t>(
+                std::min<uint64_t>(hi, static_cast<uint64_t>(info.base_address) +
+                                           info.region_size));
+            if ((info.state & kMemoryAllocationCommit) &&
+                region_end > a) {
+              heap->Protect(a, region_end - a,
+                            kMemoryProtectRead | kMemoryProtectWrite);
+              pages += (region_end - a) >> 12;
+            }
+            a = region_end > a ? region_end : a + 0x10000;
+          }
+          XELOGW(
+              "SI LOADDLL: (a) made [0x{:08X},0x{:08X}) guest-writable for "
+              "the DLL's self-installed pokes ({}; ~{} 4K pages)",
+              lo, hi, tag, pages);
+        };
+        make_writable(0x82000000u, 0x83000000u, "title image");
+        make_writable(0x84000000u, 0x84860000u, "RB3Enhanced.dll image");
+        // The guest-heap walk above is bookkeeping-only and finds ZERO
+        // committed pages for the title image (PROT TRACE run /tmp/rb3-si4:
+        // the only Protect ever touching H1's page is the loader's
+        // prot=0x1, yet QueryRegionInfo reports the range uncommitted -- the
+        // title image's real state isn't tracked by the heap page table in
+        // this fork). What actually faults the DLL's orig[0] store is the
+        // HOST mapping, so unprotect that directly -- same mechanism
+        // approach (b) uses per-page, widened to the poke surface.
+        xe::memory::Protect(mb2 + 0x82000000u, 0x1000000u,
+                            xe::memory::PageAccess::kExecuteReadWrite);
+        xe::memory::Protect(mb2 + 0x84000000u, 0x860000u,
+                            xe::memory::PageAccess::kExecuteReadWrite);
+        XELOGW(
+            "SI LOADDLL: (a) host mappings [0x82000000,+16MB) and "
+            "[0x84000000,+0x860000) set RWX for the installer's pokes");
         uint64_t saved_r[32];
         for (int i = 0; i < 32; ++i) saved_r[i] = ppc_context->r[i];
         uint64_t saved_lr = ppc_context->lr;
@@ -979,12 +1075,40 @@ void Rb3dxSaveGprLr23ProbeExtern(cpu::ppc::PPCContext* ppc_context,
           uint32_t site, hook;
           const char* tag;
         };
-        const SiHook kFromSrcHooks[4] = {
+        SiHook kFromSrcHooks[4] = {
             {0x826684C0u, 0x840191A8u, "IsActive"},
             {0x825B6488u, 0x840191E8u, "ResolveWaitStates"},
             {0x8276FA08u, 0x84019780u, "H1 ProcessConfig"},
             {0x82794740u, 0x84019450u, "H2 RecalcGemList"},
         };
+        // The hook VAs above are the July 2026 fromsource.dll layout and go
+        // stale on every DLL relink; --si_hook_vas carries the current
+        // build's addresses (site order fixed: IsActive, ResolveWaitStates,
+        // ProcessConfig, RecalcGemList).
+        if (!cvars::si_hook_vas.empty()) {
+          uint32_t vas[4] = {};
+          int n = 0;
+          const char* p = cvars::si_hook_vas.c_str();
+          while (n < 4 && *p) {
+            char* endp = nullptr;
+            vas[n] = static_cast<uint32_t>(std::strtoul(p, &endp, 16));
+            if (endp == p) break;
+            ++n;
+            p = (*endp == ',') ? endp + 1 : endp;
+          }
+          if (n == 4) {
+            for (int i = 0; i < 4; ++i) kFromSrcHooks[i].hook = vas[i];
+            XELOGW(
+                "SI LOADDLL: (b) hook VAs overridden from --si_hook_vas: "
+                "0x{:08X} 0x{:08X} 0x{:08X} 0x{:08X}",
+                vas[0], vas[1], vas[2], vas[3]);
+          } else {
+            XELOGE(
+                "SI LOADDLL: (b) --si_hook_vas parsed {} of 4 required VAs "
+                "('{}') -- falling back to the stale 2026-07 constants",
+                n, cvars::si_hook_vas);
+          }
+        }
         const size_t host_pg = xe::memory::page_size();
         for (const auto& h : kFromSrcHooks) {
           uint8_t* host_addr = mb2 + h.site;
@@ -1410,9 +1534,15 @@ static void Rb3dxSiHookVerifyThread(Memory* memory) {
     if (a < 0x1000) return false;
     auto* heap = memory->LookupHeap(a);
     if (!heap) return false;
-    uint32_t prot = 0;
-    if (!heap->QueryProtect(a, &prot)) return false;
-    return (prot & kMemoryProtectRead) != 0;
+    // Gate on COMMITTED state, not protect bits: /tmp/rb3-si2 showed the
+    // title's .text page-table entries flip to protect=0x0 once the SI DLL
+    // is loaded (guest-side protect bookkeeping), while the host mapping
+    // stays readable -- the guest-thread detour writes at the same
+    // addresses read real words throughout. What actually SIGSEGVs a host
+    // probe read is an uncommitted/unmapped page, so that is the check.
+    HeapAllocationInfo info = {};
+    if (!heap->QueryRegionInfo(a, &info)) return false;
+    return (info.state & kMemoryAllocationCommit) != 0;
   };
   auto r32 = [&](uint32_t a) -> uint32_t {
     return readable(a) ? load_and_swap<uint32_t>(base + a) : 0xEEEEEEEEu;
@@ -1506,11 +1636,26 @@ static void Rb3dxUiProbeThread(Memory* memory) {
   uint8_t* base = memory->virtual_membase();
   auto readable = [&](uint32_t addr) -> bool {
     if (addr < 0x1000) return false;
+    // The title image and any user DLL image are not tracked by the guest
+    // heap page table (QueryProtect reads 0x0 / QueryRegionInfo reads
+    // uncommitted the moment a user module loads -- see jit-fault wiki 8f),
+    // which blinded every probe read for the whole --si_load_dll family of
+    // runs. Their host pages are resident for the entire run (the JIT
+    // executes from them), so treat those windows as readable and gate the
+    // rest on commit state.
+    if ((addr >= 0x82000000u && addr < 0x83000000u) ||
+        (addr >= 0x84000000u && addr < 0x84860000u)) {
+      return true;
+    }
     auto* heap = memory->LookupHeap(addr);
     if (!heap) return false;
     uint32_t prot = 0;
-    if (!heap->QueryProtect(addr, &prot)) return false;
-    return (prot & kMemoryProtectRead) != 0;
+    if (heap->QueryProtect(addr, &prot) && (prot & kMemoryProtectRead)) {
+      return true;
+    }
+    HeapAllocationInfo info = {};
+    if (!heap->QueryRegionInfo(addr, &info)) return false;
+    return (info.state & kMemoryAllocationCommit) != 0;
   };
   auto r32 = [&](uint32_t a) -> uint32_t {
     return readable(a) ? load_and_swap<uint32_t>(base + a) : 0;
@@ -1555,6 +1700,53 @@ static void Rb3dxUiProbeThread(Memory* memory) {
         "RB3DX UI PROBE[{}]: transState={} curScreen=0x{:08X}'{}' "
         "transScreen=0x{:08X}'{}'",
         sample, ts, cur, cur_name, trans, trans_name);
+    // --- SI claim-table dump (--rb3dx_si_claim_anchor): the DLL's own
+    // gClaims/gImpls, the ground truth for "two players on one track".
+    if (cvars::rb3dx_si_claim_anchor != 0) {
+      uint32_t anchor = static_cast<uint32_t>(cvars::rb3dx_si_claim_anchor);
+      uint32_t claim_count = r32(anchor + 0x1C8);
+      uint32_t impl_count = r32(anchor + 0x1CC);
+      std::string claims;
+      for (uint32_t i = 0; i < 3; ++i) {
+        claims += fmt::format(" claim{}={{track={},cnt={}}}", i,
+                              static_cast<int32_t>(r32(anchor + i * 8)),
+                              r32(anchor + i * 8 + 4));
+      }
+      XELOGE("RB3DX UI PROBE[{}]:   SI claims: claimCount={} implCount={}{}",
+             sample, claim_count, impl_count, claims);
+    }
+    // --- closed-loop part/difficulty autopilot (--rb3dx_autoconfirm_parts).
+    // Screen-conditional so it is immune to the tens-of-seconds menu-load
+    // variance that made fixed-time A@1 presses land at the hub (opening
+    // P2's overshell menu) or after the cards were gone (si6..si10).
+    if (cvars::rb3dx_autoconfirm_parts && ts == 0) {
+      // Pad-1-first ordering is load-bearing: if P1 confirms while P2's card
+      // is untouched, the game leaves part_difficulty_screen immediately and
+      // AutoAssignMissingSlots handles P2 -- with the SI hooks armed that
+      // auto-assign path wedges in the classic track_-1 vector[-1] fault
+      // livelock at guest EA 0xFFFFFFFC (si12; the exact crash family H1/
+      // #32b were built against, but on hardware players always picked
+      // explicitly so auto-assign+SI was never exercised). Give P2 the first
+      // three samples (part + difficulty confirms), then bring P1 along.
+      static int s_part_screen_samples = 0;
+      if (cur_name == "part_difficulty_screen") {
+        ++s_part_screen_samples;
+        uint32_t pad = (s_part_screen_samples <= 3 || (sample & 1)) ? 1u : 0u;
+        xe::hid::nop::NopInjectButtonPress(pad, 0x1000 /*X_INPUT_GAMEPAD_A*/,
+                                           250);
+        XELOGW(
+            "RB3DX UI PROBE[{}]: autopilot A@{} (part_difficulty_screen "
+            "sample {})",
+            sample, pad, s_part_screen_samples);
+      } else {
+        s_part_screen_samples = 0;
+        if (cur_name == "song_select_screen" && (sample & 1)) {
+          xe::hid::nop::NopInjectButtonPress(0, 0x1000, 250);
+          XELOGW("RB3DX UI PROBE[{}]: autopilot A@0 (song_select_screen)",
+                 sample);
+        }
+      }
+    }
     // --- panels of the transition screen and current screen ---
     // RB3-360 UIScreen: mPanelList is an EMBEDDED circular {next,prev} dummy
     // at screen+0x28 (calibrated empirically: walking with s+0x2C as the

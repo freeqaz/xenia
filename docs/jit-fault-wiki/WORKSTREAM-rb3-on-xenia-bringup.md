@@ -690,6 +690,88 @@ DC3 non-regression: 627 traps, same pre-existing warns, no cores (the pacer
 DOES change DC3 behavior — its audio callbacks now run — so this check was
 load-bearing; frontier unchanged).
 
+## 8f. 2026-08-25 — SI harness refreshed; the DLL's OWN installer runs under Xenia
+
+**Goal:** the in-xenia same-instrument corroboration (feature is hardware-proven
+since July). The July harness carried hook VAs from the July DLL layout; every
+DLL relink moves them (wt-integration build 2026-08-21: IsActiveHook
+0x840191A8→0x84027B88, +0xE000 drift). Current artifact used:
+`RB3Enhanced.RB3Enhanced-wt-integration.dll` (XEX2-packed, 124928 B, map pair
+`K-link/out-RB3Enhanced-wt-integration/RB3Enhanced.map`): InitSameInstrument
+0x84029900, config 0x8485D0C0 (AllowSameInstrument flag = +0x50 = 0x8485D110).
+
+**Levers:** `--si_hook_vas=<4 hex>` (11c32a395) parameterizes approach (b)'s
+hook table from the current map. But (b) is now obsolete beyond install-proof:
+current `InitSameInstrument` installs ~20 SI_HOOKs + ~22 game-call stub pokes +
+2 crash-guard POKE_Bs — only the DLL's own installer (approach (a),
+`--si_init_va`) can wire that. Phase-3 (b) run `/tmp/rb3-si1`: PASS, boot
+stable 200 s with DLL mapped + detours at current VAs + flag armed.
+
+**Approach (a) was blocked by write protection, not ABI.** July's "Risk #3
+r13/sdata" hypothesis is REFUTED. Two crashes told the real story:
+`/tmp/rb3-si2` guest crash PC 0x8402B498 = RB3E_PokeBranch+0x40 — RB3E pokes
+are plain guest stores with NO dcbst/icbi, and the first SI_POKE_B (into DLL
+.text) hit a read-only page. Guest-heap Protect of the DLL image fixed those;
+`/tmp/rb3-si3` then crashed at HookFunction+0x50 — the `orig[0]` store into
+TITLE .text. A PROT TRACE run (`/tmp/rb3-si4`) showed the title image's state
+is NOT tracked by the guest heap page table in this fork (only Protect ever
+touching H1's page is the loader's prot=0x1, yet the range queries
+uncommitted — also why si_hook_verify reads 0xEEEEEEEE there: cosmetic,
+follow-up is an is-in-loaded-module check). The faulting layer was the HOST
+read-only .text mapping; cure (9a39ed1b0) = `xe::memory::Protect` RWX over
+[0x82000000,+16MB) + the DLL image before invoking the installer — approach
+(b)'s per-page mechanism, widened. Sites are pre-JIT at MemAlloc #800, so
+lazy compilation reads the patched bytes.
+
+**Result (`/tmp/rb3-si5`):** `[RB3E:MSG] Same-instrument hooks installed.` +
+`InitSameInstrument returned ok=true`, H1/H2 read back as `b` into the
+current build's ProcessConfigHook/RecalcGemListHook — the from-source DLL
+wires its own hooks on the live guest thread, nothing hardcoded host-side.
+
+**Behavioral runs (two guitars, `--scripted_pad_subtypes=6,6`):** a long
+probe cascade, each run advancing one layer:
+
+- **si6** — allow-flag poke went to the WRONG byte: the config struct grew
+  since July (RawfilesDir/DisableSelfGen/QuazalLogging/ContentLogging land
+  before AllowSameInstrument), so `config+0x50` now hits DisableSelfGen's
+  high byte. Ground truth re-derived from the built IsActiveHook
+  (`lbz r11,0x56(r11)` off config 0x8485D0C0) → flag = **0x8485D116**.
+  Run still valuable: two guitar-type pads both joined vanilla (guitar+bass
+  slots both accept them), split-screen two-highway gameplay, P2 on BASS.
+- **si7** — flag correct → hook bodies live (`InitSmasherPlates` scanned
+  the authored *2 plates) but SIGABRT ~24s: a guest thread died in
+  `RtlLeaveCriticalSection → xeKeSetEvent assert_always` (+ sibling in the
+  contended Enter path). The DLL's critical sections are zero-init .bss
+  (call_entry=false, no DllMain/CRT), so their event headers can't be
+  typed. Demoted both to Release semantics + log-once (b77f0fa27).
+- **si8** — survived; `watcher constructed for track 3` fired in-song (the
+  hook's per-watcher log). But only ONE: the two scripted UP@1 presses had
+  wrapped P2's part list to HARMONY (vocals — no track watcher).
+- **si9/si10** — fixed-time A@1 confirms cannot hit the part cards: menu
+  load variance moved the window by tens of seconds between runs; si10's
+  A@1 burst landed at the hub. Fix: closed-loop autopilot (probe injects A
+  per current screen through the new per-pad NopInjectButtonPress bridge),
+  plus the probe itself had to be un-blinded first (title/DLL image pages
+  vanish from the guest heap page table once a user module loads).
+- **si12** — autopilot worked but P1-first confirm let P2 fall to
+  `AutoAssignMissingSlots`, and song load wedged in a 4097-fault livelock
+  at guest EA 0xFFFFFFFC — the classic SI track_-1 vector[-1] family,
+  reachable because hardware runs always picked explicitly and never
+  exercised auto-assign+SI. New `--rb3dx_si_claim_anchor` probe (reads the
+  DLL's own gClaims/gImpls; anchor decoded from SIInstallClone =
+  0x84055FD8) proved P2 never became a track player: claimCount=1
+  {track=3,cnt=1}.
+- **si13** — pad-1-first autopilot; cards visible at CHOOSE DIFFICULTY
+  for BOTH players (instrument stage skipped — remembered-part flow), both
+  confirmed EXPERT, gameplay reached, still claimCount=1. **Open frontier:**
+  P2 confirms its card yet never lands on a scoring track. Both cards read
+  "Player1" — prime suspect is local-user profile identity (both xenia
+  fake users may present the same identity, and the session builder dedups
+  by XUID). Next: si14 discriminator (guitar+drums, the 2pad9-proven
+  config, SI armed) — if drums-P2 claims a track, the claim machinery is
+  fine and the failure is specific to guitar-family P2 under two local
+  users.
+
 ---
 
 ## 9. Related docs
