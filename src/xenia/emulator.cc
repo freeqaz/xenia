@@ -957,6 +957,48 @@ void Rb3dxSaveGprLr23ProbeExtern(cpu::ppc::PPCContext* ppc_context,
         // guest-thread ABI/r13 sdata-base); use approach (b) below for the
         // validated install-verify harness.
         uint32_t init_va = static_cast<uint32_t>(cvars::si_init_va);
+        // InitSameInstrument's RB3E_PokeBranch/HookFunction are plain guest
+        // stores into title .text (game hook sites) and DLL .text (call-stub
+        // pokes, trampoline second halves) with NO dcbst/icbi -- on hardware
+        // the pages are writable, under Xenia they are mapped read-only and
+        // the first SI_POKE_B guest-faults (proven /tmp/rb3-si2: guest crash
+        // PC inside RB3E_PokeBranch @0x8402B458+0x40, wedging the hijacked
+        // boot thread; the July "r13/sdata ABI" suspicion was wrong). Same
+        // cure as the DC3 patch procedure: guest-heap Protect the committed
+        // regions to R+W first. At MemAlloc #800 none of the poked sites has
+        // been JIT-compiled yet (pre-UI), so lazy compilation picks up the
+        // patched bytes and no invalidation is needed.
+        auto make_writable = [&](uint32_t lo, uint32_t hi, const char* tag) {
+          uint32_t a = lo, pages = 0;
+          while (a < hi) {
+            auto* heap = mem_for_emu->LookupHeap(a);
+            if (!heap) {
+              a += 0x10000;
+              continue;
+            }
+            HeapAllocationInfo info = {};
+            if (!heap->QueryRegionInfo(a, &info) || !info.region_size) {
+              a += 0x10000;
+              continue;
+            }
+            uint32_t region_end = static_cast<uint32_t>(
+                std::min<uint64_t>(hi, static_cast<uint64_t>(info.base_address) +
+                                           info.region_size));
+            if ((info.state & kMemoryAllocationCommit) &&
+                region_end > a) {
+              heap->Protect(a, region_end - a,
+                            kMemoryProtectRead | kMemoryProtectWrite);
+              pages += (region_end - a) >> 12;
+            }
+            a = region_end > a ? region_end : a + 0x10000;
+          }
+          XELOGW(
+              "SI LOADDLL: (a) made [0x{:08X},0x{:08X}) guest-writable for "
+              "the DLL's self-installed pokes ({}; ~{} 4K pages)",
+              lo, hi, tag, pages);
+        };
+        make_writable(0x82000000u, 0x83000000u, "title image");
+        make_writable(0x84000000u, 0x84860000u, "RB3Enhanced.dll image");
         uint64_t saved_r[32];
         for (int i = 0; i < 32; ++i) saved_r[i] = ppc_context->r[i];
         uint64_t saved_lr = ppc_context->lr;
@@ -1451,23 +1493,15 @@ static void Rb3dxSiHookVerifyThread(Memory* memory) {
     if (a < 0x1000) return false;
     auto* heap = memory->LookupHeap(a);
     if (!heap) return false;
-    uint32_t prot = 0;
-    bool queried = heap->QueryProtect(a, &prot);
-    if (!queried || !(prot & kMemoryProtectRead)) {
-      // Diagnose WHY a probe read is refused: distinguish "no page-table
-      // entry" from "entry present but protection lacks kRead" (e.g. the
-      // loader's post-launch section re-protect leaves .text execute-only in
-      // the guest page table while the host mapping stays readable).
-      static std::atomic<int> s_diag_budget{8};
-      if (s_diag_budget.fetch_sub(1, std::memory_order_relaxed) > 0) {
-        XELOGW(
-            "SI HOOKVERIFY: read refused @0x{:08X}: QueryProtect ok={} "
-            "prot=0x{:X} (kRead missing)",
-            a, queried, prot);
-      }
-      return false;
-    }
-    return true;
+    // Gate on COMMITTED state, not protect bits: /tmp/rb3-si2 showed the
+    // title's .text page-table entries flip to protect=0x0 once the SI DLL
+    // is loaded (guest-side protect bookkeeping), while the host mapping
+    // stays readable -- the guest-thread detour writes at the same
+    // addresses read real words throughout. What actually SIGSEGVs a host
+    // probe read is an uncommitted/unmapped page, so that is the check.
+    HeapAllocationInfo info = {};
+    if (!heap->QueryRegionInfo(a, &info)) return false;
+    return (info.state & kMemoryAllocationCommit) != 0;
   };
   auto r32 = [&](uint32_t a) -> uint32_t {
     return readable(a) ? load_and_swap<uint32_t>(base + a) : 0xEEEEEEEEu;
