@@ -26,13 +26,13 @@ DECLARE_XBOXKRNL_EXPORT1(KeEnableFpuExceptions, kNone, kStub);
 // Event Tracing stubs (ETX)
 dword_result_t EtxProducerRegister_entry(lpvoid_t provider_ptr,
                                           lpdword_t handle_ptr) {
-  XELOGI("EtxProducerRegister(provider={:08X})", provider_ptr.guest_address());
+  XELOGD("EtxProducerRegister(provider={:08X})", provider_ptr.guest_address());
   return 0;
 }
 DECLARE_XBOXKRNL_EXPORT1(EtxProducerRegister, kNone, kStub);
 
 dword_result_t EtxProducerUnregister_entry(unknown_t handle) {
-  XELOGI("EtxProducerUnregister");
+  XELOGD("EtxProducerUnregister");
   return 0;
 }
 DECLARE_XBOXKRNL_EXPORT1(EtxProducerUnregister, kNone, kStub);
