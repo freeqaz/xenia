@@ -999,6 +999,21 @@ void Rb3dxSaveGprLr23ProbeExtern(cpu::ppc::PPCContext* ppc_context,
         };
         make_writable(0x82000000u, 0x83000000u, "title image");
         make_writable(0x84000000u, 0x84860000u, "RB3Enhanced.dll image");
+        // The guest-heap walk above is bookkeeping-only and finds ZERO
+        // committed pages for the title image (PROT TRACE run /tmp/rb3-si4:
+        // the only Protect ever touching H1's page is the loader's
+        // prot=0x1, yet QueryRegionInfo reports the range uncommitted -- the
+        // title image's real state isn't tracked by the heap page table in
+        // this fork). What actually faults the DLL's orig[0] store is the
+        // HOST mapping, so unprotect that directly -- same mechanism
+        // approach (b) uses per-page, widened to the poke surface.
+        xe::memory::Protect(mb2 + 0x82000000u, 0x1000000u,
+                            xe::memory::PageAccess::kExecuteReadWrite);
+        xe::memory::Protect(mb2 + 0x84000000u, 0x860000u,
+                            xe::memory::PageAccess::kExecuteReadWrite);
+        XELOGW(
+            "SI LOADDLL: (a) host mappings [0x82000000,+16MB) and "
+            "[0x84000000,+0x860000) set RWX for the installer's pokes");
         uint64_t saved_r[32];
         for (int i = 0; i < 32; ++i) saved_r[i] = ppc_context->r[i];
         uint64_t saved_lr = ppc_context->lr;
