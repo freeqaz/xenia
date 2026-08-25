@@ -1031,6 +1031,12 @@ void Rb3dxSaveGprLr23ProbeExtern(cpu::ppc::PPCContext* ppc_context,
         // this fork). What actually faults the DLL's orig[0] store is the
         // HOST mapping, so unprotect that directly -- same mechanism
         // approach (b) uses per-page, widened to the poke surface.
+        // fork-cleanup-review flags raw xe::memory::Protect as bypassing
+        // heap bookkeeping and never restoring: INTENTIONAL here. The DLL
+        // and its game-call stubs keep poking these ranges for the whole
+        // run, so the surface must stay RWX; --si_load_dll is RB3-only and
+        // default-off, and the heap page table doesn't track module images
+        // in this fork anyway (see PROT TRACE note above).
         xe::memory::Protect(mb2 + 0x82000000u, 0x1000000u,
                             xe::memory::PageAccess::kExecuteReadWrite);
         xe::memory::Protect(mb2 + 0x84000000u, 0x860000u,
