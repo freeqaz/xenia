@@ -57,9 +57,11 @@ class NopInputDriver final : public InputDriver {
   // Set guest memory pointer so screen-aware scripting can read TheUI.
   void SetMemory(Memory* memory) { memory_ = memory; }
 
-  // Inject a one-shot button press from external code (e.g., NUI handler).
-  // Thread-safe. The press will be active for duration_ms.
-  void InjectButtonPress(uint16_t buttons, uint64_t duration_ms = 200);
+  // Inject a one-shot button press from external code (e.g., NUI handler,
+  // the RB3DX ui-probe autopilot). Thread-safe. The press will be active
+  // for duration_ms on the given pad.
+  void InjectButtonPress(uint16_t buttons, uint64_t duration_ms = 200,
+                         uint32_t pad = 0);
 
  private:
   static constexpr uint32_t kMaxPads = 2;
@@ -85,6 +87,7 @@ class NopInputDriver final : public InputDriver {
     std::chrono::steady_clock::time_point start;
     uint64_t duration_ms;
     uint16_t buttons;
+    uint8_t pad = 0;
   };
 
   uint16_t GetCurrentButtons(uint32_t pad);
@@ -139,6 +142,13 @@ class NopInputDriver final : public InputDriver {
   std::mutex inject_mutex_;
   std::vector<InjectedEvent> injected_events_;
 };
+
+// Process-wide bridge to the (single) live NopInputDriver instance so
+// host-side probe threads (e.g. the RB3DX ui-probe autopilot in emulator.cc)
+// can inject screen-conditional presses without holding an InputSystem
+// reference. No-op if no nop driver is active.
+void NopInjectButtonPress(uint32_t pad, uint16_t buttons,
+                          uint64_t duration_ms);
 
 }  // namespace nop
 }  // namespace hid
