@@ -276,6 +276,18 @@ DEFINE_bool(
     "memory access; no hooks, no patches; title-gated so DC3-inert. For the "
     "main_hub load-stall investigation.",
     "CPU");
+DEFINE_uint64(
+    rb3dx_si_claim_anchor, 0,
+    "RB3DX (title 0x45410914), default 0 (off), requires --rb3dx_ui_probe: "
+    "guest VA of the RB3Enhanced.dll SI claim-table anchor (the lis/addi "
+    "base register in SIInstallClone; wt-integration build: 0x84055FD8, "
+    "decoded from the packed DLL with capstone). Layout from "
+    "SameInstrumentHooks.c: gClaims[] {track,count} pairs at +0 stride 8, "
+    "gImpls[] at +0xC0 stride 0xC, gClaimCount at +0x1C8, gImplCount at "
+    "+0x1CC. When set, the ui probe logs these each sample -- the "
+    "machine-readable twin evidence (two players on one track => a claim "
+    "with count 2 and implCount 2). Read-only. Title-gated => DC3-inert.",
+    "CPU");
 DEFINE_bool(
     rb3dx_autoconfirm_parts, false,
     "RB3DX (title 0x45410914), default off, requires --rb3dx_ui_probe: "
@@ -1688,6 +1700,21 @@ static void Rb3dxUiProbeThread(Memory* memory) {
         "RB3DX UI PROBE[{}]: transState={} curScreen=0x{:08X}'{}' "
         "transScreen=0x{:08X}'{}'",
         sample, ts, cur, cur_name, trans, trans_name);
+    // --- SI claim-table dump (--rb3dx_si_claim_anchor): the DLL's own
+    // gClaims/gImpls, the ground truth for "two players on one track".
+    if (cvars::rb3dx_si_claim_anchor != 0) {
+      uint32_t anchor = static_cast<uint32_t>(cvars::rb3dx_si_claim_anchor);
+      uint32_t claim_count = r32(anchor + 0x1C8);
+      uint32_t impl_count = r32(anchor + 0x1CC);
+      std::string claims;
+      for (uint32_t i = 0; i < 3; ++i) {
+        claims += fmt::format(" claim{}={{track={},cnt={}}}", i,
+                              static_cast<int32_t>(r32(anchor + i * 8)),
+                              r32(anchor + i * 8 + 4));
+      }
+      XELOGE("RB3DX UI PROBE[{}]:   SI claims: claimCount={} implCount={}{}",
+             sample, claim_count, impl_count, claims);
+    }
     // --- closed-loop part/difficulty autopilot (--rb3dx_autoconfirm_parts).
     // Screen-conditional so it is immune to the tens-of-seconds menu-load
     // variance that made fixed-time A@1 presses land at the hub (opening
