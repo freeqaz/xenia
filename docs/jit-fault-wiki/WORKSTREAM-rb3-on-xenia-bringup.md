@@ -858,6 +858,75 @@ silent clean exits (si16/si19/si20 pattern, exit code 0, no core, run-
 dependent) deserve one dedicated session — si21 proved a full 300s run
 with exit 0 on the same binary/config.
 
+### 8i. ChoosePart gate SOLVED — first 2×-guitar twin run under xenia (si28..si34)
+
+Next-step (b) resolved without any host detour: the "confirm validator"
+is not compiled code at all. RB3DX replaced vanilla's
+`show_choose_part_wait` with a DTA-script gate — `slot_states.dta` calls
+`{dx_check_for_dupe $slot}` on `kState_ChoosePartWait`'s `enter` (and on
+both confirm dialogs) and bounces the loser straight back to
+`kState_ChoosePart`. That is why the rejection sat upstream of RB3E's
+Layer B (which hooks `OvershellPanel::ResolvePartWaitStates`, a path the
+DX edit no longer takes) and why si18's A-press "never left state 10":
+the bounce happens the same frame, inside script.
+
+**The fix already existed.** rock-band-3-deluxe commit `e7521060c`
+(2026-08-18, "overshell: force-allow same-instrument duping") makes
+`dx_check_for_dupe` return a bare `TRUE`, and the repo's Aug-22 ninja
+build (`out/xbox/gen/patch_xbox_{0.ark,hdr}`, branch
+feature/fast-boot-to-library @ 47c5a139c+dirty) carries it — verified by
+`dtab -a` on the built dtb. The xenia boot dir simply pointed at the
+stale Oct-2025 torrent patch ark. New boot dir `/tmp/rb3dxboot2`:
+symlinks to the torrent `main_xbox_*` + `main_xbox.hdr` (torrent data
+untouched) + the repo's fresh `patch_xbox.{hdr,ark}`. The Oct-2025
+RB3DX `default.xex` pairs fine with the Aug-2026 patch ark.
+
+**Harness changes needed to drive it** (branch rb3-si-statenav):
+- `1aa879d5c` state-driven pre-song walk: the rebuilt ark's fresh-save
+  first-boot dialog chain (`hint_rb3_welcome_screen`, multi-message,
+  ends in a CUSTOMIZE BAND / CONTINUE choice defaulting to CUSTOMIZE)
+  ate blind time-scripted A-walks — si28/si29 parked 250s in
+  manage_band_screen. Now: A on intro/splash/dx_welcome/settings_error,
+  DOWN/A alternation on the hint chain, B backout from manage_band,
+  UP×2+A on the hub (pins PLAY NOW).
+- `eee15ed2e` pad presence for script-free runs: controllers only
+  report connected in scripted mode, so a run with no `--scripted_input`
+  had ZERO pads and every autopilot injection landed in the void
+  (si31/si32 sat on splash 300s; si31's stuck CREATE-DATA save dialog
+  was the same cause).
+- `2c3a0993e` part-screen P2 join: an A on pad 1 at
+  part_difficulty_screen joins P2 directly (si33 discovery — no START
+  dance); a P2 joined this late picks its part IN the screen instead of
+  inside the hub join overshell, which pre-resolves the instrument and
+  ate si30's UP. The UP nav is now gated on BandUserMgr slot-map
+  occupancy (mgr+0x50, the real joined signal — pad-table LocalUser is
+  bound by --local_user_count at boot and is NOT it).
+
+**si34 = the proof** (fresh save, fully closed-loop, zero scripted
+input): P2 joins at the part screen → ChoosePart(10) fresh → UP →
+A-confirm on the taken GUITAR → **shell 10→12 (ChooseDiff)** — the gate
+that bounced si18 passes — → EXPERT → P1 confirms the same GUITAR →
+game_screen with **claimCount=1 implCount=2 claim0={track,cnt=2}**: one
+song track claimed twice, two TrackWatcherImpls (the SI gem-clone
+signature), both users track=1/diff=3, distinct guids (slot0+slot3).
+Pixels: two IDENTICAL guitar highways (same chart, same solo-lane rows)
+vs si30's guitar/bass pair. Gameplay held ~35 s until the unmanned band
+failed out to lose_screen (auto-restart loop). Run artifacts
+/tmp/rb3-si34.
+
+**Negative results on the way:** the si26 save backup is POST-run (P2
+remembers BASS — si33 replayed guitar+bass from it); a remembered-twin
+proof would need the pre-si26 double-guitar seed. Two self-inflicted
+harness kills: `pkill -f` patterns that matched their own argv (the
+global-CLAUDE.md trap, hit twice — si31 launch shell and the si33
+watcher). The ~130s silent exit-0 flake did NOT recur in si28..si34
+(all full-length or externally killed).
+
+**Retail-parity note:** dx_check_for_dupe force-allow is an ark-side
+*content* patch (deliberate RB3DX/SI behavior change, same bits the
+console runs), not an emulator accommodation — xenia now runs the same
+twin flow the July hardware sessions ran, end to end.
+
 ---
 
 ## 9. Related docs
