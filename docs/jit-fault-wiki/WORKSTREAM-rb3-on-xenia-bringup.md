@@ -660,6 +660,36 @@ the Xenia A/B is corroboration now, not the primary proof. The in-tree
 the current from-source DLL moved them (map addendum in that doc) — refresh
 before any Xenia SI run.
 
+## 8e. 2026-08-25 — THE SONG PLAYS: paced null audio driver
+
+**The 0:00 stall root cause was the APU, not the net-sync chain.** The new
+sync_audio_net_panel probe read `SyncGameStartPanel::mState == 5` (synced)
+for the whole gameplay phase — StartGame/EnterInGameState/SyncStartGameMsg
+all fire fine offline. The actual gate: `NopAudioSystem::CreateDriver`
+returned NOT_IMPLEMENTED, `XAudioRegisterRenderDriverClient` handed the
+guest a dummy handle, and the AudioSystem worker never pumped the guest
+render callback — so the mixer never ran and the song position (which RB3
+clocks gameplay from) stayed at zero.
+
+**Fix (`77d85acaa`):** `NopAudioDriver` — discards submitted frames but
+releases the client semaphore at hardware cadence (256 samples @ 48 kHz =
+5.333 ms) from a pacer thread, one release per submitted frame. With the
+pump alive, XMA decode immediately tripped `xma_context.cc`'s
+`assert_always("TODO")` on frames whose 15-bit length field exceeds the
+block's remaining bits; both TODO arms now log-once + skip (Release
+semantics, xconfig precedent).
+
+**Result (probe `/tmp/rb3-audio2`, two-player Vulkan run):** gems scroll,
+the no-input band fails out after ~36 s (red crowd-drain vignette →
+`lose_screen`), and RB3DX auto-restarts the attempt
+(`restart_sync_audio_net_screen` → artist title card "T. Rex, 197…" → both
+tracks live again). The full gameplay simulation loop — song clock, scoring,
+crowd meter, fail/restart — runs headless.
+
+DC3 non-regression: 627 traps, same pre-existing warns, no cores (the pacer
+DOES change DC3 behavior — its audio callbacks now run — so this check was
+load-bearing; frontier unchanged).
+
 ---
 
 ## 9. Related docs
