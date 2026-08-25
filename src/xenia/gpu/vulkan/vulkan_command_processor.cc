@@ -92,9 +92,11 @@ DEFINE_bool(dc3_inline_render, false,
             "(no deferred-draw recording/replay), so the capture readback reads "
             "the frontbuffer the game itself resolved on its own timeline — "
             "sidestepping the deferred-replay-reads-stale-guest-memory burst bug. "
-            "Requires a warm VkPipelineCache (/tmp/claude/xenia_vulkan_pipeline_"
-            "cache.bin) to avoid the CP-stall deadlock the deferral was built to "
-            "dodge. Validation lever (architecture review 2026-06-03).",
+            "Requires a warm VkPipelineCache (xenia_vulkan_pipeline_cache.bin "
+            "under --vulkan_pipeline_cache_path, default "
+            "<temp_directory_path>/xenia-pipeline-cache) to avoid the CP-stall "
+            "deadlock the deferral was built to dodge. Validation lever "
+            "(architecture review 2026-06-03).",
             "GPU");
 
 namespace xe {
