@@ -1720,16 +1720,31 @@ static void Rb3dxUiProbeThread(Memory* memory) {
     // variance that made fixed-time A@1 presses land at the hub (opening
     // P2's overshell menu) or after the cards were gone (si6..si10).
     if (cvars::rb3dx_autoconfirm_parts && ts == 0) {
+      // Pad-1-first ordering is load-bearing: if P1 confirms while P2's card
+      // is untouched, the game leaves part_difficulty_screen immediately and
+      // AutoAssignMissingSlots handles P2 -- with the SI hooks armed that
+      // auto-assign path wedges in the classic track_-1 vector[-1] fault
+      // livelock at guest EA 0xFFFFFFFC (si12; the exact crash family H1/
+      // #32b were built against, but on hardware players always picked
+      // explicitly so auto-assign+SI was never exercised). Give P2 the first
+      // three samples (part + difficulty confirms), then bring P1 along.
+      static int s_part_screen_samples = 0;
       if (cur_name == "part_difficulty_screen") {
-        uint32_t pad = (sample & 1) ? 1u : 0u;
+        ++s_part_screen_samples;
+        uint32_t pad = (s_part_screen_samples <= 3 || (sample & 1)) ? 1u : 0u;
         xe::hid::nop::NopInjectButtonPress(pad, 0x1000 /*X_INPUT_GAMEPAD_A*/,
                                            250);
-        XELOGW("RB3DX UI PROBE[{}]: autopilot A@{} (part_difficulty_screen)",
-               sample, pad);
-      } else if (cur_name == "song_select_screen" && (sample & 1)) {
-        xe::hid::nop::NopInjectButtonPress(0, 0x1000, 250);
-        XELOGW("RB3DX UI PROBE[{}]: autopilot A@0 (song_select_screen)",
-               sample);
+        XELOGW(
+            "RB3DX UI PROBE[{}]: autopilot A@{} (part_difficulty_screen "
+            "sample {})",
+            sample, pad, s_part_screen_samples);
+      } else {
+        s_part_screen_samples = 0;
+        if (cur_name == "song_select_screen" && (sample & 1)) {
+          xe::hid::nop::NopInjectButtonPress(0, 0x1000, 250);
+          XELOGW("RB3DX UI PROBE[{}]: autopilot A@0 (song_select_screen)",
+                 sample);
+        }
       }
     }
     // --- panels of the transition screen and current screen ---
