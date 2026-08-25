@@ -1341,6 +1341,54 @@ void Rb3dxIsHostOfflineExtern(cpu::ppc::PPCContext* ppc_context,
 // member offset (0x54) is the RB3 xbox360 layout verified from the ProfileMgr
 // ctor (rb3-xenon). Guest-memory write is confined to this single bool byte;
 // title-gated + default-off so DC3-inert.
+
+// Probe-thread ownership (fork-cleanup-review.md C10). These samplers used to
+// be detached std::threads with for(;;) bodies capturing Memory*; ~Emulator()
+// destroyed memory_ under them mid-LookupHeap — a guaranteed shutdown
+// use-after-free on every probe-enabled run. They are now owned here: spawned
+// via Rb3dxSpawnProbeThread(), polling Rb3dxProbeSleep() instead of a bare
+// sleep_for, and joined from Emulator::TerminateTitle() / ~Emulator().
+static std::mutex s_rb3dx_probe_thread_mutex;
+static std::vector<std::thread> s_rb3dx_probe_threads;
+static std::atomic<bool> s_rb3dx_probe_threads_stop{false};
+
+static bool Rb3dxProbeThreadsShouldStop() {
+  return s_rb3dx_probe_threads_stop.load(std::memory_order_relaxed);
+}
+
+// Sleep in short slices so a stopping emulator never waits out a full probe
+// period. Returns false (caller should exit) when a stop was requested.
+static bool Rb3dxProbeSleep(uint64_t ms) {
+  for (uint64_t waited = 0; waited < ms; waited += 250) {
+    if (Rb3dxProbeThreadsShouldStop()) {
+      return false;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(
+        std::min<uint64_t>(250, ms - waited)));
+  }
+  return !Rb3dxProbeThreadsShouldStop();
+}
+
+template <typename Fn>
+static void Rb3dxSpawnProbeThread(Fn&& fn) {
+  std::lock_guard<std::mutex> lock(s_rb3dx_probe_thread_mutex);
+  s_rb3dx_probe_threads.emplace_back(std::forward<Fn>(fn));
+}
+
+static void Rb3dxJoinProbeThreads() {
+  s_rb3dx_probe_threads_stop.store(true, std::memory_order_relaxed);
+  std::vector<std::thread> threads;
+  {
+    std::lock_guard<std::mutex> lock(s_rb3dx_probe_thread_mutex);
+    threads.swap(s_rb3dx_probe_threads);
+  }
+  for (auto& t : threads) {
+    if (t.joinable()) {
+      t.join();
+    }
+  }
+}
+
 static void Rb3dxSkipCalibrationPokeThread(Memory* memory) {
   using xe::load_and_swap;
   uint8_t* base = memory->virtual_membase();
@@ -1418,7 +1466,7 @@ static void Rb3dxSkipCalibrationPokeThread(Memory* memory) {
         ++pokes;
       }
     }
-    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    if (!Rb3dxProbeSleep(150)) return;
   }
 }
 
@@ -1501,7 +1549,7 @@ static void Rb3dxSiProbeThread(Memory* memory) {
     last_flagw = flagw;
     last_detour = detour;
     ++n;
-    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    if (!Rb3dxProbeSleep(500)) return;
   }
 }
 
@@ -1599,7 +1647,7 @@ static void Rb3dxSiHookVerifyThread(Memory* memory) {
       classify("H2", kH2);
     }
     ++n;
-    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    if (!Rb3dxProbeSleep(500)) return;
   }
 }
 
@@ -1689,7 +1737,7 @@ static void Rb3dxUiProbeThread(Memory* memory) {
   uint32_t overshell_obj = 0;
   int sample = 0;
   for (;;) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+    if (!Rb3dxProbeSleep(2000)) return;
     ++sample;
     // --- UIManager / BandUI ---
     uint32_t ts = r32(kTheBandUI + 0x10);
@@ -1734,7 +1782,10 @@ static void Rb3dxUiProbeThread(Memory* memory) {
         for (uint32_t s = 0; s < 4; ++s) {
           uint32_t g0 = r32(mgr + 0x50 + s * 0x10);
           uint32_t g1 = r32(mgr + 0x50 + s * 0x10 + 4);
-          slots += fmt::format(" slot{}={:08X}{:08X}", s, g0, g1);
+          uint32_t g2 = r32(mgr + 0x50 + s * 0x10 + 8);
+          uint32_t g3 = r32(mgr + 0x50 + s * 0x10 + 12);
+          slots += fmt::format(" slot{}={:08X}{:08X}{:08X}{:08X}", s, g0, g1,
+                               g2, g3);
         }
         uint32_t vb = r32(mgr + 0x28);
         uint32_t ve = r32(mgr + 0x2C);
@@ -1745,13 +1796,13 @@ static void Rb3dxUiProbeThread(Memory* memory) {
           if (!u) continue;
           uint32_t inner = r32(u + 4);
           uint32_t adj = inner ? r32(inner + 4) : 0;
-          uint32_t lb = (adj < 0x400) ? u + adj : u;
+          uint32_t lb = (adj < 0x1000) ? u + adj : u;
           parts += fmt::format(
-              " user{}={{bu=0x{:08X} track={} diff={} shell={} "
-              "guid={:08X}{:08X}}}",
+              " user{}={{bu=0x{:08X} track={} diff={} shell={} adj=0x{:X} "
+              "guid={:08X}{:08X}{:08X}{:08X}}}",
               i, u, static_cast<int32_t>(r32(u + 0x10)),
-              static_cast<int32_t>(r32(u + 0x8)), r32(u + 0x20),
-              r32(lb + 0x30), r32(lb + 0x34));
+              static_cast<int32_t>(r32(u + 0x8)), r32(u + 0x20), adj,
+              r32(lb + 0x30), r32(lb + 0x34), r32(lb + 0x38), r32(lb + 0x3C));
         }
         std::string pads;
         for (uint32_t p = 0; p < 4; ++p) {
@@ -3453,6 +3504,11 @@ Emulator::Emulator(const std::filesystem::path& command_line,
 Emulator::~Emulator() {
   // Note that we delete things in the reverse order they were initialized.
 
+  // The probe samplers capture memory_.get(); join them before anything is
+  // torn down (fork-cleanup-review.md C10). No-op if TerminateTitle already
+  // joined or no probes were armed.
+  Rb3dxJoinProbeThreads();
+
   // Give the systems time to shutdown before we delete them.
   if (graphics_system_) {
     graphics_system_->Shutdown();
@@ -3608,6 +3664,10 @@ X_STATUS Emulator::TerminateTitle() {
   if (!is_title_open()) {
     return X_STATUS_UNSUCCESSFUL;
   }
+
+  // Stop and join the RB3DX/DC3 probe sampler threads before the title (and
+  // later memory_) goes away under them (fork-cleanup-review.md C10).
+  Rb3dxJoinProbeThreads();
 
   if (processor_) {
     processor_->ClearGuestFunctionOverrides();
@@ -4440,9 +4500,8 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
       }
       // Periodic flush + progress so a run that is killed on a wall-clock
       // deadline still leaves a complete-to-the-second trace on disk.
-      std::thread([]() {
-        while (true) {
-          std::this_thread::sleep_for(std::chrono::seconds(10));
+      Rb3dxSpawnProbeThread([]() {
+        while (Rb3dxProbeSleep(10000)) {
           auto* sink = rb3dx_alloc_trace_sink.get();
           if (!sink) {
             return;
@@ -4452,7 +4511,7 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
                  sink->written(),
                  rb3dx_ret_matches.load(std::memory_order_relaxed));
         }
-      }).detach();
+      });
     }
   }
 
@@ -4463,7 +4522,7 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
   if (title_id_.has_value() && title_id_.value() == 0x45410914 &&
       cvars::rb3dx_ui_probe) {
     Memory* probe_mem = memory_.get();
-    std::thread([probe_mem]() { Rb3dxUiProbeThread(probe_mem); }).detach();
+    Rb3dxSpawnProbeThread([probe_mem]() { Rb3dxUiProbeThread(probe_mem); });
     XELOGI("RB3DX: UI probe sampler thread started (--rb3dx_ui_probe)");
   }
 
@@ -4472,7 +4531,7 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
   if (title_id_.has_value() && title_id_.value() == 0x45410914 &&
       cvars::si_probe) {
     Memory* si_mem = memory_.get();
-    std::thread([si_mem]() { Rb3dxSiProbeThread(si_mem); }).detach();
+    Rb3dxSpawnProbeThread([si_mem]() { Rb3dxSiProbeThread(si_mem); });
     XELOGI("RB3DX: SI static-patch probe thread started (--si_probe)");
   }
 
@@ -4484,7 +4543,7 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
   if (title_id_.has_value() && title_id_.value() == 0x45410914 &&
       cvars::si_hook_verify) {
     Memory* hv_mem = memory_.get();
-    std::thread([hv_mem]() { Rb3dxSiHookVerifyThread(hv_mem); }).detach();
+    Rb3dxSpawnProbeThread([hv_mem]() { Rb3dxSiHookVerifyThread(hv_mem); });
     XELOGI("RB3DX: SI DLL-hook verify thread started (--si_hook_verify)");
   }
 
@@ -4587,8 +4646,8 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
   if (title_id_.has_value() && title_id_.value() == 0x45410914 &&
       cvars::rb3dx_skip_calibration) {
     Memory* poke_mem = memory_.get();
-    std::thread([poke_mem]() { Rb3dxSkipCalibrationPokeThread(poke_mem); })
-        .detach();
+    Rb3dxSpawnProbeThread(
+        [poke_mem]() { Rb3dxSkipCalibrationPokeThread(poke_mem); });
     XELOGI(
         "RB3DX: first-boot calibration skip thread started "
         "(--rb3dx_skip_calibration)");

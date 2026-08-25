@@ -8,6 +8,7 @@
  */
 
 #include <cstring>
+#include <atomic>
 #include <string>
 
 #include "xenia/base/cvar.h"
@@ -86,6 +87,14 @@ X_HRESULT_result_t XamUserGetXUID_entry(dword_t user_index, dword_t type_mask,
   }
   uint32_t result = X_E_NO_SUCH_USER;
   uint64_t xuid = 0;
+  // Identity-surface diagnostic: RB3's overshell join attribution depends on
+  // which user index the title resolves for a joining pad; log the first few
+  // queries so a shared-identity bug is visible in the log.
+  static std::atomic<uint32_t> s_xuid_logs{0};
+  if (s_xuid_logs.fetch_add(1, std::memory_order_relaxed) < 8) {
+    XELOGI("XamUserGetXUID(user={}, mask={:X})", uint32_t(user_index),
+           uint32_t(type_mask));
+  }
   if (user_index < 4) {
     if (IsLocalUserSignedIn(user_index)) {
       // Local profiles are offline; honor the offline bit (1) of the mask.
@@ -156,6 +165,12 @@ X_HRESULT_result_t XamUserGetSigninInfo_entry(
   info->signin_state = 1;
   xe::string_util::copy_truncating(info->name, LocalUserName(user_index),
                                    xe::countof(info->name));
+  static std::atomic<uint32_t> s_signin_info_logs{0};
+  if (s_signin_info_logs.fetch_add(1, std::memory_order_relaxed) < 8) {
+    XELOGI("XamUserGetSigninInfo(user={}) -> xuid={:016X} name='{}'",
+           uint32_t(user_index), uint64_t(info->xuid),
+           LocalUserName(user_index));
+  }
   return X_E_SUCCESS;
 }
 DECLARE_XAM_EXPORT1(XamUserGetSigninInfo, kUserProfiles, kImplemented);
@@ -173,6 +188,10 @@ dword_result_t XamUserGetName_entry(dword_t user_index, lpstring_t buffer,
   auto user_name = LocalUserName(user_index);
   xe::string_util::copy_truncating(buffer, user_name,
                                    std::min(buffer_len.value(), uint32_t(16)));
+  static std::atomic<uint32_t> s_name_logs{0};
+  if (s_name_logs.fetch_add(1, std::memory_order_relaxed) < 8) {
+    XELOGI("XamUserGetName(user={}) -> '{}'", uint32_t(user_index), user_name);
+  }
   return X_E_SUCCESS;
 }
 DECLARE_XAM_EXPORT1(XamUserGetName, kUserProfiles, kImplemented);
@@ -195,6 +214,11 @@ dword_result_t XamUserGetGamerTag_entry(dword_t user_index,
   auto user_name = xe::to_utf16(LocalUserName(user_index));
   xe::string_util::copy_and_swap_truncating(
       buffer, user_name, std::min(buffer_len.value(), uint32_t(16)));
+  static std::atomic<uint32_t> s_tag_logs{0};
+  if (s_tag_logs.fetch_add(1, std::memory_order_relaxed) < 8) {
+    XELOGI("XamUserGetGamerTag(user={}) -> '{}'", uint32_t(user_index),
+           LocalUserName(user_index));
+  }
   return X_E_SUCCESS;
 }
 DECLARE_XAM_EXPORT1(XamUserGetGamerTag, kUserProfiles, kImplemented);
@@ -213,6 +237,18 @@ uint32_t XamUserReadProfileSettingsEx(uint32_t title_id, uint32_t user_index,
                                       be<uint32_t>* buffer_size_ptr,
                                       uint8_t* buffer,
                                       XAM_OVERLAPPED* overlapped) {
+  static std::atomic<uint32_t> s_rps_logs{0};
+  if (s_rps_logs.fetch_add(1, std::memory_order_relaxed) < 8) {
+    std::string ids;
+    for (uint32_t i = 0; i < setting_count && i < 8; ++i) {
+      ids += fmt::format(" {:08X}", uint32_t(setting_ids[i]));
+    }
+    XELOGI(
+        "XamUserReadProfileSettingsEx(title={:08X} user={} xuid_count={} "
+        "xuid0={:016X} settings=[{} ])",
+        title_id, user_index, xuid_count,
+        xuid_count && xuids ? uint64_t(xuids[0]) : 0, ids);
+  }
   if (!xuid_count) {
     assert_null(xuids);
   } else {
