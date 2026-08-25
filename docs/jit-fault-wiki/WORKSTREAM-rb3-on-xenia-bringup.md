@@ -772,6 +772,53 @@ probe cascade, each run advancing one layer:
   fine and the failure is specific to guitar-family P2 under two local
   users.
 
+### 8g. ROOT CAUSE FOUND AND FIXED: XNetRandom's constant fill collapsed every UserGuid (si15..si17, 2026-08-25)
+
+The "shared identity" suspicion was right; the layer was wrong. It was never
+the XAM profile surface — it was **xenia's `NetDll_XNetRandom` stub, which
+memsets the output buffer with constant `0xBB`** ("makes replicating things
+easier", inherited from upstream). RB3 generates each local player's
+16-byte `UserGuid` from XNetRandom, keys `BandUserMgr::mSlotMap` by guid,
+and resolves slot→user by guid equality (`GetBandUserFromSlot` @0x82682B60
+→ guid-match walk @0x82682AB8, both re-derived by disasm this session). With
+every guid identical, **every occupied slot resolves to the first
+participant**: P2's overshell card belongs to P1's BandUser (hence both
+cards labeled "Player1"), P2's own BandUser never owns a slot, its
+trackType never leaves 10, and no second track/watcher can exist. Fixed in
+`xam_net.cc` with real entropy (`--xnet_random_constant_fill=true` restores
+the old fill for replicating historical runs). Upstreamable: any title
+deriving an identity/nonce/key from XNetRandom fails equivalently.
+
+The evidence chain, for the record:
+
+- **si15** (fresh save — `band3/save.dat` from earlier runs carried
+  remembered parts and was retired as a confound; new band/pad snapshot in
+  the ui-probe): pads carry DISTINCT LocalUsers (0x4362C648/0x4362C758 =
+  BandUser+0x94), so the July "shared LocalUser" input-collision theory is
+  dead under xenia. But frame 5200 showed both CHOOSE INSTRUMENT cards
+  labeled "Player1", P2's list = BASS/KEYS/SOLO/HARMONY (no GUITAR), P2
+  trackType stuck at 10 while P1 confirmed. Slot map: slot0 == slot3 ==
+  `BBBB…` (8 bytes read).
+- **si16** (full 16-byte guid reads + first-8 logging on the XAM identity
+  surface): `XamUserGetSigninInfo(user=1)` correctly returns
+  xuid=E00000000000BABF name='Player2' — the XAM layer was NEVER the
+  problem — while slot0 and slot3 both read the full
+  `BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB`. That + the RB3E MULTI-INPUT notes
+  (ports_xbox360.h: slot resolution is guid-keyed) pinned XNetRandom.
+- **si17** (fix live): slot guids random and distinct
+  (2B0AB1B3… / C1A24188…), TWO watchers constructed (track 3 AND track 1),
+  `claimCount=2 implCount=2 {track=3,cnt=1}{track=1,cnt=1}`, gameplay with
+  both players scoring — the first true two-track two-player run under
+  xenia. Note this is still *vanilla* guitar+bass (blind A@1 confirms take
+  P2's default first-free part); the SI same-track twin
+  (`{track=3,cnt=2}` + "cloned gem DB") needs P2 navigated up to GUITAR —
+  `--rb3dx_autoconfirm_p2_up=1`, run si18.
+
+Also this session: the si13/si14 "claimCount=1 proves P2 is not a track
+player" read was reframed — the claim table counts TrackWatcherImpl
+constructions (vocals produce none), and the persisted save was steering
+remembered parts. Both mattered, but the guid collapse was the root.
+
 ---
 
 ## 9. Related docs
