@@ -115,11 +115,6 @@ DEFINE_bool(rb3_mount_update, false,
             "finds update:\\gen\\patch_xbox.hdr (title-update content). Default "
             "OFF (inert for DC3 and normal runs).",
             "RB3");
-DEFINE_bool(dc3_enable_gameplay_bootstrap, false,
-            "DC3: experimental host-driven guest bootstrap for CreateGame/"
-            "SetupAnims/OnSongLoaded/StartGame. Disabled by default because "
-            "current call sites are unstable.",
-            "DC3");
 DEFINE_bool(dc3_game_screen_real_goto, true,
             "DC3: drive loading->game_screen via the real UIManager::GotoScreen "
             "(runs game_panel Load()->CreateGame() and the per-frame Poll state "
@@ -152,11 +147,6 @@ DEFINE_bool(dc3_debug_read_cache_stream_step_override, false,
             "DC3: enable invasive ReadCacheStream step-by-step guest override "
             "for DTB debugging. WARNING: performs extra reads/seeks and can "
             "perturb checksum/parser behavior; use only in dedicated probe runs.",
-            "DC3");
-DEFINE_bool(dc3_debug_memmgr_assert_nop_bypass, false,
-            "DC3: debug-only bypass of selected MemMgr Debug::Fail callsites "
-            "(replaces assert calls with nop). Temporary progression tool only; "
-            "can mask data/config corruption.",
             "DC3");
 DEFINE_bool(dc3_debug_mempool_alloc_probe, false,
             "DC3: log-only probe for MemOrPoolAlloc. Captures caller LR, "
@@ -2100,7 +2090,6 @@ void Dc3NuiSequencerExtern(
   static int s_skel_calls = 0;
   static uint32_t s_last_screen = 0;
   static int s_screen_stable_count = 0;
-  static bool s_gameplay_setup_done = false;
   static uint32_t s_fake_frame_number = 0;
   static bool s_nui_entry_logged = false;
   static bool s_screen_name_scan_range_logged = false;
@@ -2110,13 +2099,6 @@ void Dc3NuiSequencerExtern(
   static bool s_loadsong_probe_logged = false;
   static bool s_loadsong_repair_attempted = false;
   static bool s_content_refresh_forced = false;
-  // Auto-enable gameplay bootstrap when IK telemetry wants to reach game_screen
-  static bool s_ik_bootstrap_override_applied = false;
-  if (cvars::dc3_ik_telemetry && !s_ik_bootstrap_override_applied) {
-    cvars::dc3_enable_gameplay_bootstrap = true;
-    s_ik_bootstrap_override_applied = true;
-    XELOGI("DC3: IK telemetry auto-enabled gameplay bootstrap");
-  }
   static bool s_host_beat_drive_active = false;
   static float s_host_song_seconds = 0.0f;
   static float s_host_song_beat = 0.0f;
@@ -2408,8 +2390,6 @@ void Dc3NuiSequencerExtern(
       if (raw_trans_name.empty()) {
         raw_trans_name = read_name_at(trans_screen_h, 0x20, false);
       }
-      auto* scr_obj = memory->TranslateVirtual<uint8_t*>(cur_screen_h);
-      (void)scr_obj;
       std::string cur_name = raw_name;
       if (cur_name.empty()) {
         cur_name = "attract_screen";
@@ -2569,83 +2549,8 @@ void Dc3NuiSequencerExtern(
         }
       }
 
-      auto try_bootstrap_gameplay = [&](const std::string& cur_name_for_log,
-                                        const std::string& trans_name_for_log) {
-        if (s_gameplay_setup_done || !cvars::dc3_enable_gameplay_bootstrap) {
-          return;
-        }
-        constexpr uint32_t kTheHamDirector = 0x82F603A0;
-        constexpr uint32_t kTheGamePanel = 0x83117410;
-        constexpr uint32_t kGamePanelCreateGame = 0x8287ACD0;
-        constexpr uint32_t kHamDirectorSetupAnims = 0x82474868;
-        constexpr uint32_t kSongSequenceOnSongLoaded = 0x8288BDF8;
-        constexpr uint32_t kGamePanelStartGame = 0x8287AE28;
-        constexpr uint32_t kSongSequenceSingleton = 0x8311787C;
-
-        auto* hd_ptr = memory->TranslateVirtual<uint8_t*>(kTheHamDirector);
-        auto* gp_ptr = memory->TranslateVirtual<uint8_t*>(kTheGamePanel);
-        uint32_t hd_addr = hd_ptr ? xe::load_and_swap<uint32_t>(hd_ptr) : 0;
-        uint32_t gp_addr = gp_ptr ? xe::load_and_swap<uint32_t>(gp_ptr) : 0;
-        if (!hd_addr || !gp_addr || hd_addr >= 0xF0000000 ||
-            gp_addr >= 0xF0000000) {
-          return;
-        }
-
-        auto* processor = kernel_state->processor();
-        auto* thread_state = ppc_context->thread_state;
-        kernel::XThread* execute_thread = nullptr;
-        uint32_t execute_thread_id = 0;
-        auto threads =
-            kernel_state->object_table()->GetObjectsByType<kernel::XThread>(
-                kernel::XObject::Type::Thread);
-        for (auto thread : threads) {
-          if (thread->main_thread() && thread->thread_state()) {
-            execute_thread = thread.get();
-            thread_state = thread->thread_state();
-            execute_thread_id = thread->thread_id();
-            break;
-          }
-        }
-        if (!execute_thread_id && kernel::XThread::IsInThread() &&
-            thread_state) {
-          execute_thread = kernel::XThread::GetCurrentThread();
-          execute_thread_id = kernel::XThread::GetCurrentThread()->thread_id();
-        }
-        if (!processor || !thread_state || !execute_thread) {
-          return;
-        }
-
-        auto load_u32 = [&](uint32_t guest_addr) -> uint32_t {
-          auto* ptr = is_guest_readable(guest_addr, 4)
-                          ? memory->TranslateVirtual<uint8_t*>(guest_addr)
-                          : nullptr;
-          return ptr ? xe::load_and_swap<uint32_t>(ptr) : 0;
-        };
-        uint32_t game_addr =
-            is_guest_readable(gp_addr + 0x38, 4) ? load_u32(gp_addr + 0x38) : 0;
-        uint32_t gp_state =
-            is_guest_readable(gp_addr + 0x80, 4) ? load_u32(gp_addr + 0x80) : 0;
-        XELOGI(
-            "DC3: Gameplay bootstrap cur='{}' trans='{}' hd={:08X} "
-            "gp={:08X} game={:08X} gpState={} execThread={}",
-            cur_name_for_log, trans_name_for_log, hd_addr, gp_addr, game_addr,
-            gp_state, execute_thread_id);
-        auto queue_member_apc = [&](uint32_t fn, uint32_t tp) {
-          execute_thread->EnqueueApc(fn, tp, 0, 0);
-        };
-        // APC queue is LIFO, so insert the desired call chain in reverse.
-        queue_member_apc(kGamePanelStartGame, gp_addr);
-        queue_member_apc(kSongSequenceOnSongLoaded, kSongSequenceSingleton);
-        queue_member_apc(kHamDirectorSetupAnims, hd_addr);
-        if (!game_addr) {
-          queue_member_apc(kGamePanelCreateGame, gp_addr);
-        }
-        XELOGI(
-            "DC3: Gameplay bootstrap queued APC chain on thread {} "
-            "(createGame={} setupAnims=1 onSongLoaded=1 startGame=1)",
-            execute_thread_id, game_addr ? 0 : 1);
-        s_gameplay_setup_done = true;
-      };
+      // (try_bootstrap_gameplay lambda deleted -- retired experiment;
+      // see the NOTE below about GamePanel::CreateGame blocking. fork-cleanup C.)
 
       if ((s_skel_calls % 60) == 0) {
         XELOGI("DC3: Nav diag: scr={:08X} raw='{}' name='{}' stable={} nui={}",
@@ -3124,7 +3029,6 @@ void Dc3NuiSequencerExtern(
           constexpr uint32_t kTheHamSongMgr = 0x83118C6C;
           constexpr uint32_t kTheMoveMgr = 0x82F60308;
           constexpr uint32_t kTheGameMode = 0x83117710;
-          constexpr uint32_t kContentMgrRefreshSynchronously = 0x825FEBA8;
           constexpr uint32_t kMetaPerformerCurrent = 0x828CB8A8;
           constexpr uint32_t kDataReadFile = 0x825C1AD0;
           constexpr uint32_t kHamSongMgrAddSongs = 0x828C5BC0;
@@ -4099,24 +4003,43 @@ bool Emulator::ExceptionCallback(Exception* ex) {
   }
 
   // Walk the PPC stack to identify call chain (helps diagnose recursion).
+  // fork-cleanup-review C9: this runs INSIDE the exception handler for a
+  // guest fault. TranslateVirtual is membase+addr and can NEVER return null
+  // (the old `if (!ptr) break` guards were dead), so every read must first
+  // prove the page is committed or a decommitted stack page turns a
+  // diagnosable guest crash into a nested host SIGSEGV with no output.
   {
+    auto stack_word_readable = [&](uint32_t addr) -> bool {
+      if (addr < 0x70000000 || addr >= 0x78000000) return false;
+      auto* heap = memory_->LookupHeap(addr);
+      if (!heap) return false;
+      HeapAllocationInfo info = {};
+      if (!heap->QueryRegionInfo(addr, &info)) return false;
+      return (info.state & kMemoryAllocationCommit) != 0;
+    };
     uint32_t sp = static_cast<uint32_t>(context->r[1]);
     XELOGE("==== STACK WALK (SP=0x{:08X}) ====", sp);
     int frame = 0;
     uint32_t last_lr = 0;
     int repeat_count = 0;
-    for (; frame < 20000 && sp >= 0x70000000 && sp < 0x78000000; frame++) {
+    constexpr int kMaxWalkFrames = 512;
+    for (; frame < kMaxWalkFrames && sp >= 0x70000000 && sp < 0x78000000;
+         frame++) {
+      if (!stack_word_readable(sp) || !stack_word_readable(sp + 8)) {
+        XELOGE("  [{}] sp=0x{:08X} not committed -- stopping walk", frame, sp);
+        break;
+      }
       auto* host_ptr = memory_->TranslateVirtual<uint8_t*>(sp);
-      if (!host_ptr) break;
       uint32_t back_chain = xe::load_and_swap<uint32_t>(host_ptr);
       // Try multiple LR save locations:
       uint32_t lr_sp4 = xe::load_and_swap<uint32_t>(host_ptr + 4);
       uint32_t lr_sp8 = xe::load_and_swap<uint32_t>(host_ptr + 8);
       // Also try __savegprlr convention: LR at back_chain - 8
       uint32_t lr_bc8 = 0;
-      if (back_chain >= 0x70000000 && back_chain < 0x78000000) {
+      if (back_chain >= 0x70000008 && back_chain < 0x78000000 &&
+          stack_word_readable(back_chain - 8)) {
         auto* bc_ptr = memory_->TranslateVirtual<uint8_t*>(back_chain - 8);
-        if (bc_ptr) lr_bc8 = xe::load_and_swap<uint32_t>(bc_ptr);
+        lr_bc8 = xe::load_and_swap<uint32_t>(bc_ptr);
       }
       // Pick the most likely LR (first non-BEBEBEBE, non-zero, in code range)
       uint32_t best_lr = 0;
