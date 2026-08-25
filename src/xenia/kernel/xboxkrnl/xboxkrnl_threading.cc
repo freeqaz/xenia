@@ -481,7 +481,19 @@ DECLARE_XBOXKRNL_EXPORT1(KeInitializeEvent, kThreading, kImplemented);
 uint32_t xeKeSetEvent(X_KEVENT* event_ptr, uint32_t increment, uint32_t wait) {
   auto ev = XObject::GetNativeObject<XEvent>(kernel_state(), event_ptr);
   if (!ev) {
-    assert_always();
+    // Checked assert demoted to Release semantics (return 0), xconfig
+    // precedent. Hit for real by RB3DX+RB3Enhanced.dll (/tmp/rb3-si7):
+    // RtlLeaveCriticalSection on a CS whose embedded event header is
+    // zero-init garbage because the DLL is loaded with call_entry=false
+    // (no DllMain/CRT), so GetNativeObject can't type it. Log the guest VA
+    // so the owning object is identifiable.
+    static std::atomic<bool> s_logged{false};
+    if (!s_logged.exchange(true, std::memory_order_relaxed)) {
+      XELOGW(
+          "xeKeSetEvent: GetNativeObject failed for event @0x{:08X} -- "
+          "returning 0 (Release semantics; further hits not logged)",
+          kernel_state()->memory()->HostToGuestVirtual(event_ptr));
+    }
     return 0;
   }
 
@@ -936,8 +948,17 @@ uint32_t xeKeWaitForSingleObject(void* object_ptr, uint32_t wait_reason,
   auto object = XObject::GetNativeObject<XObject>(kernel_state(), object_ptr);
 
   if (!object) {
-    // The only kind-of failure code (though this should never happen)
-    assert_always();
+    // The only kind-of failure code. Checked assert demoted to Release
+    // semantics; see xeKeSetEvent above (same uninitialized-CS-event cause,
+    // RtlEnterCriticalSection contended path).
+    static std::atomic<bool> s_logged{false};
+    if (!s_logged.exchange(true, std::memory_order_relaxed)) {
+      XELOGW(
+          "xeKeWaitForSingleObject: GetNativeObject failed for object "
+          "@0x{:08X} -- returning ABANDONED_WAIT_0 (Release semantics; "
+          "further hits not logged)",
+          kernel_state()->memory()->HostToGuestVirtual(object_ptr));
+    }
     return X_STATUS_ABANDONED_WAIT_0;
   }
 
