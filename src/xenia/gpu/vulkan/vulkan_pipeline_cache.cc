@@ -20,6 +20,8 @@
 
 #include "third_party/fmt/include/fmt/format.h"
 #include "xenia/base/assert.h"
+#include "xenia/base/cvar.h"
+#include "xenia/base/filesystem.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
 #include "xenia/base/profiling.h"
@@ -34,6 +36,17 @@
 #include "xenia/gpu/vulkan/vulkan_shader.h"
 #include "xenia/gpu/xenos.h"
 #include "xenia/ui/vulkan/vulkan_util.h"
+
+DEFINE_string(
+    vulkan_pipeline_cache_path, "",
+    "Directory to persist the VkPipelineCache blob "
+    "(xenia_vulkan_pipeline_cache.bin) in. Empty = "
+    "<temp_directory_path>/xenia-pipeline-cache. Warming this cache takes "
+    "pipeline creation from ~15ms to ~0.1ms and is what the DC3 "
+    "--dc3_inline_render path needs to avoid its CP-stall deadlock. Before "
+    "this cvar existed the path was hardcoded to /tmp/claude, which only "
+    "existed on one bring-up machine.",
+    "GPU");
 
 namespace xe {
 namespace gpu {
@@ -98,8 +111,25 @@ bool VulkanPipelineCache::Initialize() {
     cache_create_info.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
 
     // Try to load existing cache from disk.
-    pipeline_cache_path_ = std::filesystem::path("/tmp/claude") /
-                           "xenia_vulkan_pipeline_cache.bin";
+    //
+    // This used to be a hardcoded "/tmp/claude" -- a scratch directory from
+    // the bring-up box that does not exist anywhere else, so on every other
+    // machine the load silently missed and the save silently created it.
+    // Derive it instead; --vulkan_pipeline_cache_path overrides.
+    if (!cvars::vulkan_pipeline_cache_path.empty()) {
+      pipeline_cache_path_ =
+          xe::to_path(cvars::vulkan_pipeline_cache_path) /
+          "xenia_vulkan_pipeline_cache.bin";
+    } else {
+      std::error_code temp_dir_ec;
+      std::filesystem::path temp_dir =
+          std::filesystem::temp_directory_path(temp_dir_ec);
+      if (temp_dir_ec) {
+        temp_dir = std::filesystem::path("/tmp");
+      }
+      pipeline_cache_path_ = temp_dir / "xenia-pipeline-cache" /
+                             "xenia_vulkan_pipeline_cache.bin";
+    }
     std::vector<uint8_t> cache_data;
     if (std::filesystem::exists(pipeline_cache_path_)) {
       FILE* cache_file = fopen(pipeline_cache_path_.c_str(), "rb");
