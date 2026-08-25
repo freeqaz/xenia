@@ -1452,8 +1452,22 @@ static void Rb3dxSiHookVerifyThread(Memory* memory) {
     auto* heap = memory->LookupHeap(a);
     if (!heap) return false;
     uint32_t prot = 0;
-    if (!heap->QueryProtect(a, &prot)) return false;
-    return (prot & kMemoryProtectRead) != 0;
+    bool queried = heap->QueryProtect(a, &prot);
+    if (!queried || !(prot & kMemoryProtectRead)) {
+      // Diagnose WHY a probe read is refused: distinguish "no page-table
+      // entry" from "entry present but protection lacks kRead" (e.g. the
+      // loader's post-launch section re-protect leaves .text execute-only in
+      // the guest page table while the host mapping stays readable).
+      static std::atomic<int> s_diag_budget{8};
+      if (s_diag_budget.fetch_sub(1, std::memory_order_relaxed) > 0) {
+        XELOGW(
+            "SI HOOKVERIFY: read refused @0x{:08X}: QueryProtect ok={} "
+            "prot=0x{:X} (kRead missing)",
+            a, queried, prot);
+      }
+      return false;
+    }
+    return true;
   };
   auto r32 = [&](uint32_t a) -> uint32_t {
     return readable(a) ? load_and_swap<uint32_t>(base + a) : 0xEEEEEEEEu;
