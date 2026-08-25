@@ -86,6 +86,7 @@ DEFINE_string(scripted_input_file, "",
               "Reads the current screen name from guest memory (TheUI at "
               "0x82F1A8E0). Requires --fake_kinect_data=true.",
               "HID");
+DECLARE_string(scripted_pad_subtypes);
 DEFINE_int32(
     dc3_gdb_rsp_prelaunch_sleep_ms, 0,
     "DC3: optional sleep before starting the emulator thread (after headless "
@@ -119,6 +120,13 @@ static std::vector<std::unique_ptr<hid::InputDriver>> CreateHeadlessInputDrivers
   auto driver = std::make_unique<hid::nop::NopInputDriver>(window, 0);
   if (!cvars::scripted_input.empty()) {
     driver->SetScriptedInput(cvars::scripted_input);
+  } else if (!cvars::scripted_pad_subtypes.empty()) {
+    // Controllers only report connected in scripted mode. A run driven
+    // entirely by the state-driven autopilot (emulator.cc NopInjectButtonPress
+    // -- no timed script) still needs pad presence, or every injection lands
+    // on a disconnected pad: si31/si32 sat at the RB3DX splash for a full
+    // 300s probe with the autopilot "pressing" A into the void.
+    driver->SetScriptedInput("999999s:A");
   }
   // If a script file is specified, enable scripted mode (controller presence)
   // but defer loading until Memory is available.
