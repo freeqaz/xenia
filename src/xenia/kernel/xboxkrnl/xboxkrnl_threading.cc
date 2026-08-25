@@ -8,6 +8,8 @@
  */
 
 #include <algorithm>
+#include <atomic>
+#include <mutex>
 #include <vector>
 
 #include "xenia/base/atomic.h"
@@ -43,9 +45,61 @@ DEFINE_bool(rb3_trace_shutdown, false,
             "site. Default OFF (inert for DC3 and all non-diagnostic runs).",
             "Kernel");
 
+DEFINE_int32(
+    kernel_stack_walk_frames, 64,
+    "Maximum number of guest stack frames any cvar-gated kernel diagnostic "
+    "will walk. Guest stack walks read guest memory from inside a kernel shim; "
+    "each frame is bounds- and commit-checked, but a deep walk still costs "
+    "one heap lookup per frame.",
+    "Kernel");
+
 namespace xe {
 namespace kernel {
 namespace xboxkrnl {
+
+// The guest stack region. Both bounds matter: the fork's stack walks checked
+// only `sp > 0x70000000` before dereferencing, so any garbage back-chain above
+// the stack heap was translated and read anyway. TranslateVirtual is just
+// `virtual_membase_ + guest_address` (memory.h) -- it CANNOT return null, so
+// the `if (!host_ptr) break` guards that used to follow were dead code.
+constexpr uint32_t kGuestStackLow = 0x70000000;
+constexpr uint32_t kGuestStackHigh = 0x78000000;
+
+// Read a 32-bit big-endian word from a guest stack address, refusing anything
+// outside the stack region or not backed by committed, readable pages. Mirrors
+// the `is_guest_readable` pattern the RB3 probes use in emulator.cc.
+static bool ReadGuestStackWord(Memory* memory, uint32_t guest_addr,
+                               uint32_t* out_value) {
+  *out_value = 0;
+  if (!memory || guest_addr < kGuestStackLow ||
+      guest_addr > kGuestStackHigh - sizeof(uint32_t)) {
+    return false;
+  }
+  auto* heap = memory->LookupHeap(guest_addr);
+  if (!heap) {
+    return false;
+  }
+  if (heap->QueryRangeAccess(guest_addr, guest_addr + sizeof(uint32_t) - 1) ==
+      xe::memory::PageAccess::kNoAccess) {
+    return false;
+  }
+  *out_value =
+      xe::load_and_swap<uint32_t>(memory->TranslateVirtual<uint32_t*>(guest_addr));
+  return true;
+}
+
+// The title's main/App thread.
+//
+// Guest thread id 6 is an assumption, not a fact: it is what the DC3 and RB3
+// boots consistently produce because XThread ids are handed out in creation
+// order and the kernel spins up a fixed set of threads before the executable's
+// entry point. It is only ever used to *filter diagnostics*, never to change
+// behaviour, so a wrong guess costs log lines and nothing else. Kept in one
+// place so all three former open-coded `thread_id() == 6` sites are greppable
+// and can be replaced together if a real accessor appears.
+static bool IsMainGuestThread(XThread* thread) {
+  return thread && thread->thread_id() == 6;
+}
 
 // r13 + 0x100: pointer to thread local state
 // Thread local state:
@@ -166,7 +220,7 @@ dword_result_t ExCreateThread_entry(lpdword_t handle_ptr, dword_t stack_size,
     return result;
   }
 
-  XELOGI("ExCreateThread: start=0x{:08X} ctx=0x{:08X} flags=0x{:X} stack={} -> tid={}",
+  XELOGD("ExCreateThread: start=0x{:08X} ctx=0x{:08X} flags=0x{:X} stack={} -> tid={}",
          start_address.guest_address(), start_context.guest_address(),
          uint32_t(creation_flags), uint32_t(actual_stack_size),
          thread->thread_id());
@@ -357,8 +411,7 @@ dword_result_t KeDelayExecutionThread_entry(dword_t processor_mode,
   XThread* thread = XThread::GetCurrentThread();
 
   // Log when main thread calls Sleep
-  if (cvars::headless_thread_diagnostics &&
-      thread && thread->thread_id() == 6) {
+  if (cvars::headless_thread_diagnostics && IsMainGuestThread(thread)) {
     static uint32_t main_delay_count = 0;
     main_delay_count++;
     if (main_delay_count <= 3) {
@@ -377,13 +430,19 @@ dword_result_t KeDelayExecutionThread_entry(dword_t processor_mode,
       auto* memory = kernel_state()->memory();
       if (memory && guest_sp) {
         uint32_t sp = guest_sp;
-        for (int frame = 0; frame < 12 && sp != 0 && sp > 0x70000000; frame++) {
-          uint32_t back_chain = xe::load_and_swap<uint32_t>(
-              memory->TranslateVirtual<uint32_t*>(sp));
+        int max_frames = std::min(
+            12, std::max(0, static_cast<int>(cvars::kernel_stack_walk_frames)));
+        for (int frame = 0; frame < max_frames; frame++) {
+          uint32_t back_chain = 0;
+          if (!ReadGuestStackWord(memory, sp, &back_chain)) {
+            XELOGI("  frame[{}] sp={:08X} <unreadable, stopping walk>", frame,
+                   sp);
+            break;
+          }
           uint32_t lr_at_bc_minus8 = 0;
-          if (back_chain > 0x70000000 && back_chain < 0x80000000) {
-            lr_at_bc_minus8 = xe::load_and_swap<uint32_t>(
-                memory->TranslateVirtual<uint32_t*>(back_chain - 8));
+          if (back_chain >= 8) {
+            // Failure just leaves the LR at 0; the frame line is still useful.
+            ReadGuestStackWord(memory, back_chain - 8, &lr_at_bc_minus8);
           }
           XELOGI("  frame[{}] sp={:08X} back={:08X} saved_lr={:08X}",
                  frame, sp, back_chain, lr_at_bc_minus8);
@@ -569,17 +628,13 @@ uint32_t xeNtSetEvent(uint32_t handle, xe::be<uint32_t>* previous_state_ptr) {
 
   auto ev = kernel_state()->object_table()->LookupObject<XEvent>(handle);
 
-  // Trace SetEvent for handle 0xF80000EC (the splash event the main thread waits on)
-  {
-    static uint32_t set_event_count = 0;
-    set_event_count++;
-    if (handle == 0xF80000EC || set_event_count <= 30) {
-      auto* thread = XThread::GetCurrentThread();
-      uint32_t tid = thread ? thread->thread_id() : 0;
-      XELOGI("NtSetEvent #{} tid={} handle=0x{:X} obj={}",
-             set_event_count, tid, handle, (void*)ev.get());
-    }
-  }
+  // (Removed 2026-08-25, fork-cleanup section 2.) An unconditional per-call
+  // XELOGI trace keyed on the hardcoded handle 0xF80000EC used to sit here,
+  // with a non-atomic static counter. It is superseded by the
+  // --rb3_trace_shutdown block below, which its own comment explains keys on
+  // the guest call-site chain precisely BECAUSE kernel handle numbers are not
+  // stable across runs -- so the magic handle could never identify the event
+  // it was named for.
 
   // RB3 boot-to-menu diagnostic. The App main thread (tid 6) signals many
   // events per frame from a small set of stable call sites; just before it
@@ -594,8 +649,7 @@ uint32_t xeNtSetEvent(uint32_t handle, xe::be<uint32_t>* previous_state_ptr) {
   // the shutdown decision site. cvar default OFF -> inert for DC3.
   if (cvars::rb3_trace_shutdown) {
     auto* thread = XThread::GetCurrentThread();
-    uint32_t tid = thread ? thread->thread_id() : 0;
-    if (tid == 6 && thread->thread_state()) {
+    if (IsMainGuestThread(thread) && thread->thread_state()) {
       auto* ctx = thread->thread_state()->context();
       uint32_t guest_lr = ctx ? static_cast<uint32_t>(ctx->lr) : 0;
       uint32_t guest_sp = ctx ? static_cast<uint32_t>(ctx->r[1]) : 0;
@@ -610,13 +664,16 @@ uint32_t xeNtSetEvent(uint32_t handle, xe::be<uint32_t>* previous_state_ptr) {
       uint64_t sig = guest_lr;
       if (memory && guest_sp) {
         uint32_t sp = guest_sp;
-        for (int frame = 0; frame < 16 && sp > 0x70000000; frame++) {
-          uint32_t back_chain = xe::load_and_swap<uint32_t>(
-              memory->TranslateVirtual<uint32_t*>(sp));
+        int max_frames = std::min(
+            16, std::max(0, static_cast<int>(cvars::kernel_stack_walk_frames)));
+        for (int frame = 0; frame < max_frames; frame++) {
+          uint32_t back_chain = 0;
+          if (!ReadGuestStackWord(memory, sp, &back_chain)) {
+            break;
+          }
           uint32_t saved_lr = 0;
-          if (back_chain > 0x70000000 && back_chain < 0x80000000) {
-            saved_lr = xe::load_and_swap<uint32_t>(
-                memory->TranslateVirtual<uint32_t*>(back_chain - 8));
+          if (back_chain >= 8) {
+            ReadGuestStackWord(memory, back_chain - 8, &saved_lr);
           }
           chain[frame] = saved_lr;
           nframes = frame + 1;
@@ -630,16 +687,45 @@ uint32_t xeNtSetEvent(uint32_t handle, xe::be<uint32_t>* previous_state_ptr) {
           sp = back_chain;
         }
       }
+      // Bounded, and guarded: guest threads other than tid 6 are filtered out
+      // above, but XThread ids are not a lock, and the vector used to be
+      // mutated unsynchronised and grow without limit.
+      static std::mutex seen_sigs_mutex;
       static std::vector<uint64_t> seen_sigs;
-      bool is_new = true;
-      for (uint64_t v : seen_sigs) {
-        if (v == sig) { is_new = false; break; }
+      static uint32_t seen_sigs_overflow = 0;
+      constexpr size_t kMaxSeenSigs = 256;
+      bool is_new = false;
+      bool overflowed = false;
+      size_t seen_count = 0;
+      uint32_t overflow_count = 0;
+      {
+        std::lock_guard<std::mutex> lock(seen_sigs_mutex);
+        is_new = true;
+        for (uint64_t v : seen_sigs) {
+          if (v == sig) { is_new = false; break; }
+        }
+        if (is_new) {
+          if (seen_sigs.size() < kMaxSeenSigs) {
+            seen_sigs.push_back(sig);
+          } else {
+            // Stop growing; count how many distinct chains we dropped.
+            overflowed = true;
+            overflow_count = ++seen_sigs_overflow;
+          }
+        }
+        seen_count = seen_sigs.size();
       }
-      if (is_new) {
-        seen_sigs.push_back(sig);
+      if (is_new && overflowed) {
+        if (overflow_count == 1 || (overflow_count % 256) == 0) {
+          XELOGW(
+              "RB3_TRACE_SHUTDOWN: distinct-chain table full at {}; {} further "
+              "chains not recorded",
+              kMaxSeenSigs, overflow_count);
+        }
+      } else if (is_new) {
         XELOGI("RB3_TRACE_SHUTDOWN: NtSetEvent NEW-CHAIN #{} tid=6 "
                "handle=0x{:X} guest_lr={:08X} guest_sp={:08X}",
-               (int)seen_sigs.size(), handle, guest_lr, guest_sp);
+               (int)seen_count, handle, guest_lr, guest_sp);
         for (uint32_t f = 0; f < nframes; f++) {
           XELOGI("RB3_TRACE_SHUTDOWN:  frame[{}] saved_lr={:08X}", f, chain[f]);
         }
@@ -976,7 +1062,7 @@ dword_result_t KeWaitForSingleObject_entry(lpvoid_t object_ptr,
   // Trace main thread waits
   if (cvars::headless_thread_diagnostics) {
     auto* thread = XThread::GetCurrentThread();
-    if (thread && thread->thread_id() == 6) {
+    if (IsMainGuestThread(thread)) {
       static uint32_t ke_wait_count = 0;
       ke_wait_count++;
       int64_t timeout_val = timeout_ptr ? (int64_t)*timeout_ptr : -999;
@@ -992,7 +1078,7 @@ dword_result_t KeWaitForSingleObject_entry(lpvoid_t object_ptr,
   // Trace main thread wait returns
   if (cvars::headless_thread_diagnostics) {
     auto* thread = XThread::GetCurrentThread();
-    if (thread && thread->thread_id() == 6) {
+    if (IsMainGuestThread(thread)) {
       static uint32_t ke_ret_count = 0;
       ke_ret_count++;
       if (ke_ret_count <= 30 || (ke_ret_count % 500) == 0) {
@@ -1018,7 +1104,7 @@ dword_result_t NtWaitForSingleObjectEx_entry(dword_t object_handle,
   // Trace main thread waits
   if (cvars::headless_thread_diagnostics) {
     auto* thread = XThread::GetCurrentThread();
-    if (thread && thread->thread_id() == 6) {
+    if (IsMainGuestThread(thread)) {
       static uint32_t main_wait_count = 0;
       main_wait_count++;
       int64_t timeout_val = timeout_ptr ? (int64_t)*timeout_ptr : -999;
@@ -1045,7 +1131,7 @@ dword_result_t NtWaitForSingleObjectEx_entry(dword_t object_handle,
   // Trace main thread wait returns
   if (cvars::headless_thread_diagnostics) {
     auto* thread = XThread::GetCurrentThread();
-    if (thread && thread->thread_id() == 6) {
+    if (IsMainGuestThread(thread)) {
       XELOGI("MainThread NtWait RETURNED handle=0x{:X} result=0x{:X}",
              (uint32_t)object_handle, result);
     }
@@ -1623,43 +1709,57 @@ DECLARE_XBOXKRNL_EXPORT1(InterlockedFlushSList, kThreading, kImplemented);
 
 // Ke* Timer stubs (Nt* variants already implemented above)
 void KeInitializeTimerEx_entry(lpvoid_t timer_ptr, dword_t type) {
-  XELOGI("KeInitializeTimerEx(ptr={:08X}, type={})", timer_ptr.guest_address(),
+  XELOGD("KeInitializeTimerEx(ptr={:08X}, type={})", timer_ptr.guest_address(),
          (uint32_t)type);
   // TODO: real timer init - for now just zero the structure
+  if (!timer_ptr) {
+    return;
+  }
+  // 0x28 is a GUESSED KTIMER size; the real layout was never confirmed and the
+  // caller's buffer size is not passed in. See C16 in
+  // docs/fork-cleanup-review.md.
   std::memset(timer_ptr, 0, 0x28);
 }
 DECLARE_XBOXKRNL_EXPORT1(KeInitializeTimerEx, kThreading, kStub);
 
 dword_result_t KeCancelTimer_entry(lpvoid_t timer_ptr) {
-  XELOGI("KeCancelTimer(ptr={:08X})", timer_ptr.guest_address());
-  // TODO: real cancel
+  XELOGD("KeCancelTimer(ptr={:08X})", timer_ptr.guest_address());
+  // TODO: real cancel. Always claims the timer was not queued, which is a lie
+  // whenever the guest actually armed one.
   return 0;  // FALSE = timer was not in queue
 }
 DECLARE_XBOXKRNL_EXPORT1(KeCancelTimer, kThreading, kStub);
 
 dword_result_t KeSetTimer_entry(lpvoid_t timer_ptr, qword_t due_time,
                                  lpvoid_t dpc_ptr) {
-  XELOGI("KeSetTimer(ptr={:08X}, due={}, dpc={:08X})",
+  XELOGD("KeSetTimer(ptr={:08X}, due={}, dpc={:08X})",
          timer_ptr.guest_address(), (uint64_t)due_time,
          dpc_ptr.guest_address());
-  // TODO: real set timer
+  // TODO: real set timer. Nothing is armed and no DPC will ever fire; the
+  // return also always claims the timer was not already queued.
   return 0;  // FALSE = timer was not already in queue
 }
 DECLARE_XBOXKRNL_EXPORT1(KeSetTimer, kThreading, kStub);
 
 // Ke* Mutant stubs (Nt* variants already implemented above)
 void KeInitializeMutant_entry(lpvoid_t mutant_ptr, dword_t initial_owner) {
-  XELOGI("KeInitializeMutant(ptr={:08X}, owner={})",
+  XELOGD("KeInitializeMutant(ptr={:08X}, owner={})",
          mutant_ptr.guest_address(), (uint32_t)initial_owner);
   // TODO: real mutex init
+  if (!mutant_ptr) {
+    return;
+  }
+  // 0x20 is a GUESSED KMUTANT size; see the KeInitializeTimerEx note above.
+  // Note this also ignores initial_owner, so a mutant created already-held
+  // comes back unheld.
   std::memset(mutant_ptr, 0, 0x20);
 }
 DECLARE_XBOXKRNL_EXPORT1(KeInitializeMutant, kThreading, kStub);
 
 dword_result_t KeReleaseMutant_entry(lpvoid_t mutant_ptr, dword_t increment,
                                       dword_t abandoned, dword_t wait) {
-  XELOGI("KeReleaseMutant(ptr={:08X})", mutant_ptr.guest_address());
-  // TODO: real release
+  XELOGD("KeReleaseMutant(ptr={:08X})", mutant_ptr.guest_address());
+  // TODO: real release. Returns "previous state 0" unconditionally.
   return 0;
 }
 DECLARE_XBOXKRNL_EXPORT1(KeReleaseMutant, kThreading, kStub);

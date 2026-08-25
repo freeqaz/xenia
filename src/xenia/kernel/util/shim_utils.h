@@ -398,19 +398,36 @@ inline void AppendParam(StringBuffer* string_buffer, double_t param) {
 inline void AppendParam(StringBuffer* string_buffer, lpvoid_t param) {
   string_buffer->AppendFormat("{:08X}", uint32_t(param));
 }
+// Only print the guest address, not the pointed-to value: dereferencing here
+// can trigger SIGSEGV on a write-watched page and deadlock in the MMIO
+// handler, because this runs on the guest thread inside the export trace.
+//
+// The review's suggested guard (LookupHeap + QueryProtect before reading)
+// does NOT work for this hazard and was deliberately not adopted:
+//   * BaseHeap::QueryProtect reports page_table_[].current_protect, i.e. the
+//     GUEST-visible protection. Write/access watches lower the HOST protection
+//     without touching that field, so a page QueryProtect calls readable can
+//     still fault -- which is precisely the case that motivated dropping the
+//     dereference.
+//   * QueryProtect acquires the global critical region. This runs once per
+//     traced parameter per traced export call; taking a kernel-wide lock there
+//     is not acceptable, and doing it from a thread that may already be inside
+//     the fault path is its own deadlock.
+// Restoring the values needs a genuinely non-faulting read (a probe that
+// handles the signal, or a snapshot taken outside the guest thread), not a
+// protection query. Until then the elision is marked so a trace reader can
+// see that a value was dropped rather than assume the export had none.
 inline void AppendParam(StringBuffer* string_buffer, lpdword_t param) {
-  // Only print guest address, not value - dereferencing can trigger SIGSEGV
-  // on write-watched pages, deadlocking in the MMIO handler.
-  string_buffer->AppendFormat("{:08X}", param.guest_address());
+  string_buffer->AppendFormat("{:08X}(elided)", param.guest_address());
 }
 inline void AppendParam(StringBuffer* string_buffer, lpqword_t param) {
-  string_buffer->AppendFormat("{:08X}", param.guest_address());
+  string_buffer->AppendFormat("{:08X}(elided)", param.guest_address());
 }
 inline void AppendParam(StringBuffer* string_buffer, lpfloat_t param) {
-  string_buffer->AppendFormat("{:08X}", param.guest_address());
+  string_buffer->AppendFormat("{:08X}(elided)", param.guest_address());
 }
 inline void AppendParam(StringBuffer* string_buffer, lpdouble_t param) {
-  string_buffer->AppendFormat("{:08X}", param.guest_address());
+  string_buffer->AppendFormat("{:08X}(elided)", param.guest_address());
 }
 inline void AppendParam(StringBuffer* string_buffer, lpstring_t param) {
   string_buffer->AppendFormat("{:08X}", param.guest_address());

@@ -51,11 +51,11 @@ dword_result_t XexGetModuleHandle_entry(lpstring_t module_name,
 
   if (!module) {
     *hmodule_ptr = 0;
-    XELOGI("XexGetModuleHandle: '{}' -> NOT FOUND",
+    XELOGD("XexGetModuleHandle: '{}' -> NOT FOUND",
            module_name ? module_name.value() : "(null)");
     return X_ERROR_NOT_FOUND;
   }
-  XELOGI("XexGetModuleHandle: '{}' -> 0x{:08X}",
+  XELOGD("XexGetModuleHandle: '{}' -> 0x{:08X}",
          module_name ? module_name.value() : "(null)", module->hmodule_ptr());
 
   // NOTE: we don't retain the handle for return.
@@ -89,7 +89,7 @@ DECLARE_XBOXKRNL_EXPORT1(XexGetModuleSection, kModules, kImplemented);
 
 dword_result_t XexLoadImage_entry(lpstring_t module_name, dword_t module_flags,
                                   dword_t min_version, lpdword_t hmodule_ptr) {
-  XELOGI("XexLoadImage: '{}' flags=0x{:X} min_version={}",
+  XELOGD("XexLoadImage: '{}' flags=0x{:X} min_version={}",
          module_name.value(), uint32_t(module_flags), uint32_t(min_version));
   X_STATUS result = X_STATUS_NO_SUCH_FILE;
 
@@ -110,7 +110,7 @@ dword_result_t XexLoadImage_entry(lpstring_t module_name, dword_t module_flags,
       result = X_STATUS_SUCCESS;
     }
   }
-  XELOGI("XexLoadImage: '{}' -> status=0x{:08X} hmodule=0x{:08X}",
+  XELOGD("XexLoadImage: '{}' -> status=0x{:08X} hmodule=0x{:08X}",
          module_name.value(), result, hmodule);
 
   // Increment the module's load count.

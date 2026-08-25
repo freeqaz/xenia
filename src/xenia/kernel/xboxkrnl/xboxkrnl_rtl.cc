@@ -10,6 +10,7 @@
 #include "xenia/kernel/xboxkrnl/xboxkrnl_rtl.h"
 
 #include <algorithm>
+#include <atomic>
 #include <string>
 
 #include "xenia/base/atomic.h"
@@ -31,6 +32,34 @@ DEFINE_bool(crt_critical_section_diagnostics, false,
             "Log diagnostic info for RtlEnterCriticalSection calls to detect "
             "uninitialized or deadlocked critical sections during CRT init.",
             "Kernel");
+
+DEFINE_bool(
+    autoinit_critical_sections, true,
+    "RtlEnterCriticalSection silently initializes a critical section whose "
+    "dispatch header type != 1 instead of operating on it as-is. This is "
+    "decomp-support: the DC3 decomp /FORCE-links unresolved extern lock "
+    "pointers (e.g. gMemLock) and its CRT static-init order lets "
+    "CritSecTracker call Enter() before MemInit runs, and RB3Enhanced.dll is "
+    "loaded with call_entry=false so its .bss critical sections are never "
+    "constructed. For a retail title a type != 1 header more likely means the "
+    "lock's memory was misread or corrupted, and re-initializing it drops a "
+    "lock that is genuinely held. Disable to leave such a CS alone (upstream "
+    "behaviour).",
+    "Kernel");
+
+DEFINE_bool(
+    rtl_leave_critical_section_force_release, true,
+    "RtlLeaveCriticalSection repairs guest lock state when the caller is not "
+    "the recorded owner (rewrites owning_thread) or when recursion_count is "
+    "already <= 0 (clamps to 1), then releases. Both are demotions of "
+    "Checked-build asserts, but unlike a plain demotion they MUTATE guest "
+    "state, so a detectable double-unlock becomes a corrupted lock. Both our "
+    "titles reach these paths (DC3 boot logs record one ownership mismatch -- "
+    "docs/dc3-boot/STATUS.md; RB3Enhanced.dll's unconstructed .bss critical "
+    "sections hit the same family, see b77f0fa27), so it defaults on. Disable "
+    "to log and return without touching the lock, which is what upstream's "
+    "Release build effectively did before the repair was added.",
+    "Kernel");
 
 namespace xe {
 namespace kernel {
@@ -512,8 +541,11 @@ void RtlEnterCriticalSection_entry(pointer_t<X_RTL_CRITICAL_SECTION> cs) {
     bool lock_corrupted = (cs_type == 1 && owner == 0 &&
                            (raw_lock < -1 || raw_lock > 100));
 
-    static uint32_t cs_enter_count = 0;
-    cs_enter_count++;
+    // Guest threads enter critical sections concurrently, so this diagnostic
+    // counter has to be atomic (it was a plain static uint32_t).
+    static std::atomic<uint32_t> s_cs_enter_count{0};
+    uint32_t cs_enter_count =
+        s_cs_enter_count.fetch_add(1, std::memory_order_relaxed) + 1;
     if (looks_uninit || needs_lock_fix || lock_corrupted ||
         cs_enter_count <= 50 || (cs_enter_count % 1000) == 0) {
       XELOGI(
@@ -536,12 +568,33 @@ void RtlEnterCriticalSection_entry(pointer_t<X_RTL_CRITICAL_SECTION> cs) {
     }
   }
 
-  // Unconditional auto-init: if the CS was never initialized (type != 1),
-  // initialize it now.  This handles the DC3 decomp's /FORCE-linked unresolved
-  // extern pointers (e.g. gMemLock) and CRT static-init ordering issues where
-  // CritSecTracker calls Enter() before MemInit runs.
+  // Auto-init: if the CS was never initialized (type != 1), initialize it now.
+  // This handles the DC3 decomp's /FORCE-linked unresolved extern pointers
+  // (e.g. gMemLock) and CRT static-init ordering issues where CritSecTracker
+  // calls Enter() before MemInit runs. See --autoinit_critical_sections; it
+  // is on by default (fork behaviour) but is NOT correct for a retail title,
+  // where a bad header more likely means the lock was corrupted.
   if (cs->header.type != 1) {
-    xeRtlInitializeCriticalSection(cs, cs.guest_address());
+    if (cvars::autoinit_critical_sections) {
+      static std::atomic<bool> s_autoinit_logged{false};
+      if (!s_autoinit_logged.exchange(true, std::memory_order_relaxed)) {
+        XELOGW(
+            "RtlEnterCriticalSection: auto-initializing uninitialized CS "
+            "@0x{:08X} (header.type={}); --autoinit_critical_sections is on. "
+            "Further hits not logged.",
+            cs.guest_address(), (uint32_t)cs->header.type);
+      }
+      xeRtlInitializeCriticalSection(cs, cs.guest_address());
+    } else {
+      static std::atomic<bool> s_skip_logged{false};
+      if (!s_skip_logged.exchange(true, std::memory_order_relaxed)) {
+        XELOGW(
+            "RtlEnterCriticalSection: CS @0x{:08X} looks uninitialized "
+            "(header.type={}) and --autoinit_critical_sections is off -- "
+            "using it as-is. Further hits not logged.",
+            cs.guest_address(), (uint32_t)cs->header.type);
+      }
+    }
   }
 
   if (cs->owning_thread == cur_thread) {
@@ -555,6 +608,11 @@ void RtlEnterCriticalSection_entry(pointer_t<X_RTL_CRITICAL_SECTION> cs) {
   // to the slow waiter path. On real hardware, RtlEnterCriticalSection
   // always attempts the lock before queuing. Without this, a CS with
   // spin_count=0 would skip the CAS entirely and deadlock on first entry.
+  //
+  // NOTE(fork-cleanup 2026-08-25): this is an all-title behaviour change that
+  // is not DC3/RB3-specific and looks correct on its own merits -- it is a
+  // standalone upstreamable fix and should be split into its own commit with
+  // that framing before any rebase onto upstream/master.
   if (xe::atomic_cas(-1, 0, &cs->lock_count)) {
     cs->owning_thread = cur_thread;
     cs->recursion_count = 1;
@@ -608,19 +666,36 @@ DECLARE_XBOXKRNL_EXPORT2(RtlTryEnterCriticalSection, kNone, kImplemented,
 
 void RtlLeaveCriticalSection_entry(pointer_t<X_RTL_CRITICAL_SECTION> cs) {
   g_rtl_leave_cs_count.fetch_add(1, std::memory_order_relaxed);
+  // These two blocks are demotions of Checked-build asserts that go past
+  // "continue where Release would have continued" into rewriting guest lock
+  // state. See --rtl_leave_critical_section_force_release for why the repair
+  // is the default and what turning it off does.
   if (cs->owning_thread != XThread::GetCurrentThread()->guest_object()) {
-    XELOGW("RtlLeaveCriticalSection: ownership mismatch (owner={:08X} "
-           "current={:08X}) — forcing release",
-           (uint32_t)cs->owning_thread,
-           (uint32_t)XThread::GetCurrentThread()->guest_object());
+    XELOGW(
+        "RtlLeaveCriticalSection: cs=0x{:08X} ownership mismatch "
+        "(owner={:08X} current={:08X}) -- {}",
+        cs.guest_address(), (uint32_t)cs->owning_thread,
+        (uint32_t)XThread::GetCurrentThread()->guest_object(),
+        cvars::rtl_leave_critical_section_force_release
+            ? "forcing release"
+            : "returning without touching the lock");
+    if (!cvars::rtl_leave_critical_section_force_release) {
+      return;
+    }
     // Force ownership to current thread so the release proceeds.
     cs->owning_thread = XThread::GetCurrentThread()->guest_object();
   }
 
   // Drop recursion count - if it isn't zero we still have the lock.
   if (cs->recursion_count <= 0) {
-    XELOGW("RtlLeaveCriticalSection: recursion_count={} — clamping to 1",
-           (int32_t)cs->recursion_count);
+    XELOGW("RtlLeaveCriticalSection: cs=0x{:08X} recursion_count={} -- {}",
+           cs.guest_address(), (int32_t)cs->recursion_count,
+           cvars::rtl_leave_critical_section_force_release
+               ? "clamping to 1"
+               : "returning without touching the lock");
+    if (!cvars::rtl_leave_critical_section_force_release) {
+      return;
+    }
     cs->recursion_count = 1;
   }
   if (--cs->recursion_count != 0) {
@@ -794,15 +869,32 @@ DECLARE_XBOXKRNL_EXPORT1(RtlDowncaseUnicodeChar, kNone, kImplemented);
 // Exception handling stubs
 void RtlCaptureContext_entry(lpvoid_t context_ptr) {
   // TODO: real context capture for SEH
-  XELOGW("RtlCaptureContext stub - zeroing context");
+  static std::atomic<bool> s_logged{false};
+  if (!s_logged.exchange(true, std::memory_order_relaxed)) {
+    XELOGW(
+        "RtlCaptureContext stub - zeroing context @0x{:08X} (further calls "
+        "not logged)",
+        context_ptr.guest_address());
+  }
+  if (!context_ptr) {
+    // Never memset through a null guest pointer.
+    return;
+  }
+  // 0x200 is a GUESSED CONTEXT struct size -- the real PPC CONTEXT layout was
+  // never confirmed and the caller's buffer size is not passed in, so this
+  // can over- or under-write. Kept because DC3/RB3 reach it; see C16 in
+  // docs/fork-cleanup-review.md.
   std::memset(context_ptr, 0, 0x200);
 }
 DECLARE_XBOXKRNL_EXPORT1(RtlCaptureContext, kNone, kStub);
 
 void RtlUnwind_entry(lpvoid_t target_frame, lpvoid_t target_ip,
                       lpvoid_t exception_record, dword_t return_value) {
-  // TODO: real SEH unwind
-  XELOGW("RtlUnwind stub - not implemented");
+  // TODO: real SEH unwind. This silently no-ops the unwind for every title.
+  static std::atomic<bool> s_logged{false};
+  if (!s_logged.exchange(true, std::memory_order_relaxed)) {
+    XELOGW("RtlUnwind stub - not implemented (further calls not logged)");
+  }
 }
 DECLARE_XBOXKRNL_EXPORT1(RtlUnwind, kNone, kStub);
 
@@ -810,8 +902,14 @@ dword_result_t __C_specific_handler_entry(lpvoid_t exception_record,
                                            lpvoid_t establisher_frame,
                                            lpvoid_t context_record,
                                            lpvoid_t dispatcher_context) {
-  // TODO: real C exception handler
-  XELOGW("__C_specific_handler stub - not implemented");
+  // TODO: real C exception handler. Always claims "not mine", so a guest
+  // __try/__except never runs its handler.
+  static std::atomic<bool> s_logged{false};
+  if (!s_logged.exchange(true, std::memory_order_relaxed)) {
+    XELOGW(
+        "__C_specific_handler stub - not implemented, always returning "
+        "ExceptionContinueSearch (further calls not logged)");
+  }
   return 1;  // ExceptionContinueSearch
 }
 DECLARE_XBOXKRNL_EXPORT1(__C_specific_handler, kNone, kStub);

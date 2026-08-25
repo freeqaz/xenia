@@ -119,12 +119,12 @@ dword_result_t XamInputGetState_entry(dword_t user_index, dword_t flags,
                            ? static_cast<uint16_t>(input_state->gamepad.buttons)
                            : 0;
     if (n < 3) {
-      XELOGI("XamInputGetState DIAG: user={} poll#{} result=0x{:08X}",
+      XELOGD("XamInputGetState DIAG: user={} poll#{} result=0x{:08X}",
              static_cast<uint32_t>(user_index & 0xFF), n,
              static_cast<uint32_t>(input_result));
     }
     if (buttons != s_last_buttons[ui].exchange(buttons)) {
-      XELOGI("XamInputGetState DIAG: user={} buttons 0x{:04X}",
+      XELOGD("XamInputGetState DIAG: user={} buttons 0x{:04X}",
              static_cast<uint32_t>(user_index & 0xFF), buttons);
     }
   }

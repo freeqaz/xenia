@@ -24,7 +24,11 @@ X_STATUS xeRtlInitializeCriticalSectionAndSpinCount(X_RTL_CRITICAL_SECTION* cs,
                                                     uint32_t cs_ptr,
                                                     uint32_t spin_count);
 
-// Diagnostic counters for CRT init hang investigation
+// Diagnostic counters for CRT init hang investigation.
+// NOT dead: read by the headless boot report in
+// src/xenia/app/emulator_headless.cc (search GetRtlEnterCsCount). The
+// 2026-08-25 fork-cleanup review listed these for deletion as unread; that is
+// incorrect at this sha.
 uint32_t GetRtlEnterCsCount();
 uint32_t GetRtlInitCsCount();
 uint32_t GetRtlLeaveCsCount();
