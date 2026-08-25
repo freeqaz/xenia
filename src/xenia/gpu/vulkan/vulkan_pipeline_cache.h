@@ -16,9 +16,11 @@
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <thread>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 #include "xenia/base/hash.h"
 #include "xenia/base/platform.h"
@@ -358,6 +360,34 @@ class VulkanPipelineCache {
   std::unordered_map<PipelineDescription, std::shared_ptr<PendingPipeline>,
                      PipelineDescription::Hasher>
       pending_pipelines_;
+
+  // Owned creation threads. These used to be detach()ed, which left them
+  // running against `this` with no join anywhere -- Shutdown() only spun on
+  // the `done` flags of entries still in pending_pipelines_, and entries are
+  // erased from that map as they are consumed, so a thread whose entry had
+  // already been erased was tracked by nothing at all.
+  //
+  // Each entry pairs the thread with its PendingPipeline, whose `done` flag
+  // the worker sets as its last act -- so `done == true` means the thread is
+  // finished or in its epilogue and join() will return promptly. Spawns reap
+  // finished entries opportunistically so this cannot grow without bound over
+  // a long session; ShutdownCreationThreads() joins whatever is left.
+  struct CreationThread {
+    std::thread thread;
+    std::shared_ptr<PendingPipeline> pending;
+  };
+  std::mutex creation_threads_mutex_;
+  std::vector<CreationThread> creation_threads_;
+  // Set before joining; a worker that has not started its (potentially
+  // 10-100ms) vkCreateGraphicsPipelines yet checks this and bails, so
+  // shutdown is not held up by work whose result nobody will read.
+  std::atomic<bool> creation_threads_stopping_{false};
+
+  // Joins and clears creation_threads_. Idempotent.
+  void ShutdownCreationThreads();
+  // Joins and drops the entries whose worker has already finished. Called
+  // from the spawn path; assumes creation_threads_mutex_ is NOT held.
+  void ReapFinishedCreationThreads();
 };
 
 }  // namespace vulkan
