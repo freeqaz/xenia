@@ -37,8 +37,41 @@ DEFINE_bool(protect_on_release, false,
             "Protect released memory to prevent accesses.", "Memory");
 DEFINE_bool(scribble_heap, false,
             "Scribble 0xCD into all allocated heap memory.", "Memory");
+DEFINE_bool(
+    posix_allocfixed_zero_commit, true,
+    "Zero guest pages on the transition to committed, matching console "
+    "NtAllocateVirtualMemory and Windows VirtualAlloc(MEM_COMMIT). Only does "
+    "work on POSIX, where xe::memory::AllocFixed mprotects an existing "
+    "file-backed mapping instead of mmap'ing fresh anonymous pages (it has to "
+    "-- see the comment in base/memory_posix.cc) and therefore cannot zero. "
+    "Without this, a guest commit returns whatever the previous tenant left "
+    "behind. Turn it off to get the pre-2026-08 fork behavior back if a title "
+    "regresses.",
+    "Memory");
 
 namespace xe {
+
+// Whether the host AllocFixed already returns zeroed pages for a commit.
+// Windows VirtualAlloc(MEM_COMMIT) does; the POSIX mprotect path cannot.
+#if XE_PLATFORM_WIN32
+static constexpr bool kHostCommitZeroesPages = true;
+#else
+static constexpr bool kHostCommitZeroesPages = false;
+#endif
+
+// Zeroes pages that are about to move into the committed state, if the host
+// did not already do it. `protect` must include write access -- the host
+// AllocFixed has already applied it to the range, so a read-only commit cannot
+// be memset without another round trip through mprotect; those are rare enough
+// that they are left alone rather than paying for it on every allocation.
+static bool ShouldZeroOnCommit(bool heap_zeroes_on_commit,
+                               uint32_t allocation_type, uint32_t protect) {
+  return heap_zeroes_on_commit && !kHostCommitZeroesPages &&
+         cvars::posix_allocfixed_zero_commit &&
+         (allocation_type & kMemoryAllocationCommit) &&
+         (protect & kMemoryProtectWrite);
+}
+
 uint32_t get_page_count(uint32_t value, uint32_t page_size) {
   return xe::round_up(value, page_size) / page_size;
 }
@@ -931,6 +964,31 @@ bool BaseHeap::AllocFixed(uint32_t base_address, uint32_t size,
     if (cvars::scribble_heap && protect & kMemoryProtectWrite) {
       std::memset(result, 0xCD, page_count * page_size_);
     }
+
+    // Zero the pages that are newly moving into the committed state. The page
+    // table still holds the pre-allocation state here (it is updated below),
+    // and re-committing an already-committed page must NOT wipe it -- guests
+    // do that and expect their data to survive, which is also why this cannot
+    // live down in xe::memory::AllocFixed.
+    if (!cvars::scribble_heap &&
+        ShouldZeroOnCommit(zero_on_commit_, allocation_type, protect)) {
+      uint32_t run_start = UINT_MAX;
+      for (uint32_t page_number = start_page_number;
+           page_number <= end_page_number + 1; ++page_number) {
+        bool needs_zero =
+            page_number <= end_page_number &&
+            !(page_table_[page_number].state & kMemoryAllocationCommit);
+        if (needs_zero) {
+          if (run_start == UINT_MAX) {
+            run_start = page_number;
+          }
+        } else if (run_start != UINT_MAX) {
+          std::memset(TranslateRelative(run_start * page_size_), 0,
+                      (page_number - run_start) * page_size_);
+          run_start = UINT_MAX;
+        }
+      }
+    }
   }
 
   // Set page state.
@@ -1080,14 +1138,33 @@ bool BaseHeap::AllocRange(uint32_t low_address, uint32_t high_address,
     if (cvars::scribble_heap && (protect & kMemoryProtectWrite)) {
       std::memset(result, 0xCD, page_count * page_size_);
     }
+
+    // Zero newly committed pages. Unlike BaseHeap::AllocFixed no per-page
+    // check is needed: the search above only accepts a run whose every page
+    // has state == 0, so the whole range is new.
+    if (!cvars::scribble_heap &&
+        ShouldZeroOnCommit(zero_on_commit_, allocation_type, protect)) {
+      std::memset(result, 0, page_count * page_size_);
+    }
   }
 
   // Set page state.
   {
-    uint32_t max_page = uint32_t(page_table_.size());
-    uint32_t clamped_end = std::min(end_page_number, max_page - 1);
-    for (uint32_t page_number = start_page_number; page_number <= clamped_end;
-         ++page_number) {
+    // This used to clamp end_page_number to the last page and carry on, which
+    // half-succeeded: the caller got *out_address and believed it owned `size`
+    // bytes while the page table only recorded the clamped prefix. The search
+    // above bounds end_page_number by high_page_number, which is itself
+    // clamped to page_table_.size() - 1, so this is unreachable in practice --
+    // but if it ever does trip, fail loudly rather than lie.
+    if (end_page_number >= page_table_.size()) {
+      XELOGE(
+          "BaseHeap::AllocRange: page range [{}, {}] exceeds page table "
+          "({} pages); refusing to half-allocate",
+          start_page_number, end_page_number, page_table_.size());
+      return false;
+    }
+    for (uint32_t page_number = start_page_number;
+         page_number <= end_page_number; ++page_number) {
       auto& page_entry = page_table_[page_number];
       page_entry.base_address = start_page_number;
       page_entry.region_page_count = page_count;
@@ -1191,7 +1268,16 @@ bool BaseHeap::Release(uint32_t base_address, uint32_t* out_region_size) {
   uint32_t end_page_number =
       base_page_number + base_page_entry.region_page_count - 1;
   if (end_page_number >= page_table_.size()) {
-    end_page_number = uint32_t(page_table_.size()) - 1;
+    // Was a silent clamp. region_page_count comes out of the page table, which
+    // only ever gets it from a successful Alloc*, so a region that runs off the
+    // end means the table is already corrupt -- clearing a truncated prefix
+    // would leave a phantom region behind. Match the error convention of the
+    // other Release failures and refuse.
+    XELOGE(
+        "BaseHeap::Release({:08X}): region [{}, {}] exceeds page table "
+        "({} pages); page table is corrupt",
+        base_address, base_page_number, end_page_number, page_table_.size());
+    return false;
   }
   for (uint32_t page_number = base_page_number; page_number <= end_page_number;
        ++page_number) {
@@ -1430,6 +1516,8 @@ void PhysicalHeap::Initialize(Memory* memory, uint8_t* membase,
 
   BaseHeap::Initialize(memory, membase, heap_type, heap_base, heap_size,
                        page_size, host_address_offset);
+  // See zero_on_commit_ in memory.h: this heap aliases parent_heap's pages.
+  zero_on_commit_ = false;
   parent_heap_ = parent_heap;
   system_page_size_ = uint32_t(xe::memory::page_size());
 
