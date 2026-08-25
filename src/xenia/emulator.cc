@@ -302,6 +302,13 @@ DEFINE_bool(
     "the cards appear. Injection goes through the nop HID driver's "
     "per-pad InjectButtonPress; no guest writes. Title-gated => DC3-inert.",
     "CPU");
+DEFINE_int32(
+    rb3dx_autoconfirm_p2_up, 0,
+    "RB3DX autopilot: press DPAD-UP on pad 1 for the first N samples at "
+    "part_difficulty_screen before the A confirms, to navigate P2's CHOOSE "
+    "INSTRUMENT list off the default first-free part (e.g. 1 = select the "
+    "entry above BASS -- GUITAR when the same-instrument un-grey is armed).",
+    "CPU");
 DEFINE_bool(
     rb3dx_offline_join, false,
     "RB3DX (title 0x45410914), default off: complete the offline single-local-"
@@ -1831,13 +1838,29 @@ static void Rb3dxUiProbeThread(Memory* memory) {
       static int s_part_screen_samples = 0;
       if (cur_name == "part_difficulty_screen") {
         ++s_part_screen_samples;
-        uint32_t pad = (s_part_screen_samples <= 3 || (sample & 1)) ? 1u : 0u;
-        xe::hid::nop::NopInjectButtonPress(pad, 0x1000 /*X_INPUT_GAMEPAD_A*/,
-                                           250);
-        XELOGW(
-            "RB3DX UI PROBE[{}]: autopilot A@{} (part_difficulty_screen "
-            "sample {})",
-            sample, pad, s_part_screen_samples);
+        // Optional pad-1 list navigation before the confirms: press UP on the
+        // first N part-screen samples (--rb3dx_autoconfirm_p2_up). With the
+        // XNetRandom identity fix P2 owns its own card; its CHOOSE INSTRUMENT
+        // list defaults to the first free part (BASS when P1 took GUITAR), so
+        // selecting the same instrument needs N=1 UP when the SI un-grey puts
+        // GUITAR back in the list above BASS.
+        if (s_part_screen_samples <= cvars::rb3dx_autoconfirm_p2_up) {
+          xe::hid::nop::NopInjectButtonPress(1, 0x0001 /*DPAD_UP*/, 250);
+          XELOGW(
+              "RB3DX UI PROBE[{}]: autopilot UP@1 (part_difficulty_screen "
+              "sample {})",
+              sample, s_part_screen_samples);
+        } else {
+          int confirm_sample =
+              s_part_screen_samples - cvars::rb3dx_autoconfirm_p2_up;
+          uint32_t pad = (confirm_sample <= 3 || (sample & 1)) ? 1u : 0u;
+          xe::hid::nop::NopInjectButtonPress(pad, 0x1000 /*X_INPUT_GAMEPAD_A*/,
+                                             250);
+          XELOGW(
+              "RB3DX UI PROBE[{}]: autopilot A@{} (part_difficulty_screen "
+              "sample {})",
+              sample, pad, s_part_screen_samples);
+        }
       } else {
         s_part_screen_samples = 0;
         if (cur_name == "song_select_screen" && (sample & 1)) {
