@@ -1859,10 +1859,65 @@ static void Rb3dxUiProbeThread(Memory* memory) {
         }
       } else {
         s_part_screen_samples = 0;
+        static int s_hub_samples = 0;
+        if (cur_name != "main_hub_screen") s_hub_samples = 0;
         if (cur_name == "song_select_screen" && (sample & 1)) {
-          xe::hid::nop::NopInjectButtonPress(0, 0x1000, 250);
-          XELOGW("RB3DX UI PROBE[{}]: autopilot A@0 (song_select_screen)",
-                 sample);
+          // Hold the song pick until pad 1's LocalUser is bound: confirming
+          // with P2 still unjoined hands the empty slot to
+          // AutoAssignMissingSlots, the exact auto-assign+SI path that
+          // livelocks at track -1 (si12).
+          const uint32_t kJoypadUserBaseNav = 0x82CCB30C;  // + p*0xD4
+          uint32_t p2_lu = r32(kJoypadUserBaseNav + 1 * 0xD4);
+          if (p2_lu != 0) {
+            xe::hid::nop::NopInjectButtonPress(0, 0x1000, 250);
+            XELOGW("RB3DX UI PROBE[{}]: autopilot A@0 (song_select_screen)",
+                   sample);
+          } else {
+            XELOGW(
+                "RB3DX UI PROBE[{}]: autopilot HOLD (song_select_screen, pad1 "
+                "user not bound yet)",
+                sample);
+          }
+        } else if (cur_name == "intro_movie_screen" ||
+                   cur_name == "splash_screen" ||
+                   cur_name == "dx_welcome_screen" ||
+                   cur_name == "dx_settings_error_screen") {
+          if (sample & 1) {
+            xe::hid::nop::NopInjectButtonPress(0, 0x1000, 250);
+            XELOGW("RB3DX UI PROBE[{}]: autopilot A@0 ({})", sample, cur_name);
+          }
+        } else if (cur_name == "hint_rb3_welcome_screen") {
+          // Fresh-save first-boot chain: message page(s), then a
+          // CUSTOMIZE BAND / CONTINUE choice whose default is CUSTOMIZE.
+          // Alternate DOWN / A: DOWN is a no-op on message pages and moves
+          // focus to CONTINUE on the choice page, so either phase of the
+          // alternation dismisses the chain without entering Customize Band
+          // (si28/si29: blind A landed on CUSTOMIZE and parked the run in
+          // manage_band_screen for 250s).
+          uint32_t mask = (sample & 1) ? 0x1000u /*A*/ : 0x0002u /*DPAD_DOWN*/;
+          xe::hid::nop::NopInjectButtonPress(0, mask, 250);
+          XELOGW("RB3DX UI PROBE[{}]: autopilot {}@0 (hint_rb3_welcome_screen)",
+                 sample, (mask == 0x1000u) ? "A" : "DOWN");
+        } else if (cur_name == "manage_band_screen") {
+          // Recovery: a stray confirm entered Customize Band; B backs out.
+          if (sample & 1) {
+            xe::hid::nop::NopInjectButtonPress(0, 0x2000 /*B*/, 250);
+            XELOGW("RB3DX UI PROBE[{}]: autopilot B@0 (manage_band_screen)",
+                   sample);
+          }
+        } else if (cur_name == "main_hub_screen") {
+          // Deterministic PLAY NOW: the hub list has PLAY NOW at the top, so
+          // two UPs pin focus there from any tile, then A enters it.
+          ++s_hub_samples;
+          if (s_hub_samples <= 2) {
+            xe::hid::nop::NopInjectButtonPress(0, 0x0001 /*DPAD_UP*/, 250);
+            XELOGW("RB3DX UI PROBE[{}]: autopilot UP@0 (main_hub_screen {})",
+                   sample, s_hub_samples);
+          } else if (sample & 1) {
+            xe::hid::nop::NopInjectButtonPress(0, 0x1000, 250);
+            XELOGW("RB3DX UI PROBE[{}]: autopilot A@0 (main_hub_screen)",
+                   sample);
+          }
         }
       }
     }
