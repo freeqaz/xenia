@@ -54,6 +54,11 @@ using xe::cpu::hir::Value;
 static constexpr uint32_t kInvalidInstrLogLimit = 64;
 static constexpr uint32_t kUnimplementedInstrLogLimit = 64;
 
+// Upper bound on the byte extent PPCHIRBuilder::Emit will translate, and the
+// budget for reporting that the bound was hit.
+static constexpr uint32_t kMaxFunctionSize = 1024 * 1024;
+static constexpr uint32_t kFunctionSizeCapLogLimit = 16;
+
 // The number of times each opcode has been translated.
 // Accumulated across the entire run.
 uint32_t opcode_translation_counts[static_cast<int>(PPCOpcode::kInvalid)] = {0};
@@ -100,9 +105,29 @@ bool PPCHIRBuilder::Emit(GuestFunction* function, uint32_t flags) {
   start_address_ = function_->address();
 
   // Cap function size to 1MB to prevent arena overflow from garbage functions.
+  // The cap stays -- a 1MB "function" is always a scanner failure and the arena
+  // allocation below is instr_count_ * 2 * sizeof(void*) -- but it must not be
+  // silent: everything past the cap is dropped from the translation, so the
+  // guest gets a function that returns early with no indication why.
+  // docs/fork-cleanup-review.md, section 2, ppc_hir_builder.cc:93-96.
   uint32_t fn_size = function_->end_address() - function_->address();
-  if (fn_size > 1024 * 1024) {
-    fn_size = 1024 * 1024;
+  if (fn_size > kMaxFunctionSize) {
+    static std::atomic<uint32_t> capped_count{0};
+    uint32_t n = capped_count.fetch_add(1, std::memory_order_relaxed);
+    if (n < kFunctionSizeCapLogLimit) {
+      XELOGW(
+          "Function {:08X}-{:08X} is {} bytes; truncating translation to {} "
+          "bytes (scanner almost certainly ran off the end of the function)",
+          function_->address(), function_->end_address(), fn_size,
+          kMaxFunctionSize);
+    } else if (n == kFunctionSizeCapLogLimit) {
+      XELOGW(
+          "Function {:08X} translation truncated to {} bytes (hit {} times; "
+          "suppressing further reports)",
+          function_->address(), kMaxFunctionSize,
+          kFunctionSizeCapLogLimit + 1);
+    }
+    fn_size = kMaxFunctionSize;
   }
   instr_count_ = fn_size / 4 + 1;
 
