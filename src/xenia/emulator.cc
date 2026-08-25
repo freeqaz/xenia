@@ -1540,6 +1540,7 @@ static void Rb3dxUiProbeThread(Memory* memory) {
   const uint32_t kTheBandUI = 0x82DFD2B0;
   const uint32_t kMainDirPtr = 0x82E054B8;
   uint32_t saveload_obj = 0, netsync_obj = 0, session_obj = 0;
+  uint32_t overshell_obj = 0;
   int sample = 0;
   for (;;) {
     std::this_thread::sleep_for(std::chrono::milliseconds(2000));
@@ -1590,7 +1591,7 @@ static void Rb3dxUiProbeThread(Memory* memory) {
     if (cur != trans) dump_panels(cur, "C:");
     // --- find saveload_mgr / net_sync via main-dir hash (once) ---
     static bool s_dumped_names = false;
-    if (!saveload_obj || !netsync_obj || !session_obj ||
+    if (!saveload_obj || !netsync_obj || !session_obj || !overshell_obj ||
         (!s_dumped_names && cur)) {
       uint32_t dir = r32(kMainDirPtr);
       if (dir) {
@@ -1613,8 +1614,13 @@ static void Rb3dxUiProbeThread(Memory* memory) {
             } else if (nm == "session" && !session_obj) {
               session_obj = obj;
               XELOGE("RB3DX UI PROBE: found session obj=0x{:08X}", session_obj);
+            } else if (nm == "overshell" && !overshell_obj) {
+              overshell_obj = obj;
+              XELOGE("RB3DX UI PROBE: found overshell obj=0x{:08X}",
+                     overshell_obj);
             }
-            if (saveload_obj && netsync_obj && session_obj) break;
+            if (saveload_obj && netsync_obj && session_obj && overshell_obj)
+              break;
           }
           // One-time: dump the whole main-dir name table so session/overshell
           // objects can be located offline.
@@ -1684,6 +1690,76 @@ static void Rb3dxUiProbeThread(Memory* memory) {
           "mUsers[begin=0x{:08X} end=0x{:08X}]",
           sample, b, r32(b + 0x68), r32(b + 0x70), r32(b + 0x14),
           r32(b + 0x18));
+    }
+    // --- gJoypadData[4]: the two-pad join gate. Base/stride decoded from the
+    // running xex's JoypadGetPadData @0x82524998 (RB3E PORT_JOYPADGETPADDATA):
+    // lis 0x82CD; mulli r10,r3,0xD4; addi -0x4D38 => gJoypadData = 0x82CCB2C8,
+    // 0xD4 per pad. Offsets from rb3-xenon Joypad.h: mButtons@0x00,
+    // mUser@0x44, mConnected@0x48, mType@0x6C. If a pad polls SUCCESS at the
+    // XamInput layer but mConnected stays 0 here, the connection is dying
+    // inside the guest reader thread, not in the HID driver.
+    {
+      const uint32_t kJoypadData = 0x82CCB2C8;
+      std::string pads;
+      for (int p = 0; p < 4; ++p) {
+        uint32_t b2 = kJoypadData + p * 0xD4;
+        pads += fmt::format(" [{}]conn={} user=0x{:08X} type={} btn=0x{:04X}",
+                            p, r8(b2 + 0x48), r32(b2 + 0x44),
+                            static_cast<int32_t>(r32(b2 + 0x6C)),
+                            r32(b2 + 0x0));
+      }
+      XELOGE("RB3DX UI PROBE[{}]:   joypads:{}", sample, pads);
+    }
+    // --- overshell slots + per-slot join lists ---
+    // maindir['overshell'] is the OvershellPanel's Hmx::Object VBASE (tail,
+    // +0x4D4 from the head per the rb3-xenon RTTI note). Rather than trust
+    // that constant, auto-locate mSlots ONCE: scan the head region for a
+    // vector triple {begin<=end<=cap} of 3..8 guest pointers whose pointees
+    // read a plausible mSlotNum (int 0..7 at slot+0x40, matching its index).
+    // Slot layout (retail, rb3-xenon OvershellSlot.h): mState@0x2C,
+    // mSlotNum@0x40, mPotentialUsers vector@0x6C of {LocalBandUser*, JoinState}
+    // 8-byte entries.
+    static uint32_t s_overshell_slots_vec = 0;
+    if (overshell_obj && !s_overshell_slots_vec) {
+      uint32_t head = overshell_obj - 0x4D4;
+      for (uint32_t off = 0; off < 0x200 && !s_overshell_slots_vec; off += 4) {
+        uint32_t b2 = r32(head + off), e2 = r32(head + off + 4);
+        if (!b2 || e2 <= b2 || (e2 - b2) % 4 != 0) continue;
+        uint32_t n = (e2 - b2) / 4;
+        if (n < 3 || n > 8) continue;
+        bool ok = true;
+        for (uint32_t i = 0; i < n && ok; ++i) {
+          uint32_t slot = r32(b2 + i * 4);
+          if (slot < 0x40000000 || slot >= 0x80000000 ||
+              r32(slot + 0x40) != i) {
+            ok = false;
+          }
+        }
+        if (ok) {
+          s_overshell_slots_vec = head + off;
+          XELOGE(
+              "RB3DX UI PROBE: overshell head=0x{:08X} mSlots located at "
+              "+0x{:X} ({} slots)",
+              head, off, n);
+        }
+      }
+    }
+    if (s_overshell_slots_vec) {
+      uint32_t b2 = r32(s_overshell_slots_vec), e2 = r32(s_overshell_slots_vec + 4);
+      for (uint32_t sp = b2; sp < e2 && sp < b2 + 0x20; sp += 4) {
+        uint32_t slot = r32(sp);
+        if (!slot) continue;
+        uint32_t pu_b = r32(slot + 0x6C), pu_e = r32(slot + 0x70);
+        std::string pus;
+        for (uint32_t p = pu_b; p + 8 <= pu_e && p < pu_b + 0x40; p += 8) {
+          pus += fmt::format(" {{user=0x{:08X} join={}}}", r32(p), r32(p + 4));
+        }
+        XELOGE(
+            "RB3DX UI PROBE[{}]:   oshell slot{} @0x{:08X} state=0x{:08X} "
+            "npot={}{}",
+            sample, r32(slot + 0x40), slot, r32(slot + 0x2C),
+            (pu_e > pu_b) ? (pu_e - pu_b) / 8 : 0, pus);
+      }
     }
   }
 }
