@@ -43,6 +43,32 @@ DECLARE_string(dump_frames_path);
 DECLARE_int32(headless_capture_interval);
 DECLARE_bool(headless_verbose_diagnostics);
 
+DEFINE_bool(headless_skip_submission_wait, true,
+            "Headless: when the CP is asked to await a specific submission, "
+            "poll for completion instead of blocking on it. Keeps the CP "
+            "thread responsive to EVENT_WRITE_SHD / WAIT_REG_MEM, which the "
+            "DC3 and RB3DX headless capture flows deadlock without (~frame 12). "
+            "UNSOUND for any other headless workflow — notably --gpu=vulkan "
+            "trace dumps and automated capture of unrelated titles — because "
+            "buffers and descriptor pools can be recycled while the GPU is "
+            "still reading them (device-side use-after-free presenting as "
+            "corruption or a spurious VK_ERROR_DEVICE_LOST). Upstream "
+            "semantics are false. Defaults true only to preserve this fork's "
+            "existing DC3/RB3 behaviour; set false for anything else.",
+            "GPU");
+
+DEFINE_bool(headless_capture_only_draws, true,
+            "Headless: execute draws and EDRAM copies only on frames the "
+            "capture logic has marked as render frames, dropping the rest. "
+            "This is a DC3/RB3DX capture-throughput optimisation, not a "
+            "correctness requirement — with it true, every headless Vulkan run "
+            "of every title renders nothing except on capture frames, which "
+            "silently breaks trace-dump and regression-capture workflows. Set "
+            "false to render everything headless (upstream-equivalent output "
+            "at a large throughput cost). --force_all_draws remains a separate "
+            "per-draw escape hatch.",
+            "GPU");
+
 DEFINE_bool(dc3_persist_render_state, true,
             "DC3 headless capture: keep EDRAM + host render targets persistent "
             "across deferred-draw flushes (destructive teardown runs only on the "
@@ -2719,7 +2745,11 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
 
   if (edram_mode == xenos::EdramMode::kCopy) {
     // HEADLESS: Skip copies when not rendering — no EDRAM content to resolve.
-    if (!graphics_system_->presenter() && !headless_render_frame_ &&
+    // Gated on --headless_capture_only_draws alongside the non-copy skip
+    // below; dropping copies while still issuing draws would make
+    // --headless_capture_only_draws=false render into EDRAM and never resolve.
+    if (cvars::headless_capture_only_draws &&
+        !graphics_system_->presenter() && !headless_render_frame_ &&
         !cvars::force_all_draws) {
       return true;
     }
@@ -2768,7 +2798,13 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
 
   // HEADLESS: Skip non-copy draws unless this is a capture frame or
   // force_all_draws is enabled.
-  if (!graphics_system_->presenter() && !headless_render_frame_ &&
+  //
+  // !presenter() alone is true for ANY windowless run, so ungated this drops
+  // every draw of every headless title — trace dumps included. Require
+  // --headless_capture_only_draws (default true = this fork's DC3/RB3 capture
+  // behaviour); false renders everything headless.
+  if (cvars::headless_capture_only_draws &&
+      !graphics_system_->presenter() && !headless_render_frame_ &&
       !cvars::force_all_draws) {
     return true;
   }
@@ -3492,7 +3528,13 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
   // HEADLESS: Non-blocking completion check. The CP thread must stay
   // responsive to process EVENT_WRITE_SHD and WAIT_REG_MEM commands the
   // game thread depends on. Blocking here causes deadlock at ~frame 12.
-  bool headless = !graphics_system_->presenter();
+  //
+  // !presenter() alone is true for ANY windowless run, including trace dumps
+  // of unrelated titles, for which skipping the await is a device-side
+  // use-after-free (see --headless_skip_submission_wait). Require the cvar as
+  // well so the unsound path is opt-in rather than inferred.
+  bool headless =
+      !graphics_system_->presenter() && cvars::headless_skip_submission_wait;
   if (headless && await_submission > 0) {
     CheckSubmissionCompletionAndDeviceLoss(0);
   } else {
