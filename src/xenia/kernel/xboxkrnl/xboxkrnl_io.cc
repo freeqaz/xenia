@@ -241,6 +241,26 @@ dword_result_t NtReadFile_entry(dword_t file_handle, dword_t event_handle,
   }
   X_STATUS result = X_STATUS_SUCCESS;
 
+  // --rb3_overlapped_writeback ABI probe: dump the first reads' io_status_block
+  // / apc_context / apc_routine / event so we can see, from a live run, whether
+  // the guest OVERLAPPED IS the io_status_block (standard kernel32 variant:
+  // its Internal reads 0x103 on entry) or a separate object handed via
+  // ApcContext. Error-level so it survives the default log threshold.
+  if (cvars::rb3_overlapped_writeback) {
+    static std::atomic<uint32_t> probed{0};
+    if (probed.fetch_add(1, std::memory_order_relaxed) < 30) {
+      uint32_t iosb_a = io_status_block ? io_status_block.guest_address() : 0u;
+      uint32_t iosb_internal_before =
+          io_status_block ? (uint32_t)io_status_block->status : 0xFFFFFFFFu;
+      XELOGE(
+          "NtReadFile ABI: handle=0x{:X} iosb=0x{:08X} iosb.Internal_in=0x{:08X} "
+          "apc_ctx=0x{:08X} apc_routine=0x{:08X} event=0x{:X} len={}",
+          (uint32_t)file_handle, iosb_a, iosb_internal_before,
+          (uint32_t)apc_context, (uint32_t)apc_routine_ptr,
+          (uint32_t)event_handle, (uint32_t)buffer_length);
+    }
+  }
+
   bool signal_event = false;
   auto ev = kernel_state()->object_table()->LookupObject<XEvent>(event_handle);
   if (event_handle && !ev) {
@@ -301,7 +321,7 @@ dword_result_t NtReadFile_entry(dword_t file_handle, dword_t event_handle,
           ovb->information = bytes_read;
           static std::atomic<uint32_t> logged{0};
           if (logged.fetch_add(1, std::memory_order_relaxed) < 40) {
-            XELOGD(
+            XELOGE(
                 "NtReadFile overlapped-writeback: iosb=0x{:08X} "
                 "OVERLAPPED(apc_ctx)=0x{:08X} same={} status=0x{:08X} bytes={}",
                 io_status_block ? io_status_block.guest_address() : 0u, ov,
