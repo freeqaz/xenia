@@ -2044,6 +2044,53 @@ static void Rb3dxUiProbeThread(Memory* memory,
         }
       }
     }
+    // --- one-shot guest-code dump: the xex-file-offset disasm used off-line
+    // is shifted (section raw/virtual gaps), so dump live code for offline
+    // capstone at the chain addresses of interest.
+    static bool s_codedump_done = false;
+    if (!s_codedump_done && sample == 8) {
+      s_codedump_done = true;
+      for (uint32_t fn : {0x8279A650u, 0x82742600u, 0x827414C0u, 0x82527A80u,
+                          0x82844C80u, 0x82271500u}) {
+        std::string row;
+        for (uint32_t d = 0; d < 0x100; d += 4) {
+          row += fmt::format(" {:08X}", r32(fn + d));
+        }
+        XELOGE("RB3DX UI PROBE[{}]: CODE {:08X}:{}", sample, fn, row);
+      }
+    }
+    // --- one-shot handshake-object locator: the boot-blocking wait loop
+    // (fn 0x827414E0) waits on two event handles at obj+0x8C/+0x90 with the
+    // state word at obj+0x94. Kernel handles are 0xF80000xx; find adjacent
+    // handle pairs in heap/statics and dump the surrounding object.
+    static bool s_hs_locate_done = false;
+    if (!s_hs_locate_done && sample == 12) {
+      s_hs_locate_done = true;
+      int found = 0;
+      auto scan_range = [&](uint32_t lo, uint32_t hi) {
+        for (uint32_t page = lo; page < hi && found < 10; page += 0x1000) {
+          if (!readable(page)) continue;
+          for (uint32_t a = page; a < page + 0x1000 - 8; a += 4) {
+            uint32_t v1 = r32(a), v2 = r32(a + 4);
+            if ((v1 & 0xFFFFFF03) == 0xF8000000 && v1 != v2 &&
+                (v2 & 0xFFFFFF03) == 0xF8000000 && (v2 - v1) < 0x40) {
+              uint32_t obj = a - 0x8C;
+              std::string row;
+              for (uint32_t d = 0x80; d <= 0xA8; d += 4) {
+                row += fmt::format(" +{:02X}={:08X}", d, r32(obj + d));
+              }
+              XELOGE(
+                  "RB3DX UI PROBE[{}]: HS-OBJ candidate obj={:08X} "
+                  "handles={:08X}/{:08X}{}",
+                  sample, obj, v1, v2, row);
+              if (++found >= 10) break;
+            }
+          }
+        }
+      };
+      scan_range(0x82C34400, 0x83000000);
+      scan_range(0x40000000, 0x44000000);
+    }
     // --- one-shot TheLoadMgr locator (clean-TU5 loader-freeze) ---
     // Milo std::list embeds its dummy node inside the owning object, so any
     // queued Loader* value found in a heap list node whose next/prev points
