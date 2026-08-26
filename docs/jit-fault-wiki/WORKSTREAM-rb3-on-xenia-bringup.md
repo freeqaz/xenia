@@ -995,8 +995,14 @@ OOM (journal + earlyoom clean), and NOT harness foreground-timeout
 kills (timing refuted for si19/si20). si19 died parked at
 `part_difficulty_screen`; si20's probe froze ~16 s BEFORE the silent
 death. A supervised repro harness (`/tmp/flake-repro.sh`, exact si16
-config under `wait` with real status capture) is staged; first runs
-pending. All future runs should carry `--rb3_trace_shutdown=true`
+config under `wait` with real status capture) ran twice: BOTH runs
+survived the full 300 s (WAITSTATUS=0, LIFETIME=301s). Combined with
+si28..si34, that is 9 consecutive clean runs on post-fork-cleanup
+binaries vs ~3-in-8 flaking before. Verdict: **no longer reproduces**;
+most plausible mechanism was the pre-cleanup unconditional NtSetEvent
+trace with its non-atomic static counter in a hot multi-thread path,
+removed in the fork-cleanup merge (af286fb77). Not proven — if it ever
+recurs, the harness + wait census are ready. All future runs should carry `--rb3_trace_shutdown=true`
 (cheap; logs each distinct tid-6 NtSetEvent chain once).
 
 ---
