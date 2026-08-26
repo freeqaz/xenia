@@ -1684,7 +1684,8 @@ static void Rb3dxSiHookVerifyThread(Memory* memory) {
 //     mLockMachine != 0), mWaitList.mList vector {begin@+0x20, end@+0x24},
 //     mHasResponded @+0x28, mLockSuccess @+0x29.
 static void Rb3dxUiProbeThread(Memory* memory,
-                               kernel::KernelState* kernel_state) {
+                               kernel::KernelState* kernel_state,
+                               cpu::Processor* processor) {
   using xe::load_and_swap;
   uint8_t* base = memory->virtual_membase();
   auto readable = [&](uint32_t addr) -> bool {
@@ -1759,16 +1760,22 @@ static void Rb3dxUiProbeThread(Memory* memory,
     // context and walk the back-chain. Unsynchronised read of a running
     // thread's context: individual samples may tear; consistent repetition
     // across samples is the signal, single odd frames are not.
-    if (auto* ks = kernel_state) {
-      // Walk every live guest thread (ids are small ints) every 5th tick; the
-      // stuck party in a lockstep handshake is usually NOT the thread you
-      // first suspected, so sample them all rather than just thid 6.
+    if (processor) {
+      // Walk every live guest thread every 5th tick; the stuck party in a
+      // lockstep handshake is usually NOT the thread you first suspected, so
+      // sample them all. Enumerate via the debugger's ThreadDebugInfo registry:
+      // both threads_by_id_ (fork exited-thread sweep) and the object table
+      // (title closes thread handles after spawn) lose guest threads within
+      // ~20s of boot, which blinded the two earlier samplers in turn.
       bool full_sweep = (sample % 5) == 1;
-      for (uint32_t tid = 1; tid <= 40; ++tid) {
+      for (auto* info : processor->QueryThreadDebugInfos()) {
+        if (!info || info->state != cpu::ThreadDebugInfo::State::kAlive ||
+            !info->thread) {
+          continue;
+        }
+        uint32_t tid = info->thread_id;
         if (!full_sweep && tid != 6) continue;
-        auto th = ks->GetThreadByID(tid);
-        if (!th) continue;
-        auto* tstate = th->thread_state();
+        auto* tstate = info->thread->thread_state();
         auto* ctx = tstate ? tstate->context() : nullptr;
         if (!ctx) continue;
         uint32_t mlr = static_cast<uint32_t>(ctx->lr);
@@ -1783,10 +1790,10 @@ static void Rb3dxUiProbeThread(Memory* memory,
           s = bc;
         }
         XELOGE(
-            "RB3DX UI PROBE[{}]:   thr{} '{}' lr={:08X} sp={:08X} r3={:08X} "
+            "RB3DX UI PROBE[{}]:   thr{} lr={:08X} sp={:08X} r3={:08X} "
             "r4={:08X} r5={:08X} chain:{}",
-            sample, tid, th->thread_name(), mlr, msp,
-            static_cast<uint32_t>(ctx->r[3]), static_cast<uint32_t>(ctx->r[4]),
+            sample, tid, mlr, msp, static_cast<uint32_t>(ctx->r[3]),
+            static_cast<uint32_t>(ctx->r[4]),
             static_cast<uint32_t>(ctx->r[5]), chain);
       }
     }
@@ -4597,8 +4604,10 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
       cvars::rb3dx_ui_probe) {
     Memory* probe_mem = memory_.get();
     kernel::KernelState* probe_ks = kernel_state_.get();
-    Rb3dxSpawnProbeThread(
-        [probe_mem, probe_ks]() { Rb3dxUiProbeThread(probe_mem, probe_ks); });
+    cpu::Processor* probe_proc = processor_.get();
+    Rb3dxSpawnProbeThread([probe_mem, probe_ks, probe_proc]() {
+      Rb3dxUiProbeThread(probe_mem, probe_ks, probe_proc);
+    });
     XELOGI("RB3DX: UI probe sampler thread started (--rb3dx_ui_probe)");
   }
 
