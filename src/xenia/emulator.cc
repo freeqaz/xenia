@@ -267,6 +267,35 @@ DEFINE_bool(
     "memory access; no hooks, no patches; title-gated so DC3-inert. For the "
     "main_hub load-stall investigation.",
     "CPU");
+DEFINE_bool(
+    rb3_loadmgr_unbudget, false,
+    "RB3 TU5/DX (title 0x45410914), default off, requires --rb3dx_ui_probe: "
+    "poke TheLoadMgr's per-frame Poll() time budget (the 10.0f period/split "
+    "pair at 0x82E06E48/4C) to 1e30 -- the value the game itself uses inside "
+    "PollUntilEmpty() for unbudgeted synchronous drains. Under Checked-config "
+    "xenia a budgeted Poll() pass can exhaust its 10ms before the front "
+    "loader's first state step (DirLoader::PollLoading checks CheckSplit() "
+    "BEFORE advancing), starving the front loader forever: the clean-TU5 "
+    "boot freeze at the char-cache extras milos. Guest-data poke only; no "
+    "code patches. Title-gated => DC3-inert.",
+    "CPU");
+DEFINE_bool(
+    rb3_overlapped_scan, false,
+    "RB3 (title 0x45410914), default off, requires --rb3dx_ui_probe: scan the "
+    "guest heap for OVERLAPPED structs stuck at Internal==STATUS_PENDING "
+    "(0x103) to test the clean-TU5 loader-freeze hypothesis (AsyncFileWin::"
+    "_ReadDone spins on an OVERLAPPED xenia never clears). Read-only. "
+    "Title-gated => DC3-inert.",
+    "CPU");
+DEFINE_bool(
+    rb3_tu5_hash_poke, false,
+    "RB3 TU5 (title 0x45410914), default off, requires --rb3dx_ui_probe: "
+    "rewrite the exe's embedded ark-integrity SHA1s for the two dtbs the "
+    "clean-TU5 boot patch modifies (ui.dtb, splash.dtb) so the anti-tamper "
+    "check stops silently quitting the game during App::App. Equivalent to "
+    "arkhelper patchcreator's exePath hash patching, applied in guest memory. "
+    "Title-gated => DC3-inert.",
+    "CPU");
 DEFINE_uint64(
     rb3dx_si_claim_anchor, 0,
     "RB3DX (title 0x45410914), default 0 (off), requires --rb3dx_ui_probe: "
@@ -1845,6 +1874,46 @@ static void Rb3dxUiProbeThread(Memory* memory,
                sample, n, node, ldr, hdr, strs);
         node = r32(node);
       }
+      // Front-loader change detector: distinguishes "PollLoading body never
+      // runs" (frozen bytes = budget starvation before the first state step,
+      // the HX_NATIVE-documented CheckSplit gate) from "OpenFile runs but
+      // retries forever" (fields churn).
+      uint32_t front_node = r32(dummy);
+      if (front_node && front_node != dummy) {
+        uint32_t fldr = r32(front_node + 8);
+        uint64_t h = 1469598103934665603ull;
+        for (uint32_t d = 0; d < 0x80; d += 4) {
+          h = (h ^ r32(fldr + d)) * 1099511628211ull;
+        }
+        static uint32_t s_front_ldr = 0;
+        static uint64_t s_front_hash = 0;
+        static int s_front_frozen = 0;
+        if (fldr == s_front_ldr && h == s_front_hash) {
+          s_front_frozen++;
+        } else {
+          s_front_frozen = 0;
+        }
+        s_front_ldr = fldr;
+        s_front_hash = h;
+        XELOGE("RB3DX UI PROBE[{}]:   front-ldr {:08X} hash={:016X} frozen x{}",
+               sample, fldr, h, s_front_frozen);
+      }
+      // --rb3_loadmgr_unbudget: poke the LoadMgr period/split floats
+      // (10.0f pair at 0x82E06E48/4C) to 1e30 -- the game's own
+      // PollUntilEmpty() value -- so every per-frame Poll() drains
+      // unbudgeted. If the boot then proceeds, the CheckSplit starvation
+      // diagnosis is confirmed AND the flow is unblocked in one stroke.
+      if (cvars::rb3_loadmgr_unbudget) {
+        // 0x82E06Exx is title .data (RW pages; host mapping writable -- no
+        // heap->Protect needed, unlike code pages).
+        for (uint32_t a : {0x82E06E48u, 0x82E06E4Cu}) {
+          if (readable(a) && r32(a) != 0x7149F2CAu) {
+            xe::store_and_swap<uint32_t>(base + a, 0x7149F2CAu);  // 1e30f
+            XELOGE("RB3DX UI PROBE[{}]: loadmgr unbudget poke @{:08X}", sample,
+                   a);
+          }
+        }
+      }
     }
     // --- SI claim-table dump (--rb3dx_si_claim_anchor): the DLL's own
     // gClaims/gImpls, the ground truth for "two players on one track".
@@ -2048,15 +2117,161 @@ static void Rb3dxUiProbeThread(Memory* memory,
     // is shifted (section raw/virtual gaps), so dump live code for offline
     // capstone at the chain addresses of interest.
     static bool s_codedump_done = false;
+    static uint32_t s_gmainthread_addr = 0;
     if (!s_codedump_done && sample == 8) {
       s_codedump_done = true;
-      for (uint32_t fn : {0x8279A650u, 0x82742600u, 0x827414C0u, 0x82527A80u,
-                          0x82844C80u, 0x82271500u}) {
+      // 0x82741200..0x82741B00: the WaitForState/SetMutableState/Resume fn
+      // cluster (WaitForState proper at 0x827414E0; callers 0x827413A4,
+      // 0x82741948, 0x82741A58 seen in wait-census frames).
+      // 0x824A4C10: MainThread() -- the bl target inside WaitForState's
+      // event-pick branch. 0x827CAFxx: the parked worker's loop fn (census
+      // frame[1] ret 0x827CAFD0). 0x82736800/0x8246B880: main-thread caller
+      // frames above the stuck WaitForState.
+      // Second wave (si57 analysis): the 130s post-App-ctor wedge lives in
+      // the chain 0x8250F854 -> 0x823E0804 -> 0x823EDCE8 -> 0x82A89AEC ->
+      // leaf 0x82A8BA6C (looks like DTA dispatch into a spinning native
+      // handler); dump those regions plus 0x82742620 (the App-boot
+      // WaitForState caller that DID complete) and the boot fn 0x82272E00.
+      for (uint32_t fn :
+           {0x8279A650u, 0x82742600u, 0x82527A80u, 0x82844C80u, 0x82271500u,
+            0x824A4C10u, 0x827CAF00u, 0x827CB000u, 0x827CB100u, 0x82736800u,
+            0x8246B880u, 0x82741200u, 0x82741300u, 0x82741400u, 0x82741500u,
+            0x82741600u, 0x82741700u, 0x82741800u, 0x82741900u, 0x82741A00u,
+            0x82A89A00u, 0x82A8B900u, 0x82A8BA00u, 0x823E0700u, 0x823EDC00u,
+            0x8250F800u, 0x82272E00u, 0x822703D0u, 0x82270400u}) {
         std::string row;
         for (uint32_t d = 0; d < 0x100; d += 4) {
           row += fmt::format(" {:08X}", r32(fn + d));
         }
         XELOGE("RB3DX UI PROBE[{}]: CODE {:08X}:{}", sample, fn, row);
+      }
+      // Decode &gMainThreadID out of MainThread() at 0x824A4C10: find the
+      // first lis rD,H / lwz rT,L(rD) pair (MSVC absolute-address global
+      // load). MainThread() returns true for EVERY thread when the global is
+      // 0 -- which would send every worker onto the main-side event and
+      // explain a multi-object handshake wedge -- so watch its value live.
+      {
+        uint32_t hi_val[32] = {0};
+        bool hi_set[32] = {false};
+        for (uint32_t d = 0; d < 0x60 && !s_gmainthread_addr; d += 4) {
+          uint32_t insn = r32(0x824A4C10u + d);
+          if ((insn & 0xFC1F0000u) == 0x3C000000u) {  // lis rD, IMM
+            uint32_t rd = (insn >> 21) & 31;
+            hi_val[rd] = insn << 16;
+            hi_set[rd] = true;
+          } else if ((insn & 0xFC000000u) == 0x80000000u) {  // lwz rT, d(rB)
+            uint32_t rb = (insn >> 16) & 31;
+            if (rb != 0 && hi_set[rb]) {
+              int16_t lo = static_cast<int16_t>(insn & 0xFFFF);
+              s_gmainthread_addr = hi_val[rb] + lo;
+            }
+          }
+        }
+        XELOGE("RB3DX UI PROBE[{}]: gMainThreadID decode -> addr={:08X}",
+               sample, s_gmainthread_addr);
+      }
+    }
+    if (s_gmainthread_addr) {
+      XELOGE("RB3DX UI PROBE[{}]: gMainThreadID @{:08X} = {:08X}", sample,
+             s_gmainthread_addr, r32(s_gmainthread_addr));
+    }
+    // --rb3_overlapped_scan: test the async-completion hypothesis for the
+    // clean-TU5 loader freeze. AsyncFileWin::_ReadDone spins while
+    // OVERLAPPED.Internal == STATUS_PENDING (0x103); if xenia's synchronous
+    // read completion never clears it, exactly one OVERLAPPED stays 0x103
+    // across the whole stuck phase. Scan the guest heap for words == 0x103
+    // whose following word (InternalHigh) is a plausible byte count, and
+    // report any address that reads 0x103 on two consecutive samples.
+    if (cvars::rb3_overlapped_scan && (sample % 4) == 0) {
+      static std::map<uint32_t, int> s_pending_seen;
+      std::map<uint32_t, int> now_pending;
+      auto scan = [&](uint32_t lo, uint32_t hi) {
+        for (uint32_t page = lo; page < hi; page += 0x1000) {
+          if (!readable(page)) continue;
+          for (uint32_t a = page; a < page + 0x1000 - 8; a += 4) {
+            if (r32(a) != 0x00000103u) continue;
+            uint32_t high = r32(a + 4);
+            if (high <= 0x400000u) {  // plausible InternalHigh (bytes)
+              now_pending[a] = s_pending_seen.count(a) ? s_pending_seen[a] + 1
+                                                       : 1;
+            }
+          }
+        }
+      };
+      scan(0x40000000u, 0x44000000u);
+      int persistent = 0;
+      for (auto& [a, cnt] : now_pending) {
+        if (cnt >= 2) {
+          persistent++;
+          if (persistent <= 6) {
+            XELOGE(
+                "RB3DX UI PROBE[{}]: OVERLAPPED-PENDING @{:08X} Internal=103 "
+                "InternalHigh={:08X} persisted x{}",
+                sample, a, r32(a + 4), cnt);
+          }
+        }
+      }
+      XELOGE("RB3DX UI PROBE[{}]: overlapped-scan: {} words==0x103, {} persistent",
+             sample, (int)now_pending.size(), persistent);
+      s_pending_seen = std::move(now_pending);
+    }
+    // --rb3_tu5_hash_poke: the TU5 exe embeds 922 per-file SHA1s of ark
+    // entries (arkhelper hashfinder verified); a patchcreator ark whose
+    // ui.dtb/splash.dtb no longer match makes the game silently set its quit
+    // flag during App::App and exit App::Run before the first frame (the
+    // "clean-TU5 boot freeze" = that quit + a teardown spin). arkhelper's own
+    // fix is patching the hashes into the exe; do the equivalent in guest
+    // memory: find the two original 20-byte hashes in the image once, then
+    // overwrite (and re-assert each tick) with the patched files' hashes.
+    if (cvars::rb3_tu5_hash_poke) {
+      struct HashFix {
+        uint8_t orig[20];
+        uint8_t fixed[20];
+        uint32_t addr;  // 0 until found
+      };
+      // ui/gen/ui.dtb, ui/splash/gen/splash.dtb (patched 2026-08-26).
+      static HashFix s_fixes[2] = {
+          {{0xE0, 0x16, 0x62, 0x1C, 0xAF, 0xDA, 0xFD, 0xAB, 0xDA, 0xDA,
+            0x1A, 0x3A, 0x91, 0xB1, 0x83, 0xA4, 0x9E, 0x00, 0xC8, 0x8A},
+           {0x57, 0x35, 0xA7, 0xC1, 0x74, 0x04, 0xE4, 0xCB, 0xE1, 0x15,
+            0xCA, 0x21, 0x22, 0xA9, 0x46, 0x71, 0xD4, 0x5D, 0x90, 0x30},
+           0},
+          {{0x5B, 0x7B, 0x45, 0xD9, 0x12, 0x5A, 0xF5, 0x4D, 0xC0, 0xE7,
+            0x5E, 0x9B, 0xF3, 0x89, 0x03, 0x5B, 0x30, 0xC3, 0x0C, 0x25},
+           {0x53, 0xB2, 0x51, 0x54, 0x50, 0xFA, 0x40, 0xD9, 0xDC, 0x15,
+            0x31, 0x85, 0xDE, 0xDE, 0x23, 0x9C, 0x02, 0x49, 0xAA, 0x16},
+           0}};
+      for (auto& fix : s_fixes) {
+        if (!fix.addr) {
+          for (uint32_t a = 0x82000000u; a < 0x82E00000u && !fix.addr;
+               a += 4) {
+            if (r32(a) != (uint32_t(fix.orig[0]) << 24 |
+                           uint32_t(fix.orig[1]) << 16 |
+                           uint32_t(fix.orig[2]) << 8 | fix.orig[3])) {
+              continue;
+            }
+            bool all = true;
+            for (int k = 4; k < 20 && all; ++k) {
+              all = *(base + a + k) == fix.orig[k];
+            }
+            if (all) fix.addr = a;
+          }
+          if (fix.addr) {
+            XELOGE("RB3DX UI PROBE[{}]: TU5 hash table entry found @{:08X}",
+                   sample, fix.addr);
+          }
+        }
+        if (fix.addr && *(base + fix.addr) != fix.fixed[0]) {
+          // The table likely lives in a read-only image section; unprotect
+          // the pages first (same rule as PPC bytepatches).
+          if (auto* heap = memory->LookupHeap(fix.addr)) {
+            heap->Protect(fix.addr & ~0xFFFu, 0x2000,
+                          kMemoryProtectRead | kMemoryProtectWrite);
+          }
+          std::memcpy(base + fix.addr, fix.fixed, 20);
+          XELOGE("RB3DX UI PROBE[{}]: TU5 hash poked @{:08X}", sample,
+                 fix.addr);
+        }
       }
     }
     // --- one-shot handshake-object locator: the boot-blocking wait loop
