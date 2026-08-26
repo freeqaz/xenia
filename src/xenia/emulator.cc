@@ -1683,7 +1683,9 @@ static void Rb3dxSiHookVerifyThread(Memory* memory) {
 //     mUILockStep @+0x2C -> LockStepMgr: mLockMachine @+0x1C (InLock() =
 //     mLockMachine != 0), mWaitList.mList vector {begin@+0x20, end@+0x24},
 //     mHasResponded @+0x28, mLockSuccess @+0x29.
-static void Rb3dxUiProbeThread(Memory* memory) {
+static void Rb3dxUiProbeThread(Memory* memory,
+                               kernel::KernelState* kernel_state,
+                               cpu::Processor* processor) {
   using xe::load_and_swap;
   uint8_t* base = memory->virtual_membase();
   auto readable = [&](uint32_t addr) -> bool {
@@ -1752,6 +1754,98 @@ static void Rb3dxUiProbeThread(Memory* memory) {
         "RB3DX UI PROBE[{}]: transState={} curScreen=0x{:08X}'{}' "
         "transScreen=0x{:08X}'{}'",
         sample, ts, cur, cur_name, trans, trans_name);
+    // --- Main-thread guest stack sample (clean-TU5 flow bring-up). The TU5
+    // intro_movie transition never completes and nothing in the probe surface
+    // says where the main loop actually spins, so sample thid 6's live guest
+    // context and walk the back-chain. Unsynchronised read of a running
+    // thread's context: individual samples may tear; consistent repetition
+    // across samples is the signal, single odd frames are not.
+    if (processor) {
+      // Walk every live guest thread every 5th tick; the stuck party in a
+      // lockstep handshake is usually NOT the thread you first suspected, so
+      // sample them all. Enumerate via the debugger's ThreadDebugInfo registry:
+      // both threads_by_id_ (fork exited-thread sweep) and the object table
+      // (title closes thread handles after spawn) lose guest threads within
+      // ~20s of boot, which blinded the two earlier samplers in turn.
+      bool full_sweep = (sample % 5) == 1;
+      for (auto* info : processor->QueryThreadDebugInfos()) {
+        if (!info || info->state != cpu::ThreadDebugInfo::State::kAlive ||
+            !info->thread) {
+          continue;
+        }
+        uint32_t tid = info->thread_id;
+        if (!full_sweep && tid != 6) continue;
+        auto* tstate = info->thread->thread_state();
+        auto* ctx = tstate ? tstate->context() : nullptr;
+        if (!ctx) continue;
+        uint32_t mlr = static_cast<uint32_t>(ctx->lr);
+        uint32_t msp = static_cast<uint32_t>(ctx->r[1]);
+        std::string chain;
+        uint32_t s = msp;
+        for (int i = 0; i < 16 && s; ++i) {
+          uint32_t bc = r32(s);
+          if (bc <= s || bc - s > 0x100000) break;
+          uint32_t slr = r32(bc - 8);
+          chain += fmt::format(" {:08X}", slr);
+          s = bc;
+        }
+        XELOGE(
+            "RB3DX UI PROBE[{}]:   thr{} lr={:08X} sp={:08X} r3={:08X} "
+            "r4={:08X} r5={:08X} chain:{}",
+            sample, tid, mlr, msp, static_cast<uint32_t>(ctx->r[3]),
+            static_cast<uint32_t>(ctx->r[4]),
+            static_cast<uint32_t>(ctx->r[5]), chain);
+      }
+    }
+    // --- TheLoadMgr candidate dump (clean-TU5 stall): the loader-code region
+    // 0x82740000-0x82760000 materializes 0x82E00050/58/60/68/80 far more than
+    // any other data address, so the LoadMgr singleton almost certainly lives
+    // at ~0x82E00040. Dump the window each tick; if this is right, the queued
+    // panel DirLoader pointers show up in the mLoading list nodes and the
+    // mPeriod float (10.0f/26.67f/0) is directly readable.
+    {
+      // TheLoadMgr located via the si46 list-node prev-walk: the mLoading
+      // embedded dummy is 0x82E06E38, mPeriod (10.0f) sits at 0x82E06E48.
+      // Dump the object window every tick -- mTimer restarting between ticks
+      // distinguishes "Poll runs but starves" from "Poll never called".
+      std::string row;
+      uint32_t win_lo = 0x82E06DE0, win_hi = 0x82E06EA0;
+      for (uint32_t a = win_lo; a < win_hi; a += 4) {
+        if (((a - win_lo) & 0x1F) == 0 && !row.empty()) {
+          XELOGE("RB3DX UI PROBE[{}]:   loadmgr[{:08X}]:{}", sample, a - 0x20,
+                 row);
+          row.clear();
+        }
+        row += fmt::format(" {:08X}", r32(a));
+      }
+      if (!row.empty()) {
+        XELOGE("RB3DX UI PROBE[{}]:   loadmgr[{:08X}]:{}", sample,
+               win_hi - 0x20, row);
+      }
+      // Walk mLoading (embedded dummy @0x82E06E38, nodes {next,prev,Loader*})
+      // and dump each queued loader's header + any string its early fields
+      // point at -- names the file the front (stuck) loader is on.
+      uint32_t dummy = 0x82E06E38;
+      uint32_t node = r32(dummy);
+      for (int n = 0; n < 4 && node && node != dummy; ++n) {
+        uint32_t ldr = r32(node + 8);
+        std::string hdr, strs;
+        for (uint32_t d = 0; d < 0x30; d += 4) {
+          uint32_t v = r32(ldr + d);
+          hdr += fmt::format(" {:08X}", v);
+          if (v >= 0x1000 && (v < 0x50000000 || (v >= 0x82000000 &&
+                                                 v < 0x83000000))) {
+            std::string s = rstr(v);
+            if (s.size() >= 3 && s.size() < 47 && s != "<binary>") {
+              strs += fmt::format(" +0x{:X}->'{}'", d, s);
+            }
+          }
+        }
+        XELOGE("RB3DX UI PROBE[{}]:   loadq[{}] node={:08X} ldr={:08X}:{}{}",
+               sample, n, node, ldr, hdr, strs);
+        node = r32(node);
+      }
+    }
     // --- SI claim-table dump (--rb3dx_si_claim_anchor): the DLL's own
     // gClaims/gImpls, the ground truth for "two players on one track".
     if (cvars::rb3dx_si_claim_anchor != 0) {
@@ -1950,6 +2044,102 @@ static void Rb3dxUiProbeThread(Memory* memory) {
         }
       }
     }
+    // --- one-shot guest-code dump: the xex-file-offset disasm used off-line
+    // is shifted (section raw/virtual gaps), so dump live code for offline
+    // capstone at the chain addresses of interest.
+    static bool s_codedump_done = false;
+    if (!s_codedump_done && sample == 8) {
+      s_codedump_done = true;
+      for (uint32_t fn : {0x8279A650u, 0x82742600u, 0x827414C0u, 0x82527A80u,
+                          0x82844C80u, 0x82271500u}) {
+        std::string row;
+        for (uint32_t d = 0; d < 0x100; d += 4) {
+          row += fmt::format(" {:08X}", r32(fn + d));
+        }
+        XELOGE("RB3DX UI PROBE[{}]: CODE {:08X}:{}", sample, fn, row);
+      }
+    }
+    // --- one-shot handshake-object locator: the boot-blocking wait loop
+    // (fn 0x827414E0) waits on two event handles at obj+0x8C/+0x90 with the
+    // state word at obj+0x94. Kernel handles are 0xF80000xx; find adjacent
+    // handle pairs in heap/statics and dump the surrounding object.
+    static bool s_hs_locate_done = false;
+    if (!s_hs_locate_done && sample == 12) {
+      s_hs_locate_done = true;
+      int found = 0;
+      auto scan_range = [&](uint32_t lo, uint32_t hi) {
+        for (uint32_t page = lo; page < hi && found < 10; page += 0x1000) {
+          if (!readable(page)) continue;
+          for (uint32_t a = page; a < page + 0x1000 - 8; a += 4) {
+            uint32_t v1 = r32(a), v2 = r32(a + 4);
+            if ((v1 & 0xFFFFFF03) == 0xF8000000 && v1 != v2 &&
+                (v2 & 0xFFFFFF03) == 0xF8000000 && (v2 - v1) < 0x40) {
+              uint32_t obj = a - 0x8C;
+              std::string row;
+              for (uint32_t d = 0x80; d <= 0xA8; d += 4) {
+                row += fmt::format(" +{:02X}={:08X}", d, r32(obj + d));
+              }
+              XELOGE(
+                  "RB3DX UI PROBE[{}]: HS-OBJ candidate obj={:08X} "
+                  "handles={:08X}/{:08X}{}",
+                  sample, obj, v1, v2, row);
+              if (++found >= 10) break;
+            }
+          }
+        }
+      };
+      scan_range(0x82C34400, 0x83000000);
+      scan_range(0x40000000, 0x44000000);
+    }
+    // --- one-shot TheLoadMgr locator (clean-TU5 loader-freeze) ---
+    // Milo std::list embeds its dummy node inside the owning object, so any
+    // queued Loader* value found in a heap list node whose next/prev points
+    // into static .data/.bss locates TheLoadMgr.mLoading directly -- no
+    // symbols needed. Armed by the first nonzero panel mLoader seen below.
+    static uint32_t s_locate_loader_target = 0;
+    static bool s_locate_done = false;
+    if (s_locate_loader_target && !s_locate_done) {
+      s_locate_done = true;
+      const uint32_t lo = 0x40000000, hi = 0x48000000;
+      int hits = 0;
+      for (uint32_t page = lo; page < hi && hits < 8; page += 0x1000) {
+        if (!readable(page)) continue;
+        for (uint32_t a = page; a < page + 0x1000; a += 4) {
+          if (r32(a) != s_locate_loader_target) continue;
+          uint32_t node = a - 8;
+          uint32_t nxt = r32(node), prv = r32(node + 4);
+          bool nxt_static = nxt >= 0x82C34400 && nxt < 0x83000000;
+          bool prv_static = prv >= 0x82C34400 && prv < 0x83000000;
+          XELOGE(
+              "RB3DX UI PROBE[{}]: LOADMGR-LOCATE hit value@{:08X} node={:08X} "
+              "next={:08X}{} prev={:08X}{}",
+              sample, a, node, nxt, nxt_static ? "(STATIC)" : "", prv,
+              prv_static ? "(STATIC)" : "");
+          // Walk the prev chain until it leaves the heap: the terminal static
+          // address is the embedded list dummy inside TheLoadMgr.
+          uint32_t walk = prv;
+          std::string walked;
+          for (int w = 0; w < 32 && walk; ++w) {
+            walked += fmt::format(" {:08X}", walk);
+            if (walk >= 0x82C34400 && walk < 0x83000000) break;
+            if (walk < 0x40000000 || walk >= 0x50000000) break;
+            walk = r32(walk + 4);
+          }
+          XELOGE("RB3DX UI PROBE[{}]: LOADMGR-LOCATE prevwalk:{}", sample,
+                 walked);
+          for (uint32_t st : {nxt_static ? nxt : 0u, prv_static ? prv : 0u}) {
+            if (!st) continue;
+            std::string row;
+            for (uint32_t d = st - 0x20; d < st + 0x40; d += 4) {
+              row += fmt::format(" {:08X}", r32(d));
+            }
+            XELOGE("RB3DX UI PROBE[{}]: LOADMGR-LOCATE static {:08X}-0x20:{}"
+                   , sample, st, row);
+          }
+          if (++hits >= 8) break;
+        }
+      }
+    }
     // --- panels of the transition screen and current screen ---
     // RB3-360 UIScreen: mPanelList is an EMBEDDED circular {next,prev} dummy
     // at screen+0x28 (calibrated empirically: walking with s+0x2C as the
@@ -1971,6 +2161,9 @@ static void Rb3dxUiProbeThread(Memory* memory) {
           uint32_t ploaded = r8(panel + 0x1C);
           uint32_t ploader = r32(panel + 0xC);
           uint32_t prefs = r32(panel + 0x28);
+          if (ploader && !s_locate_loader_target) {
+            s_locate_loader_target = ploader;
+          }
           XELOGE(
               "RB3DX UI PROBE[{}]:   {}panel[{}]@0x{:08X} 0x{:08X}'{}' "
               "active={} refLoaded={} mState={} mLoaded={} mLoader=0x{:08X} "
@@ -4558,7 +4751,11 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
   if (title_id_.has_value() && title_id_.value() == 0x45410914 &&
       cvars::rb3dx_ui_probe) {
     Memory* probe_mem = memory_.get();
-    Rb3dxSpawnProbeThread([probe_mem]() { Rb3dxUiProbeThread(probe_mem); });
+    kernel::KernelState* probe_ks = kernel_state_.get();
+    cpu::Processor* probe_proc = processor_.get();
+    Rb3dxSpawnProbeThread([probe_mem, probe_ks, probe_proc]() {
+      Rb3dxUiProbeThread(probe_mem, probe_ks, probe_proc);
+    });
     XELOGI("RB3DX: UI probe sampler thread started (--rb3dx_ui_probe)");
   }
 
