@@ -2048,16 +2048,56 @@ static void Rb3dxUiProbeThread(Memory* memory,
     // is shifted (section raw/virtual gaps), so dump live code for offline
     // capstone at the chain addresses of interest.
     static bool s_codedump_done = false;
+    static uint32_t s_gmainthread_addr = 0;
     if (!s_codedump_done && sample == 8) {
       s_codedump_done = true;
-      for (uint32_t fn : {0x8279A650u, 0x82742600u, 0x827414C0u, 0x82527A80u,
-                          0x82844C80u, 0x82271500u}) {
+      // 0x82741200..0x82741B00: the WaitForState/SetMutableState/Resume fn
+      // cluster (WaitForState proper at 0x827414E0; callers 0x827413A4,
+      // 0x82741948, 0x82741A58 seen in wait-census frames).
+      // 0x824A4C10: MainThread() -- the bl target inside WaitForState's
+      // event-pick branch. 0x827CAFxx: the parked worker's loop fn (census
+      // frame[1] ret 0x827CAFD0). 0x82736800/0x8246B880: main-thread caller
+      // frames above the stuck WaitForState.
+      for (uint32_t fn :
+           {0x8279A650u, 0x82742600u, 0x82527A80u, 0x82844C80u, 0x82271500u,
+            0x824A4C10u, 0x827CAF00u, 0x827CB000u, 0x827CB100u, 0x82736800u,
+            0x8246B880u, 0x82741200u, 0x82741300u, 0x82741400u, 0x82741500u,
+            0x82741600u, 0x82741700u, 0x82741800u, 0x82741900u, 0x82741A00u}) {
         std::string row;
         for (uint32_t d = 0; d < 0x100; d += 4) {
           row += fmt::format(" {:08X}", r32(fn + d));
         }
         XELOGE("RB3DX UI PROBE[{}]: CODE {:08X}:{}", sample, fn, row);
       }
+      // Decode &gMainThreadID out of MainThread() at 0x824A4C10: find the
+      // first lis rD,H / lwz rT,L(rD) pair (MSVC absolute-address global
+      // load). MainThread() returns true for EVERY thread when the global is
+      // 0 -- which would send every worker onto the main-side event and
+      // explain a multi-object handshake wedge -- so watch its value live.
+      {
+        uint32_t hi_val[32] = {0};
+        bool hi_set[32] = {false};
+        for (uint32_t d = 0; d < 0x60 && !s_gmainthread_addr; d += 4) {
+          uint32_t insn = r32(0x824A4C10u + d);
+          if ((insn & 0xFC1F0000u) == 0x3C000000u) {  // lis rD, IMM
+            uint32_t rd = (insn >> 21) & 31;
+            hi_val[rd] = insn << 16;
+            hi_set[rd] = true;
+          } else if ((insn & 0xFC000000u) == 0x80000000u) {  // lwz rT, d(rB)
+            uint32_t rb = (insn >> 16) & 31;
+            if (rb != 0 && hi_set[rb]) {
+              int16_t lo = static_cast<int16_t>(insn & 0xFFFF);
+              s_gmainthread_addr = hi_val[rb] + lo;
+            }
+          }
+        }
+        XELOGE("RB3DX UI PROBE[{}]: gMainThreadID decode -> addr={:08X}",
+               sample, s_gmainthread_addr);
+      }
+    }
+    if (s_gmainthread_addr) {
+      XELOGE("RB3DX UI PROBE[{}]: gMainThreadID @{:08X} = {:08X}", sample,
+             s_gmainthread_addr, r32(s_gmainthread_addr));
     }
     // --- one-shot handshake-object locator: the boot-blocking wait loop
     // (fn 0x827414E0) waits on two event handles at obj+0x8C/+0x90 with the

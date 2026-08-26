@@ -122,6 +122,35 @@ static std::mutex g_wait_census_mutex;
 static std::map<uint32_t, WaitCensusEntry> g_wait_census_active;
 static std::atomic<bool> g_wait_census_reaper_started{false};
 
+// Per-handle NtSetEvent accounting, so a PARKED report can say whether the
+// event the thread is waiting on was EVER signalled and by whom -- the
+// difference between a lost wakeup (set once, consumed by the wrong waiter)
+// and a never-sent signal. Counters only; no per-call logging.
+struct SetEventStat {
+  uint64_t count;
+  uint32_t last_tid;
+  uint32_t last_lr;
+  std::chrono::steady_clock::time_point last_when;
+};
+static std::mutex g_set_event_stats_mutex;
+static std::map<uint32_t, SetEventStat> g_set_event_stats;
+
+static void SetEventCensusRecord(uint32_t handle) {
+  auto* thread = XThread::GetCurrentThread();
+  uint32_t tid = thread ? thread->thread_id() : 0;
+  uint32_t lr = 0;
+  if (thread && thread->thread_state()) {
+    auto* ctx = thread->thread_state()->context();
+    if (ctx) lr = static_cast<uint32_t>(ctx->lr);
+  }
+  std::lock_guard<std::mutex> g(g_set_event_stats_mutex);
+  auto& s = g_set_event_stats[handle];
+  s.count++;
+  s.last_tid = tid;
+  s.last_lr = lr;
+  s.last_when = std::chrono::steady_clock::now();
+}
+
 static void WaitCensusEnter(uint32_t handle_or_obj) {
   auto* thread = XThread::GetCurrentThread();
   if (!thread || !thread->thread_state()) return;
@@ -197,10 +226,27 @@ static void WaitCensusEnter(uint32_t handle_or_obj) {
                         now - e.enter)
                         .count();
           if (ms > 10000) {
+            // Annotate with the handle's NtSetEvent history: never-set vs
+            // set-but-consumed-elsewhere is the whole diagnosis.
+            std::string set_info = "NEVER-SET";
+            {
+              std::lock_guard<std::mutex> g2(g_set_event_stats_mutex);
+              auto it = g_set_event_stats.find(e.handle);
+              if (it != g_set_event_stats.end()) {
+                auto ago = std::chrono::duration_cast<
+                               std::chrono::milliseconds>(now -
+                                                          it->second.last_when)
+                               .count();
+                set_info = fmt::format(
+                    "set_count={} last_set_by tid={} lr={:08X} {}ms ago",
+                    it->second.count, it->second.last_tid, it->second.last_lr,
+                    ago);
+              }
+            }
             XELOGE(
                 "WAITCENSUS: tid={} PARKED {}ms in wait handle/obj=0x{:08X} "
-                "guest_lr={:08X} sp={:08X}",
-                tid, ms, e.handle, e.guest_lr, e.guest_sp);
+                "guest_lr={:08X} sp={:08X} [{}]",
+                tid, ms, e.handle, e.guest_lr, e.guest_sp, set_info);
             // Walk the parked thread's back-chain; for each frame also dump
             // the 6 words above the back-chain pointer -- the callee register
             // save area (std r30/r31 land there), which carries the waiting
@@ -680,6 +726,13 @@ DECLARE_XBOXKRNL_EXPORT1(KeInitializeEvent, kThreading, kImplemented);
 
 uint32_t xeKeSetEvent(X_KEVENT* event_ptr, uint32_t increment, uint32_t wait) {
   auto ev = XObject::GetNativeObject<XEvent>(kernel_state(), event_ptr);
+
+  if (cvars::headless_thread_diagnostics) {
+    // Keyed by guest VA -- matches KeWait* census entries, which are also
+    // recorded by object address rather than handle.
+    SetEventCensusRecord(
+        kernel_state()->memory()->HostToGuestVirtual(event_ptr));
+  }
   if (!ev) {
     // Checked assert demoted to Release semantics (return 0), xconfig
     // precedent. Hit for real by RB3DX+RB3Enhanced.dll (/tmp/rb3-si7):
@@ -768,6 +821,10 @@ uint32_t xeNtSetEvent(uint32_t handle, xe::be<uint32_t>* previous_state_ptr) {
   X_STATUS result = X_STATUS_SUCCESS;
 
   auto ev = kernel_state()->object_table()->LookupObject<XEvent>(handle);
+
+  if (cvars::headless_thread_diagnostics) {
+    SetEventCensusRecord(handle);
+  }
 
   // (Removed 2026-08-25, fork-cleanup section 2.) An unconditional per-call
   // XELOGI trace keyed on the hardcoded handle 0xF80000EC used to sit here,
