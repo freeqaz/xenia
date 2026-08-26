@@ -2110,11 +2110,18 @@ static void Rb3dxUiProbeThread(Memory* memory,
       // event-pick branch. 0x827CAFxx: the parked worker's loop fn (census
       // frame[1] ret 0x827CAFD0). 0x82736800/0x8246B880: main-thread caller
       // frames above the stuck WaitForState.
+      // Second wave (si57 analysis): the 130s post-App-ctor wedge lives in
+      // the chain 0x8250F854 -> 0x823E0804 -> 0x823EDCE8 -> 0x82A89AEC ->
+      // leaf 0x82A8BA6C (looks like DTA dispatch into a spinning native
+      // handler); dump those regions plus 0x82742620 (the App-boot
+      // WaitForState caller that DID complete) and the boot fn 0x82272E00.
       for (uint32_t fn :
            {0x8279A650u, 0x82742600u, 0x82527A80u, 0x82844C80u, 0x82271500u,
             0x824A4C10u, 0x827CAF00u, 0x827CB000u, 0x827CB100u, 0x82736800u,
             0x8246B880u, 0x82741200u, 0x82741300u, 0x82741400u, 0x82741500u,
-            0x82741600u, 0x82741700u, 0x82741800u, 0x82741900u, 0x82741A00u}) {
+            0x82741600u, 0x82741700u, 0x82741800u, 0x82741900u, 0x82741A00u,
+            0x82A89A00u, 0x82A8B900u, 0x82A8BA00u, 0x823E0700u, 0x823EDC00u,
+            0x8250F800u, 0x82272E00u}) {
         std::string row;
         for (uint32_t d = 0; d < 0x100; d += 4) {
           row += fmt::format(" {:08X}", r32(fn + d));
