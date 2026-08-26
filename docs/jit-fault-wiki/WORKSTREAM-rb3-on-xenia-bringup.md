@@ -1036,17 +1036,65 @@ merged here) settled it in a handful of runs:
      skipped, so the stuck loader moves to `world/shared/extras/male_extras01.milo` (the char-cache
      preview extras queued by the App-ctor `TheCharSync->UpdateCharCache()`).
 
-4. **Mechanism = async-file read completion never firing — the SAME bug as the DC3 AsyncFile stall
-   (§ session 52).** `DirLoader` reads through a `ChunkStream`, which double-buffers via
-   `mFile->ReadAsync` and reports `ChunkStream::Eof() == TempEof` whenever `mFile->ReadDone()`
-   returns 0 (utl/ChunkStream.cpp:231-236). `DirLoader::LoadDir` returns to wait on `TempEof`; if
-   xenia's async completion never turns that read "done," the loader is frozen in-state forever.
-   Small milos fit one 64 KB chunk and complete; large ones (extras, the movie) need a second async
-   chunk that never arrives. This is exactly the DC3 `AsyncFile::_ReadDone` poll that "never fires
-   under xenia" from session 52 — **the DC3 boot stall and the clean-TU5 boot stall are one
-   xenia-side async-file-I/O completion bug**, and fixing it should unblock both. (The `bytes_read=0
-   at offset 2048` reads seen repeatedly during the stuck phase, plus `NullDevice::ResolvePath`,
-   are consistent with a continuation read that comes back empty.)
+4. **Leading hypothesis (code-path-grounded, one empirical check still pending): the guest's
+   `AsyncFileWin::_ReadDone` polls `OVERLAPPED.Internal` and xenia's synchronous-complete path may
+   never clear it — the same shape as the DC3 `_ReadDone` stall (§ session 52).**
+   `DirLoader` reads through a `ChunkStream`, which double-buffers via `mFile->ReadAsync` and reports
+   `ChunkStream::Eof() == TempEof` whenever `mFile->ReadDone()` returns 0 (utl/ChunkStream.cpp:231-236);
+   `DirLoader::LoadDir` returns to wait on `TempEof`. Walking the Xbox path in dc3-decomp
+   (os/AsyncFile_Win.cpp — same engine, same platform as retail TU5):
+
+   - `AsyncFileWin::_ReadAsync` issues `ReadFile(mFile, buf, len, NULL, &mOverlapped)` — an OVERLAPPED
+     (async) read.
+   - `AsyncFileWin::_ReadDone` returns **false** (not done) while `mOverlapped.Internal == 0x103`
+     (`STATUS_PENDING`), and only calls `GetOverlappedResult` once `Internal` has been cleared to the
+     final status (AsyncFile_Win.cpp:236-237).
+
+   Xenia's own `NtReadFile` comment (xboxkrnl_io.cc:277-286) states the XAPI `ReadFile` wrapper sets
+   `OVERLAPPED.Internal = STATUS_PENDING` **itself** and passes a **separate stack `IO_STATUS_BLOCK`**
+   to `NtReadFile`. Xenia then eagerly completes the transfer into *that separate block* (and, with
+   `--io_force_synchronous_completion` = true by default, returns SUCCESS so `GetOverlappedResult`-by-
+   return-value callers are fine) — **but it never writes back the guest's `OVERLAPPED.Internal`.** A
+   guest that polls `mOverlapped.Internal == STATUS_PENDING` (which `AsyncFileWin::_ReadDone` does) sees
+   PENDING forever, so `ReadDone` is false forever, `ChunkStream::Eof()` is `TempEof` forever, and the
+   front loader freezes in-state. If confirmed this is the same failure as the DC3 session-52
+   "`AsyncFile::_ReadDone` never fires under xenia" spin — i.e. **the DC3 and clean-TU5 boot stalls would
+   share one OVERLAPPED-completion-writeback root** (`io_force_synchronous_completion` fixes only the
+   *return value*, not the OVERLAPPED, which would explain why it never helped either title).
+
+   **Empirical support (si68, `--rb3_overlapped_scan`): confirmed that PENDING OVERLAPPEDs persist
+   through the entire stuck phase.** A heap scan for words `== 0x103` (STATUS_PENDING) whose next word
+   is a plausible byte count found **188 at sample 4** (many transient — active in-flight reads),
+   collapsing to a stable **18** by sample 12 and holding at exactly 18 for the rest of the run
+   (persisted ×13 consecutive scans over ~100 s, each `Internal=0x103 InternalHigh=0`). The 188→18 drop
+   lands exactly where file-handle I/O ceases (~17 %), i.e. the survivors are reads that were *issued
+   and never completed*. That is the signature the hypothesis predicts. Still not a closed proof — I did
+   not tie one of the 18 addresses to the frozen loader's specific `AsyncFileWin` (would need the TU5
+   `ChunkStream`→`mFile` struct offsets), and `InternalHigh=0` rather than a real byte count leaves a
+   little room for false positives — but the correlation with I/O cessation makes the
+   OVERLAPPED-never-cleared mechanism the strongly-favored explanation.
+
+   Caveat on the fix side: a real Win32 `ReadFile` with an OVERLAPPED normally passes
+   `&overlapped->Internal` *as* the `IO_STATUS_BLOCK` to `NtReadFile`, in which case xenia's existing
+   `io_status_block->status` write already clears `Internal`. That these OVERLAPPEDs stay PENDING means
+   RB3's XAPILIB path does *not* do that (matching xenia's own `NtReadFile` comment about a separate
+   stack status block) — so the fix must reach the OVERLAPPED explicitly.
+
+   Corroborating evidence, all consistent: **during the entire stuck phase the guest opens/reads/closes
+   no files** — all `XFile` handle create/remove activity ends at ~17% of the run log and never
+   resumes; the final 80% is only probe output + WAITCENSUS. The loader is not re-issuing reads; it is
+   spinning polling an OVERLAPPED that will never clear. Small milos that fit a single already-completed
+   read slip through; the first loader whose `ChunkStream` needs a *fresh* `ReadAsync` (large extras
+   milo, or the intro `.bik`) wedges on the un-cleared OVERLAPPED. The loader header PTMF is 0x826C3888
+   for every stuck extras loader (maps to the `ChunkStream`-blocked `DirLoader` state; exact name needs
+   the TU5 symbol map).
+
+   **The fix (shared DC3 + TU5, next session):** in xenia's `NtReadFile`/`NtReadFileScatter`, when the
+   read is issued via an OVERLAPPED whose `Internal` the guest pre-set to `STATUS_PENDING`, write the
+   final status back into that OVERLAPPED (`Internal = status`, `InternalHigh = bytes`) on completion —
+   or have the XAPI `ReadFile` shim point `NtReadFile`'s `io_status_block` at the OVERLAPPED instead of
+   a separate stack block. Either makes `AsyncFileWin::_ReadDone` observe completion and both boots
+   proceed.
 
 **On the ark anti-tamper angle (a real but secondary thing):** the TU5 exe embeds 922 per-file
 SHA1s of ark entries (`arkhelper hashfinder` locates them → `/tmp/tu5_hashes.txt`). A `patchcreator`
@@ -1064,11 +1112,12 @@ wedge-region live code dumps; `--rb3_loadmgr_unbudget` (an experiment that poked
 10.0f period pair to 1e30 — it **corrupted** adjacent mTimer fields and made boots worse in si58;
 flag retained but inert unless passed, do not use); `--rb3_tu5_hash_poke`.
 
-**Next step (now concrete and shared with DC3):** fix xenia's async-file read completion so a
-pending `NtReadFile`/scatter read that a guest polls via `ReadDone` actually reports done — that is
-the single blocker behind both the DC3 `_ReadDone` spin and the clean-TU5 loader freeze. DC3
-non-regression re-verified this session: exactly **627** forced-trap hits, exit 0
-(`/tmp/dc3-regcheck9`).
+**Next step (shared DC3 + TU5):** (1) confirm the hypothesis empirically — read the stuck file's
+`mOverlapped.Internal` live (find `AsyncFileWin` via the frozen `DirLoader`→`ChunkStream`→`mFile`
+chain; if it reads `0x103` the writeback bug is proven); then (2) implement the OVERLAPPED-writeback
+in xenia's `NtReadFile`/`NtReadFileScatter` and confirm both the clean-TU5 loader freeze and the DC3
+`_ReadDone` spin clear. DC3 non-regression re-verified this session: exactly **627** forced-trap
+hits, exit 0 (`/tmp/dc3-regcheck9`).
 
 ---
 

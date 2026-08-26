@@ -280,6 +280,14 @@ DEFINE_bool(
     "code patches. Title-gated => DC3-inert.",
     "CPU");
 DEFINE_bool(
+    rb3_overlapped_scan, false,
+    "RB3 (title 0x45410914), default off, requires --rb3dx_ui_probe: scan the "
+    "guest heap for OVERLAPPED structs stuck at Internal==STATUS_PENDING "
+    "(0x103) to test the clean-TU5 loader-freeze hypothesis (AsyncFileWin::"
+    "_ReadDone spins on an OVERLAPPED xenia never clears). Read-only. "
+    "Title-gated => DC3-inert.",
+    "CPU");
+DEFINE_bool(
     rb3_tu5_hash_poke, false,
     "RB3 TU5 (title 0x45410914), default off, requires --rb3dx_ui_probe: "
     "rewrite the exe's embedded ark-integrity SHA1s for the two dtbs the "
@@ -2166,6 +2174,46 @@ static void Rb3dxUiProbeThread(Memory* memory,
     if (s_gmainthread_addr) {
       XELOGE("RB3DX UI PROBE[{}]: gMainThreadID @{:08X} = {:08X}", sample,
              s_gmainthread_addr, r32(s_gmainthread_addr));
+    }
+    // --rb3_overlapped_scan: test the async-completion hypothesis for the
+    // clean-TU5 loader freeze. AsyncFileWin::_ReadDone spins while
+    // OVERLAPPED.Internal == STATUS_PENDING (0x103); if xenia's synchronous
+    // read completion never clears it, exactly one OVERLAPPED stays 0x103
+    // across the whole stuck phase. Scan the guest heap for words == 0x103
+    // whose following word (InternalHigh) is a plausible byte count, and
+    // report any address that reads 0x103 on two consecutive samples.
+    if (cvars::rb3_overlapped_scan && (sample % 4) == 0) {
+      static std::map<uint32_t, int> s_pending_seen;
+      std::map<uint32_t, int> now_pending;
+      auto scan = [&](uint32_t lo, uint32_t hi) {
+        for (uint32_t page = lo; page < hi; page += 0x1000) {
+          if (!readable(page)) continue;
+          for (uint32_t a = page; a < page + 0x1000 - 8; a += 4) {
+            if (r32(a) != 0x00000103u) continue;
+            uint32_t high = r32(a + 4);
+            if (high <= 0x400000u) {  // plausible InternalHigh (bytes)
+              now_pending[a] = s_pending_seen.count(a) ? s_pending_seen[a] + 1
+                                                       : 1;
+            }
+          }
+        }
+      };
+      scan(0x40000000u, 0x44000000u);
+      int persistent = 0;
+      for (auto& [a, cnt] : now_pending) {
+        if (cnt >= 2) {
+          persistent++;
+          if (persistent <= 6) {
+            XELOGE(
+                "RB3DX UI PROBE[{}]: OVERLAPPED-PENDING @{:08X} Internal=103 "
+                "InternalHigh={:08X} persisted x{}",
+                sample, a, r32(a + 4), cnt);
+          }
+        }
+      }
+      XELOGE("RB3DX UI PROBE[{}]: overlapped-scan: {} words==0x103, {} persistent",
+             sample, (int)now_pending.size(), persistent);
+      s_pending_seen = std::move(now_pending);
     }
     // --rb3_tu5_hash_poke: the TU5 exe embeds 922 per-file SHA1s of ark
     // entries (arkhelper hashfinder verified); a patchcreator ark whose
