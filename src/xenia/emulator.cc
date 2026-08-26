@@ -267,6 +267,18 @@ DEFINE_bool(
     "memory access; no hooks, no patches; title-gated so DC3-inert. For the "
     "main_hub load-stall investigation.",
     "CPU");
+DEFINE_bool(
+    rb3_loadmgr_unbudget, false,
+    "RB3 TU5/DX (title 0x45410914), default off, requires --rb3dx_ui_probe: "
+    "poke TheLoadMgr's per-frame Poll() time budget (the 10.0f period/split "
+    "pair at 0x82E06E48/4C) to 1e30 -- the value the game itself uses inside "
+    "PollUntilEmpty() for unbudgeted synchronous drains. Under Checked-config "
+    "xenia a budgeted Poll() pass can exhaust its 10ms before the front "
+    "loader's first state step (DirLoader::PollLoading checks CheckSplit() "
+    "BEFORE advancing), starving the front loader forever: the clean-TU5 "
+    "boot freeze at the char-cache extras milos. Guest-data poke only; no "
+    "code patches. Title-gated => DC3-inert.",
+    "CPU");
 DEFINE_uint64(
     rb3dx_si_claim_anchor, 0,
     "RB3DX (title 0x45410914), default 0 (off), requires --rb3dx_ui_probe: "
@@ -1844,6 +1856,46 @@ static void Rb3dxUiProbeThread(Memory* memory,
         XELOGE("RB3DX UI PROBE[{}]:   loadq[{}] node={:08X} ldr={:08X}:{}{}",
                sample, n, node, ldr, hdr, strs);
         node = r32(node);
+      }
+      // Front-loader change detector: distinguishes "PollLoading body never
+      // runs" (frozen bytes = budget starvation before the first state step,
+      // the HX_NATIVE-documented CheckSplit gate) from "OpenFile runs but
+      // retries forever" (fields churn).
+      uint32_t front_node = r32(dummy);
+      if (front_node && front_node != dummy) {
+        uint32_t fldr = r32(front_node + 8);
+        uint64_t h = 1469598103934665603ull;
+        for (uint32_t d = 0; d < 0x80; d += 4) {
+          h = (h ^ r32(fldr + d)) * 1099511628211ull;
+        }
+        static uint32_t s_front_ldr = 0;
+        static uint64_t s_front_hash = 0;
+        static int s_front_frozen = 0;
+        if (fldr == s_front_ldr && h == s_front_hash) {
+          s_front_frozen++;
+        } else {
+          s_front_frozen = 0;
+        }
+        s_front_ldr = fldr;
+        s_front_hash = h;
+        XELOGE("RB3DX UI PROBE[{}]:   front-ldr {:08X} hash={:016X} frozen x{}",
+               sample, fldr, h, s_front_frozen);
+      }
+      // --rb3_loadmgr_unbudget: poke the LoadMgr period/split floats
+      // (10.0f pair at 0x82E06E48/4C) to 1e30 -- the game's own
+      // PollUntilEmpty() value -- so every per-frame Poll() drains
+      // unbudgeted. If the boot then proceeds, the CheckSplit starvation
+      // diagnosis is confirmed AND the flow is unblocked in one stroke.
+      if (cvars::rb3_loadmgr_unbudget) {
+        // 0x82E06Exx is title .data (RW pages; host mapping writable -- no
+        // heap->Protect needed, unlike code pages).
+        for (uint32_t a : {0x82E06E48u, 0x82E06E4Cu}) {
+          if (readable(a) && r32(a) != 0x7149F2CAu) {
+            xe::store_and_swap<uint32_t>(base + a, 0x7149F2CAu);  // 1e30f
+            XELOGE("RB3DX UI PROBE[{}]: loadmgr unbudget poke @{:08X}", sample,
+                   a);
+          }
+        }
       }
     }
     // --- SI claim-table dump (--rb3dx_si_claim_anchor): the DLL's own
