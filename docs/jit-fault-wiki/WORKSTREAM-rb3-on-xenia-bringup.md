@@ -1121,6 +1121,89 @@ hits, exit 0 (`/tmp/dc3-regcheck9`).
 
 ---
 
+### 8l. 2026-08-26 (later) — §8k's OVERLAPPED-writeback root cause is REFUTED; the real gate is the intro `.bik` movie load
+
+**§8k's headline is retracted in turn.** I implemented the OVERLAPPED-writeback (gated
+`--rb3_overlapped_writeback`, in `NtReadFile`/`NtReadFileScatter`: on completion, also write the final
+status/bytes into the guest OVERLAPPED reached via `ApcContext`) **plus** an error-level ABI probe that
+dumps the first 30 reads. The probe settles the ABI question §8k left open, and the answer kills the
+theory:
+
+```
+NtReadFile ABI: handle=0xF8000040 iosb=0x82DFD108 iosb.Internal_in=0x00000103
+                apc_ctx=0x82DFD108 apc_routine=0x00000000 event=0x0 len=65536
+NtReadFile overlapped-writeback: iosb=0x400E3098 OVERLAPPED(apc_ctx)=0x400E3098 same=1 status=0 bytes=131072
+```
+
+- **`iosb == apc_ctx == the OVERLAPPED` (`same=1`), and `iosb.Internal_in = 0x103`.** So this title's
+  XAPILIB uses the STANDARD kernel32 variant: it passes the OVERLAPPED *itself* as `io_status_block`
+  (its first 8 bytes ARE the `IO_STATUS_BLOCK`) and again as `ApcContext`. §8k's premise — "a separate
+  stack `IO_STATUS_BLOCK`, so the guest OVERLAPPED is never written" — is **wrong for the async path**.
+- Therefore the pre-existing `io_status_block->status = result` at `xboxkrnl_io.cc:262` **already clears
+  `OVERLAPPED.Internal` to SUCCESS on every completion.** The ApcContext writeback lands on the same
+  address; it is a **confirmed no-op**. xenia was never failing to clear the OVERLAPPED.
+- The **"18 persistent `0x103` words" scan (si68) is heap noise.** `0x103` is a common small constant and
+  the `InternalHigh<=0x400000` filter is weak; none of those addresses ever pass through `NtReadFile`
+  (every such address is written to 0 on completion). Real ark reads complete fine (`status=0
+  bytes=65536`). So the si68 "empirical support" for §8k was a false positive.
+
+**The real gate (pure-retail boot6, `/tmp/rb3tu5boot6`, no patch):** the LoadMgr **front** loader on
+`videos/rb3_intro_cinematic.bik` never completes, so the intro `MoviePanel` never reports loaded and the
+`intro_movie_screen` transition never finishes (`transState=1` for the whole run; `curScreen` stays
+`<null>`; `intro_movie_panel mLoaded=0`). The front loader header holds the Bink magic `"BIKi"` at
++0x24 (`0x42494B69`) — it read the header and stalled after. Loaders **drain normally** up to it
+(`portrait_clips_shared` → `startup_autosave_base` → … → `intro_cinematic.bik`), then it wedges for the
+rest of the run (~700 splash-worker frames continue).
+
+**Movie-loader map (rb3 decomp, via subagent):**
+- `MoviePanel::PlayMovie` → `Movie::Impl::Begin` builds the loader **directly** (not via `AddLoader`,
+  which has no `.bik` factory): **preload** → `FileLoader(kLoadFront)` reads the whole file
+  (`Movie.cpp:617`); **stream** → `MovieLoader(kLoadStayBack)` reads only a 0x20 header
+  (`Movie.cpp:622`, `399`).
+- **Loading a `.bik` does NOT need Bink** — it is raw byte reads. Bink is touched only *after*
+  `IsLoaded()`, in `CheckOpen`→`MovieOpen`→`BinkOpen` and `Poll`→`BinkDoFrame`. So a stubbed Bink cannot
+  hang the LoadMgr front loader, but it **can** hang `MoviePanel::IsLoaded()` (= `mMovie.Ready()` =
+  `mLoader->IsLoaded()`, plus a subtitles loader and `UIPanel::IsLoaded`).
+- Real wait loops that turn this into an infinite boot hang: `LoadMgr::PollUntilEmpty` at boot
+  (`App.cpp:487`), `PollUntilLoaded` (`Loader.cpp:207`), `BinkClip::EnsureLoaded` (`BinkClip.cpp:212`).
+- "state 3" candidates (no shared `mState` enum): `LoaderPos kLoadStayBack=3` (a streaming `MovieLoader`
+  at the *back* of `mLoading`, never polled while something ahead is stuck); `StandardStream kPlaying=3`
+  (`+0x14`); `BinkReader kPlay=3` (`+0xE0`) — the audio `.bik` path, which never reaches `kDone` if Bink
+  decode is a no-op (`mBink->FrameNum` never advances).
+
+**This is the SAME class of blocker DC3 already solved.** `src/xenia/dc3_hack_pack_skeleton.cc:272-356`
+clears DC3's attract Bink movie by (1) `BinkMovieImpl::Ready()` → 1 (`0x82E221C8`), (2)
+`MoviePanel::IsLoaded()` → 1 (`0x82E0EFE8`, "gates on the subtitles loader and UIPanel::IsLoaded too"),
+(3) gated `UIManager::GotoFirstScreen`. Those are DC3 (`ham_xbox_r.map`) addresses; the RB3 TU5 fix is
+the same overrides at the **RB3 retail** addresses (not yet located — needs an RB3 TU5 symbol map or
+vtable-slot hooking off the live movie-loader vptr `0x82103A84`).
+
+**Splash-redirect path (boot5, `/tmp/rb3tu5boot5`, patchcreator `$first_screen`→splash) gets much
+further and does NOT wedge:** it **skips the intro movie** (`transScreen = splash_screen`), then drains
+the char-cache extras queue cleanly — `skeleton_unshared` → `main` → `chars` → `male_extras01/02/03`,
+`female_extras01`, `inline_help_center` all cycle through as front, each frozen only x0–x2 (i.e.
+advancing, not stuck). 726 splash frames render. Then the **App exits cleanly at ~18s** — the main
+thread `NtWait`-joins all worker threads and returns (App::Run → main returns), NOT a crash and NOT a
+`XamLoaderTerminateTitle` (the earlier "terminate" read was a false match on the xam *import-table*
+listing, not a runtime call). So on the splash path the remaining question is **why App::Run returns
+early** rather than sustaining into an interactive splash/menu. (si58's "splash-patched stalls on
+`male_extras01.milo`" is also retracted: it drains, it does not stall.)
+
+**Two forward paths, both real:**
+1. **boot6 / retail:** replicate the DC3 movie overrides at RB3 TU5 addresses (`Movie::Ready` /
+   `MoviePanel::IsLoaded` → true) so the intro panel reports loaded and the transition to
+   `intro_movie_screen`→`splash_screen` proceeds without Bink. Needs the RB3 TU5 retail addresses.
+2. **boot5 / splash-redirect:** already past the movie; diagnose why App::Run returns at ~18s (does the
+   splash flow reach `press start`, then quit for lack of input/profile? is a soft-fault
+   `last_fault=0x170130000` recurring?). This path is closer to a menu and touches no movie code.
+
+**Net for §8j/§8k/§8l:** the clean-TU5 stall is a **movie-load / UI-transition gate**, not any
+async-file or OVERLAPPED bug. `AsyncFileWin::_ReadDone` works correctly under xenia (reads complete,
+`Internal` is cleared). The `--rb3_overlapped_writeback` + ABI probe are retained gated (a safety net
+for any *other* title that genuinely uses a separate-IOSB variant, and the instrument that proved this
+one does not). DC3 non-regression re-verified: exactly **627** forced-trap hits with the cvar off
+(`/tmp/dc3-regcheck10`).
+
 ---
 
 ## 9. Related docs
