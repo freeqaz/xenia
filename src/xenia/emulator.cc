@@ -1683,7 +1683,8 @@ static void Rb3dxSiHookVerifyThread(Memory* memory) {
 //     mUILockStep @+0x2C -> LockStepMgr: mLockMachine @+0x1C (InLock() =
 //     mLockMachine != 0), mWaitList.mList vector {begin@+0x20, end@+0x24},
 //     mHasResponded @+0x28, mLockSuccess @+0x29.
-static void Rb3dxUiProbeThread(Memory* memory) {
+static void Rb3dxUiProbeThread(Memory* memory,
+                               kernel::KernelState* kernel_state) {
   using xe::load_and_swap;
   uint8_t* base = memory->virtual_membase();
   auto readable = [&](uint32_t addr) -> bool {
@@ -1752,6 +1753,33 @@ static void Rb3dxUiProbeThread(Memory* memory) {
         "RB3DX UI PROBE[{}]: transState={} curScreen=0x{:08X}'{}' "
         "transScreen=0x{:08X}'{}'",
         sample, ts, cur, cur_name, trans, trans_name);
+    // --- Main-thread guest stack sample (clean-TU5 flow bring-up). The TU5
+    // intro_movie transition never completes and nothing in the probe surface
+    // says where the main loop actually spins, so sample thid 6's live guest
+    // context and walk the back-chain. Unsynchronised read of a running
+    // thread's context: individual samples may tear; consistent repetition
+    // across samples is the signal, single odd frames are not.
+    if (auto* ks = kernel_state) {
+      if (auto main_th = ks->GetThreadByID(6)) {
+        auto* tstate = main_th->thread_state();
+        auto* ctx = tstate ? tstate->context() : nullptr;
+        if (ctx) {
+          uint32_t mlr = static_cast<uint32_t>(ctx->lr);
+          uint32_t msp = static_cast<uint32_t>(ctx->r[1]);
+          std::string chain;
+          uint32_t s = msp;
+          for (int i = 0; i < 16 && s; ++i) {
+            uint32_t bc = r32(s);
+            if (bc <= s || bc - s > 0x100000) break;
+            uint32_t slr = r32(bc - 8);
+            chain += fmt::format(" {:08X}", slr);
+            s = bc;
+          }
+          XELOGE("RB3DX UI PROBE[{}]:   mainthr lr={:08X} sp={:08X} chain:{}",
+                 sample, mlr, msp, chain);
+        }
+      }
+    }
     // --- SI claim-table dump (--rb3dx_si_claim_anchor): the DLL's own
     // gClaims/gImpls, the ground truth for "two players on one track".
     if (cvars::rb3dx_si_claim_anchor != 0) {
@@ -4558,7 +4586,9 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
   if (title_id_.has_value() && title_id_.value() == 0x45410914 &&
       cvars::rb3dx_ui_probe) {
     Memory* probe_mem = memory_.get();
-    Rb3dxSpawnProbeThread([probe_mem]() { Rb3dxUiProbeThread(probe_mem); });
+    kernel::KernelState* probe_ks = kernel_state_.get();
+    Rb3dxSpawnProbeThread(
+        [probe_mem, probe_ks]() { Rb3dxUiProbeThread(probe_mem, probe_ks); });
     XELOGI("RB3DX: UI probe sampler thread started (--rb3dx_ui_probe)");
   }
 
