@@ -1007,6 +1007,71 @@ recurs, the harness + wait census are ready. All future runs should carry `--rb3
 
 ---
 
+### 8k. 2026-08-26 — the §8j "handshake deadlock" was a MISREAD; the real gate is the async-file read loader stall (si57..si67)
+
+**§8j's headline finding is retracted.** There is no "two-sided worker handshake deadlock at
+0x82E0710C," and gMainThreadID is not zeroed. New instrumentation (branch `rb3-tu5-flow2`,
+merged here) settled it in a handful of runs:
+
+1. **gMainThreadID is stable = 6 for the whole run.** Decoded `&gMainThreadID` live out of
+   `MainThread()` (lis/lwz at 0x824A4C10 → 0x82C71B08) and printed its value every tick — never
+   0, never anything but 6. The §8j theory that `MainThread()` misdetects every thread (which
+   would send workers onto the main-side event) is **dead**.
+
+2. **The boot does not crash or quit.** Both pure-retail and patched clean-TU5 present ~700
+   `XE_SWAP` frames continuously across a 2–5 minute run — the *splash worker thread* (spawned by
+   `Splash::BeginSplasher`, renders the boot logos) is doing that, while the main thread is parked
+   in the App boot-load wait. tid13 parking on F8000030 is that splash worker idling — main set
+   that event 979× during the ctor (per-handle `NtSetEvent` census: `set_count=979 last_set_by
+   tid=6`) and then stopped when the ctor load stalled. Normal, not a lost wakeup.
+
+3. **The real gate: the LoadMgr front loader never completes for specific files.** Loaders drain
+   normally (each milo appears at the queue front once, loads, pops) until one sticks and its
+   header bytes freeze forever (added a per-tick front-loader byte-hash "frozen xN" counter):
+   - **pure retail** (`/tmp/rb3tu5boot6`, no patch ark): stuck on `videos/rb3_intro_cinematic.bik`,
+     main still inside `App::App` (return 0x82272E8C) — the ctor's `TheLoadMgr.PollUntilEmpty()`
+     never drains. (Decoded `main()`'s three back-to-back `bl`s live: 0x82272E88 = `App::App`,
+     0x82272E90 = `App::Run`, 0x82272E98 = `App::~App`.)
+   - **splash-patched** (`$first_screen`→`splash_screen`, `/tmp/rb3tu5boot5`): the intro movie is
+     skipped, so the stuck loader moves to `world/shared/extras/male_extras01.milo` (the char-cache
+     preview extras queued by the App-ctor `TheCharSync->UpdateCharCache()`).
+
+4. **Mechanism = async-file read completion never firing — the SAME bug as the DC3 AsyncFile stall
+   (§ session 52).** `DirLoader` reads through a `ChunkStream`, which double-buffers via
+   `mFile->ReadAsync` and reports `ChunkStream::Eof() == TempEof` whenever `mFile->ReadDone()`
+   returns 0 (utl/ChunkStream.cpp:231-236). `DirLoader::LoadDir` returns to wait on `TempEof`; if
+   xenia's async completion never turns that read "done," the loader is frozen in-state forever.
+   Small milos fit one 64 KB chunk and complete; large ones (extras, the movie) need a second async
+   chunk that never arrives. This is exactly the DC3 `AsyncFile::_ReadDone` poll that "never fires
+   under xenia" from session 52 — **the DC3 boot stall and the clean-TU5 boot stall are one
+   xenia-side async-file-I/O completion bug**, and fixing it should unblock both. (The `bytes_read=0
+   at offset 2048` reads seen repeatedly during the stuck phase, plus `NullDevice::ResolvePath`,
+   are consistent with a continuation read that comes back empty.)
+
+**On the ark anti-tamper angle (a real but secondary thing):** the TU5 exe embeds 922 per-file
+SHA1s of ark entries (`arkhelper hashfinder` locates them → `/tmp/tu5_hashes.txt`). A `patchcreator`
+ark that edits ui.dtb/splash.dtb without also patching those hashes into the exe leaves a mismatch.
+Added `--rb3_tu5_hash_poke` (finds the two original 20-byte hash rows in the guest image and
+rewrites them with the patched files' SHA1s, re-asserted per tick; verified it locates+pokes both
+at 0x82C69594 / 0x82C6AE0C). It did **not** change the outcome — the splash-patched boot still
+stalls on the extras loader — so the hash mismatch is not the boot blocker; the async-read stall
+is. Keep the flag for the eventual full patched-ark boot, but it is not the fix.
+
+**Instrumentation added this session (all `--rb3dx_ui_probe`/title-gated, DC3-inert):** live
+`gMainThreadID` decode+watch; per-handle `NtSetEvent`/`KeSetEvent` census (count, last-setter
+tid/lr, age → PARKED reports say NEVER-SET vs set-but-consumed); front-loader freeze detector;
+wedge-region live code dumps; `--rb3_loadmgr_unbudget` (an experiment that poked the LoadMgr
+10.0f period pair to 1e30 — it **corrupted** adjacent mTimer fields and made boots worse in si58;
+flag retained but inert unless passed, do not use); `--rb3_tu5_hash_poke`.
+
+**Next step (now concrete and shared with DC3):** fix xenia's async-file read completion so a
+pending `NtReadFile`/scatter read that a guest polls via `ReadDone` actually reports done — that is
+the single blocker behind both the DC3 `_ReadDone` spin and the clean-TU5 loader freeze. DC3
+non-regression re-verified this session: exactly **627** forced-trap hits, exit 0
+(`/tmp/dc3-regcheck9`).
+
+---
+
 ---
 
 ## 9. Related docs
