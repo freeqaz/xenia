@@ -927,6 +927,80 @@ watcher). The ~130s silent exit-0 flake did NOT recur in si28..si34
 console runs), not an emulator accommodation — xenia now runs the same
 twin flow the July hardware sessions ran, end to end.
 
+### 8j. 2026-08-26 — clean-TU5 flow bring-up: the boot deadlock found (si35..si56)
+
+Wiki 8h next-step (a) — clean TU5 headless — ran a full diagnostic arc.
+The July "self-exit at 18 s" (08-boot-to-menu.md) does NOT reproduce on
+the current fork; clean TU5 now boots and runs indefinitely, stuck
+pre-menu. The stall was peeled one wrong theory at a time:
+
+1. **Not the intro movie.** si27/si35 park in `transState=1 →
+   intro_movie_screen` forever (`intro_movie_panel` mState=0 mLoader=0).
+   A vanilla-format patch ark built with arkhelper `patchcreator`
+   (`main_xbox_10.ark` + rewritten hdr over untouched torrent-symlink
+   parts, round-trip verified, served live — the `first_screen`
+   ui.dtb edit visibly redirected the boot) swapped the panel for a bare
+   `UIPanel` and then retargeted `$first_screen=splash_screen`: the
+   stall FOLLOWS the first transition wherever it goes (si36/si43).
+   The `_nodd` xex accepts the rewritten hdr (no dirty-disc).
+2. **Not NetSync lockstep.** net_sync dumps byte-equivalent DX-vs-TU5.
+3. **Real but not the stall: short ark tail reads.** The torrent rip's
+   ten `main_xbox_*.ark` parts are not 64 KB-block-aligned; BlockMgr's
+   aligned tail-block read short-reads (`req_len=65536 offset=74383360 →
+   bytes_read=13457` == EOF of part 2 exactly). 64 KB-padded reflink
+   copies live at `~/tmp/rb3tu5-padded-arks/` and are wired into
+   `/tmp/rb3tu5boot3/gen`. Fix confirmed at the I/O layer (short read
+   gone), stall unchanged.
+4. **The actual gate: a two-sided worker handshake deadlock.**
+   `TheLoadMgr` (located empirically at ~0x82E06E18 via a heap list-node
+   prev-walk to the embedded `mLoading` dummy 0x82E06E38) freezes after
+   ~28k boot polls with the char-cache extras milos
+   (`world/shared/extras/{male,female}_extras0*.milo`) queued — because
+   nothing calls `LoadMgr::Poll` anymore. The main thread (live guest
+   code dump; the xex-FILE-offset disasm is section-shifted and must not
+   be used) is trapped in fn `0x827414E0`:
+   `while (obj->mState@+0x94 != 5) Event::Wait(obj+0x8C / obj+0x90, INFINITE)`
+   called from the App boot path (`0x82271588 → 0x82742620`) adjacent to
+   the `TheLoadMgr.PollUntilEmpty()` call. The object is **static
+   0x82E0710C** (events `F8000030`/`F8000034`, `mState` stuck at 0);
+   worker **tid 13** parks forever on the SAME `F8000030` (its
+   work-wake; idle loop against globals `0x82E07198/9C`, entry chain
+   `0x8284D6DC → 0x827CAFD0`). Main waits for the worker's state; the
+   worker waits for a wake that never arrives.
+
+**Why DX passes with near-identical code:** unproven, but DX's boot DTA
+(`dx_movie_enter`) runs `{saveload_mgr activate}` EARLY ("dx - load save
+file early"), reordering boot around this worker — prime suspect is the
+save/content-enumeration worker system. **Next steps:** (a) identify
+0x82E0710C's subsystem (Ghidra on the wait-loop callers; rb3-xenon
+`http://ghidra.local:8001/mcp`), (b) find who was supposed to
+`NtSetEvent(F8000030)` and why headless xenia never does (lost wakeup vs
+never-sent), (c) cheap experiment: an ark-side DTA patch mirroring DX's
+early `saveload_mgr activate` in vanilla `ui.dta`.
+
+**Instrumentation landed** (all cvar/title-gated, DC3-inert): per-tick
+main-thread + all-thread guest stack sampler in the UI probe (thread
+enumeration NOTE: `threads_by_id_`, the object table, and the
+ThreadDebugInfo registry ALL lose guest threads ~20 s in — in-shim
+recording is the only reliable surface), a wait census
+(`--headless_thread_diagnostics`) that logs any wait parked >10 s with
+tid/handle/LR/SP + frame walks, `TheLoadMgr` window + `mLoading` queue
+walker with file names, and one-shot locators (list-node prev-walk,
+handle-pair scan, live code dump).
+
+**Flake (8h next-step (c)) progress:** the ~130 s silent exit-0 deaths
+(si16/si19/si20) are NOT watcher kills (both watchers only *observed*
+the deaths: "process exited at 132s" / "no xenia proc after 125s"), NOT
+OOM (journal + earlyoom clean), and NOT harness foreground-timeout
+kills (timing refuted for si19/si20). si19 died parked at
+`part_difficulty_screen`; si20's probe froze ~16 s BEFORE the silent
+death. A supervised repro harness (`/tmp/flake-repro.sh`, exact si16
+config under `wait` with real status capture) is staged; first runs
+pending. All future runs should carry `--rb3_trace_shutdown=true`
+(cheap; logs each distinct tid-6 NtSetEvent chain once).
+
+---
+
 ---
 
 ## 9. Related docs

@@ -9,7 +9,10 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <map>
 #include <mutex>
+#include <thread>
 #include <vector>
 
 #include "xenia/base/atomic.h"
@@ -99,6 +102,144 @@ static bool ReadGuestStackWord(Memory* memory, uint32_t guest_addr,
 // and can be replaced together if a real accessor appears.
 static bool IsMainGuestThread(XThread* thread) {
   return thread && thread->thread_id() == 6;
+}
+
+// --- Wait census (--headless_thread_diagnostics) -------------------------
+// The clean-TU5 flow stall (wiki 8h next-step (a)) is a lockstep handshake
+// where the parked party is some guest worker, and every thread-enumeration
+// surface (threads_by_id_, object table, ThreadDebugInfo) loses guest
+// threads within ~20s of boot. So instead of enumerating threads from
+// outside, record every guest thread's in-flight NtWait/KeWait here, from
+// inside the shim, and have a reaper log any wait parked >10s with its
+// tid/handle/guest-LR. Bounded: one map entry per live tid.
+struct WaitCensusEntry {
+  uint32_t handle;
+  uint32_t guest_lr;
+  uint32_t guest_sp;
+  std::chrono::steady_clock::time_point enter;
+};
+static std::mutex g_wait_census_mutex;
+static std::map<uint32_t, WaitCensusEntry> g_wait_census_active;
+static std::atomic<bool> g_wait_census_reaper_started{false};
+
+static void WaitCensusEnter(uint32_t handle_or_obj) {
+  auto* thread = XThread::GetCurrentThread();
+  if (!thread || !thread->thread_state()) return;
+  auto* ctx = thread->thread_state()->context();
+  uint32_t lr = ctx ? static_cast<uint32_t>(ctx->lr) : 0;
+  uint32_t sp = ctx ? static_cast<uint32_t>(ctx->r[1]) : 0;
+  uint32_t tid = thread->thread_id();
+  {
+    std::lock_guard<std::mutex> g(g_wait_census_mutex);
+    g_wait_census_active[tid] = {handle_or_obj, lr, sp,
+                                 std::chrono::steady_clock::now()};
+  }
+  // Clean-TU5 handshake-loop identification: waits entered via the RB3 TU5
+  // Event::Wait wrapper at 0x82527AB0 belong to the boot-blocking
+  // wait-for-worker-state loop (fn 0x827414E0: while (this->0x94 != target)
+  // wait(this+0x8C/+0x90)). These waits RETURN each cycle so the parked
+  // reaper never sees them; dump the caller frames' register save areas once
+  // to capture the loop object's this-pointer and target state.
+  // ctx->lr inside the shim is the syscall STUB return (0x82844CF8), so key on
+  // the first walked frame's saved LR being inside the wrapper instead.
+  bool in_handshake = false;
+  {
+    auto* memory = kernel_state()->memory();
+    uint32_t bc0 = 0, slr0 = 0;
+    if (memory && sp && ReadGuestStackWord(memory, sp, &bc0) && bc0 > sp &&
+        bc0 - sp < 0x100000 && ReadGuestStackWord(memory, bc0 - 8, &slr0)) {
+      in_handshake = slr0 >= 0x82527A00 && slr0 < 0x82527B10;
+    }
+  }
+  if (in_handshake) {
+    // Per-tid one-shots (tid 13's work-queue waits ate a global cap of 3
+    // before the main thread's handshake ever sampled).
+    static std::mutex s_hs_mutex;
+    static std::map<uint32_t, int> s_hs_counts;
+    bool dump_this;
+    {
+      std::lock_guard<std::mutex> g(s_hs_mutex);
+      dump_this = s_hs_counts[tid]++ < 2;
+    }
+    if (dump_this) {
+      auto* memory = kernel_state()->memory();
+      uint32_t sp2 = sp;
+      for (int frame = 0; frame < 8 && memory && sp2; frame++) {
+        uint32_t bc = 0;
+        if (!ReadGuestStackWord(memory, sp2, &bc) || bc <= sp2 ||
+            bc - sp2 > 0x100000) {
+          break;
+        }
+        uint32_t slr = 0;
+        ReadGuestStackWord(memory, bc - 8, &slr);
+        uint32_t saves[8] = {0};
+        for (int k = 0; k < 8; ++k) {
+          ReadGuestStackWord(memory, bc + 0x3C + 4 * k, &saves[k]);
+        }
+        XELOGE(
+            "WAITCENSUS-HS: tid={} frame[{}] bc={:08X} saved_lr={:08X} "
+            "save+3C..58: {:08X} {:08X} {:08X} {:08X} {:08X} {:08X} {:08X} "
+            "{:08X}",
+            tid, frame, bc, slr, saves[0], saves[1], saves[2], saves[3],
+            saves[4], saves[5], saves[6], saves[7]);
+        sp2 = bc;
+      }
+    }
+  }
+  if (!g_wait_census_reaper_started.exchange(true)) {
+    std::thread([]() {
+      for (;;) {
+        std::this_thread::sleep_for(std::chrono::seconds(5));
+        auto now = std::chrono::steady_clock::now();
+        std::lock_guard<std::mutex> g(g_wait_census_mutex);
+        for (auto& [tid, e] : g_wait_census_active) {
+          auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        now - e.enter)
+                        .count();
+          if (ms > 10000) {
+            XELOGE(
+                "WAITCENSUS: tid={} PARKED {}ms in wait handle/obj=0x{:08X} "
+                "guest_lr={:08X} sp={:08X}",
+                tid, ms, e.handle, e.guest_lr, e.guest_sp);
+            // Walk the parked thread's back-chain; for each frame also dump
+            // the 6 words above the back-chain pointer -- the callee register
+            // save area (std r30/r31 land there), which carries the waiting
+            // object's this-pointer and target state for handshake loops.
+            auto* memory = kernel_state()->memory();
+            if (memory && e.guest_sp) {
+              uint32_t sp2 = e.guest_sp;
+              for (int frame = 0; frame < 10; frame++) {
+                uint32_t bc = 0;
+                if (!ReadGuestStackWord(memory, sp2, &bc) || bc <= sp2 ||
+                    bc - sp2 > 0x100000) {
+                  break;
+                }
+                uint32_t slr = 0;
+                ReadGuestStackWord(memory, bc - 8, &slr);
+                uint32_t saves[6] = {0};
+                for (int k = 0; k < 6; ++k) {
+                  ReadGuestStackWord(memory, bc + 0x44 + 4 * k, &saves[k]);
+                }
+                XELOGE(
+                    "WAITCENSUS:   tid={} frame[{}] bc={:08X} saved_lr={:08X} "
+                    "save+44..58: {:08X} {:08X} {:08X} {:08X} {:08X} {:08X}",
+                    tid, frame, bc, slr, saves[0], saves[1], saves[2],
+                    saves[3], saves[4], saves[5]);
+                sp2 = bc;
+              }
+            }
+          }
+        }
+      }
+    }).detach();
+  }
+}
+
+static void WaitCensusExit() {
+  auto* thread = XThread::GetCurrentThread();
+  if (!thread) return;
+  std::lock_guard<std::mutex> g(g_wait_census_mutex);
+  g_wait_census_active.erase(thread->thread_id());
 }
 
 // r13 + 0x100: pointer to thread local state
@@ -1073,8 +1214,14 @@ dword_result_t KeWaitForSingleObject_entry(lpvoid_t object_ptr,
     }
   }
   uint64_t timeout = timeout_ptr ? static_cast<uint64_t>(*timeout_ptr) : 0u;
+  if (cvars::headless_thread_diagnostics) {
+    WaitCensusEnter(object_ptr.guest_address());
+  }
   auto result = xeKeWaitForSingleObject(object_ptr, wait_reason, processor_mode,
                                  alertable, timeout_ptr ? &timeout : nullptr);
+  if (cvars::headless_thread_diagnostics) {
+    WaitCensusExit();
+  }
   // Trace main thread wait returns
   if (cvars::headless_thread_diagnostics) {
     auto* thread = XThread::GetCurrentThread();
@@ -1122,8 +1269,14 @@ dword_result_t NtWaitForSingleObjectEx_entry(dword_t object_handle,
   if (object) {
     uint64_t timeout = timeout_ptr ? static_cast<uint64_t>(*timeout_ptr) : 0u;
 
+    if (cvars::headless_thread_diagnostics) {
+      WaitCensusEnter(object_handle);
+    }
     result =
         object->Wait(3, wait_mode, alertable, timeout_ptr ? &timeout : nullptr);
+    if (cvars::headless_thread_diagnostics) {
+      WaitCensusExit();
+    }
   } else {
     result = X_STATUS_INVALID_HANDLE;
   }
@@ -1161,10 +1314,17 @@ dword_result_t KeWaitForMultipleObjects_entry(
   }
 
   uint64_t timeout = timeout_ptr ? static_cast<uint64_t>(*timeout_ptr) : 0u;
-  return XObject::WaitMultiple(uint32_t(objects.size()),
-                               reinterpret_cast<XObject**>(objects.data()),
-                               wait_type, wait_reason, processor_mode,
-                               alertable, timeout_ptr ? &timeout : nullptr);
+  if (cvars::headless_thread_diagnostics) {
+    WaitCensusEnter(count ? static_cast<uint32_t>(objects_ptr[0]) : 0);
+  }
+  auto result = XObject::WaitMultiple(
+      uint32_t(objects.size()), reinterpret_cast<XObject**>(objects.data()),
+      wait_type, wait_reason, processor_mode, alertable,
+      timeout_ptr ? &timeout : nullptr);
+  if (cvars::headless_thread_diagnostics) {
+    WaitCensusExit();
+  }
+  return result;
 }
 DECLARE_XBOXKRNL_EXPORT3(KeWaitForMultipleObjects, kThreading, kImplemented,
                          kBlocking, kHighFrequency);
@@ -1195,9 +1355,16 @@ dword_result_t NtWaitForMultipleObjectsEx_entry(
     dword_t count, lpdword_t handles, dword_t wait_type, dword_t wait_mode,
     dword_t alertable, lpqword_t timeout_ptr) {
   uint64_t timeout = timeout_ptr ? static_cast<uint64_t>(*timeout_ptr) : 0u;
-  return xeNtWaitForMultipleObjectsEx(count, handles, wait_type, wait_mode,
-                                      alertable,
-                                      timeout_ptr ? &timeout : nullptr);
+  if (cvars::headless_thread_diagnostics) {
+    WaitCensusEnter(count ? static_cast<uint32_t>(handles[0]) : 0);
+  }
+  auto result = xeNtWaitForMultipleObjectsEx(count, handles, wait_type,
+                                             wait_mode, alertable,
+                                             timeout_ptr ? &timeout : nullptr);
+  if (cvars::headless_thread_diagnostics) {
+    WaitCensusExit();
+  }
+  return result;
 }
 DECLARE_XBOXKRNL_EXPORT3(NtWaitForMultipleObjectsEx, kThreading, kImplemented,
                          kBlocking, kHighFrequency);
