@@ -1874,6 +1874,41 @@ static void Rb3dxUiProbeThread(Memory* memory,
                sample, n, node, ldr, hdr, strs);
         node = r32(node);
       }
+      // DirLoader mState locator: dump every .text-range word in the first two
+      // queued loaders' objects [0,0x140). The FRONT loader (loadq[0]) is being
+      // actively polled so its mState PTMF has advanced past &DirLoader::OpenFile,
+      // while the loader behind it (loadq[1]) has never been polled and still
+      // holds &OpenFile. The offset whose code-address VALUE differs between the
+      // two is mState; front's value names the stuck state (OpenFile/LoadHeader/
+      // LoadDir/LoadResources/CreateObjects/LoadObjs/DoneLoading, declared in
+      // that order so their addresses tend to be monotonic).
+      {
+        uint32_t n2 = r32(dummy);
+        uint32_t objs[2] = {0, 0};
+        for (int q = 0; q < 2 && n2 && n2 != dummy; ++q) {
+          uint32_t ldr = r32(n2 + 8);
+          objs[q] = ldr;
+          std::string all;
+          for (uint32_t d = 0; d < 0xB0; d += 4) {
+            all += fmt::format(" {:08X}", r32(ldr + d));
+          }
+          XELOGE("RB3DX UI PROBE[{}]:   ldr-all[{}] {:08X}:{}", sample, q, ldr,
+                 all);
+          n2 = r32(n2);
+        }
+        // Explicit per-word diff of the two loader objects: names exactly which
+        // offset(s) the actively-polled front loader has advanced vs the queued
+        // (OpenFile-state) one behind it.
+        if (objs[0] && objs[1]) {
+          std::string diff;
+          for (uint32_t d = 0; d < 0xB0; d += 4) {
+            uint32_t a = r32(objs[0] + d), b = r32(objs[1] + d);
+            if (a != b) diff += fmt::format(" +{:X}:{:08X}vs{:08X}", d, a, b);
+          }
+          XELOGE("RB3DX UI PROBE[{}]:   ldr-diff front-vs-queued:{}", sample,
+                 diff.empty() ? " (identical)" : diff.c_str());
+        }
+      }
       // Front-loader change detector: distinguishes "PollLoading body never
       // runs" (frozen bytes = budget starvation before the first state step,
       // the HX_NATIVE-documented CheckSplit gate) from "OpenFile runs but
@@ -2138,7 +2173,11 @@ static void Rb3dxUiProbeThread(Memory* memory,
             0x8246B880u, 0x82741200u, 0x82741300u, 0x82741400u, 0x82741500u,
             0x82741600u, 0x82741700u, 0x82741800u, 0x82741900u, 0x82741A00u,
             0x82A89A00u, 0x82A8B900u, 0x82A8BA00u, 0x823E0700u, 0x823EDC00u,
-            0x8250F800u, 0x82272E00u, 0x822703D0u, 0x82270400u}) {
+            0x8250F800u, 0x82272E00u, 0x822703D0u, 0x82270400u,
+            // tid=9 loader/consumer wait site (lr 0x8286C5BC), the worker-pool
+            // producer that sets events (lr 0x8283D3D4), and the worker idle
+            // loop (0x82844CF8) -- to identify the thread-pool dispatch path.
+            0x8286C580u, 0x8283D380u, 0x82844CC0u}) {
         std::string row;
         for (uint32_t d = 0; d < 0x100; d += 4) {
           row += fmt::format(" {:08X}", r32(fn + d));

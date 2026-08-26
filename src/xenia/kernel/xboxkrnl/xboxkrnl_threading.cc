@@ -824,6 +824,14 @@ uint32_t xeNtSetEvent(uint32_t handle, xe::be<uint32_t>* previous_state_ptr) {
 
   if (cvars::headless_thread_diagnostics) {
     SetEventCensusRecord(handle);
+    // ALSO record under the event's guest object VA. KeWaitForSingleObject
+    // waiters key the wait census by object pointer, but the RB3 worker-pool
+    // producer signals via NtSetEvent (handle-based); without this the parked
+    // reaper reports those events as NEVER-SET even when they are being
+    // signalled every cycle (a keying mismatch, not a lost wakeup).
+    if (ev && ev->guest_object()) {
+      SetEventCensusRecord(ev->guest_object());
+    }
   }
 
   // (Removed 2026-08-25, fork-cleanup section 2.) An unconditional per-call
