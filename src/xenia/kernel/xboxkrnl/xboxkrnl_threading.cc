@@ -9,7 +9,10 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <map>
 #include <mutex>
+#include <thread>
 #include <vector>
 
 #include "xenia/base/atomic.h"
@@ -99,6 +102,63 @@ static bool ReadGuestStackWord(Memory* memory, uint32_t guest_addr,
 // and can be replaced together if a real accessor appears.
 static bool IsMainGuestThread(XThread* thread) {
   return thread && thread->thread_id() == 6;
+}
+
+// --- Wait census (--headless_thread_diagnostics) -------------------------
+// The clean-TU5 flow stall (wiki 8h next-step (a)) is a lockstep handshake
+// where the parked party is some guest worker, and every thread-enumeration
+// surface (threads_by_id_, object table, ThreadDebugInfo) loses guest
+// threads within ~20s of boot. So instead of enumerating threads from
+// outside, record every guest thread's in-flight NtWait/KeWait here, from
+// inside the shim, and have a reaper log any wait parked >10s with its
+// tid/handle/guest-LR. Bounded: one map entry per live tid.
+struct WaitCensusEntry {
+  uint32_t handle;
+  uint32_t guest_lr;
+  std::chrono::steady_clock::time_point enter;
+};
+static std::mutex g_wait_census_mutex;
+static std::map<uint32_t, WaitCensusEntry> g_wait_census_active;
+static std::atomic<bool> g_wait_census_reaper_started{false};
+
+static void WaitCensusEnter(uint32_t handle_or_obj) {
+  auto* thread = XThread::GetCurrentThread();
+  if (!thread || !thread->thread_state()) return;
+  auto* ctx = thread->thread_state()->context();
+  uint32_t lr = ctx ? static_cast<uint32_t>(ctx->lr) : 0;
+  uint32_t tid = thread->thread_id();
+  {
+    std::lock_guard<std::mutex> g(g_wait_census_mutex);
+    g_wait_census_active[tid] = {handle_or_obj, lr,
+                                 std::chrono::steady_clock::now()};
+  }
+  if (!g_wait_census_reaper_started.exchange(true)) {
+    std::thread([]() {
+      for (;;) {
+        std::this_thread::sleep_for(std::chrono::seconds(5));
+        auto now = std::chrono::steady_clock::now();
+        std::lock_guard<std::mutex> g(g_wait_census_mutex);
+        for (auto& [tid, e] : g_wait_census_active) {
+          auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        now - e.enter)
+                        .count();
+          if (ms > 10000) {
+            XELOGE(
+                "WAITCENSUS: tid={} PARKED {}ms in wait handle/obj=0x{:08X} "
+                "guest_lr={:08X}",
+                tid, ms, e.handle, e.guest_lr);
+          }
+        }
+      }
+    }).detach();
+  }
+}
+
+static void WaitCensusExit() {
+  auto* thread = XThread::GetCurrentThread();
+  if (!thread) return;
+  std::lock_guard<std::mutex> g(g_wait_census_mutex);
+  g_wait_census_active.erase(thread->thread_id());
 }
 
 // r13 + 0x100: pointer to thread local state
@@ -1073,8 +1133,14 @@ dword_result_t KeWaitForSingleObject_entry(lpvoid_t object_ptr,
     }
   }
   uint64_t timeout = timeout_ptr ? static_cast<uint64_t>(*timeout_ptr) : 0u;
+  if (cvars::headless_thread_diagnostics) {
+    WaitCensusEnter(object_ptr.guest_address());
+  }
   auto result = xeKeWaitForSingleObject(object_ptr, wait_reason, processor_mode,
                                  alertable, timeout_ptr ? &timeout : nullptr);
+  if (cvars::headless_thread_diagnostics) {
+    WaitCensusExit();
+  }
   // Trace main thread wait returns
   if (cvars::headless_thread_diagnostics) {
     auto* thread = XThread::GetCurrentThread();
@@ -1122,8 +1188,14 @@ dword_result_t NtWaitForSingleObjectEx_entry(dword_t object_handle,
   if (object) {
     uint64_t timeout = timeout_ptr ? static_cast<uint64_t>(*timeout_ptr) : 0u;
 
+    if (cvars::headless_thread_diagnostics) {
+      WaitCensusEnter(object_handle);
+    }
     result =
         object->Wait(3, wait_mode, alertable, timeout_ptr ? &timeout : nullptr);
+    if (cvars::headless_thread_diagnostics) {
+      WaitCensusExit();
+    }
   } else {
     result = X_STATUS_INVALID_HANDLE;
   }
@@ -1161,10 +1233,17 @@ dword_result_t KeWaitForMultipleObjects_entry(
   }
 
   uint64_t timeout = timeout_ptr ? static_cast<uint64_t>(*timeout_ptr) : 0u;
-  return XObject::WaitMultiple(uint32_t(objects.size()),
-                               reinterpret_cast<XObject**>(objects.data()),
-                               wait_type, wait_reason, processor_mode,
-                               alertable, timeout_ptr ? &timeout : nullptr);
+  if (cvars::headless_thread_diagnostics) {
+    WaitCensusEnter(count ? static_cast<uint32_t>(objects_ptr[0]) : 0);
+  }
+  auto result = XObject::WaitMultiple(
+      uint32_t(objects.size()), reinterpret_cast<XObject**>(objects.data()),
+      wait_type, wait_reason, processor_mode, alertable,
+      timeout_ptr ? &timeout : nullptr);
+  if (cvars::headless_thread_diagnostics) {
+    WaitCensusExit();
+  }
+  return result;
 }
 DECLARE_XBOXKRNL_EXPORT3(KeWaitForMultipleObjects, kThreading, kImplemented,
                          kBlocking, kHighFrequency);
@@ -1195,9 +1274,16 @@ dword_result_t NtWaitForMultipleObjectsEx_entry(
     dword_t count, lpdword_t handles, dword_t wait_type, dword_t wait_mode,
     dword_t alertable, lpqword_t timeout_ptr) {
   uint64_t timeout = timeout_ptr ? static_cast<uint64_t>(*timeout_ptr) : 0u;
-  return xeNtWaitForMultipleObjectsEx(count, handles, wait_type, wait_mode,
-                                      alertable,
-                                      timeout_ptr ? &timeout : nullptr);
+  if (cvars::headless_thread_diagnostics) {
+    WaitCensusEnter(count ? static_cast<uint32_t>(handles[0]) : 0);
+  }
+  auto result = xeNtWaitForMultipleObjectsEx(count, handles, wait_type,
+                                             wait_mode, alertable,
+                                             timeout_ptr ? &timeout : nullptr);
+  if (cvars::headless_thread_diagnostics) {
+    WaitCensusExit();
+  }
+  return result;
 }
 DECLARE_XBOXKRNL_EXPORT3(NtWaitForMultipleObjectsEx, kThreading, kImplemented,
                          kBlocking, kHighFrequency);
