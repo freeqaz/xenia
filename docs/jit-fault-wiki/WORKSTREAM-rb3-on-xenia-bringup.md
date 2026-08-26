@@ -1206,6 +1206,57 @@ one does not). DC3 non-regression re-verified: exactly **627** forced-trap hits 
 
 ---
 
+### 8m. 2026-08-26 (later) — the splash-path wedge is a LoadMgr pump stall: `LoadMgr::Poll()` stops being called
+
+Dug into the boot5/splash-redirect path (which skips the intro movie). It wedges transitioning
+into `splash_screen` (`transState=1`, `curScreen=<null>` forever). Reliable chain, each step
+instrumented and cross-checked:
+
+1. **Front loader is a char-cache extras milo, stuck in `OpenFile`.** `world/shared/extras/
+   male_extras01.milo` (a `DirLoader`) sits at `mLoading.front()` and never completes. A full
+   `[0,0xB0)` object dump diffed against the queued `female_extras01` (still at its initial
+   `&DirLoader::OpenFile`) shows **no code-word differs** — only per-loader heap pointers (`+30`,
+   `+5C`) and ids. So male_extras01's `mState` PTMF is *also* still `&OpenFile`. Since
+   `DirLoader::OpenFile` advances to `LoadHeader` (or `Cleanup`+dequeues) unconditionally in one
+   call, being stuck in it means **it is never being called**.
+2. **Not budget starvation.** The retail `DirLoader::PollLoading` is the Wii time-sliced form
+   (`while (!CheckSplit() && GetFirstLoading()==this && !IsLoaded()) step()`), and the decomp
+   comment warns a loader can "sit in OpenFile forever" if `CheckSplit()` trips before the first
+   step. But forcing unbudgeted polling (`--rb3_loadmgr_unbudget`: `mPeriod` **and** `unk1c` both
+   `1e30`, verified live in the LoadMgr dump — `CheckSplit()` can never trip) does **not** advance
+   it. So the loop body isn't being gated out; it isn't being reached.
+3. **Root: `LoadMgr::Poll()` is not being called at all.** `LoadMgr::Poll()` does
+   `mTimer.Restart()` at entry. The LoadMgr `mTimer` word (`0x82E06E58`) is **byte-static across
+   every probe** in the wedged phase (`270B7B5A`, probes 20–29). A frozen `mTimer` means `Poll()`
+   never runs while male_extras01 is queued — nothing pumps the loader queue.
+4. **The main thread stopped pumping.** tid=6 (main) signals the splash-worker handshake event
+   `0xF8000030` via `NtSetEvent` — `set_count` climbs to **979** during boot then **freezes**
+   (age grows 23s→43s, no new sets). So tid=6 left the frame loop at ~15s and is now blocked or
+   busy-spinning somewhere that neither sets the handshake nor calls `LoadMgr::Poll()`. It is
+   **not** in a `Ke` wait (absent from the parked census down to the 10s threshold), so it is a
+   busy-spin, most likely `while (!screenLoaded) …` waiting for the char cache that only `Poll()`
+   could advance — a self-deadlock the frame loop avoids on hardware.
+
+**Ruled out this pass:**
+- **tid=9 `[NEVER-SET]` was a red herring.** It parks on a heap `KEVENT` `0x433DB2C0` via
+  `KeWaitForSingleObject` (site `0x8286C5BC`; the producer signals via `NtSetEvent` at `0x8283D3D4`
+  — both identified by disassembling the live image). It parks from early boot and stays parked
+  while loaders *do* advance through several milos, so it is an idle pool worker, not the loader
+  driver. Confirmed genuinely never-signalled only after fixing a **census keying bug**:
+  `KeWaitForSingleObject` waiters were keyed by object pointer but sets were recorded only by
+  `NtSetEvent` handle, so every Ke-waiter falsely read `[NEVER-SET]`. `xeNtSetEvent` now also
+  records the census under the event's guest object VA.
+
+**Gap remaining (next step):** identify *where* tid=6 busy-spins (which screen-load / transition
+wait), then either make that wait pump `LoadMgr::Poll()` or force the gate the way DC3 forces
+`MoviePanel::IsLoaded`. The intro-movie path (§8l) and this splash path likely share the shape
+"a boot-time wait that stops pumping the loader," just at different screens.
+
+DC3 non-regression re-verified: exactly **627** forced-trap hits, cvar off (`/tmp/dc3-regcheck11`).
+Diagnostics/fix on branch `rb3-tu5-loader-pump-diag` (`3487f8879`).
+
+---
+
 ## 9. Related docs
 
 Inside this wiki (`docs/jit-fault-wiki/`):
