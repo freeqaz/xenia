@@ -279,6 +279,15 @@ DEFINE_bool(
     "boot freeze at the char-cache extras milos. Guest-data poke only; no "
     "code patches. Title-gated => DC3-inert.",
     "CPU");
+DEFINE_bool(
+    rb3_tu5_hash_poke, false,
+    "RB3 TU5 (title 0x45410914), default off, requires --rb3dx_ui_probe: "
+    "rewrite the exe's embedded ark-integrity SHA1s for the two dtbs the "
+    "clean-TU5 boot patch modifies (ui.dtb, splash.dtb) so the anti-tamper "
+    "check stops silently quitting the game during App::App. Equivalent to "
+    "arkhelper patchcreator's exePath hash patching, applied in guest memory. "
+    "Title-gated => DC3-inert.",
+    "CPU");
 DEFINE_uint64(
     rb3dx_si_claim_anchor, 0,
     "RB3DX (title 0x45410914), default 0 (off), requires --rb3dx_ui_probe: "
@@ -2121,7 +2130,7 @@ static void Rb3dxUiProbeThread(Memory* memory,
             0x8246B880u, 0x82741200u, 0x82741300u, 0x82741400u, 0x82741500u,
             0x82741600u, 0x82741700u, 0x82741800u, 0x82741900u, 0x82741A00u,
             0x82A89A00u, 0x82A8B900u, 0x82A8BA00u, 0x823E0700u, 0x823EDC00u,
-            0x8250F800u, 0x82272E00u}) {
+            0x8250F800u, 0x82272E00u, 0x822703D0u, 0x82270400u}) {
         std::string row;
         for (uint32_t d = 0; d < 0x100; d += 4) {
           row += fmt::format(" {:08X}", r32(fn + d));
@@ -2157,6 +2166,65 @@ static void Rb3dxUiProbeThread(Memory* memory,
     if (s_gmainthread_addr) {
       XELOGE("RB3DX UI PROBE[{}]: gMainThreadID @{:08X} = {:08X}", sample,
              s_gmainthread_addr, r32(s_gmainthread_addr));
+    }
+    // --rb3_tu5_hash_poke: the TU5 exe embeds 922 per-file SHA1s of ark
+    // entries (arkhelper hashfinder verified); a patchcreator ark whose
+    // ui.dtb/splash.dtb no longer match makes the game silently set its quit
+    // flag during App::App and exit App::Run before the first frame (the
+    // "clean-TU5 boot freeze" = that quit + a teardown spin). arkhelper's own
+    // fix is patching the hashes into the exe; do the equivalent in guest
+    // memory: find the two original 20-byte hashes in the image once, then
+    // overwrite (and re-assert each tick) with the patched files' hashes.
+    if (cvars::rb3_tu5_hash_poke) {
+      struct HashFix {
+        uint8_t orig[20];
+        uint8_t fixed[20];
+        uint32_t addr;  // 0 until found
+      };
+      // ui/gen/ui.dtb, ui/splash/gen/splash.dtb (patched 2026-08-26).
+      static HashFix s_fixes[2] = {
+          {{0xE0, 0x16, 0x62, 0x1C, 0xAF, 0xDA, 0xFD, 0xAB, 0xDA, 0xDA,
+            0x1A, 0x3A, 0x91, 0xB1, 0x83, 0xA4, 0x9E, 0x00, 0xC8, 0x8A},
+           {0x57, 0x35, 0xA7, 0xC1, 0x74, 0x04, 0xE4, 0xCB, 0xE1, 0x15,
+            0xCA, 0x21, 0x22, 0xA9, 0x46, 0x71, 0xD4, 0x5D, 0x90, 0x30},
+           0},
+          {{0x5B, 0x7B, 0x45, 0xD9, 0x12, 0x5A, 0xF5, 0x4D, 0xC0, 0xE7,
+            0x5E, 0x9B, 0xF3, 0x89, 0x03, 0x5B, 0x30, 0xC3, 0x0C, 0x25},
+           {0x53, 0xB2, 0x51, 0x54, 0x50, 0xFA, 0x40, 0xD9, 0xDC, 0x15,
+            0x31, 0x85, 0xDE, 0xDE, 0x23, 0x9C, 0x02, 0x49, 0xAA, 0x16},
+           0}};
+      for (auto& fix : s_fixes) {
+        if (!fix.addr) {
+          for (uint32_t a = 0x82000000u; a < 0x82E00000u && !fix.addr;
+               a += 4) {
+            if (r32(a) != (uint32_t(fix.orig[0]) << 24 |
+                           uint32_t(fix.orig[1]) << 16 |
+                           uint32_t(fix.orig[2]) << 8 | fix.orig[3])) {
+              continue;
+            }
+            bool all = true;
+            for (int k = 4; k < 20 && all; ++k) {
+              all = *(base + a + k) == fix.orig[k];
+            }
+            if (all) fix.addr = a;
+          }
+          if (fix.addr) {
+            XELOGE("RB3DX UI PROBE[{}]: TU5 hash table entry found @{:08X}",
+                   sample, fix.addr);
+          }
+        }
+        if (fix.addr && *(base + fix.addr) != fix.fixed[0]) {
+          // The table likely lives in a read-only image section; unprotect
+          // the pages first (same rule as PPC bytepatches).
+          if (auto* heap = memory->LookupHeap(fix.addr)) {
+            heap->Protect(fix.addr & ~0xFFFu, 0x2000,
+                          kMemoryProtectRead | kMemoryProtectWrite);
+          }
+          std::memcpy(base + fix.addr, fix.fixed, 20);
+          XELOGE("RB3DX UI PROBE[{}]: TU5 hash poked @{:08X}", sample,
+                 fix.addr);
+        }
+      }
     }
     // --- one-shot handshake-object locator: the boot-blocking wait loop
     // (fn 0x827414E0) waits on two event handles at obj+0x8C/+0x90 with the
