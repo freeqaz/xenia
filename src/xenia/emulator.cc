@@ -1760,24 +1760,34 @@ static void Rb3dxUiProbeThread(Memory* memory,
     // thread's context: individual samples may tear; consistent repetition
     // across samples is the signal, single odd frames are not.
     if (auto* ks = kernel_state) {
-      if (auto main_th = ks->GetThreadByID(6)) {
-        auto* tstate = main_th->thread_state();
+      // Walk every live guest thread (ids are small ints) every 5th tick; the
+      // stuck party in a lockstep handshake is usually NOT the thread you
+      // first suspected, so sample them all rather than just thid 6.
+      bool full_sweep = (sample % 5) == 1;
+      for (uint32_t tid = 1; tid <= 40; ++tid) {
+        if (!full_sweep && tid != 6) continue;
+        auto th = ks->GetThreadByID(tid);
+        if (!th) continue;
+        auto* tstate = th->thread_state();
         auto* ctx = tstate ? tstate->context() : nullptr;
-        if (ctx) {
-          uint32_t mlr = static_cast<uint32_t>(ctx->lr);
-          uint32_t msp = static_cast<uint32_t>(ctx->r[1]);
-          std::string chain;
-          uint32_t s = msp;
-          for (int i = 0; i < 16 && s; ++i) {
-            uint32_t bc = r32(s);
-            if (bc <= s || bc - s > 0x100000) break;
-            uint32_t slr = r32(bc - 8);
-            chain += fmt::format(" {:08X}", slr);
-            s = bc;
-          }
-          XELOGE("RB3DX UI PROBE[{}]:   mainthr lr={:08X} sp={:08X} chain:{}",
-                 sample, mlr, msp, chain);
+        if (!ctx) continue;
+        uint32_t mlr = static_cast<uint32_t>(ctx->lr);
+        uint32_t msp = static_cast<uint32_t>(ctx->r[1]);
+        std::string chain;
+        uint32_t s = msp;
+        for (int i = 0; i < 16 && s; ++i) {
+          uint32_t bc = r32(s);
+          if (bc <= s || bc - s > 0x100000) break;
+          uint32_t slr = r32(bc - 8);
+          chain += fmt::format(" {:08X}", slr);
+          s = bc;
         }
+        XELOGE(
+            "RB3DX UI PROBE[{}]:   thr{} '{}' lr={:08X} sp={:08X} r3={:08X} "
+            "r4={:08X} r5={:08X} chain:{}",
+            sample, tid, th->thread_name(), mlr, msp,
+            static_cast<uint32_t>(ctx->r[3]), static_cast<uint32_t>(ctx->r[4]),
+            static_cast<uint32_t>(ctx->r[5]), chain);
       }
     }
     // --- SI claim-table dump (--rb3dx_si_claim_anchor): the DLL's own
