@@ -309,6 +309,18 @@ DEFINE_bool(
     "arkhelper patchcreator's exePath hash patching, applied in guest memory. "
     "Title-gated => DC3-inert.",
     "CPU");
+DEFINE_bool(
+    rb3_no_char_preview, false,
+    "RB3 TU5 (title 0x45410914), default off: no-op CharSync::UpdateCharCache "
+    "(0x82564698) via a guest-function override so the band-member preview "
+    "char-cache extras (world/shared/extras/male_extras0N.milo) are never "
+    "queued. Those loaders sit kLoadFront at the head of the single main-thread "
+    "load FIFO and, when one stalls, head-of-line-block the splash_screen "
+    "panels behind them -- freezing the whole cooperative-loader frame loop "
+    "~13s into boot (clean-TU5 wedge). Byte-for-byte equivalent to the rb3 "
+    "native port's RB3_NO_CHAR_PREVIEW early-return; previews are cosmetic and "
+    "off the boot-to-menu path. Title-gated + default-off => DC3-inert.",
+    "CPU");
 DEFINE_uint64(
     rb3dx_si_claim_anchor, 0,
     "RB3DX (title 0x45410914), default 0 (off), requires --rb3dx_ui_probe: "
@@ -1363,6 +1375,24 @@ void Rb3dxIsHostOfflineExtern(cpu::ppc::PPCContext* ppc_context,
   // this machine is the host. The real code asks Quazal only when mQNet!=0
   // (this+0x70), which headless returns false and causes the join stall.
   ppc_context->r[3] = 1;
+}
+
+// RB3 TU5 clean-boot: no-op CharSync::UpdateCharCache (0x82564698, void ret).
+// Register as a guest-function override so the band-member preview char cache
+// is never streamed -- its extras milos (world/shared/extras/male_extras0N.milo)
+// are queued kLoadFront at the head of the single main-thread load FIFO and
+// head-of-line-block the splash_screen panels behind them, freezing the whole
+// cooperative-loader frame loop ~13s in. Empty body = the guest fn returns
+// immediately, exactly like the rb3 native port's RB3_NO_CHAR_PREVIEW.
+void Rb3NoCharPreviewExtern(cpu::ppc::PPCContext* ppc_context,
+                            kernel::KernelState* kernel_state) {
+  static std::atomic<uint32_t> s_calls{0};
+  uint32_t n = s_calls.fetch_add(1, std::memory_order_relaxed);
+  if (n < 4 && ppc_context) {
+    XELOGI("RB3 no-char-preview: UpdateCharCache hit #{} suppressed (lr=0x{:08X})",
+           n, static_cast<uint32_t>(ppc_context->lr));
+  }
+  // void return; do not touch r[3].
 }
 
 // RB3DX / RB3 TU5 first-boot calibration skip (--rb3dx_skip_calibration).
@@ -5059,6 +5089,21 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
           "0x{:08X} (filter lr=0x827BCD40)",
           kSaveGprLr23);
     }
+  }
+
+  // RB3 TU5 (0x45410914): no-op CharSync::UpdateCharCache to clear the
+  // head-of-line char-cache stall that freezes the clean-TU5 boot at the
+  // splash_screen transition (--rb3_no_char_preview). Register early here,
+  // before the JIT compiles the direct `bl 0x82564698` in App::App (0x82271490),
+  // so the override takes. Title-gated + default-off => DC3-inert.
+  if (title_id_.has_value() && title_id_.value() == 0x45410914 &&
+      cvars::rb3_no_char_preview) {
+    const uint32_t kUpdateCharCache = 0x82564698;
+    processor_->RegisterGuestFunctionOverride(
+        kUpdateCharCache, Rb3NoCharPreviewExtern,
+        "RB3:CharSync::UpdateCharCache(no-op)");
+    XELOGI("RB3: UpdateCharCache no-op override installed at 0x{:08X}",
+           kUpdateCharCache);
   }
 
   // RB3DX (0x45410914): per-allocation binary trace for the heap-"main"
