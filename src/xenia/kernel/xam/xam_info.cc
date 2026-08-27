@@ -320,6 +320,16 @@ void XamLoaderLaunchTitle_entry(lpstring_t raw_name_ptr, dword_t flags) {
 DECLARE_XAM_EXPORT1(XamLoaderLaunchTitle, kNone, kSketchy);
 
 void XamLoaderTerminateTitle_entry() {
+  // clean-TU5 diag: retail RB3 cleanly terminates ~16s into boot; capture the
+  // guest caller so we can name the code path that gives up on the title.
+  auto* cur = XThread::GetCurrentThread();
+  uint32_t lr = 0, tid = 0;
+  if (cur && cur->thread_state() && cur->thread_state()->context()) {
+    lr = static_cast<uint32_t>(cur->thread_state()->context()->lr);
+    tid = cur->thread_id();
+  }
+  XELOGE("RB3DX TERMINATE: XamLoaderTerminateTitle called tid={} guest_lr={:08X}",
+         tid, lr);
   // This function does not return.
   kernel_state()->TerminateTitle();
 }
