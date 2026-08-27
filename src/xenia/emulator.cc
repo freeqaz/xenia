@@ -69,6 +69,7 @@
 #include "xenia/kernel/xam/xam_module.h"
 #include "xenia/kernel/xbdm/xbdm_module.h"
 #include "xenia/kernel/xboxkrnl/xboxkrnl_module.h"
+#include "xenia/kernel/xevent.h"
 #include "xenia/memory.h"
 #include "xenia/vfs/devices/disc_image_device.h"
 #include "xenia/vfs/devices/host_path_device.h"
@@ -278,6 +279,18 @@ DEFINE_bool(
     "BEFORE advancing), starving the front loader forever: the clean-TU5 "
     "boot freeze at the char-cache extras milos. Guest-data poke only; no "
     "code patches. Title-gated => DC3-inert.",
+    "CPU");
+DEFINE_bool(
+    rb3_splash_unwedge, false,
+    "RB3 TU5 (title 0x45410914), default off, requires --rb3dx_ui_probe: break "
+    "the clean-TU5 boot deadlock in Splash::EndSplasher. App::App's EndSplasher "
+    "calls SetImmutableState(kTerminating) which no-ops when a Suspend is "
+    "in-flight (mState<kResumed), then blocks in WaitForState(kTerminated) "
+    "forever while the SplashThread worker is parked in WaitForState(kResuming). "
+    "This finds the live Splash (tid=6 stack) and drives the state machine to "
+    "completion (resume the worker, then terminate it) so App::App returns and "
+    "the frame loop resumes pumping the loader. Guest-memory poke + NtSetEvent "
+    "only. Title-gated => DC3-inert.",
     "CPU");
 DEFINE_bool(
     rb3_overlapped_scan, false,
@@ -1790,6 +1803,20 @@ static void Rb3dxUiProbeThread(Memory* memory,
     // thread's context: individual samples may tear; consistent repetition
     // across samples is the signal, single odd frames are not.
     if (processor) {
+      // Definitive tid=6 (Main XThread) liveness probe every sample: is main
+      // Alive(0)/Waiting(1)/Exited(2)/Zombie(3), or entirely ABSENT from the
+      // registry? Distinguishes "main busy-spins" from "main already exited and
+      // a worker spins" -- the linchpin for the clean-TU5 wedge diagnosis.
+      {
+        auto* i6 = processor->QueryThreadDebugInfo(6);
+        if (!i6) {
+          XELOGE("RB3DX UI PROBE[{}]: TID6 ABSENT (erased from registry)",
+                 sample);
+        } else {
+          XELOGE("RB3DX UI PROBE[{}]: TID6 state={} thread_ptr={}", sample,
+                 static_cast<int>(i6->state), i6->thread ? 1 : 0);
+        }
+      }
       // Walk every live guest thread every 5th tick; the stuck party in a
       // lockstep handshake is usually NOT the thread you first suspected, so
       // sample them all. Enumerate via the debugger's ThreadDebugInfo registry:
@@ -1798,12 +1825,18 @@ static void Rb3dxUiProbeThread(Memory* memory,
       // ~20s of boot, which blinded the two earlier samplers in turn.
       bool full_sweep = (sample % 5) == 1;
       for (auto* info : processor->QueryThreadDebugInfos()) {
-        if (!info || info->state != cpu::ThreadDebugInfo::State::kAlive ||
-            !info->thread) {
+        // Accept kAlive AND kWaiting: a busy-spin that momentarily dips into a
+        // guest wait gets stuck marked kWaiting (OnThreadLeavingWait is not
+        // always paired), which silently dropped the main thread from the dump
+        // ~20s in. Only a null thread ptr (kZombie/destroyed) is truly unreadable.
+        if (!info || !info->thread ||
+            (info->state != cpu::ThreadDebugInfo::State::kAlive &&
+             info->state != cpu::ThreadDebugInfo::State::kWaiting)) {
           continue;
         }
         uint32_t tid = info->thread_id;
         if (!full_sweep && tid != 6) continue;
+        int dbg_state = static_cast<int>(info->state);
         auto* tstate = info->thread->thread_state();
         auto* ctx = tstate ? tstate->context() : nullptr;
         if (!ctx) continue;
@@ -1819,11 +1852,82 @@ static void Rb3dxUiProbeThread(Memory* memory,
           s = bc;
         }
         XELOGE(
-            "RB3DX UI PROBE[{}]:   thr{} lr={:08X} sp={:08X} r3={:08X} "
+            "RB3DX UI PROBE[{}]:   thr{} st={} lr={:08X} sp={:08X} r3={:08X} "
             "r4={:08X} r5={:08X} chain:{}",
-            sample, tid, mlr, msp, static_cast<uint32_t>(ctx->r[3]),
+            sample, tid, dbg_state, mlr, msp, static_cast<uint32_t>(ctx->r[3]),
             static_cast<uint32_t>(ctx->r[4]),
             static_cast<uint32_t>(ctx->r[5]), chain);
+      }
+      // --rb3_splash_unwedge: break the Splash::EndSplasher boot deadlock.
+      // App::App's EndSplasher (0x82742620) calls SetImmutableState(kTerminating)
+      // which no-ops when a Suspend is in-flight (mState<kResumed), then blocks
+      // in WaitForState(kTerminated) at ret 0x82742668 forever while the
+      // SplashThread worker is parked in WaitForState(kResuming). Locate the live
+      // Splash via tid=6's stack: the WaitForState frame (saved_lr==0x82742668)
+      // saved r31 = Splash at (back-chain - 0x10). 360 layout: unk_0x88 event
+      // handle @ +0x8C (worker->main, tid6 waits), unk_0xAC @ +0x90 (main->worker,
+      // tid13 waits), mState @ +0x94. Drive the state machine to termination.
+      if (cvars::rb3_splash_unwedge) {
+        uint32_t splash = 0;
+        for (auto* info : processor->QueryThreadDebugInfos()) {
+          if (!info || info->state != cpu::ThreadDebugInfo::State::kAlive ||
+              !info->thread || info->thread_id != 6) {
+            continue;
+          }
+          auto* tstate = info->thread->thread_state();
+          auto* ctx = tstate ? tstate->context() : nullptr;
+          if (!ctx) continue;
+          uint32_t s = static_cast<uint32_t>(ctx->r[1]);
+          for (int i = 0; i < 24 && s; ++i) {
+            uint32_t bc = r32(s);
+            if (bc <= s || bc - s > 0x100000) break;
+            if (r32(bc - 8) == 0x82742668u) {
+              splash = r32(bc - 0x10);
+              break;
+            }
+            s = bc;
+          }
+        }
+        if (splash >= 0x40000000u && splash < 0x50000000u) {
+          uint32_t mstate = r32(splash + 0x94);
+          uint32_t ev_main = r32(splash + 0x8C);
+          uint32_t ev_wrk = r32(splash + 0x90);
+          XELOGE(
+              "RB3DX UI PROBE[{}]: SPLASH-UNWEDGE splash={:08X} mState={} "
+              "ev_main={:08X} ev_wrk={:08X}",
+              sample, splash, mstate, ev_main, ev_wrk);
+          auto poke = [&](uint32_t a, uint32_t v) {
+            if (auto* heap = memory->LookupHeap(a)) {
+              heap->Protect(a & ~0xFFFu, 0x2000,
+                            kMemoryProtectRead | kMemoryProtectWrite);
+            }
+            xe::store_and_swap<uint32_t>(base + a, v);
+          };
+          auto sig = [&](uint32_t handle) {
+            if (!handle) return;
+            auto ev = kernel_state->object_table()->LookupObject<kernel::XEvent>(
+                handle);
+            if (ev) ev->Set(0, false);
+          };
+          // State-driven drive toward kTerminated(8): satisfy the worker's
+          // WaitForState(kResuming=4) first, let it advance, then terminate and
+          // wake main. mState<8 means main is still stuck in EndSplasher.
+          if (mstate != 8) {
+            if (mstate < 4) {
+              poke(splash + 0x94, 4);  // kResuming -> release the worker
+              sig(ev_wrk);
+            } else if (mstate == 4 || mstate == 5) {
+              poke(splash + 0x94, 7);  // kTerminating
+              sig(ev_wrk);
+            } else {  // 6/7
+              poke(splash + 0x94, 8);  // kTerminated
+              sig(ev_wrk);
+              sig(ev_main);  // wake main out of WaitForState(kTerminated)
+            }
+          } else {
+            sig(ev_main);  // ensure main woke to observe kTerminated
+          }
+        }
       }
     }
     // --- TheLoadMgr candidate dump (clean-TU5 stall): the loader-code region
@@ -2177,12 +2281,43 @@ static void Rb3dxUiProbeThread(Memory* memory,
             // tid=9 loader/consumer wait site (lr 0x8286C5BC), the worker-pool
             // producer that sets events (lr 0x8283D3D4), and the worker idle
             // loop (0x82844CF8) -- to identify the thread-pool dispatch path.
-            0x8286C580u, 0x8283D380u, 0x82844CC0u}) {
+            0x8286C580u, 0x8283D380u, 0x82844CC0u,
+            // The tid=6 WaitForState handshake stall: SetMutableState/WaitForState
+            // cluster (0x82741400/500/E80), the scoped caller (0x82742620), the
+            // boot/frame fn that invokes it (0x82271500), and main's caller frames
+            // (0x82272E40..0x82272F80) to place this in App::App vs the frame loop.
+            0x82742620u, 0x827414C0u, 0x82741E80u, 0x82271580u, 0x82271600u,
+            0x82272E40u, 0x82272EC0u, 0x82272F40u,
+            // Sample-9 busy-spin chain (post-EndSplasher App::App init): main
+            // loops here forever without pumping TheLoadMgr (mTimer frozen).
+            // Return sites: 82272E9C(App::App) -> 8250F854 -> 8240EE38 ->
+            // 8273B2CC -> 82739BB8 -> 827334CC -> 8273CD10 -> 82858408 ->
+            // 82857F40, lr=82273334. Dump 0x180 around each to decode the loop.
+            0x8250F780u, 0x8240ED80u, 0x8273B200u, 0x82739B00u, 0x82733400u,
+            0x8273CC80u, 0x82858380u, 0x82857E80u, 0x82273280u, 0x82272E00u,
+            // main_impl(0x82272E60) calls three fns in order: App::App(ctor)
+            // 0x82270E68, then 0x822703D0, then 0x82270000 -- main spends boot
+            // time in the THIRD (its tree reaches 0x8250F820/0x8240EE10 poll).
+            // Classify all three + the two poll leaves to find the loop+gate.
+            0x82270000u, 0x82270100u, 0x82270200u, 0x82270300u, 0x822703D0u,
+            0x82270E68u, 0x8250F820u, 0x8250F890u, 0x8240EE10u, 0x82270E00u}) {
         std::string row;
-        for (uint32_t d = 0; d < 0x100; d += 4) {
+        for (uint32_t d = 0; d < 0x200; d += 4) {
           row += fmt::format(" {:08X}", r32(fn + d));
         }
         XELOGE("RB3DX UI PROBE[{}]: CODE {:08X}:{}", sample, fn, row);
+      }
+      // Poll-singleton dump: 0x8240EE10 loads *(0x82C76B68) then calls its
+      // vtable slot 0x60. Dump the pointer, its vtable head, and the object so
+      // we can name the manager main polls each loop iteration.
+      {
+        uint32_t obj = r32(0x82C76B68u);
+        uint32_t vt = r32(obj);
+        std::string orow, vrow;
+        for (uint32_t d = 0; d < 0x40; d += 4) orow += fmt::format(" {:08X}", r32(obj + d));
+        for (uint32_t d = 0; d < 0x80; d += 4) vrow += fmt::format(" {:08X}", r32(vt + d));
+        XELOGE("RB3DX UI PROBE[{}]: POLLSINGLETON obj={:08X} vt={:08X} obj:[{}] vt:[{}]",
+               sample, obj, vt, orow, vrow);
       }
       // Decode &gMainThreadID out of MainThread() at 0x824A4C10: find the
       // first lis rD,H / lwz rT,L(rD) pair (MSVC absolute-address global
