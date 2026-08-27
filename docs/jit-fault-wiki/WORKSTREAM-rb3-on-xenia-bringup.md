@@ -1257,6 +1257,118 @@ Diagnostics/fix on branch `rb3-tu5-loader-pump-diag` (`3487f8879`).
 
 ---
 
+### 8n. 2026-08-27 — DEFINITIVE root cause: the Splash `EndSplasher` handshake deadlock in `App::App` (§8m's loader-pump was downstream)
+
+Dug in with opus subagents (decomp mapping) + live disassembly of the stuck stack. The wedge is **not**
+a loader problem at all — the loader-not-pumped (§8m) and male_extras01-stuck (§8m) are downstream
+symptoms of a **Splash worker-handshake deadlock inside `App::App()`**. Session 57's "two-sided worker
+handshake deadlock" was right; §8's later async-file (§8k/l) and loader-pump (§8m) theories were chasing
+symptoms.
+
+**Live stack of the stuck main thread (tid 6), stable/repeated across runs:**
+```
+KeWaitForSingleObject  <- Event::Wait (0x82527AB0)  <- WaitForState (0x827414E0)
+  <- EndSplasher (0x82742620, ret 0x82742668)  <- App::App boot (ret 0x82271590)  <- App::App (0x82270e68, ret 0x82272E8C)  <- main (0x82272E60)
+```
+main (`0x82272E60`) calls three methods off the App object `r31+0x50`: `App::App`=`0x82270e68`
+(ret `0x82272E8C`), `App::Run`=`0x822703d0`, `App::~App`=`0x82270000`. tid=6's return is `0x82272E8C`
+⇒ **still in `App::App`; the frame loop never starts**, so `SystemPoll→LoadMgr::Poll` never runs
+(hence §8m's byte-static `mTimer`) and every queued loader (male_extras01…) is a red herring.
+
+**The deadlock, proven at instruction level.** `0x82742620` is `Splash::EndSplasher`:
+```
+82742654 li r4,7 ; 82742658 bl 0x82741408   -> SetImmutableState(kTerminating=7)
+8274265C li r4,8 ; 82742660 mr r3,r31 ; 82742664 bl 0x827414e0  -> WaitForState(kTerminated=8)  [STUCK]
+```
+The setter `0x82741408` starts `lwz r11,0x94(r30); cmpwi r11,5; blt <fail>` — it **no-ops if
+`mState < kResumed(5)`**. A per-frame Suspend/Resume was in flight (`mState` = kSuspending/s2/s3), so
+`SetImmutableState(kTerminating)` returned 0 **without setting the state or signalling the worker**;
+retail has the `MILO_ASSERT` compiled out, so it fell straight into `WaitForState(kTerminated)`.
+Result: **main blocks on `unk_0x88`** (worker→main event, handle seen as `0xF80000D8`) waiting for
+`kTerminated`, while the **worker (tid 13) is parked in `WaitForState(kResuming)` on `unk_0xAC`**
+(main→worker event, `0xF8000030`, which main set 979× then stopped). Neither can advance — a genuine
+lost-step / interleave deadlock at splash teardown. Matches the subagent's Splash source analysis
+(`Splash.cpp:310` WaitForState, `:167/:189` Set{Mutable,Immutable}State, `:86-94` EndSplasher, `:326-342`
+CheckWorkerSuspend). `SetMutableState` (`0x82741408`): sets `mState`(+0x94), then `MainThread()`
+(`0x824A4C10`) picks the event — signals `+0x90` from main / `+0x8C` from worker.
+
+**360 Splash layout (from disasm; Wii `Splash.h` offsets differ):** `unk_0x88`(worker→main event handle)
+`@ +0x8C`, `unk_0xAC`(main→worker) `@ +0x90`, `mState` `@ +0x94`, `unk_0x64`(can-wait flag) `@ +0x64`.
+The 360 `SynchronizationEvent` packs to a **4-byte kernel event handle**; `::Set` = `NtSetEvent(handle)`.
+So from the host we can read the two handles at Splash+0x8C/+0x90 and `NtSetEvent` them, and poke
+`mState` at +0x94.
+
+**Fix plan (in progress, `--rb3_splash_unwedge`):** locate the live Splash via tid=6's stack (the
+WaitForState frame's saved r31, found at the frame whose saved_lr==`0x82742668`), then orchestrate the
+missing steps: poke `mState=kResuming(4)` + signal `unk_0xAC` (release the worker's WaitForState),
+let it reach kResumed, poke `mState=kTerminating(7)` + signal `unk_0xAC` (worker terminates → sets
+kTerminated + signals `unk_0x88`), and finally poke `mState=kTerminated(8)` + signal `unk_0x88` to wake
+main. Once App::App returns, the frame loop pumps the loader and the downstream male_extras01 stall
+resolves on its own. (A guest `RegisterGuestFunctionOverride` of `WaitForState`/`SetImmutableState` is
+the alternative but must not disturb the ~979 healthy Suspend/Resume cycles; the state-machine poke is
+scoped to the terminal deadlock only.)
+
+DC3 non-regression re-verified: exactly **627** forced-trap hits, cvar off.
+
+---
+
+### 8o. 2026-08-27 (later, session 60) — §8n REFUTED: the game RUNS; the wedge is a single-thread cooperative-loader head-of-line stall
+
+§8n's `EndSplasher` deadlock is **wrong** (like §8j/§8k/§8l/§8m before it — all downstream symptoms).
+Settled with a decisive per-sample `QueryThreadDebugInfo(6)` liveness probe + a `XamLoaderTerminateTitle`
+guest-caller hook + VdSwap present-counting. Proven facts:
+
+- **The game does not deadlock and does not quit.** `XamLoaderTerminateTitle` is never called; 0 forced
+  traps; no guest exception; no `SetDiskError`. VdSwap present-count reaches **#600 (tid 8) / #400 (tid 14)**
+  — the game renders ~600 frames.
+- **TID6 exiting ~18s is NORMAL handoff, not the wedge.** TID6 (the XEX entry / `main_impl` thread) is
+  `kAlive` through sample 9 then `kExited` — it finishes early boot and exits. The real frame loop runs
+  on **tid 8**. §8n (and earlier) had been reading the bootstrap thread. `EndSplasher`'s `WaitForState`
+  (ret `0x82742668`) is **transient**: main is in it at samples 7-8 and past it by 9. `main_impl`
+  (`0x82272E60`) = `App::App`(ctor `0x82270E68`) → `0x822703D0` (register App global) → `0x82270000`
+  (tail-calls the `0x8250F820` subscriber dispatch); by sample 9 the first two have already returned.
+- **The actual wedge:** the whole game loop **freezes ~13-14s** (last VdSwap #600 right after sample 7;
+  `LoadMgr` `mTimer` freezes the same instant). Same under `gpu=null` and `gpu=vulkan`, and in boot5
+  (splash-redirect) and boot6 (pure retail, stuck on `intro_movie_screen`). The `splash_screen`
+  transition is stuck `transState=1`, `curScreen=null`, waiting on 3 panels (`meta`/`sv8_panel`/
+  `splash_panel`, all `mLoaded=0`) queued **behind** a byte-frozen front-of-FIFO loader for the
+  char-cache extras (`world/shared/extras/male_extras0N.milo`).
+
+**Architecture (opus subagent, decomp cross-ref).** RB3's retail loader is **100% main-thread
+cooperatively pumped — there is NO game loader worker pool.** Loader progress happens only when the frame
+loop reaches `SystemPoll → TheLoadMgr.Poll` (`System.cpp:706`); `PollFrontLoader` (`Loader.cpp:803`) is
+strict head-of-line FIFO (advances `mLoading.front()` ONLY). The producer/consumer event pair
+(`0x8286C5BC` consumer wait / `0x8283D3D4` producer) is the **platform async-file backend**, not the
+game loader — the parked "workers" (tid 11/12/13 `[NEVER-SET]`) are a symptom. The freeze is that the
+main thread stopped calling `SystemPoll`: it is **trapped in a synchronous drain**
+(`PollUntilEmpty`/`PollUntilLoaded`, which pin `CheckSplit` off so each loader state func's
+`while(mStream->Eof()!=NotEof)` / `AsyncFile::Read`'s `while(!ReadDone())` becomes a no-yield spin) whose
+completion predicate never flips. Reads themselves are healthy (all `status=0`, no short reads / open
+failures), so the bytes arrive but the completion is not propagated up to the `ReadDone()`/`Eof()`
+predicate the drain spins on — the async-completion-propagation class (cf. §8k, DC3 s52). Because the
+drain is single-threaded and head-of-line, this starves **every** loader, not just the char extras.
+
+**`UpdateCharCache` no-op lever tested — insufficient alone (`--rb3_no_char_preview`).** Located
+`CharSync::UpdateCharCache` in the **XBOX 360** build via `rb3-xenon` `config/45410914/scope_map.json`
+(CharSync.cpp pinned `0x82564410..0x8256505C`; the largest unmatched fn `0x82564698` size `0x548` is
+UpdateCharCache — `0x82564E20` size `0x1A4` ≈ Wii `Handle` `0x1A0` validates the map). App::App calls it
+`bl 0x82564698` at `0x82271490`. The override fires and suppresses it (hit #0, lr `0x82271494`) but the
+extras are STILL queued and STILL freeze the boot → they are streamed by a **different** path (the splash
+screen's own band-member preview `BandCharacter::StartLoad`, or `CharCache::Init`), not just the App-ctor
+`UpdateCharCache`. Kept as a correct, gated lever (matches the port's `RB3_NO_CHAR_PREVIEW`) that will
+likely be needed **in combination with** the real fix.
+
+**Next.** Two orthogonal fixes the source supports: (1) the **correct** fix — make the async completion
+actually flip the loader's `ReadDone()`/`Eof()` predicate at the xenia async-file/OVERLAPPED layer (needs
+pinning the exact predicate the Xbox `AsyncFile`/`BlockMgr` drain spins on — reconcile with §8k/s58 which
+showed `io_status_block IS the OVERLAPPED` and is cleared, so the stuck loader must use a *different*
+completion path, e.g. a `BlockMgr`/`AsyncTask` event or APC); or (2) DC3-style, force the front
+`DirLoader`(s) to `DoneLoading` (poke `mState`→`&DirLoader::DoneLoading`; DirLoader.cpp fns pinned
+`0x8274DFD0`.. in the scope_map) so the drain exits and the splash panels reach the front. Diagnostics +
+`--rb3_no_char_preview` on branch `rb3-tu5-main-exit-diag`. DC3 627 re-verified.
+
+---
+
 ## 9. Related docs
 
 Inside this wiki (`docs/jit-fault-wiki/`):
