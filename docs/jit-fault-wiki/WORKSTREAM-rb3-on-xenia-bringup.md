@@ -1593,7 +1593,7 @@ host-drive the whole join / force the overshell slot to `kState_JoinedDefault` (
 style), bypassing input entirely. Commit `a27922d7f` on `frag-alloc-trace` holds the diagnosis +
 DIAG instrumentation. DC3 non-regression: 627 exact.
 
-### §8u — CORRECTED boot model + the reader DOES poll; real gate is input routing (s63)
+### §8u — ⚠️ SUPERSEDED BY §8v — boot model read from the WRONG (patched) PE; "input routing anomaly" was a logging artifact (s63)
 
 Disassembling the actual TU5 image (`rb3-xenon/tools/tu5_va.py` over `orig/45410914/band.exe`, which
 matches the running binary byte-for-byte — thread-census start addresses line up exactly) overturns
@@ -1632,6 +1632,70 @@ the reader don't route to xenia's handlers (a general fix here would make the re
 natively, no per-pad RE); (ii) the per-pad connection path (`0x82531f08` gate + downstream) — override
 `0x8283fb80` fully replicating the connect result, or hook higher. Commits `a27922d7f`, `bade8c652`,
 `b8a19ccbb` on `frag-alloc-trace`. DC3 non-regression: 627 exact.
+
+### §8v — ROOT CAUSE FOUND + MENU FLOW WORKING: the retail SEH null-write trick vs `--protect_zero=false` (s64)
+
+**⚠️ This section supersedes §8u's boot model and §8t/§8u's input-routing story. Read this one.**
+
+**The wrong-PE trap.** Everything §8u derived from `rb3-xenon/orig/45410914/band.exe` about `main`
+calling `0x82270080` was read from a **patched** image: that file differs from the actually-running
+clean TU5 (`/tmp/rb3tu5boot5/default.xex` = `rb3-xenon/_tu5probe/clean/band_clean_tu5.exe`) in 53
+words, one of which is `main`'s second call. The patched image carries `bc-always 0x82270080` at
+`0x82272E90` — i.e. **the RB3DX lineage ships exactly the fix we needed**, which is why RB3DX booted
+to gameplay while clean TU5 always flow-quit. Use `_tu5probe/clean/band_clean_tu5.exe` as the
+disassembly reference for clean-TU5 work.
+
+**The real boot model (clean image).** `main(0x82272E68)` = `bl App::App(0x82270e68)`;
+`bl App::Run(0x822703D0)`; `bl App::~App(0x82270000)`. `App::Run` stores `gTheApp`, installs an
+unhandled-exception filter (`0x822703A8`) via `SetUnhandledExceptionFilter(0x8283C6B0)`, and then
+**deliberately writes to guest address 0** (`stw r10,0(0)` @`0x822703FC`). On hardware the AV routes
+through the CRT `UnhandledExceptionFilter(0x8283C780)` to the app filter, and **the filter calls
+`App::RunWithoutDebugging(0x82270080)` — the real frame loop, which never returns.** Whole-image
+xref proof: `0x82270080` has exactly ONE caller in the binary (the filter); `SystemPoll(0x82510270)`
+has exactly one caller (inside the loop); `BandUI::Poll(0x825381C0)` is reachable only via the
+loop's `TheUI.Poll` vtable call (`TheUI` ptr at `0x82C721F0`, statically = TheBandUI `0x82DFD2B0`,
+slot 2). The loop body (`0x822700D4-0x82270184`, no conditional branches): `SystemPoll(false)` +
+UIStats/Achievements/AccomplishmentMgr/PrefabMgr/SaveLoadMgr/ProfileMgr/MusicLibrary/Synth/Net/
+RockCentral/EntityUploader polls + `TheUI.Poll` + `TheTaskMgr.Poll` + `App::DrawRegular(0x82270018)`.
+
+**Why we never entered it:** `--protect_zero=false` (shipped §07 for the separate `0x8275026C`
+page-0 read) commits guest page 0 R/W, so the null store **succeeds silently**, the filter never
+fires, `App::Run` returns in microseconds, and `main` falls into `App::~App` → `TheDebug.Exit
+(0x8250F820)` → exit-callback walk → audio teardown joins all worker threads → the "clean guest
+flow-quit" (§8p-8s). Corrected labels: `0x82270000` = **App::~App** (not "App::Poll");
+`0x8250F820` = **Debug::Exit** (not "poll-once+shutdown").
+
+**The fix — `--rb3_tu5_app_run_direct`** (title-gated `0x45410914`, default off, commit
+`c397a705d`): byte-patch `main`'s `bl 0x822703D0` at `0x82272E90` (pristine word `0x4BFFD541`) to
+`bl 0x82270080` (`0x4BFFD1F1`) — the same one-word patch the patched image ships. `r3` is already
+the `App*`.
+
+**Input was never broken.** With the frame loop running, everything the earlier sessions fought
+comes up natively: the joypad reader thread (`0x8252A3B0`) polls `XamInputGetState` (users 0/1
+SUCCESS under `--scripted_input`), XInput2's `OpenDevice` succeeds (caps poll `lr=0x8284E5DC`),
+`gLastXInputState` packet numbers go live, and `JoypadPollCommon(0x82526a00)` — which runs from
+**SystemPoll**, i.e. only inside the frame loop — writes `gJoypadData` `mConnected=1 type=2` for
+pads 0/1. Corrected: `0x82531f08` = **JoypadGetCachedXInputCaps**, a harmless caps *cache* whose
+failure both callers tolerate — NOT a connect gate. `mConnected=1` ⟺
+`gLastXInputState[pad].dwPacketNumber != -1`; nothing reads the caps masks. The §8t/§8u "import
+routing anomaly" was a double logging artifact (XELOGD filtered at default level; `--log_level=4`
+slows Checked so much the reader never spawns before the timeout) — refuted in commit `dba3ce2d4`.
+
+**Result (s64, 160s headless, `--gpu=null`):** splash_screen loads and completes → transition to
+`main_hub_screen` → `hint_rb3_welcome_screen` (first-boot hint) dismissed by scripted A →
+navigated to `manage_band_screen` by further presses. ~56 fps (7276 XE_SWAP / 130s). Run recipe:
+
+```
+xenia-headless --target=/tmp/rb3tu5boot5/default.xex \
+  --protect_zero=false --break_on_debugbreak=false --headless_timeout_ms=160000 --gpu=null \
+  --rb3dx_ui_probe=true --rb3_no_char_preview=true --rb3_tu5_app_run_direct=true \
+  --rb3dx_offline_join=true --scripted_input=50s:A:1000ms,58s:START:1000ms,...
+```
+
+**Superseded and removed in the cleanup pass:** `--rb3_tu5_loop_main` (called App::~App every
+frame under its "App::Poll" label; only worked because Debug::Exit's callback list empties on the
+first pass), `--rb3_tu5_hold_main`, `--rb3_tu5_joypad_read`. Logs: `~/tmp/tu5_s64_*.log`.
+DC3 non-regression: 627 exact at every commit.
 
 ---
 
