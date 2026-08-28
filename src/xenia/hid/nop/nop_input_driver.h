@@ -95,6 +95,12 @@ class NopInputDriver final : public InputDriver {
 
   // Read the current screen name from guest memory (TheUI->mCurrentScreen->mName)
   std::string ReadCurrentScreenName() const;
+  // RB3 (BandUI) variant of the above; "" if this is not an RB3 title.
+  std::string ReadRb3ScreenName() const;
+  // Set by ReadCurrentScreenName: true when the name came from the RB3 BandUI
+  // layout. Guards the DC3-only gameplay pokes, whose hardcoded addresses would
+  // be meaningless (and destructive) in RB3's address space.
+  mutable bool screen_name_is_rb3_ = false;
 
   // Drive DC3 gameplay timelines from a callback that survives past
   // the final menu transition.
