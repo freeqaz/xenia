@@ -356,6 +356,23 @@ DEFINE_bool(
     "keeps the title alive and pumps the subsystems. Title-gated + default-off "
     "=> DC3-inert.",
     "CPU");
+DEFINE_bool(
+    rb3_tu5_app_run_direct, false,
+    "RB3 TU5 (title 0x45410914), default off: enter the real frame loop "
+    "directly. Retail App::Run (0x822703D0) installs an unhandled-exception "
+    "filter (0x822703A8) and then deliberately writes to guest address 0 "
+    "(`stw r10,0(0)` at 0x822703FC); on hardware the access violation invokes "
+    "the filter, and the FILTER calls App::RunWithoutDebugging (0x82270080) -- "
+    "the actual unconditional frame loop (SystemPoll + all subsystem polls + "
+    "TheUI.Poll + Draw). Under --protect_zero=false (required for the separate "
+    "0x8275026C page-0 read) the null store succeeds silently, the filter "
+    "never runs, App::Run returns, and main falls into App::~App -> clean "
+    "teardown ('the flow-quit'). Byte-patch main's `bl 0x822703D0` at "
+    "0x82272E90 into `bl 0x82270080` -- the exact one-word patch the patched "
+    "TU5 image (RB3DX lineage) already ships at that site. Supersedes "
+    "--rb3_tu5_loop_main/--rb3_tu5_hold_main. Title-gated + default-off => "
+    "DC3-inert.",
+    "CPU");
 DEFINE_uint64(
     rb3dx_si_claim_anchor, 0,
     "RB3DX (title 0x45410914), default 0 (off), requires --rb3dx_ui_probe: "
@@ -1901,7 +1918,7 @@ static void Rb3dxUiProbeThread(Memory* memory,
     // 0x82516e78) was ever spawned. If no thread's start_address lands in the
     // Joypad_Xbox/Joypad_Xinput obj neighborhood, JoypadInit never ran.
     static bool s_thread_census_done = false;
-    if (sample >= 3 && sample <= 9 && kernel_state) {
+    if (sample >= 3 && sample % 3 == 0 && kernel_state) {
       s_thread_census_done = true;
       auto threads =
           kernel_state->object_table()->GetObjectsByType<kernel::XThread>();
@@ -3041,6 +3058,19 @@ static void Rb3dxUiProbeThread(Memory* memory,
                             r32(b2 + 0x0));
       }
       XELOGE("RB3DX UI PROBE[{}]:   joypads:{}", sample, pads);
+      // s64 connect-chain forensics: mConnected is set by JoypadPollCommon
+      // (TU5 0x82526a00) iff gLastXInputState[pad].dwPacketNumber != -1; the
+      // packet is written by the reader loop unless XInput2Sample
+      // (0x8284e388) or XInput2GetDeviceId (0x8284e6a0) fail, whose beq's
+      // skip the state write entirely. pkt==FFFFFFFF => reader taking a
+      // fatal skip; pkt real but conn=0 => JoypadPollCommon isn't running.
+      const uint32_t kLastXInputState = 0x82CCB8D8;
+      std::string pkts;
+      for (int p = 0; p < 4; ++p) {
+        pkts += fmt::format(" [{}]pkt=0x{:08X}", p,
+                            r32(kLastXInputState + p * 0x10));
+      }
+      XELOGE("RB3DX UI PROBE[{}]:   xinput:{}", sample, pkts);
     }
     // --- overshell slots + per-slot join lists ---
     // maindir['overshell'] is the OvershellPanel's Hmx::Object VBASE (tail,
@@ -5426,6 +5456,42 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
     processor_->RegisterGuestFunctionOverride(
         kJoypadRead, Rb3Tu5JoypadReadExtern, "RB3TU5:JoypadRead(0x8283fb80)");
     XELOGI("RB3 TU5: joypad-read override installed at 0x{:08X}", kJoypadRead);
+  }
+
+  // RB3 TU5 (0x45410914): enter the real frame loop directly
+  // (--rb3_tu5_app_run_direct). See the cvar help for the full story: retail
+  // App::Run (0x822703D0) reaches the frame loop App::RunWithoutDebugging
+  // (0x82270080) only through a deliberate null-store -> unhandled-exception
+  // -> filter chain, which --protect_zero=false silently defuses. Patch
+  // main's `bl App::Run` to call the frame loop directly (r3 = App* is
+  // already set by the addi at 0x82272E8C).
+  if (title_id_.has_value() && title_id_.value() == 0x45410914 &&
+      cvars::rb3_tu5_app_run_direct) {
+    const uint32_t kMainRunCall = 0x82272E90;
+    auto* heap = memory_->LookupHeap(kMainRunCall);
+    auto* mem = memory_->virtual_membase();
+    uint32_t cur = xe::load_and_swap<uint32_t>(mem + kMainRunCall);
+    if (cur == 0x4BFFD1F1u || cur == 0x4280D1F1u) {
+      // Already calls 0x82270080 (a pre-patched image, e.g. RB3DX lineage).
+      XELOGI("RB3: app-run-direct: image already patched @0x{:08X} (0x{:08X})",
+             kMainRunCall, cur);
+    } else if (cur != 0x4BFFD541u) {  // bl 0x822703D0 (pristine clean TU5)
+      XELOGW(
+          "RB3: app-run-direct NOT installed (0x{:08X} is 0x{:08X}, not the "
+          "App::Run bl)",
+          kMainRunCall, cur);
+    } else if (heap && heap->Protect(kMainRunCall & ~0xFFFu, 0x1000,
+                                     kMemoryProtectRead | kMemoryProtectWrite)) {
+      // bl 0x82270080 = App::RunWithoutDebugging (the frame loop).
+      xe::store_and_swap<uint32_t>(mem + kMainRunCall, 0x4BFFD1F1u);
+      XELOGI(
+          "RB3: app-run-direct installed -- main's `bl App::Run(0x822703D0)` "
+          "@0x{:08X} -> `bl App::RunWithoutDebugging(0x82270080)`",
+          kMainRunCall);
+    } else {
+      XELOGW("RB3: app-run-direct NOT installed (Protect failed @0x{:08X})",
+             kMainRunCall);
+    }
   }
 
   // RB3 TU5 (0x45410914) DIAGNOSTIC: hold main() from returning

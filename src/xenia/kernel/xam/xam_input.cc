@@ -156,10 +156,18 @@ dword_result_t XamInputGetState_entry(dword_t user_index, dword_t flags,
     uint16_t buttons = (input_result == X_ERROR_SUCCESS && input_state)
                            ? static_cast<uint16_t>(input_state->gamepad.buttons)
                            : 0;
-    if (n < 3) {
-      XELOGE("XamInputGetState DIAG: user={} poll#{} result=0x{:08X}",
+    if (n < 8) {
+      uint32_t lr = 0;
+      auto* thread = XThread::GetCurrentThread();
+      if (thread) {
+        lr = static_cast<uint32_t>(thread->thread_state()->context()->lr);
+      }
+      // lr distinguishes the reader's direct poll (0x8252A148) from XInput2's
+      // OpenDevice-success poll (0x8284E5DC): seeing the latter proves
+      // OpenDevice completed and XInput2Sample should return connected.
+      XELOGE("XamInputGetState DIAG: user={} poll#{} result=0x{:08X} lr=0x{:08X}",
              static_cast<uint32_t>(user_index & 0xFF), n,
-             static_cast<uint32_t>(input_result));
+             static_cast<uint32_t>(input_result), lr);
     }
     if (buttons != s_last_buttons[ui].exchange(buttons)) {
       XELOGE("XamInputGetState DIAG: user={} buttons 0x{:04X}",
