@@ -1430,6 +1430,56 @@ locate RB3 TU5's `UIManager::GotoFirstScreen`/first-screen-enter (analogue of DC
 the splash→frontend transition instead of letting the splash terminate into a dead app.
 Diagnostics on branch `rb3-tu5-census-flowquit`.
 
+### 8q. 2026-08-28 (session 61 cont.) — the missing frame loop is the cause; synthesized it; unmasked a REAL loader stall
+
+Localized the mechanism precisely and built a working intervention. This peels the onion into
+three ordered layers.
+
+**Structure (live disasm).** `main_impl` (`0x82272E60`, the XEX entry `main`, called by the CRT
+at `0x8283CEAC`) is `App::_ct(0x82270E68)` ; `reg(0x822703D0)` ; `pollOnce(0x82270000)` ;
+`li r3,0` ; `blr`. **None is a frame loop.** `0x82270000` ("App", tail-calls Debug.cpp
+`0x8250f820`) walks the **Pollable list** at source `0x82CC9874+0x28` (18 handlers — Game,
+Rnd, Graph, Synth, MoviePanel, RockCentral, … via rb3-xenon scope_map) and polls each **once**.
+On return the CRT calls `0x82C4BCCC` = **XamLoaderTerminateTitle** — so this build ends the title
+the instant `main` returns. `main` is therefore *meant* to block for the whole session but here
+runs boot + one poll + returns.
+
+**Layer 1 — teardown is `pollOnce`-driven (`--rb3_tu5_hold_main`).** Per-sample tid6 chain: thr6
+blocks in `EndSplasher::WaitForState` (samples 6-8), returns from the ctor, enters `pollOnce`
+(sample 9, inside a subscriber at `0x826FC940`=Synth), and is torn down at the broadcast tail
+(sample 10). Byte-patching the `pollOnce` call site (`0x82272E98`) to `b .` keeps **every** worker
+thread alive to timeout — but the frontend stays frozen (`transState=1`, `curScreen=null`, panels
+`mState=0`), because nothing pumps it.
+
+**Layer 2 — the frame loop was simply missing (`--rb3_tu5_loop_main`).** `System::Poll`
+(`0x82510270`, os/System.cpp) is the real per-frame body: it pumps `TheLoadMgr` (`bl 0x827bf700`
+on `0x82E06E38`), polls the Pollables (`0x8250f898`), and drives ~10 more subsystems. Two patches
+turn `main`'s tail into `while(1) System::Poll()`: `0x82272E98` `bl 0x82270000`→`bl 0x82510270`,
+and `0x82272E9C` `li r3,0`→`b 0x82272E94`. Result: title stays alive, thr6 confirmed looping in
+System::Poll, **the loader is now pumped** (TheLoadMgr poll-counter advances `0x24`→`0x2D126`) and
+**real files load and cycle** through the queue: `startup_autosave_base.milo`,
+`keyboard.milo_xbox`, `portrait_clips_shared.milo`, `vocals.milo`, … No trap/fault.
+
+**Layer 3 — a REAL head-of-line loader stall (now unmasked, not teardown-masked).** From ~sample 9
+the FIFO front is stuck **permanently** on `ui/resource/inline_help_center.milo` (loader
+`0x42749238`, vtable `0x82106950`): its struct is **byte-identical** across samples 9→24 (frozen,
+not mid-read), so everything queued behind it — including the `splash_screen` panels
+(meta/sv8_panel/splash_panel) — never loads and `curScreen` never leaves null. Other milos of the
+**same** loader type completed fine, so it is specific to this file/loader. No xenia file I/O is
+logged for it (stuck *before* issuing reads, i.e. a loader-STATE stall, not the async-OVERLAPPED
+mid-read story §8k chased). The only file failure in the whole run remains
+`update:\gen\patch_xbox.hdr` (`0xC000000F`, §4.B) — so `inline_help_center.milo` may live in the
+TU5 patch ark whose header is the `LOLZ` placeholder.
+
+**Where this leaves it.** The clean-TU5 flow is no longer a mystery: it needs a frame loop (built)
+plus resolution of one head-of-line loader stall. **Next:** decode the frozen loader's `mState`
+(FileLoader `mState` PTMF at +0x44) to name the stuck state, and determine whether
+`inline_help_center.milo` is resolvable at all in this ark set (patch-ark placeholder vs a genuine
+loader-state bug). If it is a missing-content artifact, the two §4.B paths (source real TU5 update;
+or skip/stub that specific loader) apply; if it is a loader-state bug, fix that state's advance.
+Levers `--rb3_tu5_hold_main` / `--rb3_tu5_loop_main` on branch `frag-alloc-trace` (title-gated,
+default-off, DC3-inert).
+
 ---
 
 ## 9. Related docs
