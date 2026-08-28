@@ -31,6 +31,22 @@ using xe::hid::X_INPUT_VIBRATION;
 constexpr uint32_t XINPUT_FLAG_GAMEPAD = 0x01;
 constexpr uint32_t XINPUT_FLAG_ANY_USER = 1 << 30;
 
+// TEMP DIAG (clean-TU5 join gate, s64): the RB3 per-pad connect gate
+// (TU5 0x82531f08) calls XamInputGetCapabilities successfully but still never
+// marks the pad connected -- log the first calls of every other input-adjacent
+// export with the guest caller LR so we can see what the gate tries next and
+// what we fail. TODO(rb3): remove with the rest of the DIAGs.
+static void LogInputDiag(const char* name, uint32_t a, uint32_t b, uint32_t r) {
+  static std::atomic<uint32_t> s_calls{0};
+  uint32_t n = s_calls.fetch_add(1, std::memory_order_relaxed);
+  if (n >= 40) return;
+  uint32_t lr = 0;
+  auto* thread = XThread::GetCurrentThread();
+  if (thread) lr = static_cast<uint32_t>(thread->thread_state()->context()->lr);
+  XELOGE("XamInput DIAG#{}: {}(0x{:X}, 0x{:X}) -> 0x{:08X} lr=0x{:08X}", n,
+         name, a, b, r, lr);
+}
+
 void XamResetInactivity_entry() {
   // Do we need to do anything?
 }
@@ -72,7 +88,7 @@ dword_result_t XamInputGetCapabilities_entry(
       uint32_t lr = 0;
       auto* thread = XThread::GetCurrentThread();
       if (thread) lr = static_cast<uint32_t>(thread->thread_state()->context()->lr);
-      XELOGD(
+      XELOGE(
           "XamInputGetCapabilities DIAG: call#{} user={} flags=0x{:X} "
           "result=0x{:08X} subtype={} lr=0x{:08X}",
           n, static_cast<uint32_t>(user_index & 0xFF),
@@ -103,7 +119,9 @@ dword_result_t XamInputGetCapabilitiesEx_entry(
   }
 
   auto input_system = kernel_state()->emulator()->input_system();
-  return input_system->GetCapabilities(actual_user_index, flags, caps);
+  X_RESULT r = input_system->GetCapabilities(actual_user_index, flags, caps);
+  LogInputDiag("GetCapabilitiesEx", user_index, flags, r);
+  return r;
 }
 DECLARE_XAM_EXPORT1(XamInputGetCapabilitiesEx, kInput, kSketchy);
 
@@ -139,12 +157,12 @@ dword_result_t XamInputGetState_entry(dword_t user_index, dword_t flags,
                            ? static_cast<uint16_t>(input_state->gamepad.buttons)
                            : 0;
     if (n < 3) {
-      XELOGD("XamInputGetState DIAG: user={} poll#{} result=0x{:08X}",
+      XELOGE("XamInputGetState DIAG: user={} poll#{} result=0x{:08X}",
              static_cast<uint32_t>(user_index & 0xFF), n,
              static_cast<uint32_t>(input_result));
     }
     if (buttons != s_last_buttons[ui].exchange(buttons)) {
-      XELOGD("XamInputGetState DIAG: user={} buttons 0x{:04X}",
+      XELOGE("XamInputGetState DIAG: user={} buttons 0x{:04X}",
              static_cast<uint32_t>(user_index & 0xFF), buttons);
     }
   }
@@ -166,7 +184,9 @@ dword_result_t XamInputSetState_entry(dword_t user_index, dword_t unk,
   }
 
   auto input_system = kernel_state()->emulator()->input_system();
-  return input_system->SetState(user_index, vibration);
+  X_RESULT r = input_system->SetState(user_index, vibration);
+  LogInputDiag("SetState", user_index, unk, r);
+  return r;
 }
 DECLARE_XAM_EXPORT1(XamInputSetState, kInput, kImplemented);
 
@@ -193,7 +213,9 @@ dword_result_t XamInputGetKeystroke_entry(
   }
 
   auto input_system = kernel_state()->emulator()->input_system();
-  return input_system->GetKeystroke(user_index, flags, keystroke);
+  X_RESULT r = input_system->GetKeystroke(user_index, flags, keystroke);
+  LogInputDiag("GetKeystroke", user_index, flags, r);
+  return r;
 }
 DECLARE_XAM_EXPORT1(XamInputGetKeystroke, kInput, kImplemented);
 
@@ -233,8 +255,11 @@ X_HRESULT_result_t XamUserGetDeviceContext_entry(dword_t user_index,
   // set zero just to be safe.
   *out_ptr = 0;
   if (!user_index || (user_index & 0xFF) == 0xFF) {
+    LogInputDiag("UserGetDeviceContext", user_index, unk, 0);
     return X_E_SUCCESS;
   } else {
+    LogInputDiag("UserGetDeviceContext", user_index, unk,
+                 static_cast<uint32_t>(X_E_DEVICE_NOT_CONNECTED));
     return X_E_DEVICE_NOT_CONNECTED;
   }
 }
@@ -242,17 +267,23 @@ DECLARE_XAM_EXPORT1(XamUserGetDeviceContext, kInput, kStub);
 
 dword_result_t XamInputSendStayAliveRequest_entry(unknown_t unk1,
                                                    unknown_t unk2) {
+  LogInputDiag("SendStayAliveRequest", static_cast<uint32_t>(unk1.value()),
+               static_cast<uint32_t>(unk2.value()), 0);
   return 0;
 }
 DECLARE_XAM_EXPORT1(XamInputSendStayAliveRequest, kInput, kStub);
 
 dword_result_t XamInputControl_entry(unknown_t unk1, unknown_t unk2,
                                       unknown_t unk3) {
+  LogInputDiag("InputControl", static_cast<uint32_t>(unk1.value()),
+               static_cast<uint32_t>(unk2.value()), 0);
   return 0;
 }
 DECLARE_XAM_EXPORT1(XamInputControl, kInput, kStub);
 
 dword_result_t XamInputRawState_entry(dword_t user_index, lpvoid_t state_ptr) {
+  LogInputDiag("InputRawState", user_index, 0,
+               static_cast<uint32_t>(X_E_FAIL));
   return X_E_FAIL;
 }
 DECLARE_XAM_EXPORT1(XamInputRawState, kInput, kStub);

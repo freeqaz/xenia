@@ -1883,20 +1883,19 @@ static void Rb3dxUiProbeThread(Memory* memory,
   for (;;) {
     if (!Rb3dxProbeSleep(2000)) return;
     ++sample;
-    // ROOT CAUSE (clean-TU5 splash->main_hub join gate, s63): under the
-    // truncated --rb3_tu5_loop_main boot the guest calls XamInputGetCapabilities
-    // and XamInputGetState ZERO times the whole run (verified with --log_level=4
-    // debug DIAG in xam_input.cc). The RB3 Xbox joypad reader is a dedicated
-    // thread (JoypadInit -> sub spawns entry 0x82516e78 in base game =
-    // InitXinputJoypadThreadData + a ~4ms sleep-loop that calls
-    // XInputGetCapabilities/XInput2Sample per pad). That thread never runs, so
-    // every gJoypadData pad stays conn=0 and no overshell join can fire.
-    // REFUTED HYPOTHESIS: re-broadcasting XN_SYS_INPUTDEVICESCHANGED (0x12) with
-    // a port-0 mask to all listeners did NOT make the guest poll input -- the
-    // reader thread simply isn't spawned/looping, it is not waiting on a
-    // device-change notification. The real fix must either drive the join from
-    // the host (populate gJoypadData / force the overshell slot state) or make
-    // the reader thread actually run.
+    // CORRECTED ROOT CAUSE (clean-TU5 splash->main_hub join gate, s63/s64):
+    // the TU5 joypad reader thread (tid7, entry 0x8252A3B0) DOES run and DOES
+    // reach its per-pad read helper 0x8283fb80 (`mr r5,r4; li r4,1;
+    // b 0x82C4BF7C` = tail-branch into the XamInputGetState import thunk) --
+    // proven by the --rb3_tu5_joypad_read override firing for pads 0-3. Yet
+    // the kernel XamInputGetState handler logs poll#=0, i.e. the tail-branch
+    // into the thunk never routes to the export. (Earlier "reader never
+    // spawns" conclusion was wrong: it scanned for the BASE-game entry
+    // address range, not the TU5 one.)
+    // REFUTED HYPOTHESIS: re-broadcasting XN_SYS_INPUTDEVICESCHANGED (0x12)
+    // with a port-0 mask to all listeners did NOT make pads connect -- the
+    // reader was polling all along; the break is in import-thunk routing
+    // and/or the per-pad connect gate (0x82531f08) downstream.
     // ONE-SHOT thread census: list every live guest thread with its entry point
     // so we can tell whether the Xbox joypad reader thread (base-game entry
     // 0x82516e78) was ever spawned. If no thread's start_address lands in the
@@ -1928,6 +1927,37 @@ static void Rb3dxUiProbeThread(Memory* memory,
         }
         XELOGE("RB3DX UI PROBE: THREAD tid={} start=0x{:08X} susp={}{}",
                t->thread_id(), start, susp, chain);
+      }
+    }
+    // ONE-SHOT import-thunk forensics (s64, clean-TU5 input-routing anomaly):
+    // the reader tail-branches into the XamInputGetState thunk 0x82C4BF7C but
+    // the kernel handler never fires, while the same thread's Sleep(4) goes
+    // through the KeDelayExecutionThread thunk 0x82C4C5EC and works (the loop
+    // paces at ~4ms). Compare the sites: raw guest instruction words + whether
+    // the JIT has a Function declared there and with what behavior
+    // (0=default guest, 4=builtin, 5=extern -- cpu/function.h).
+    static bool s_thunk_dump_done = false;
+    if (!s_thunk_dump_done && sample >= 3 && processor) {
+      s_thunk_dump_done = true;
+      const struct {
+        const char* name;
+        uint32_t va;
+      } kSites[] = {
+          {"XamInputGetState.thunk", 0x82C4BF7Cu},
+          {"XamInputGetCapabilities.thunk", 0x82C4BF6Cu},
+          {"KeDelayExecutionThread.thunk", 0x82C4C5ECu},
+          {"reader.pad_read_helper", 0x8283FB80u},
+      };
+      for (const auto& site : kSites) {
+        uint32_t w0 = r32(site.va), w1 = r32(site.va + 4);
+        uint32_t w2 = r32(site.va + 8), w3 = r32(site.va + 12);
+        auto* fn = processor->QueryFunction(site.va);
+        XELOGE(
+            "RB3DX UI PROBE: THUNK {} va=0x{:08X} words {:08X} {:08X} {:08X} "
+            "{:08X} fn={} behavior={} end=0x{:08X}",
+            site.name, site.va, w0, w1, w2, w3, fn ? "yes" : "no",
+            fn ? static_cast<int>(fn->behavior()) : -1,
+            fn ? fn->end_address() : 0u);
       }
     }
     // --- UIManager / BandUI ---
