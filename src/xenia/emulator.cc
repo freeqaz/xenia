@@ -60,6 +60,7 @@
 #include "xenia/gpu/gpu_flags.h"
 #include "xenia/gpu/graphics_system.h"
 #include "xenia/hid/input_driver.h"
+#include "xenia/hid/input.h"
 #include "xenia/hid/input_system.h"
 #include "xenia/hid/nop/nop_input_driver.h"
 #include "xenia/kernel/kernel_state.h"
@@ -320,6 +321,17 @@ DEFINE_bool(
     "~13s into boot (clean-TU5 wedge). Byte-for-byte equivalent to the rb3 "
     "native port's RB3_NO_CHAR_PREVIEW early-return; previews are cosmetic and "
     "off the boot-to-menu path. Title-gated + default-off => DC3-inert.",
+    "CPU");
+DEFINE_bool(
+    rb3_tu5_joypad_read, false,
+    "RB3 TU5 (title 0x45410914), default off: override the joypad reader "
+    "thread's per-pad input wrapper (0x8283fb80, tail-calls XamInputGetState) "
+    "to fill a connected-gamepad state for pad 0 directly from the input "
+    "system. Clean-TU5 diagnostic+fix: the reader thread exists but the kernel "
+    "XamInputGetState never fires (pads stay conn=0, no overshell join). This "
+    "hook confirms whether the reader reaches the call and, if so, connects "
+    "pad 0 so --scripted_input can drive the splash->main_hub join. Title-gated "
+    "+ default-off => DC3-inert.",
     "CPU");
 DEFINE_bool(
     rb3_tu5_hold_main, false,
@@ -1418,6 +1430,38 @@ void Rb3NoCharPreviewExtern(cpu::ppc::PPCContext* ppc_context,
   // void return; do not touch r[3].
 }
 
+// RB3 TU5 clean-boot joypad-read hook (--rb3_tu5_joypad_read). Overrides the
+// reader thread's per-pad input wrapper (0x8283fb80: `mr r5,r4; li r4,1; b
+// XamInputGetState`). DIAGNOSTIC + FIX in one: the reader thread (tid7, entry
+// 0x8252A3B0) exists and its backchain sits in the loop-tail Sleep, but the
+// kernel XamInputGetState handler never fires (poll#=0) -- so either the reader
+// never reaches this call or the tail-branch to the import thunk does not route
+// to our export. Overriding the direct `bl 0x8283fb80` answers it: if this fires
+// the reader IS polling, and we fill a connected-gamepad state (pad 0) straight
+// into its buffer so gJoypadData[0].conn flips to 1 and the overshell join can
+// fire. r3=pad, r4=guest X_INPUT_STATE*. Returns X_ERROR_SUCCESS for pad 0,
+// DEVICE_NOT_CONNECTED for others. Title-gated + default-off => DC3-inert.
+void Rb3Tu5JoypadReadExtern(cpu::ppc::PPCContext* ppc_context,
+                            kernel::KernelState* kernel_state) {
+  if (!ppc_context || !kernel_state) return;
+  uint32_t pad = static_cast<uint32_t>(ppc_context->r[3]);
+  uint32_t buf = static_cast<uint32_t>(ppc_context->r[4]);
+  static std::atomic<uint32_t> s_calls{0};
+  uint32_t n = s_calls.fetch_add(1, std::memory_order_relaxed);
+  if (n < 12) {
+    XELOGE("RB3 TU5 joypad-read hook#{} pad={} buf=0x{:08X} lr=0x{:08X}", n, pad,
+           buf, static_cast<uint32_t>(ppc_context->lr));
+  }
+  auto* input = kernel_state->emulator()->input_system();
+  uint8_t* base = kernel_state->memory()->virtual_membase();
+  X_RESULT r = X_ERROR_DEVICE_NOT_CONNECTED;
+  if (buf && input) {
+    auto* st = reinterpret_cast<xe::hid::X_INPUT_STATE*>(base + buf);
+    r = input->GetState(pad, st);
+  }
+  ppc_context->r[3] = static_cast<uint64_t>(r);
+}
+
 // RB3DX / RB3 TU5 first-boot calibration skip (--rb3dx_skip_calibration).
 //
 // The splash flow, at kSplashScreen_EndOvershell, evaluates the DTA condition
@@ -1858,15 +1902,32 @@ static void Rb3dxUiProbeThread(Memory* memory,
     // 0x82516e78) was ever spawned. If no thread's start_address lands in the
     // Joypad_Xbox/Joypad_Xinput obj neighborhood, JoypadInit never ran.
     static bool s_thread_census_done = false;
-    if (sample >= 3 && !s_thread_census_done && kernel_state) {
+    if (sample >= 3 && sample <= 9 && kernel_state) {
       s_thread_census_done = true;
       auto threads =
           kernel_state->object_table()->GetObjectsByType<kernel::XThread>();
       for (auto& t : threads) {
         if (!t) continue;
         uint32_t start = t->creation_params()->start_address;
-        XELOGE("RB3DX UI PROBE: THREAD tid={} start=0x{:08X} word0=0x{:08X} '{}'",
-               t->thread_id(), start, r32(start), t->name());
+        // Where is it executing NOW? Xenia's JIT keeps no live PC, so use
+        // lr + saved-LR backchain from sp (same trick as the TID6 walk). This
+        // reveals whether e.g. the joypad reader (start 0x8252A3B0) is blocked
+        // in CriticalSection::Enter vs actually looping.
+        std::string chain;
+        uint32_t susp = t->suspend_count();
+        if (t->thread_state() && t->thread_state()->context()) {
+          auto* c = t->thread_state()->context();
+          uint32_t s = static_cast<uint32_t>(c->r[1]);
+          chain = fmt::format(" lr={:08X} bc:", static_cast<uint32_t>(c->lr));
+          for (int i = 0; i < 10 && s; ++i) {
+            uint32_t bc = r32(s);
+            if (bc <= s || bc - s > 0x100000) break;
+            chain += fmt::format(" {:08X}", r32(bc - 8));
+            s = bc;
+          }
+        }
+        XELOGE("RB3DX UI PROBE: THREAD tid={} start=0x{:08X} susp={}{}",
+               t->thread_id(), start, susp, chain);
       }
     }
     // --- UIManager / BandUI ---
@@ -5324,6 +5385,17 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
         "RB3:CharSync::UpdateCharCache(no-op)");
     XELOGI("RB3: UpdateCharCache no-op override installed at 0x{:08X}",
            kUpdateCharCache);
+  }
+
+  // RB3 TU5 (0x45410914): joypad reader per-pad input hook (0x8283fb80).
+  // Diagnostic + input fix for the clean-TU5 splash->main_hub join gate.
+  // Title-gated + default-off => DC3-inert.
+  if (title_id_.has_value() && title_id_.value() == 0x45410914 &&
+      cvars::rb3_tu5_joypad_read) {
+    const uint32_t kJoypadRead = 0x8283fb80;
+    processor_->RegisterGuestFunctionOverride(
+        kJoypadRead, Rb3Tu5JoypadReadExtern, "RB3TU5:JoypadRead(0x8283fb80)");
+    XELOGI("RB3 TU5: joypad-read override installed at 0x{:08X}", kJoypadRead);
   }
 
   // RB3 TU5 (0x45410914) DIAGNOSTIC: hold main() from returning
