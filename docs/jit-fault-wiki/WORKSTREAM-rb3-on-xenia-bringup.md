@@ -1550,6 +1550,45 @@ and no signin dialog is pushed, so signin is not the gate. **Two sub-gates:** (a
 `kState_ChooseProfile`. Fixing (a) then mirroring the native `kState_JoinedDefault` fix for (b) is
 the path to main_hub. Enum in `band3/meta_band/OvershellSlotState.h`. DC3 non-regression: 627 exact.
 
+### §8t — sub-gate (a) root cause: the Xbox joypad reader thread never spawns (s63)
+
+Sub-gate (a) — pads `conn=0`, no join — is **not** a notification or connection-state problem. The
+guest calls `XamInputGetCapabilities` and `XamInputGetState` **zero times the entire run** (verified
+under `--log_level=4` with debug DIAG in `xam_input.cc`, so it is not a log-filter artifact; the
+first probe's "1 call" was an import-table declaration line, not a real call).
+
+RB3's Xbox controller input is read on a **dedicated reader thread**, not in the `SystemPoll` frame
+body. From the base-game objs (`rb3-xenon` `os:Joypad_Xbox.obj` / `os:Joypad_Xinput.obj`, disassembled
+with capstone): `JoypadInit (0x82516f08)` → `JoypadInitCommon` + spawns a thread whose entry
+`0x82516e78` runs `InitXinputJoypadThreadData (0x82516358)` then a **~4 ms sleep-loop** (`0x82516b80`)
+that per-pad calls the guest-lib `XInputGetCapabilities (0x82817b80 → kernel XamInputGetCapabilities
+import thunk)`; on SUCCESS it calls `XInput2Sample`/`XInput2GetDeviceId` and fills an accumulator array
+(~`base−0x5ad8`). `SystemPoll`'s `JoypadPoll` later drains that accumulator via
+`GetXinputSinceLastFrame (0x825163a8)` and writes `gJoypadData (0x82CCB2C8)`.
+
+A **host thread census** (`kernel_state->object_table()->GetObjectsByType<XThread>()`, logging each
+`creation_params()->start_address`) confirms it: the 11 live guest threads (tid 6–16) have entries at
+`0x8283CD20, 0x8252A3B0, 0x8286C520×2, 0x82BF3B60, 0x82C57480×2, 0x827CAF80, 0x82742968, 0x82C51060,
+0x8282DA50` — **none** in the joypad obj range (~`0x82516xxx`/`0x8251exxx`). The reader thread was
+**never spawned**: `JoypadInit` never ran. Its caller is reached **indirectly** (function pointer /
+init callback, no direct `bl` in the image), i.e. it belongs to a full-startup init path that the
+truncated `--rb3_tu5_loop_main` boot (main = `App::_ct; reg; pollOnce; ret`, tail force-looped) never
+executes. Because the reader never runs, every `gJoypadData` pad stays `conn=0` and no
+`--scripted_input` press can ever reach the join. Note `gJoypadData` is **downstream** of `JoypadPoll`
+(which rewrites it each frame from the empty accumulator), so host-writing `gJoypadData` alone would
+be clobbered.
+
+**REFUTED en route:** re-broadcasting `XN_SYS_INPUTDEVICESCHANGED (0x12)` with a port-0 mask to every
+listener did not make the guest poll input.
+
+**Fix options (all substantial; not yet chosen):** (1) force-run `JoypadInit` from the host
+(`processor->Execute` from inside a main-thread guest-function override — needs the TU5 `JoypadInit`
+address, bindiffed from base-game `0x82516f08`); (2) restructure the boot so real first-frame init
+runs (understand why retail `main` returns after one `pollOnce` instead of running `App::Run`); (3)
+host-drive the whole join / force the overshell slot to `kState_JoinedDefault` (DC3 `hack_pack`
+style), bypassing input entirely. Commit `a27922d7f` on `frag-alloc-trace` holds the diagnosis +
+DIAG instrumentation. DC3 non-regression: 627 exact.
+
 ---
 
 ## 9. Related docs
