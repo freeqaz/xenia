@@ -321,6 +321,17 @@ DEFINE_bool(
     "native port's RB3_NO_CHAR_PREVIEW early-return; previews are cosmetic and "
     "off the boot-to-menu path. Title-gated + default-off => DC3-inert.",
     "CPU");
+DEFINE_bool(
+    rb3_tu5_hold_main, false,
+    "RB3 TU5 (title 0x45410914), default off, DIAGNOSTIC: byte-patch main()'s "
+    "terminal `blr` (0x82272EB0) into an infinite self-branch so the XEX entry "
+    "thread never returns. main_impl = App::_ct(); reg(); broadcast(); return -- "
+    "none is a frame loop, so it returns ~15s in (after the boot splash) and the "
+    "guest CRT tears down every worker thread. This holds main alive to test "
+    "whether the frontend/game loop lives on a surviving worker thread (menu "
+    "would appear) or genuinely never starts. Title-gated + default-off => "
+    "DC3-inert.",
+    "CPU");
 DEFINE_uint64(
     rb3dx_si_claim_anchor, 0,
     "RB3DX (title 0x45410914), default 0 (off), requires --rb3dx_ui_probe: "
@@ -1843,8 +1854,25 @@ static void Rb3dxUiProbeThread(Memory* memory,
           XELOGE("RB3DX UI PROBE[{}]: TID6 ABSENT (erased from registry)",
                  sample);
         } else {
-          XELOGE("RB3DX UI PROBE[{}]: TID6 state={} thread_ptr={}", sample,
-                 static_cast<int>(i6->state), i6->thread ? 1 : 0);
+          // Also walk tid6's guest stack EVERY sample so we can see the exact
+          // frame it exits from (the teardown happens in one ~2s window between
+          // two full-sweep ticks). chain = saved-LR back-chain from sp.
+          std::string chain;
+          if (i6->thread && i6->thread->thread_state()) {
+            auto* c6 = i6->thread->thread_state()->context();
+            if (c6) {
+              uint32_t s = static_cast<uint32_t>(c6->r[1]);
+              chain = fmt::format(" lr={:08X}", static_cast<uint32_t>(c6->lr));
+              for (int i = 0; i < 12 && s; ++i) {
+                uint32_t bc = r32(s);
+                if (bc <= s || bc - s > 0x100000) break;
+                chain += fmt::format(" {:08X}", r32(bc - 8));
+                s = bc;
+              }
+            }
+          }
+          XELOGE("RB3DX UI PROBE[{}]: TID6 state={} thread_ptr={} chain:{}",
+                 sample, static_cast<int>(i6->state), i6->thread ? 1 : 0, chain);
         }
       }
       // Direct per-tid state census (tids 6..31) EVERY sample. The plural
@@ -5132,6 +5160,45 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
         "RB3:CharSync::UpdateCharCache(no-op)");
     XELOGI("RB3: UpdateCharCache no-op override installed at 0x{:08X}",
            kUpdateCharCache);
+  }
+
+  // RB3 TU5 (0x45410914) DIAGNOSTIC: hold main() from returning
+  // (--rb3_tu5_hold_main). main_impl(0x82272E60) = App::_ct(0x82270E68);
+  // reg(0x822703D0); broadcast(0x82270000); return 0 -- NONE is a frame loop,
+  // so main returns ~15s in (right after the boot splash) and the guest CRT
+  // exit path zombies every other guest thread (proven by the per-tid census,
+  // wiki 8p). Byte-patch the terminal `blr` at 0x82272EB0 into `b .`
+  // (0x48000000) so the entry thread spins there forever and the workers
+  // survive. If a frontend/menu then appears, the game loop was on a worker
+  // thread and main-return was killing it; if nothing changes, the frontend
+  // never starts and needs an explicit kick (DC3-style GotoFirstScreen).
+  // Title-gated + default-off => DC3-inert.
+  if (title_id_.has_value() && title_id_.value() == 0x45410914 &&
+      cvars::rb3_tu5_hold_main) {
+    // Hold thr6 right BEFORE the App shutdown-broadcast call (bl 0x82270000 at
+    // 0x82272E98). The per-tid census + per-sample tid6 chain proved thr6
+    // exits DURING that broadcast (a subscriber handler tears the title down),
+    // not via main's blr -- so spinning at the blr missed it. main_impl has
+    // already run App::_ct(ctor) + reg(0x822703D0) by here, so ctor side
+    // effects (workers spawned, UI transition kicked) are intact; only the
+    // shutdown notification is suppressed. If the frontend then engages, the
+    // teardown was broadcast-driven; if not, teardown is initiated elsewhere.
+    const uint32_t kMainBcast = 0x82272E98;
+    auto* heap = memory_->LookupHeap(kMainBcast);
+    auto* mem = memory_->virtual_membase();
+    uint32_t cur = xe::load_and_swap<uint32_t>(mem + kMainBcast);
+    if (cur != 0x4BFFD169) {  // bl 0x82270000
+      XELOGW("RB3: hold-main NOT installed (0x{:08X} is 0x{:08X}, not the "
+             "broadcast bl)", kMainBcast, cur);
+    } else if (heap && heap->Protect(kMainBcast & ~0xFFFu, 0x1000,
+                                     kMemoryProtectRead | kMemoryProtectWrite)) {
+      xe::store_and_swap<uint32_t>(mem + kMainBcast, 0x48000000u);  // b .
+      XELOGI("RB3: hold-main installed -- main() broadcast bl @0x{:08X} -> `b .`",
+             kMainBcast);
+    } else {
+      XELOGW("RB3: hold-main NOT installed (Protect failed @0x{:08X})",
+             kMainBcast);
+    }
   }
 
   // RB3DX (0x45410914): per-allocation binary trace for the heap-"main"
