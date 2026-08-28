@@ -1367,6 +1367,69 @@ completion path, e.g. a `BlockMgr`/`AsyncTask` event or APC); or (2) DC3-style, 
 `0x8274DFD0`.. in the scope_map) so the drain exits and the splash panels reach the front. Diagnostics +
 `--rb3_no_char_preview` on branch `rb3-tu5-main-exit-diag`. DC3 627 re-verified.
 
+### 8p. 2026-08-28 (session 61) — §8j–§8o REFUTED by a per-tid census: it is a clean guest flow-quit (re-confirms §4.B)
+
+A direct per-tid state census settles the whole §8 saga. §8j–§8o (loader head-of-line
+stall / async-completion / EndSplasher deadlock) are **all wrong**; the behaviour is the
+**"App::Run flow-quit"** that [08-boot-to-menu.md](08-boot-to-menu.md) (§4.B) had already
+narrowed to — sessions 57–60 lost that conclusion and re-chased downstream symptoms.
+
+**Why the earlier sessions kept mis-reading it.** The plural `QueryThreadDebugInfos()` sweep
+filters out `kExited`/`kZombie` threads. So when the game tears its threads down, they
+silently drop from the roster and the *remaining* parked xenia-internal threads (tids 1–5,
+`lr=0`) look like "everything is stuck head-of-line." The fix is to query by id:
+`QueryThreadDebugInfo(id)` entries **persist after exit**, so a direct census of tids 6..31
+every sample shows the true state. Added as `TIDCENSUS` (probe-gated).
+
+**What the census proves (boot5, gpu=null; identical shape every run):**
+
+| sample (~1.4 s each) | tid 6 (entry/main) | tids 7–24 | meaning |
+|---|---|---|---|
+| 1–8 (~0–13 s) | Alive(0) | all Alive(0) | game booting; splash worker rendering |
+| 9 (~14 s) | Alive | thr14 **Exited**, thr15 **Zombie** | splash worker finishes |
+| 10 (~15 s) | **Exited(2)** | **all Zombie(3)** | `main_impl` returned → CRT exit zombied every thread |
+| 11–19 | Exited | all Zombie | frozen; host lingers only to `--headless_timeout_ms` |
+
+`thr6 = kExited` is a **clean thread-function return**, not a wait/spin — `main_impl`
+*returned*. `XamLoaderTerminateTitle` is never called at runtime (the log lines are the
+import table). No trap, no `SetDiskError`. This is a guest-side flow-quit, deterministic
+~15 s, exactly §4.B's teardown.
+
+**Structure, decoded from the live disassembly (contiguous CODE dumps 0x82270E68..0x822715B0
+and 0x82742700..0x82742B00):**
+
+- `main_impl` (`0x82272E60`) = `App::_ct(0x82270E68)` ; `reg_singleton(0x822703D0)` ;
+  `subscriber_broadcast(0x82270000)` ; `li r3,0` ; `blr`. **None of the three is a frame
+  loop.** The `~15 s` is spent entirely inside call #1.
+- Boot ctor `0x82270E68` is a **linear init** (a long run of `beq cr6 → skip InitX()`
+  guards, one tiny counted loop at `0x82271400`) with **exactly one exit: the unconditional
+  tail-return at `0x822715AC`**, right after `EndSplasher(0x82742620)` is called at
+  `0x8227158C`. thr6's own stack (chain `82527ACC 82741530 82742668 82271590 82272E8C
+  8283CEB0`) confirms it reached that tail via EndSplasher's `WaitForState`.
+- The `~600 VdSwap` "frames" §8o read as "the game runs" are the **splash WORKER (thr14)**
+  animating the warm-up/loading scene before it exits (VdSwap is issued from stack
+  `0x7042xxxx` = thr14). thr6 is *blocked in `EndSplasher::WaitForState`* the whole time.
+- Splash worker loop = `do { …; cont = SplashShouldContinue(0x82742738); } while(cont);
+  terminate(state 7→8)`. `SplashShouldContinue` returns **false (terminate)** iff
+  `elapsed > min_duration(this->8)` **AND** `fn_0x82741EE8() == 0` (nothing left loading).
+  That is the **normal** splash→frontend handoff, *not* the bug.
+
+**The actual bug (unchanged from §4.B):** after the splash ends, the frontend never engages,
+so `main_impl` runs to its return and the title ends. §4.B's best mechanism — the post-warmup
+`main_hub`/shell load needs **genuine TU5 title-update content that is absent** (on-disk
+`patch_xbox.hdr` is the `LOLZ` placeholder; mounting it makes the title quit *earlier*) — is
+still the leading hypothesis. The exact frontend-load-fail decision is **not yet located**.
+
+**Consequences for the next attempt.** The `--rb3_no_char_preview`, loader-pump,
+overlapped-writeback, splash-unwedge, and "force front DirLoader DoneLoading" levers from
+§8j–§8o all target a stall that **does not exist** — do not pursue them. The productive
+directions are the two §4.B named: (1) **source a genuine matching TU5 update package** so
+the frontend can load (data problem), or (2) **DC3-style force the frontend to engage** —
+locate RB3 TU5's `UIManager::GotoFirstScreen`/first-screen-enter (analogue of DC3's
+`dc3_hack_pack_skeleton.cc` `GotoFirstScreen` + `MoviePanel::IsLoaded` overrides) and drive
+the splash→frontend transition instead of letting the splash terminate into a dead app.
+Diagnostics on branch `rb3-tu5-census-flowquit`.
+
 ---
 
 ## 9. Related docs
