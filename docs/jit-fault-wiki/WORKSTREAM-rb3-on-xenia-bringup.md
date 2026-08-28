@@ -1697,6 +1697,55 @@ frame under its "App::Poll" label; only worked because Debug::Exit's callback li
 first pass), `--rb3_tu5_hold_main`, `--rb3_tu5_joypad_read`. Logs: `~/tmp/tu5_s64_*.log`.
 DC3 non-regression: 627 exact at every commit.
 
+### §8w — clean retail TU5 drives the full menu chain to gameplay entry; last gate is the song audio stream (s65)
+
+With `--rb3_tu5_app_run_direct` (§8v) supplying the real frame loop, the **existing** state-driven
+autopilot `--rb3dx_autoconfirm_parts` (already title-gated to `0x45410914`, so it covered clean TU5
+all along) drives retail TU5 through the entire menu chain:
+
+```
+splash_screen -> main_hub_screen -> hint_rb3_welcome_screen -> manage_band_screen
+   -> main_hub_screen -> song_select_screen -> part_difficulty_screen
+   -> tv3_x_screen (venue card) -> [transition to game_screen]
+```
+
+Recipe: `--rb3_tu5_app_run_direct --rb3_no_char_preview --rb3dx_offline_join
+--rb3dx_skip_calibration --rb3dx_autoconfirm_parts --rb3dx_ui_probe --local_user_count=2
+--scripted_pad_subtypes=1,8`. `--local_user_count=2` is required: the autopilot's `song_select`
+branch only confirms the song once pad 1's LocalUser is bound.
+
+**The splash-redirect ark patch is no longer needed.** Against 100% pristine retail content
+(`/tmp/rb3tu5boot`, original `main_xbox.hdr`, unpadded arks) the intro movie now **plays and
+completes** and the same chain runs. The old `videos/rb3_intro_cinematic.bik` wedge (§8, item 3) was
+another symptom of the missing frame loop, not a content problem.
+
+**Remaining gate.** The `game_screen` transition never completes — `transState=1` for the rest of
+the run while the frame loop stays healthy at ~57 fps. TheLoadMgr's head is a **`BeatMasterLoader`**
+(vtable `0x8210A9C0`, RTTI `.?AVBeatMasterLoader@@`; 0x20 bytes, single member `mBeatMaster@+0x1C`)
+whose `mPos=2` (`kLoadFrontStayBack`) parks it at the head and starves everything behind it
+(`world/world.milo`, the sfx banks). `BeatMaster::LoaderPoll` (`0x8276E478`) is in **phase 3**:
+`mLoaded=1, unk2d=1` (MIDI parse done, `MasterAudio::Load` ran), spinning on
+`BeatMaster::IsLoaded(0x8276E270)` → `MasterAudio::IsLoaded(0x8277B6E8)` → `songStream->IsReady`
+(vslot 2). Measured via the new BEATMASTER probe: **`streamState=0` (kInit — never even reaches
+kBuffering) and the channel vector is EMPTY**. So the song's audio stream object exists but never
+set up channels.
+
+**Ruled out, each by a full boot:** instrument choice (`1,8` and `6,6` wedge identically — the
+`'PART DRUMS'`/`'bass1.cue'` strings are neighbouring heap, not loader fields); GPU backend (null and
+vulkan identical); content (patched+padded arks vs pristine arks identical); and **the emulator's
+audio stack** — RB3DX on the *same binary* reaches `game_screen` and plays through to `lose_screen`,
+so XMA + the paced `NopAudioDriver` are sufficient for RB3 gameplay. The 112k "XMA: Write to unknown
+register (0601)" lines are benign lock chatter (xma_decoder.cc's own comment says so), not the bug.
+The difference is the executable (retail TU5 vs the DX repack), not the host.
+
+**Next step:** RE `MasterAudio::Load`/`SetupChannels` on retail TU5 — why the stream is created with
+zero channels and never leaves `kInit`. Compare against the RB3DX repack, whose loader completes in
+under 2 s. A surgical last-resort override exists (`MasterAudio::IsLoaded @0x8277B6E8 → 1`, reached
+by a direct `bl`, so `RegisterGuestFunctionOverride` works) but it only buys entry into
+`game_screen`: with a stream that never plays, song time stays at 0:00 and no gems scroll.
+
+Commit `77ad3dcce`. DC3 non-regression: 627 exact.
+
 ---
 
 ## 9. Related docs
