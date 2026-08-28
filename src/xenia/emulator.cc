@@ -2040,6 +2040,23 @@ static void Rb3dxUiProbeThread(Memory* memory,
         XELOGE("RB3DX UI PROBE[{}]:   loadmgr[{:08X}]:{}", sample,
                win_hi - 0x20, row);
       }
+      // LoadMgr layout probe: LoadMgr::Poll (0x827bf700) gets this=0x82E06E38
+      // and drains this->0x18 (list sentinel @0x82E06E50). Dump BOTH candidate
+      // list heads to resolve which list the pump actually walks vs which one
+      // the stuck inline_help_center loader sits in. For each: raw {next,prev}
+      // and the front loader's file.
+      for (uint32_t lh : {0x82E06E38u, 0x82E06E50u}) {
+        uint32_t nx = r32(lh), pv = r32(lh + 4);
+        std::string ff;
+        if (nx && nx != lh) {
+          uint32_t l = r32(nx + 8);
+          ff = fmt::format(" front_ldr={:08X} mState20={:08X}", l, r32(l + 0x20));
+          std::string s = rstr(r32(l + 0x14));
+          if (s.size() >= 3 && s.size() < 47) ff += " '" + s + "'";
+        }
+        XELOGE("RB3DX UI PROBE[{}]: LISTHEAD {:08X} next={:08X} prev={:08X}{}",
+               sample, lh, nx, pv, ff);
+      }
       // Walk mLoading (embedded dummy @0x82E06E38, nodes {next,prev,Loader*})
       // and dump each queued loader's header + any string its early fields
       // point at -- names the file the front (stuck) loader is on.
@@ -2416,7 +2433,18 @@ static void Rb3dxUiProbeThread(Memory* memory,
             // os/System.cpp frame functions: the real per-frame System::Poll
             // (pumps TheLoadMgr.Poll + pollables + render) that main should be
             // looping on. Decode 0x825100C8 (size 292) + 0x82510510 (size 120).
-            0x82510080u, 0x82510180u, 0x82510280u, 0x82510480u, 0x82510500u}) {
+            0x82510080u, 0x82510180u, 0x82510280u, 0x82510480u, 0x82510500u,
+            // DirLoader state dispatcher: PollLoading 0x82754A58, IsLoaded
+            // 0x82754DB0, StateName 0x82757998. Decode how mState is loaded/
+            // called to confirm its offset + what a stuck value means. Plus the
+            // 0x82106900 region (holds the stuck loader's mState=0x8210693C).
+            0x82754A40u, 0x82754D80u, 0x82757980u, 0x82106900u, 0x82106980u,
+            // The loader-pump System::Poll invokes (bl 0x827bf700, r3=0x82E06E38
+            // = TheLoadMgr.mLoading): is it LoadMgr::Poll -> PollFrontLoader (which
+            // should POP a front loader whose IsLoaded()==true)? The stuck front
+            // reports IsLoaded=true yet is never popped. Dump 0x827BF700 + the
+            // Loader.cpp poll cluster around it.
+            0x827BF700u, 0x827BF7D0u, 0x827BFA00u, 0x827BFAC0u}) {
         std::string row;
         for (uint32_t d = 0; d < 0x200; d += 4) {
           row += fmt::format(" {:08X}", r32(fn + d));
@@ -5278,6 +5306,27 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
       xe::store_and_swap<uint32_t>(mem + kAfter, 0x4BFFFFF8u);  // b 0x82272E94
       XELOGI("RB3: loop-main installed -- main() -> `while(1) System::Poll()` "
              "(call@0x{:08X}=bl 0x82510270, loop@0x{:08X})", kCall, kAfter);
+      // Also NOP LoadMgr::Poll's budget entry-gate (0x827BF720 `ble cr6,+0xA0`,
+      // word 0x409900A0). Without a real per-frame load budget (this->0x10 at
+      // 0x82E06E48, which the synthesized loop doesn't set), the gate makes Poll
+      // return WITHOUT draining, so a front loader whose IsLoaded()==true is
+      // never popped and head-of-line-blocks the FIFO (observed: the DONE
+      // DirLoader for inline_help_center.milo stuck at front forever). NOPing
+      // the gate makes every Poll enter the drain loop and pop loaded fronts.
+      const uint32_t kGate = 0x827BF720;
+      uint32_t g = xe::load_and_swap<uint32_t>(mem + kGate);
+      if (g == 0x409900A0) {
+        auto* gh = memory_->LookupHeap(kGate);
+        if (gh && gh->Protect(kGate & ~0xFFFu, 0x1000,
+                              kMemoryProtectRead | kMemoryProtectWrite)) {
+          xe::store_and_swap<uint32_t>(mem + kGate, 0x60000000u);  // nop
+          XELOGI("RB3: loop-main -- NOP'd LoadMgr::Poll budget gate @0x{:08X}",
+                 kGate);
+        }
+      } else {
+        XELOGW("RB3: loop-main -- gate @0x{:08X} is 0x{:08X}, not the ble; "
+               "not NOP'd", kGate, g);
+      }
     } else {
       XELOGW("RB3: loop-main NOT installed (Protect failed @0x{:08X})", kCall);
     }
