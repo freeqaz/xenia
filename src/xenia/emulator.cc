@@ -332,6 +332,18 @@ DEFINE_bool(
     "would appear) or genuinely never starts. Title-gated + default-off => "
     "DC3-inert.",
     "CPU");
+DEFINE_bool(
+    rb3_tu5_loop_main, false,
+    "RB3 TU5 (title 0x45410914), default off, EXPERIMENT: turn main()'s tail "
+    "into a frame loop. main_impl's 3rd call (bl 0x82270000 at 0x82272E98) is "
+    "'poll every registered Pollable once' (Game/Rnd/Graph/Synth/MoviePanel/... "
+    "-- the body of a real frame loop). main calls it ONCE then returns, so the "
+    "UI panel loads never finish and the frontend never renders. Byte-patch the "
+    "instruction right after that call (0x82272E9C, `li r3,0`) into `b "
+    "0x82272E94` so thr6 re-invokes the poll forever -- a crude frame loop that "
+    "keeps the title alive and pumps the subsystems. Title-gated + default-off "
+    "=> DC3-inert.",
+    "CPU");
 DEFINE_uint64(
     rb3dx_si_claim_anchor, 0,
     "RB3DX (title 0x45410914), default 0 (off), requires --rb3dx_ui_probe: "
@@ -2386,12 +2398,41 @@ static void Rb3dxUiProbeThread(Memory* memory,
             // kTerminated). Dump the whole 0x82742700..0x82742B00 worker region
             // + PollTheSplasher 0x827429E0.
             0x82742700u, 0x82742780u, 0x82742880u, 0x82742900u, 0x82742978u,
-            0x82742A00u, 0x82742A80u, 0x82741940u}) {
+            0x82742A00u, 0x82742A80u, 0x82741940u,
+            // CRT after main_impl returns (thr6 chain bottom 0x8283CEB0 = the
+            // caller of main). Decode whether the CRT loops/keeps a frame loop
+            // or just exits -- the structural "where is App::Run" question.
+            0x8283CE00u, 0x8283CE80u, 0x8283CF00u,
+            // The broadcast's post-loop callees: 0x82718880 (Pollable.cpp),
+            // 0x8250F4E0 (Debug.cpp), and 0x8283D4F0 (residual, fired only when
+            // r5=1, with string 0x82000C55) -- the teardown-trigger suspects.
+            0x82718840u, 0x8250F4C0u, 0x8283D4C0u, 0x8283D540u,
+            // os/System.cpp frame functions: the real per-frame System::Poll
+            // (pumps TheLoadMgr.Poll + pollables + render) that main should be
+            // looping on. Decode 0x825100C8 (size 292) + 0x82510510 (size 120).
+            0x82510080u, 0x82510180u, 0x82510280u, 0x82510480u, 0x82510500u}) {
         std::string row;
         for (uint32_t d = 0; d < 0x200; d += 4) {
           row += fmt::format(" {:08X}", r32(fn + d));
         }
         XELOGE("RB3DX UI PROBE[{}]: CODE {:08X}:{}", sample, fn, row);
+      }
+      // Pollable-list walk: main's 3rd call (0x82270000) broadcasts to the list
+      // at source 0x82CC9874 (r3 = lis -0x7d33 + addi -0x678c). Each node has
+      // next=[node+0], handler=[node+8]. Walk it and log each node + handler so
+      // we can name the Pollables (via rb3-xenon scope_map) and find which
+      // fires the teardown. Head = [0x82CC9874 + 0x28]; sentinel = 0x82CC989C.
+      {
+        const uint32_t src = 0x82CC9874u;
+        const uint32_t sentinel = src + 0x28u;
+        uint32_t node = r32(sentinel);
+        std::string pl;
+        for (int i = 0; i < 32 && node && node != sentinel; ++i) {
+          uint32_t handler = r32(node + 8);
+          pl += fmt::format(" [{:08X}]h={:08X}", node, handler);
+          node = r32(node);
+        }
+        XELOGE("RB3DX UI PROBE[{}]: POLLABLES src={:08X}:{}", sample, src, pl);
       }
       // Poll-singleton dump: 0x8240EE10 loads *(0x82C76B68) then calls its
       // vtable slot 0x60. Dump the pointer, its vtable head, and the object so
@@ -5198,6 +5239,41 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
     } else {
       XELOGW("RB3: hold-main NOT installed (Protect failed @0x{:08X})",
              kMainBcast);
+    }
+  }
+
+  // RB3 TU5 (0x45410914) EXPERIMENT: synthesize the missing frame loop
+  // (--rb3_tu5_loop_main). main_impl's 3rd call is `bl 0x82270000` (poll
+  // Pollables ONCE) at 0x82272E98; it does NOT pump TheLoadMgr, so the UI panel
+  // loads never even start (mState=0). System::Poll (0x82510270, os/System.cpp)
+  // IS the real per-frame body: it calls 0x827bf700 (Loader.cpp) on TheLoadMgr
+  // (0x82E06E38) to pump the loader, polls the Pollables (0x8250f898), and
+  // drives ~10 more subsystems. Two patches turn main's tail into a frame loop:
+  //   (1) 0x82272E98: `bl 0x82270000` -> `bl 0x82510270` (call System::Poll)
+  //   (2) 0x82272E9C: `li r3,0`       -> `b 0x82272E94` (loop back to the call)
+  // so thr6 runs `addi r3,r31,0x50; System::Poll(...)` forever instead of
+  // returning into the CRT's XamLoaderTerminateTitle. Title-gated + default-off
+  // => DC3-inert.
+  if (title_id_.has_value() && title_id_.value() == 0x45410914 &&
+      cvars::rb3_tu5_loop_main) {
+    const uint32_t kCall = 0x82272E98;   // bl 0x82270000
+    const uint32_t kAfter = 0x82272E9C;  // li r3,0
+    auto* heap = memory_->LookupHeap(kCall);
+    auto* mem = memory_->virtual_membase();
+    uint32_t c0 = xe::load_and_swap<uint32_t>(mem + kCall);
+    uint32_t c1 = xe::load_and_swap<uint32_t>(mem + kAfter);
+    if (c0 != 0x4BFFD169 || c1 != 0x38600000) {
+      XELOGW("RB3: loop-main NOT installed (0x{:08X}=0x{:08X} 0x{:08X}=0x{:08X})",
+             kCall, c0, kAfter, c1);
+    } else if (heap && heap->Protect(kCall & ~0xFFFu, 0x1000,
+                                     kMemoryProtectRead | kMemoryProtectWrite)) {
+      // bl 0x82510270 from 0x82272E98: off = 0x82510270-0x82272E98 = 0x29D3D8.
+      xe::store_and_swap<uint32_t>(mem + kCall, 0x4829D3D9u);   // bl 0x82510270
+      xe::store_and_swap<uint32_t>(mem + kAfter, 0x4BFFFFF8u);  // b 0x82272E94
+      XELOGI("RB3: loop-main installed -- main() -> `while(1) System::Poll()` "
+             "(call@0x{:08X}=bl 0x82510270, loop@0x{:08X})", kCall, kAfter);
+    } else {
+      XELOGW("RB3: loop-main NOT installed (Protect failed @0x{:08X})", kCall);
     }
   }
 
