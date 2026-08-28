@@ -2048,7 +2048,8 @@ static void Rb3dxUiProbeThread(Memory* memory,
       for (int n = 0; n < 4 && node && node != dummy; ++n) {
         uint32_t ldr = r32(node + 8);
         std::string hdr, strs;
-        for (uint32_t d = 0; d < 0x30; d += 4) {
+        for (uint32_t d = 0; d < 0x80; d += 4) {  // extend to 0x80 to reach
+                                                  // FileLoader mState (PTMF @0x44)
           uint32_t v = r32(ldr + d);
           hdr += fmt::format(" {:08X}", v);
           if (v >= 0x1000 && (v < 0x50000000 || (v >= 0x82000000 &&
@@ -2059,8 +2060,13 @@ static void Rb3dxUiProbeThread(Memory* memory,
             }
           }
         }
-        XELOGE("RB3DX UI PROBE[{}]:   loadq[{}] node={:08X} ldr={:08X}:{}{}",
-               sample, n, node, ldr, hdr, strs);
+        // The loader's vtable (word[0]) names its class; dump the first 6 vptr
+        // slots so IsLoaded/PollLoading/StateName can be mapped via scope_map.
+        uint32_t vt = r32(ldr);
+        std::string vts;
+        for (uint32_t s = 0; s < 0x18; s += 4) vts += fmt::format(" {:08X}", r32(vt + s));
+        XELOGE("RB3DX UI PROBE[{}]:   loadq[{}] node={:08X} ldr={:08X}:{}{} vt[{:08X}]:{}",
+               sample, n, node, ldr, hdr, strs, vt, vts);
         node = r32(node);
       }
       // DirLoader mState locator: dump every .text-range word in the first two
