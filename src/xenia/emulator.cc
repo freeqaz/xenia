@@ -2151,6 +2151,57 @@ static void Rb3dxUiProbeThread(Memory* memory,
                sample, n, node, ldr, hdr, strs, vt, vts);
         node = r32(node);
       }
+      // BeatMasterLoader phase probe (song load -> game_screen gate). When the
+      // LoadMgr's head is a BeatMasterLoader (vtable 0x8210A9C0, RTTI-confirmed)
+      // it is loading the selected song, and because it is kLoadFrontStayBack
+      // it starves the whole queue until it completes. BeatMaster::LoaderPoll
+      // (0x8276E478) has three phases and only two can wedge, so dump the two
+      // phase bytes plus the state each phase waits on:
+      //   phase 1 (!mLoaded): MIDI parse -- MidiReader.mState/track/tick must
+      //     advance; frozen tick = a parse wedge, moving tick = merely slow.
+      //   phase 3 (unk2d): audio -- StandardStream.mState must leave
+      //     kBuffering(1) for kReady(2), which needs every StreamReceiver's
+      //     mState (recv+0x18010) to leave kInit(0), which needs decoded PCM
+      //     (recv+0x1800C ring write pos; 0 = the decoder delivered nothing).
+      {
+        uint32_t head = r32(dummy);
+        uint32_t bml = head && head != dummy ? r32(head + 8) : 0;
+        if (bml && r32(bml) == 0x8210A9C0u) {
+          uint32_t bm = r32(bml + 0x1C);
+          uint32_t sd = r32(bm + 0x0C), au = r32(bm + 0x1C);
+          uint32_t sp = sd ? r32(sd + 0x124) : 0;
+          uint32_t mr = sp ? r32(sp + 0x20) : 0;
+          XELOGE(
+              "RB3DX UI PROBE[{}]: BEATMASTER bm=0x{:08X} mLoaded={} unk2d={} "
+              "songData=0x{:08X} parser=0x{:08X} midiRdr=0x{:08X} "
+              "mrState={} track={} tick={} fail={}",
+              sample, bm, r8(bm + 0x30), r8(bm + 0x31), sd, sp, mr,
+              mr ? r32(mr + 0x18) : 0, mr ? r32(mr + 0x28) : 0,
+              mr ? r32(mr + 0x2C) : 0, mr ? r8(mr + 0x6C) : 0);
+          uint32_t st = au ? r32(au + 0x38) : 0;
+          if (st) {
+            std::string recvs;
+            for (uint32_t c = r32(st + 0x20), e = r32(st + 0x24);
+                 c && c + 4 <= e && recvs.size() < 200; c += 4) {
+              uint32_t rv = r32(c);
+              if (!rv) continue;
+              recvs += fmt::format(" {{recv=0x{:08X} state={} ringWr=0x{:X}}}",
+                                   rv, r32(rv + 0x18010), r32(rv + 0x1800C));
+            }
+            // streamVt identifies the concrete Stream class (StandardStream is
+            // 0x820F6A8C) and so validates the +0x14/+0x20 offsets below it;
+            // chans begin==end means SetupChannels produced NO channels, which
+            // is a different failure from "channels exist but never buffer".
+            XELOGE(
+                "RB3DX UI PROBE[{}]: BEATMASTER audio=0x{:08X} stream=0x{:08X} "
+                "streamVt=0x{:08X} streamState={} chans=0x{:08X}..0x{:08X} "
+                "rdr=0x{:08X} rdrVt=0x{:08X}{}",
+                sample, au, st, r32(st), r32(st + 0x14), r32(st + 0x20),
+                r32(st + 0x24), r32(st + 0x1C),
+                r32(st + 0x1C) ? r32(r32(st + 0x1C)) : 0, recvs);
+          }
+        }
+      }
       // DirLoader mState locator: dump every .text-range word in the first two
       // queued loaders' objects [0,0x140). The FRONT loader (loadq[0]) is being
       // actively polled so its mState PTMF has advanced past &DirLoader::OpenFile,
@@ -3004,10 +3055,15 @@ static void Rb3dxUiProbeThread(Memory* memory,
         for (uint32_t p = pu_b; p + 8 <= pu_e && p < pu_b + 0x40; p += 8) {
           pus += fmt::format(" {{user=0x{:08X} join={}}}", r32(p), r32(p + 4));
         }
+        // mState is a pointer to a state object; its vtable (state+0x0)
+        // identifies which OvershellSlotState class it is, so log it -- the
+        // pointer alone says nothing, but the vtable is a stable code address
+        // we can name. Also log the slot's own vtable for orientation.
+        uint32_t st = r32(slot + 0x2C);
         XELOGE(
             "RB3DX UI PROBE[{}]:   oshell slot{} @0x{:08X} state=0x{:08X} "
-            "npot={}{}",
-            sample, r32(slot + 0x40), slot, r32(slot + 0x2C),
+            "stateVt=0x{:08X} npot={}{}",
+            sample, r32(slot + 0x40), slot, st, st ? r32(st) : 0,
             (pu_e > pu_b) ? (pu_e - pu_b) / 8 : 0, pus);
       }
     }

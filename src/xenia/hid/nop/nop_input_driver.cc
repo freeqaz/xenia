@@ -352,8 +352,51 @@ void NopInputDriver::InjectButtonPress(uint16_t buttons, uint64_t duration_ms,
   injected_events_.push_back(ev);
 }
 
+// RB3 (TU5, title 0x45410914) screen-name read. The RB3 UI singleton is a
+// BandUI at a FIXED address (TheBandUI = 0x82DFD2B0 -- the object itself, not
+// a pointer to it; the frame loop's TheUI pointer global 0x82C721F0 is
+// statically initialized to it), with mCurrentScreen @ +0x2C and the screen's
+// name pointer @ +0x18. This layout is unrelated to DC3's (a pointer global at
+// 0x82F1A8E0, mCurrentScreen @ +0x48, name @ +0x1C/+0x20), so screen-aware
+// scripts need both readers. Returns "" if the layout does not read plausibly,
+// which is how the caller decides which game it is looking at.
+std::string NopInputDriver::ReadRb3ScreenName() const {
+  if (!memory_) return "";
+  constexpr uint32_t kTheBandUI = 0x82DFD2B0;
+  if (!IsGuestReadable(memory_, kTheBandUI + 0x30, 4)) return "";
+  auto* ui_obj = memory_->TranslateVirtual<uint8_t*>(kTheBandUI);
+  uint32_t cur_screen = xe::load_and_swap<uint32_t>(ui_obj + 0x2C);
+  if (!cur_screen || cur_screen >= 0xF0000000) return "";
+  if (!IsGuestReadable(memory_, cur_screen + 0x18, 4)) return "";
+  auto* scr = memory_->TranslateVirtual<uint8_t*>(cur_screen);
+  uint32_t name_ptr = xe::load_and_swap<uint32_t>(scr + 0x18);
+  if (!name_ptr || name_ptr >= 0xF0000000) return "";
+  std::string result;
+  for (uint32_t i = 0; i < 64; ++i) {
+    if (!IsGuestReadable(memory_, name_ptr + i, 1)) return "";
+    char ch = static_cast<char>(*memory_->TranslateVirtual<uint8_t*>(name_ptr + i));
+    if (!ch) return result;
+    unsigned char uch = static_cast<unsigned char>(ch);
+    if (!(std::isalnum(uch) || ch == '_')) return "";
+    result.push_back(ch);
+  }
+  return "";
+}
+
 std::string NopInputDriver::ReadCurrentScreenName() const {
   if (!memory_) return "";
+
+  // RB3 first: its read is strictly validated (fixed object address, name must
+  // be a clean identifier), so a hit is unambiguous and a miss costs two loads.
+  // Record which layout answered: RB3 and DC3 share screen names ("game_screen"
+  // exists in both) but NOT addresses, so the DC3 gameplay poking below must
+  // never fire on an RB3 name.
+  std::string rb3 = ReadRb3ScreenName();
+  if (!rb3.empty()) {
+    screen_name_is_rb3_ = true;
+    return rb3;
+  }
+  screen_name_is_rb3_ = false;
 
   constexpr uint32_t kTheUI = 0x82F1A8E0;
   auto* ui_ptr =
@@ -394,7 +437,10 @@ void NopInputDriver::UpdateDc3HostBeatDrive() {
     last_screen_read_time_ = now;
   }
 
-  if (last_screen_name_ != "game_screen") {
+  // RB3 also has a screen literally named "game_screen"; everything below this
+  // point addresses DC3 singletons by absolute guest address and WRITES to
+  // some of them, so it must not run for RB3.
+  if (last_screen_name_ != "game_screen" || screen_name_is_rb3_) {
     if (dc3_host_beat_drive_active_) {
       XELOGI("DC3 Script: host beat drive deactivated on '{}'",
              last_screen_name_);
@@ -537,7 +583,7 @@ void NopInputDriver::UpdateDc3HostBeatDrive() {
 }
 
 void NopInputDriver::ProbeDc3GameplayState() {
-  if (!memory_ || last_screen_name_ != "game_screen") {
+  if (!memory_ || last_screen_name_ != "game_screen" || screen_name_is_rb3_) {
     return;
   }
 
