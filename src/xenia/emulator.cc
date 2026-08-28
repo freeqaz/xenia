@@ -1847,6 +1847,21 @@ static void Rb3dxUiProbeThread(Memory* memory,
                  static_cast<int>(i6->state), i6->thread ? 1 : 0);
         }
       }
+      // Direct per-tid state census (tids 6..31) EVERY sample. The plural
+      // QueryThreadDebugInfos() sweep filters out kExited/kZombie threads, so a
+      // thread that has TORN DOWN silently drops from the roster and reads as a
+      // "head-of-line spin" when it is actually a mass thread teardown. Query by
+      // id (entries persist post-exit) to get the true state of every game
+      // thread at the freeze: 0=Alive 1=Waiting 2=Exited 3=Zombie -=absent.
+      {
+        std::string census;
+        for (uint32_t tid = 6; tid <= 31; ++tid) {
+          auto* ti = processor->QueryThreadDebugInfo(tid);
+          if (!ti) continue;
+          census += fmt::format(" {}:{}", tid, static_cast<int>(ti->state));
+        }
+        XELOGE("RB3DX UI PROBE[{}]: TIDCENSUS{}", sample, census);
+      }
       // Walk every live guest thread every 5th tick; the stuck party in a
       // lockstep handshake is usually NOT the thread you first suspected, so
       // sample them all. Enumerate via the debugger's ThreadDebugInfo registry:
@@ -2325,12 +2340,25 @@ static void Rb3dxUiProbeThread(Memory* memory,
             // 82857F40, lr=82273334. Dump 0x180 around each to decode the loop.
             0x8250F780u, 0x8240ED80u, 0x8273B200u, 0x82739B00u, 0x82733400u,
             0x8273CC80u, 0x82858380u, 0x82857E80u, 0x82273280u, 0x82272E00u,
-            // main_impl(0x82272E60) calls three fns in order: App::App(ctor)
-            // 0x82270E68, then 0x822703D0, then 0x82270000 -- main spends boot
-            // time in the THIRD (its tree reaches 0x8250F820/0x8240EE10 poll).
-            // Classify all three + the two poll leaves to find the loop+gate.
+            // main_impl(0x82272E60) calls three fns in order: 0x82270E68
+            // (the big boot fn -- main BLOCKS ~15s here inside EndSplasher's
+            // WaitForState at 0x8227158C), then 0x822703D0 (tiny: register App
+            // singleton), then 0x82270000 (subscriber broadcast). NONE loops;
+            // 0x82270E68's tail (0x822715AC) is an UNCONDITIONAL return after
+            // EndSplasher. Dump 0x82270E68..0x822715B0 CONTIGUOUSLY to find any
+            // loop-vs-return gate EARLIER in the fn (the 0x82271068..0x82271500
+            // stretch was previously an un-dumped gap).
             0x82270000u, 0x82270100u, 0x82270200u, 0x82270300u, 0x822703D0u,
-            0x82270E68u, 0x8250F820u, 0x8250F890u, 0x8240EE10u, 0x82270E00u}) {
+            0x82270E68u, 0x82271068u, 0x82271200u, 0x82271400u,
+            0x8250F820u, 0x8250F890u, 0x8240EE10u, 0x82270E00u,
+            // Splash-WORKER (thr14) call chain: entry 8284D6DC -> 0x82742978
+            // -> 0x82742884 -> 0x8274279C -> 0x82741948 -> WaitForState. This
+            // is where the terminate-vs-transition-to-frontend decision lives
+            // (main/thr6 parks in EndSplasher 0x82742620 until thr14 sets
+            // kTerminated). Dump the whole 0x82742700..0x82742B00 worker region
+            // + PollTheSplasher 0x827429E0.
+            0x82742700u, 0x82742780u, 0x82742880u, 0x82742900u, 0x82742978u,
+            0x82742A00u, 0x82742A80u, 0x82741940u}) {
         std::string row;
         for (uint32_t d = 0; d < 0x200; d += 4) {
           row += fmt::format(" {:08X}", r32(fn + d));
