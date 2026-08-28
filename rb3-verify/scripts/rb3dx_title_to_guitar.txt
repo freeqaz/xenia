@@ -1,0 +1,29 @@
+# RB3DX title -> main_hub -> Quickplay -> song_select -> both pick GUITAR
+# Format: --scripted_input="<t>:<BTN>[@pad][:hold], ..."  (time-based, seconds)
+# Headless ~3.6 fps => generous spacing. Times assume the title-wedge FAULT
+# (lane L1/L2/L3) is already fixed so frames keep advancing; re-tune wall-clock
+# once real per-screen transition times are measured on a non-wedged boot.
+#
+# KEY: the RB3 title / "PRESS START" screen advances on START, NOT A.
+#   (rb3 native flow: first input after boot is `start` = kPad_Start; confirmed
+#    native/src/rb3_game_input.cpp: verb "start" -> kPad_Start/kAction_Start,
+#    verb "confirm" -> A/kAction_Confirm.)
+# A-only spam cannot leave press-start. Send START first, then A for menus.
+#
+# Phase 1  boot splashes (ESRB, RB3DX photosensitivity) — advance/skip on A@0
+8s:A@0,14s:A@0,20s:A@0,
+# Phase 2  title / press-start -> main_hub  (START; include A as harmless fallback)
+28s:START@0,34s:START@0,40s:A@0,
+# Phase 3  P2 joins the band at main_hub/overshell (START to join pad1, A to
+#          accept Guest profile / confirm sign-in)
+48s:START@1,54s:A@1,60s:A@1,
+# Phase 4  P1 main_hub -> PLAY NOW -> QUICKPLAY -> song_select (A confirms; extra
+#          presses cover the 2-3 menu levels pn_quickplay.btn / qp_quickplay.btn)
+68s:A@0,76s:A@0,84s:A@0,
+# Phase 5  song_select: pick the highlighted song (A@0) -> part/instrument select
+94s:A@0,
+# Phase 6  instrument/part select: BOTH pick GUITAR. Guitar is the first/default
+#          overshell slot; A confirms on each pad. DOWN/nav left in as needed.
+104s:A@0,110s:A@1,
+# (fallbacks if guitar isn't default focus — nudge then reconfirm)
+118s:UP@0,122s:A@0,126s:UP@1,130s:A@1

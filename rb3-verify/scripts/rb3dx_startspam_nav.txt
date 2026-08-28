@@ -1,0 +1,16 @@
+# RB3DX robust nav: broad START spam to leave the title (appears ~30-36s, persists),
+# then A to advance menus, P2 join, both GUITAR. Headless ~56fps on non-wedge boots.
+# Phase 1 boot splashes
+8s:A@0,14s:A@0,20s:A@0,
+# Phase 2 LEAVE TITLE — spam START@0 every 4s across a wide window (title is interactive ~30s+)
+28s:START@0,32s:START@0,36s:START@0,40s:START@0,44s:START@0,48s:START@0,52s:START@0,56s:START@0,60s:START@0,
+# Phase 3 P2 joins the band (START@1 to join, A@1 accept guest profile)
+66s:START@1,70s:START@1,74s:A@1,78s:A@1,
+# Phase 4 P1 main_hub -> PLAY NOW -> QUICKPLAY -> song_select (A confirms each level)
+84s:A@0,90s:A@0,96s:A@0,102s:A@0,
+# Phase 5 song_select pick highlighted song
+110s:A@0,116s:A@0,
+# Phase 6 instrument select: both pick GUITAR (first slot); A confirm each pad
+124s:A@0,128s:A@1,134s:A@0,138s:A@1,
+# fallback nudges
+146s:UP@0,150s:A@0,154s:UP@1,158s:A@1

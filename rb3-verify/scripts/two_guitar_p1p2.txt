@@ -1,0 +1,5 @@
+# Two-player same-instrument choreography (time-based --scripted_input).
+# BLOCKED at runtime by the Xenia main_hub heap crash; kept for when that is fixed.
+# P1 (pad0) advances splash->main_hub, joins, picks Guitar; P2 (pad1) joins, picks Guitar.
+# Path (from Explore of RB3 Wii decomp): main_hub(join) -> Quickplay -> song_select -> part_difficulty.
+14s:A@0,20s:A@0,30s:A@1,36s:DOWN@1,40s:A@1,46s:A@0,52s:DOWN@0,56s:A@0
