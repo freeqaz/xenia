@@ -16,6 +16,7 @@
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/util/shim_utils.h"
 #include "xenia/kernel/xam/xam_private.h"
+#include "xenia/kernel/xthread.h"
 #include "xenia/xbox.h"
 
 namespace xe {
@@ -60,7 +61,26 @@ dword_result_t XamInputGetCapabilities_entry(
   }
 
   auto input_system = kernel_state()->emulator()->input_system();
-  return input_system->GetCapabilities(actual_user_index, flags, caps);
+  X_RESULT r = input_system->GetCapabilities(actual_user_index, flags, caps);
+  // TEMP DIAG (clean-TU5 join gate): the RB3 Xbox joypad reader thread polls
+  // XInputGetCapabilities per pad each iteration; if it never loops we see this
+  // fire ~once. Log first several calls with caller LR + result + subtype.
+  {
+    static std::atomic<uint32_t> s_caps_calls{0};
+    uint32_t n = s_caps_calls.fetch_add(1, std::memory_order_relaxed);
+    if (n < 12) {
+      uint32_t lr = 0;
+      auto* thread = XThread::GetCurrentThread();
+      if (thread) lr = static_cast<uint32_t>(thread->thread_state()->context()->lr);
+      XELOGD(
+          "XamInputGetCapabilities DIAG: call#{} user={} flags=0x{:X} "
+          "result=0x{:08X} subtype={} lr=0x{:08X}",
+          n, static_cast<uint32_t>(user_index & 0xFF),
+          static_cast<uint32_t>(flags), static_cast<uint32_t>(r),
+          r == X_ERROR_SUCCESS ? static_cast<uint32_t>(caps->sub_type) : 0, lr);
+    }
+  }
+  return r;
 }
 DECLARE_XAM_EXPORT1(XamInputGetCapabilities, kInput, kSketchy);
 
