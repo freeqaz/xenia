@@ -323,40 +323,6 @@ DEFINE_bool(
     "off the boot-to-menu path. Title-gated + default-off => DC3-inert.",
     "CPU");
 DEFINE_bool(
-    rb3_tu5_joypad_read, false,
-    "RB3 TU5 (title 0x45410914), default off: override the joypad reader "
-    "thread's per-pad input wrapper (0x8283fb80, tail-calls XamInputGetState) "
-    "to fill a connected-gamepad state for pad 0 directly from the input "
-    "system. Clean-TU5 diagnostic+fix: the reader thread exists but the kernel "
-    "XamInputGetState never fires (pads stay conn=0, no overshell join). This "
-    "hook confirms whether the reader reaches the call and, if so, connects "
-    "pad 0 so --scripted_input can drive the splash->main_hub join. Title-gated "
-    "+ default-off => DC3-inert.",
-    "CPU");
-DEFINE_bool(
-    rb3_tu5_hold_main, false,
-    "RB3 TU5 (title 0x45410914), default off, DIAGNOSTIC: byte-patch main()'s "
-    "terminal `blr` (0x82272EB0) into an infinite self-branch so the XEX entry "
-    "thread never returns. main_impl = App::_ct(); reg(); broadcast(); return -- "
-    "none is a frame loop, so it returns ~15s in (after the boot splash) and the "
-    "guest CRT tears down every worker thread. This holds main alive to test "
-    "whether the frontend/game loop lives on a surviving worker thread (menu "
-    "would appear) or genuinely never starts. Title-gated + default-off => "
-    "DC3-inert.",
-    "CPU");
-DEFINE_bool(
-    rb3_tu5_loop_main, false,
-    "RB3 TU5 (title 0x45410914), default off, EXPERIMENT: turn main()'s tail "
-    "into a frame loop. main_impl's 3rd call (bl 0x82270000 at 0x82272E98) is "
-    "'poll every registered Pollable once' (Game/Rnd/Graph/Synth/MoviePanel/... "
-    "-- the body of a real frame loop). main calls it ONCE then returns, so the "
-    "UI panel loads never finish and the frontend never renders. Byte-patch the "
-    "instruction right after that call (0x82272E9C, `li r3,0`) into `b "
-    "0x82272E94` so thr6 re-invokes the poll forever -- a crude frame loop that "
-    "keeps the title alive and pumps the subsystems. Title-gated + default-off "
-    "=> DC3-inert.",
-    "CPU");
-DEFINE_bool(
     rb3_tu5_app_run_direct, false,
     "RB3 TU5 (title 0x45410914), default off: enter the real frame loop "
     "directly. Retail App::Run (0x822703D0) installs an unhandled-exception "
@@ -1447,38 +1413,6 @@ void Rb3NoCharPreviewExtern(cpu::ppc::PPCContext* ppc_context,
   // void return; do not touch r[3].
 }
 
-// RB3 TU5 clean-boot joypad-read hook (--rb3_tu5_joypad_read). Overrides the
-// reader thread's per-pad input wrapper (0x8283fb80: `mr r5,r4; li r4,1; b
-// XamInputGetState`). DIAGNOSTIC + FIX in one: the reader thread (tid7, entry
-// 0x8252A3B0) exists and its backchain sits in the loop-tail Sleep, but the
-// kernel XamInputGetState handler never fires (poll#=0) -- so either the reader
-// never reaches this call or the tail-branch to the import thunk does not route
-// to our export. Overriding the direct `bl 0x8283fb80` answers it: if this fires
-// the reader IS polling, and we fill a connected-gamepad state (pad 0) straight
-// into its buffer so gJoypadData[0].conn flips to 1 and the overshell join can
-// fire. r3=pad, r4=guest X_INPUT_STATE*. Returns X_ERROR_SUCCESS for pad 0,
-// DEVICE_NOT_CONNECTED for others. Title-gated + default-off => DC3-inert.
-void Rb3Tu5JoypadReadExtern(cpu::ppc::PPCContext* ppc_context,
-                            kernel::KernelState* kernel_state) {
-  if (!ppc_context || !kernel_state) return;
-  uint32_t pad = static_cast<uint32_t>(ppc_context->r[3]);
-  uint32_t buf = static_cast<uint32_t>(ppc_context->r[4]);
-  static std::atomic<uint32_t> s_calls{0};
-  uint32_t n = s_calls.fetch_add(1, std::memory_order_relaxed);
-  if (n < 12) {
-    XELOGE("RB3 TU5 joypad-read hook#{} pad={} buf=0x{:08X} lr=0x{:08X}", n, pad,
-           buf, static_cast<uint32_t>(ppc_context->lr));
-  }
-  auto* input = kernel_state->emulator()->input_system();
-  uint8_t* base = kernel_state->memory()->virtual_membase();
-  X_RESULT r = X_ERROR_DEVICE_NOT_CONNECTED;
-  if (buf && input) {
-    auto* st = reinterpret_cast<xe::hid::X_INPUT_STATE*>(base + buf);
-    r = input->GetState(pad, st);
-  }
-  ppc_context->r[3] = static_cast<uint64_t>(r);
-}
-
 // RB3DX / RB3 TU5 first-boot calibration skip (--rb3dx_skip_calibration).
 //
 // The splash flow, at kSplashScreen_EndOvershell, evaluates the DTA condition
@@ -1900,26 +1834,11 @@ static void Rb3dxUiProbeThread(Memory* memory,
   for (;;) {
     if (!Rb3dxProbeSleep(2000)) return;
     ++sample;
-    // CORRECTED ROOT CAUSE (clean-TU5 splash->main_hub join gate, s63/s64):
-    // the TU5 joypad reader thread (tid7, entry 0x8252A3B0) DOES run and DOES
-    // reach its per-pad read helper 0x8283fb80 (`mr r5,r4; li r4,1;
-    // b 0x82C4BF7C` = tail-branch into the XamInputGetState import thunk) --
-    // proven by the --rb3_tu5_joypad_read override firing for pads 0-3. Yet
-    // the kernel XamInputGetState handler logs poll#=0, i.e. the tail-branch
-    // into the thunk never routes to the export. (Earlier "reader never
-    // spawns" conclusion was wrong: it scanned for the BASE-game entry
-    // address range, not the TU5 one.)
-    // REFUTED HYPOTHESIS: re-broadcasting XN_SYS_INPUTDEVICESCHANGED (0x12)
-    // with a port-0 mask to all listeners did NOT make pads connect -- the
-    // reader was polling all along; the break is in import-thunk routing
-    // and/or the per-pad connect gate (0x82531f08) downstream.
-    // ONE-SHOT thread census: list every live guest thread with its entry point
-    // so we can tell whether the Xbox joypad reader thread (base-game entry
-    // 0x82516e78) was ever spawned. If no thread's start_address lands in the
-    // Joypad_Xbox/Joypad_Xinput obj neighborhood, JoypadInit never ran.
-    static bool s_thread_census_done = false;
-    if (sample >= 3 && sample % 3 == 0 && kernel_state) {
-      s_thread_census_done = true;
+    // Thread census (bounded window): every live guest thread with its entry
+    // point + a saved-LR backchain. This is what located the joypad reader
+    // (tid7, entry 0x8252A3B0) and, in s64, proved the main thread spent
+    // 35s+ inside App::App and never entered the frame loop (wiki §8v).
+    if (sample >= 3 && sample <= 9 && kernel_state) {
       auto threads =
           kernel_state->object_table()->GetObjectsByType<kernel::XThread>();
       for (auto& t : threads) {
@@ -1944,37 +1863,6 @@ static void Rb3dxUiProbeThread(Memory* memory,
         }
         XELOGE("RB3DX UI PROBE: THREAD tid={} start=0x{:08X} susp={}{}",
                t->thread_id(), start, susp, chain);
-      }
-    }
-    // ONE-SHOT import-thunk forensics (s64, clean-TU5 input-routing anomaly):
-    // the reader tail-branches into the XamInputGetState thunk 0x82C4BF7C but
-    // the kernel handler never fires, while the same thread's Sleep(4) goes
-    // through the KeDelayExecutionThread thunk 0x82C4C5EC and works (the loop
-    // paces at ~4ms). Compare the sites: raw guest instruction words + whether
-    // the JIT has a Function declared there and with what behavior
-    // (0=default guest, 4=builtin, 5=extern -- cpu/function.h).
-    static bool s_thunk_dump_done = false;
-    if (!s_thunk_dump_done && sample >= 3 && processor) {
-      s_thunk_dump_done = true;
-      const struct {
-        const char* name;
-        uint32_t va;
-      } kSites[] = {
-          {"XamInputGetState.thunk", 0x82C4BF7Cu},
-          {"XamInputGetCapabilities.thunk", 0x82C4BF6Cu},
-          {"KeDelayExecutionThread.thunk", 0x82C4C5ECu},
-          {"reader.pad_read_helper", 0x8283FB80u},
-      };
-      for (const auto& site : kSites) {
-        uint32_t w0 = r32(site.va), w1 = r32(site.va + 4);
-        uint32_t w2 = r32(site.va + 8), w3 = r32(site.va + 12);
-        auto* fn = processor->QueryFunction(site.va);
-        XELOGE(
-            "RB3DX UI PROBE: THUNK {} va=0x{:08X} words {:08X} {:08X} {:08X} "
-            "{:08X} fn={} behavior={} end=0x{:08X}",
-            site.name, site.va, w0, w1, w2, w3, fn ? "yes" : "no",
-            fn ? static_cast<int>(fn->behavior()) : -1,
-            fn ? fn->end_address() : 0u);
       }
     }
     // --- UIManager / BandUI ---
@@ -5447,17 +5335,6 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
            kUpdateCharCache);
   }
 
-  // RB3 TU5 (0x45410914): joypad reader per-pad input hook (0x8283fb80).
-  // Diagnostic + input fix for the clean-TU5 splash->main_hub join gate.
-  // Title-gated + default-off => DC3-inert.
-  if (title_id_.has_value() && title_id_.value() == 0x45410914 &&
-      cvars::rb3_tu5_joypad_read) {
-    const uint32_t kJoypadRead = 0x8283fb80;
-    processor_->RegisterGuestFunctionOverride(
-        kJoypadRead, Rb3Tu5JoypadReadExtern, "RB3TU5:JoypadRead(0x8283fb80)");
-    XELOGI("RB3 TU5: joypad-read override installed at 0x{:08X}", kJoypadRead);
-  }
-
   // RB3 TU5 (0x45410914): enter the real frame loop directly
   // (--rb3_tu5_app_run_direct). See the cvar help for the full story: retail
   // App::Run (0x822703D0) reaches the frame loop App::RunWithoutDebugging
@@ -5491,137 +5368,6 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
     } else {
       XELOGW("RB3: app-run-direct NOT installed (Protect failed @0x{:08X})",
              kMainRunCall);
-    }
-  }
-
-  // RB3 TU5 (0x45410914) DIAGNOSTIC: hold main() from returning
-  // (--rb3_tu5_hold_main). main_impl(0x82272E60) = App::_ct(0x82270E68);
-  // reg(0x822703D0); broadcast(0x82270000); return 0 -- NONE is a frame loop,
-  // so main returns ~15s in (right after the boot splash) and the guest CRT
-  // exit path zombies every other guest thread (proven by the per-tid census,
-  // wiki 8p). Byte-patch the terminal `blr` at 0x82272EB0 into `b .`
-  // (0x48000000) so the entry thread spins there forever and the workers
-  // survive. If a frontend/menu then appears, the game loop was on a worker
-  // thread and main-return was killing it; if nothing changes, the frontend
-  // never starts and needs an explicit kick (DC3-style GotoFirstScreen).
-  // Title-gated + default-off => DC3-inert.
-  if (title_id_.has_value() && title_id_.value() == 0x45410914 &&
-      cvars::rb3_tu5_hold_main) {
-    // Hold thr6 right BEFORE the App shutdown-broadcast call (bl 0x82270000 at
-    // 0x82272E98). The per-tid census + per-sample tid6 chain proved thr6
-    // exits DURING that broadcast (a subscriber handler tears the title down),
-    // not via main's blr -- so spinning at the blr missed it. main_impl has
-    // already run App::_ct(ctor) + reg(0x822703D0) by here, so ctor side
-    // effects (workers spawned, UI transition kicked) are intact; only the
-    // shutdown notification is suppressed. If the frontend then engages, the
-    // teardown was broadcast-driven; if not, teardown is initiated elsewhere.
-    const uint32_t kMainBcast = 0x82272E98;
-    auto* heap = memory_->LookupHeap(kMainBcast);
-    auto* mem = memory_->virtual_membase();
-    uint32_t cur = xe::load_and_swap<uint32_t>(mem + kMainBcast);
-    if (cur != 0x4BFFD169) {  // bl 0x82270000
-      XELOGW("RB3: hold-main NOT installed (0x{:08X} is 0x{:08X}, not the "
-             "broadcast bl)", kMainBcast, cur);
-    } else if (heap && heap->Protect(kMainBcast & ~0xFFFu, 0x1000,
-                                     kMemoryProtectRead | kMemoryProtectWrite)) {
-      xe::store_and_swap<uint32_t>(mem + kMainBcast, 0x48000000u);  // b .
-      XELOGI("RB3: hold-main installed -- main() broadcast bl @0x{:08X} -> `b .`",
-             kMainBcast);
-    } else {
-      XELOGW("RB3: hold-main NOT installed (Protect failed @0x{:08X})",
-             kMainBcast);
-    }
-  }
-
-  // RB3 TU5 (0x45410914) EXPERIMENT: synthesize the missing frame loop
-  // (--rb3_tu5_loop_main). main_impl's tail is:
-  //   82272E94 addi r3,r31,0x50 ; 82272E98 bl 0x82270000 (App::Poll -- poll
-  //   Pollables/UI ONCE) ; 82272E9C li r3,0 ; ...epilogue... ; 82272EB0 blr
-  // App::Poll (0x82270000) drives the UIManager (TheUI.Poll ->
-  // UIScreen::CheckIsLoaded -> UIPanel::PollForLoading, which ADOPTS a finished
-  // DirLoader into the panel: mState kUnloaded->kDown), but does NOT pump
-  // TheLoadMgr. System::Poll (0x82510270, os/System.cpp) pumps TheLoadMgr
-  // (0x82E06E38 via 0x827bf700) so the panel DirLoaders actually FINISH, but
-  // does NOT poll the UIManager. A real frame needs BOTH: looping either alone
-  // wedges (System-only: panel loaders reach stateCode=DONE but are never
-  // adopted, so the splash_screen kTransitionTo transition never advances;
-  // App-only: loaders never finish). main never returns, so the dead epilogue
-  // (82272EA0.. onward) is free scratch for the extra call. Rewrite the tail to:
-  //   82272E94 addi r3,r31,0x50    (keep -- App* arg)
-  //   82272E98 bl 0x82270000       (keep -- App::Poll: UI/Pollables)
-  //   82272E9C addi r3,r31,0x50    (was `li r3,0` -- arg for System::Poll)
-  //   82272EA0 bl 0x82510270       (was epilogue -- System::Poll: LoadMgr)
-  //   82272EA4 b  0x82272E94       (was epilogue -- loop)
-  // Title-gated + default-off => DC3-inert.
-  if (title_id_.has_value() && title_id_.value() == 0x45410914 &&
-      cvars::rb3_tu5_loop_main) {
-    // The real per-frame body (App::RunOneFrame in the decomp) is
-    //   SystemPoll(); TheUI.Poll(); ...; TheUI.Draw();
-    // and TheUI is a BandUI. BandUI::Poll (TU5 0x825381C0, verified: vtable
-    // slot 2 of TheBandUI@0x82DFD2B0, whose body is TheNetSync->Poll();
-    // UIManager::Poll()(=0x82803f00); TheSessionMgr->Poll(); mOvershell...) is
-    // what services the splash_screen kTransitionTo transition: it runs
-    // UIScreen::CheckIsLoaded -> UIPanel::PollForLoading, which ADOPTS each
-    // panel's finished DirLoader (mState kUnloaded->kDown) and, once all three
-    // panels are loaded, flips the transition to kTransitionFrom and Enter()s
-    // the screen. App::Poll (0x82270000, generic Pollables: Game/Rnd/Graph/
-    // Synth/...) and System::Poll (0x82510270, pumps TheLoadMgr so the panel
-    // loaders FINISH) round out the frame. main never returns, so the dead
-    // epilogue (0x82272EA0.. onward, up to the blr at 0x82272EB0) is free
-    // scratch. Overwrite 0x82272E94..0x82272EB0 with the 8-instruction loop:
-    //   82272E94 lis   r3, 0x82E0
-    //   82272E98 addi  r3, r3, -0x2D50   ; r3 = TheBandUI (0x82DFD2B0)
-    //   82272E9C bl    0x825381C0        ; BandUI::Poll(TheBandUI)
-    //   82272EA0 addi  r3, r31, 0x50     ; r3 = App*
-    //   82272EA4 bl    0x82270000        ; App::Poll(App*)  (Pollables)
-    //   82272EA8 addi  r3, r31, 0x50
-    //   82272EAC bl    0x82510270        ; System::Poll()   (LoadMgr)
-    //   82272EB0 b     0x82272E94        ; loop
-    const uint32_t kCall = 0x82272E98;   // bl 0x82270000 (pristine-image check)
-    const uint32_t kAfter = 0x82272E9C;  // li r3,0        (pristine-image check)
-    auto* heap = memory_->LookupHeap(kCall);
-    auto* mem = memory_->virtual_membase();
-    uint32_t c0 = xe::load_and_swap<uint32_t>(mem + kCall);
-    uint32_t c1 = xe::load_and_swap<uint32_t>(mem + kAfter);
-    if (c0 != 0x4BFFD169 || c1 != 0x38600000) {
-      XELOGW("RB3: loop-main NOT installed (0x{:08X}=0x{:08X} 0x{:08X}=0x{:08X})",
-             kCall, c0, kAfter, c1);
-    } else if (heap && heap->Protect(0x82272E94u & ~0xFFFu, 0x1000,
-                                     kMemoryProtectRead | kMemoryProtectWrite)) {
-      xe::store_and_swap<uint32_t>(mem + 0x82272E94u, 0x3C6082E0u);  // lis r3,0x82E0
-      xe::store_and_swap<uint32_t>(mem + 0x82272E98u, 0x3863D2B0u);  // addi r3,r3,-0x2D50
-      xe::store_and_swap<uint32_t>(mem + 0x82272E9Cu, 0x482C5325u);  // bl 0x825381C0 BandUI::Poll
-      xe::store_and_swap<uint32_t>(mem + 0x82272EA0u, 0x387F0050u);  // addi r3,r31,0x50
-      xe::store_and_swap<uint32_t>(mem + 0x82272EA4u, 0x4BFFD15Du);  // bl 0x82270000 App::Poll
-      xe::store_and_swap<uint32_t>(mem + 0x82272EA8u, 0x387F0050u);  // addi r3,r31,0x50
-      xe::store_and_swap<uint32_t>(mem + 0x82272EACu, 0x4829D3C5u);  // bl 0x82510270 System::Poll
-      xe::store_and_swap<uint32_t>(mem + 0x82272EB0u, 0x4BFFFFE4u);  // b 0x82272E94
-      XELOGI("RB3: loop-main installed -- main() -> `while(1){{ BandUI::Poll(); "
-             "App::Poll(); System::Poll(); }}` (UI+Pollables+LoadMgr) "
-             "loop@0x82272E94");
-      // Also NOP LoadMgr::Poll's budget entry-gate (0x827BF720 `ble cr6,+0xA0`,
-      // word 0x409900A0). Without a real per-frame load budget (this->0x10 at
-      // 0x82E06E48, which the synthesized loop doesn't set), the gate makes Poll
-      // return WITHOUT draining, so a front loader whose IsLoaded()==true is
-      // never popped and head-of-line-blocks the FIFO (observed: the DONE
-      // DirLoader for inline_help_center.milo stuck at front forever). NOPing
-      // the gate makes every Poll enter the drain loop and pop loaded fronts.
-      const uint32_t kGate = 0x827BF720;
-      uint32_t g = xe::load_and_swap<uint32_t>(mem + kGate);
-      if (g == 0x409900A0) {
-        auto* gh = memory_->LookupHeap(kGate);
-        if (gh && gh->Protect(kGate & ~0xFFFu, 0x1000,
-                              kMemoryProtectRead | kMemoryProtectWrite)) {
-          xe::store_and_swap<uint32_t>(mem + kGate, 0x60000000u);  // nop
-          XELOGI("RB3: loop-main -- NOP'd LoadMgr::Poll budget gate @0x{:08X}",
-                 kGate);
-        }
-      } else {
-        XELOGW("RB3: loop-main -- gate @0x{:08X} is 0x{:08X}, not the ble; "
-               "not NOP'd", kGate, g);
-      }
-    } else {
-      XELOGW("RB3: loop-main NOT installed (Protect failed @0x{:08X})", kCall);
     }
   }
 
