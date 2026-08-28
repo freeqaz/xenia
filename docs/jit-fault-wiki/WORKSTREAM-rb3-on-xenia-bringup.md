@@ -1514,6 +1514,42 @@ transition. Ordered levers, all on `frag-alloc-trace` (title-gated, default-off,
 loop). **Next:** locate `UIManager`/`UIScreen::Load` for RB3 TU5 and drive the `splash_screen`
 transition (queue the panels / force `IsLoaded`), DC3-style — that is the last gate before pixels.
 
+### 8s. 2026-08-28 (session 62) — splash_screen ENTERS: the frame loop was missing `TheUI.Poll()`; now blocked on the overshell-join → main_hub gate
+
+§8r's "force `IsLoaded`" plan was unnecessary. The panels were **not** un-loadable — their three
+`DirLoader`s (`ui/meta_panel.milo`, `world/vignette/shell/sv8_a.milo`, `ui/splash/splash.milo`)
+all reached `stateCode=0x826C3888` (**DONE**), but each panel stayed `mState=kUnloaded, mDir=NULL`
+because `UIPanel::PollForLoading` (which adopts a finished loader into the panel) is only reached
+from `UIManager::Poll`, and **`--rb3_tu5_loop_main` never called it.** The old loop ran
+`App::Poll` (generic Pollables) + `System::Poll` (LoadMgr) but the real per-frame body — decomp
+`App::RunOneFrame` — is `SystemPoll(); TheUI.Poll(); …; TheUI.Draw();`, and `TheUI` is a `BandUI`.
+
+Located `BandUI::Poll` at **TU5 `0x825381C0`** by disassembling `TheBandUI@0x82DFD2B0`'s vtable
+(slot 2; body = `TheNetSync->Poll(); UIManager::Poll()(=0x82803f00); TheSessionMgr->Poll();
+mOvershell…` — an exact match for `band3/meta_band/BandUI.cpp:198`). Rebuilt `--rb3_tu5_loop_main`
+(main never returns → the dead epilogue `0x82272EA0..` is free scratch) as an 8-instruction loop
+at `0x82272E94`: `lis r3,0x82E0; addi r3,r3,-0x2D50 (=TheBandUI); bl BandUI::Poll; addi r3,r31,0x50;
+bl App::Poll; addi r3,r31,0x50; bl System::Poll; b loop`.
+
+**Result: the transition ADVANCES.** `transState 1 (kTransitionTo, stuck) → 2 (kTransitionFrom,
+curScreen=splash_screen) → 0 (kTransitionNone, curScreen=splash_screen)`; panels go
+`mState=kUp, mLoader=0, mDir=<valid>`. **The clean-TU5 frontend reaches a live screen for the
+first time.** (commit `0a98cd96b`.)
+
+**Next gate — splash_screen → main_hub (the overshell join).** splash holds; nothing starts the
+`main_hub_screen` transition (`transScreen=null`). Root cause is `OvershellSlot.cpp:1564-1587`:
+the splash_panel state machine parks in `kSplashScreen_WaitOvershell` until an overshell **slot**
+reaches `kState_JoinedDefault (=5)` and the overshell emits `overshell_allowing_input TRUE`. On the
+**retail** (non-`HX_NATIVE`) path a joining profileless user goes to `kState_ChooseProfile (=31)`
+and parks (the native port's fix forces `kState_JoinedDefault`). And the join never even fires
+headless: all four `gJoypadData` pads read **`conn=0`** under the synthesized loop (users are
+bound — `user=0x4362…` — but the pad is not "connected"), so `--scripted_input` START/A presses are
+ignored and every overshell slot stays `npot=0`. User 0 *is* signed in (`XamUserGetSigninState=1`)
+and no signin dialog is pushed, so signin is not the gate. **Two sub-gates:** (a) pad `conn=0` under
+`--rb3_tu5_loop_main` (input never connects → no join), (b) retail parks the join at
+`kState_ChooseProfile`. Fixing (a) then mirroring the native `kState_JoinedDefault` fix for (b) is
+the path to main_hub. Enum in `band3/meta_band/OvershellSlotState.h`. DC3 non-regression: 627 exact.
+
 ---
 
 ## 9. Related docs
