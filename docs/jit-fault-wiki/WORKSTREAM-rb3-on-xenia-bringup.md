@@ -1480,6 +1480,40 @@ or skip/stub that specific loader) apply; if it is a loader-state bug, fix that 
 Levers `--rb3_tu5_hold_main` / `--rb3_tu5_loop_main` on branch `frag-alloc-trace` (title-gated,
 default-off, DC3-inert).
 
+### 8r. 2026-08-28 (session 61 cont.) — §8q's "loader stall" CORRECTED: mLoading is empty; the gate is the stuck UI transition
+
+§8q called `inline_help_center.milo` a real head-of-line loader stall. That is **wrong** — it
+was me walking the wrong list. Decoded the Xbox `LoadMgr` layout (`this=0x82E06E38`, from
+`System::Poll`'s `bl 0x827bf700`) against the decomp `Loader.h`:
+
+| field | offset | addr | contents |
+|---|---|---|---|
+| `mLoaders` (loader **cache**) | `this+0x0` | `0x82E06E38` | all registered loaders, mostly done |
+| `mPeriod` (load budget) | `this+0x10` | `0x82E06E48` | float |
+| `mLoading` (active **queue**) | `this+0x18` | `0x82E06E50` | **EMPTY** |
+| `mTimer` | `this+0x20` | `0x82E06E58` | (matches §8m) |
+
+`LoadMgr::Poll` (`0x827bf700`) correctly drains `mLoading` (`this+0x18`). The probe had been
+walking `mLoaders` (`this+0x0`, the cache). So `inline_help_center.milo` is **not** stuck loading
+— it is a *cached, DONE* `DirLoader` (`mState=0x826C3888`=DoneLoading, `IsLoaded()`→true) sitting
+in the cache. The budget-gate / pop theories (and the `--rb3_loadmgr_unbudget` + gate-NOP
+experiments) chased a non-problem; `mLoading` being empty means Poll has nothing to drain.
+
+**True state with the synthesized frame loop running:** title alive, `System::Poll` pumps every
+subsystem, `mLoading` **empty**, and the `splash_screen` UI transition is stuck (`transState=1`,
+`curScreen=null`, `transScreen=splash_screen`) with its 3 panels (meta/sv8_panel/splash_panel)
+`mLoaded=0` and **never queued for loading** (never added to `mLoading`). So the gate is the
+**`UIManager` screen transition not advancing** far enough to load its panels — *upstream* of the
+loader, not in it. This is the same class as DC3's stuck screen transition, which
+`dc3_hack_pack_skeleton.cc` clears with `GotoFirstScreen` + panel-`IsLoaded` overrides.
+
+**Net for session 61:** clean-TU5 went from "mysterious ~15s flow-quit" to a live game with a
+working synthesized frame loop, blocked on exactly one thing — the `splash_screen` `UIManager`
+transition. Ordered levers, all on `frag-alloc-trace` (title-gated, default-off, DC3-inert):
+`--rb3_tu5_hold_main` (stop the teardown), `--rb3_tu5_loop_main` (run `System::Poll` as the frame
+loop). **Next:** locate `UIManager`/`UIScreen::Load` for RB3 TU5 and drive the `splash_screen`
+transition (queue the panels / force `IsLoaded`), DC3-style — that is the last gate before pixels.
+
 ---
 
 ## 9. Related docs
