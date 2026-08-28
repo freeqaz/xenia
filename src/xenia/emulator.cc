@@ -1849,6 +1849,45 @@ static void Rb3dxUiProbeThread(Memory* memory,
         "RB3DX UI PROBE[{}]: transState={} curScreen=0x{:08X}'{}' "
         "transScreen=0x{:08X}'{}'",
         sample, ts, cur, cur_name, trans, trans_name);
+    // ONE-SHOT: locate BandUI/UIManager::Poll in TheBandUI's vtable. The real
+    // per-frame body (App::RunOneFrame in the decomp) is `SystemPoll();
+    // TheUI.Poll(); ...; TheUI.Draw();`. Our synthesized main loop pumps
+    // SystemPoll + App::Poll(Pollables) but never TheUI.Poll(), so the
+    // splash_screen kTransitionTo transition is never serviced. UIManager::Poll
+    // is the vtable slot whose body calls UIScreen::CheckIsLoaded (0x827A3A00),
+    // Exiting (0x827A35C0) and Enter (0x827A51E0). Scan slots for those bl
+    // targets and report the address so we can add it to the frame loop.
+    static bool s_vt_scanned = false;
+    if (!s_vt_scanned && sample >= 2 && readable(kTheBandUI)) {
+      s_vt_scanned = true;
+      uint32_t vt = r32(kTheBandUI);
+      XELOGE("RB3DX UI PROBE: TheBandUI@0x{:08X} vtable=0x{:08X}", kTheBandUI, vt);
+      auto is_text = [&](uint32_t a) {
+        return a >= 0x82000000 && a < 0x83000000 && readable(a);
+      };
+      auto bl_target = [&](uint32_t at, uint32_t w) -> uint32_t {
+        if ((w & 0xFC000003u) != 0x48000001u) return 0;  // bl (LK=1, AA=0)
+        int32_t off = (int32_t)(w & 0x03FFFFFCu);
+        if (off & 0x02000000) off |= 0xFC000000;  // sign-extend 26-bit
+        return at + (uint32_t)off;
+      };
+      // BandUI::Poll (decomp band3/meta_band/BandUI.cpp:198) is the vtable Poll
+      // slot; its body does a DIRECT `bl UIManager::Poll` (UI.obj, 0x827Dxxxx).
+      // The slot with such a bl IS BandUI::Poll, and the bl target IS
+      // UIManager::Poll -- exactly the two addresses the frame loop needs.
+      for (int slot = 0; slot < 16; ++slot) {
+        uint32_t fn = r32(vt + slot * 4);
+        if (!is_text(fn)) continue;
+        (void)bl_target;
+        std::string words;
+        for (int w = 0; w < 0x40; ++w) {
+          uint32_t a = fn + w * 4;
+          if (!readable(a)) break;
+          words += fmt::format(" {:08X}", r32(a));
+        }
+        XELOGE("RB3DX UI PROBE: SLOTCODE vt[{}]=0x{:08X}:{}", slot, fn, words);
+      }
+    }
     // --- Main-thread guest stack sample (clean-TU5 flow bring-up). The TU5
     // intro_movie transition never completes and nothing in the probe surface
     // says where the main loop actually spins, so sample thid 6's live guest
@@ -2717,9 +2756,29 @@ static void Rb3dxUiProbeThread(Memory* memory,
           XELOGE(
               "RB3DX UI PROBE[{}]:   {}panel[{}]@0x{:08X} 0x{:08X}'{}' "
               "active={} refLoaded={} mState={} mLoaded={} mLoader=0x{:08X} "
-              "mLoadRefs={}",
+              "mLoadRefs={} mDir=0x{:08X}",
               sample, tag, n, node, panel, pname, active, loaded_ref, pstate,
-              ploaded, ploader, prefs);
+              ploaded, ploader, prefs, r32(panel + 0x8));
+          // Panel stuck at mState=kUnloaded with a live mLoader => the panel's
+          // DirLoader never reaches IsLoaded (UIPanel::PollForLoading only
+          // adopts when mLoader->IsLoaded()). Dump the loader's internals to
+          // tell apart "still mid-load" from "done-but-not-adopted": DirLoader
+          // vtable @+0 (expect 0x82106950), mState PTMF code @+0x20 (DONE stub
+          // = 0x826C3888 as seen on the startup_autosave loaders), the file
+          // path @+0x14/+0x30, and a strip of status words. Pure reads.
+          if (ploader && readable(ploader)) {
+            uint32_t lvt = r32(ploader);
+            uint32_t lstate = r32(ploader + 0x20);
+            std::string lfile = rstr(r32(ploader + 0x14));
+            std::string row;
+            for (uint32_t d = ploader; d < ploader + 0x40; d += 4) {
+              row += fmt::format(" {:08X}", r32(d));
+            }
+            XELOGE("RB3DX UI PROBE[{}]:     {}ldr 0x{:08X} vt={:08X} "
+                   "stateCode={:08X}{} file='{}':{}",
+                   sample, tag, ploader, lvt, lstate,
+                   lstate == 0x826C3888 ? "(DONE)" : "(mid)", lfile, row);
+          }
           // SyncGameStartPanel ('sync_audio_net_panel'): the song-start sync
           // gate. Retail layout (rb3-xenon SyncGameStartPanel.h, verified vs
           // retail ctor): own mState @0x3C (0..3 lockstep, 4=StartGame issued,
@@ -5277,21 +5336,51 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
   }
 
   // RB3 TU5 (0x45410914) EXPERIMENT: synthesize the missing frame loop
-  // (--rb3_tu5_loop_main). main_impl's 3rd call is `bl 0x82270000` (poll
-  // Pollables ONCE) at 0x82272E98; it does NOT pump TheLoadMgr, so the UI panel
-  // loads never even start (mState=0). System::Poll (0x82510270, os/System.cpp)
-  // IS the real per-frame body: it calls 0x827bf700 (Loader.cpp) on TheLoadMgr
-  // (0x82E06E38) to pump the loader, polls the Pollables (0x8250f898), and
-  // drives ~10 more subsystems. Two patches turn main's tail into a frame loop:
-  //   (1) 0x82272E98: `bl 0x82270000` -> `bl 0x82510270` (call System::Poll)
-  //   (2) 0x82272E9C: `li r3,0`       -> `b 0x82272E94` (loop back to the call)
-  // so thr6 runs `addi r3,r31,0x50; System::Poll(...)` forever instead of
-  // returning into the CRT's XamLoaderTerminateTitle. Title-gated + default-off
-  // => DC3-inert.
+  // (--rb3_tu5_loop_main). main_impl's tail is:
+  //   82272E94 addi r3,r31,0x50 ; 82272E98 bl 0x82270000 (App::Poll -- poll
+  //   Pollables/UI ONCE) ; 82272E9C li r3,0 ; ...epilogue... ; 82272EB0 blr
+  // App::Poll (0x82270000) drives the UIManager (TheUI.Poll ->
+  // UIScreen::CheckIsLoaded -> UIPanel::PollForLoading, which ADOPTS a finished
+  // DirLoader into the panel: mState kUnloaded->kDown), but does NOT pump
+  // TheLoadMgr. System::Poll (0x82510270, os/System.cpp) pumps TheLoadMgr
+  // (0x82E06E38 via 0x827bf700) so the panel DirLoaders actually FINISH, but
+  // does NOT poll the UIManager. A real frame needs BOTH: looping either alone
+  // wedges (System-only: panel loaders reach stateCode=DONE but are never
+  // adopted, so the splash_screen kTransitionTo transition never advances;
+  // App-only: loaders never finish). main never returns, so the dead epilogue
+  // (82272EA0.. onward) is free scratch for the extra call. Rewrite the tail to:
+  //   82272E94 addi r3,r31,0x50    (keep -- App* arg)
+  //   82272E98 bl 0x82270000       (keep -- App::Poll: UI/Pollables)
+  //   82272E9C addi r3,r31,0x50    (was `li r3,0` -- arg for System::Poll)
+  //   82272EA0 bl 0x82510270       (was epilogue -- System::Poll: LoadMgr)
+  //   82272EA4 b  0x82272E94       (was epilogue -- loop)
+  // Title-gated + default-off => DC3-inert.
   if (title_id_.has_value() && title_id_.value() == 0x45410914 &&
       cvars::rb3_tu5_loop_main) {
-    const uint32_t kCall = 0x82272E98;   // bl 0x82270000
-    const uint32_t kAfter = 0x82272E9C;  // li r3,0
+    // The real per-frame body (App::RunOneFrame in the decomp) is
+    //   SystemPoll(); TheUI.Poll(); ...; TheUI.Draw();
+    // and TheUI is a BandUI. BandUI::Poll (TU5 0x825381C0, verified: vtable
+    // slot 2 of TheBandUI@0x82DFD2B0, whose body is TheNetSync->Poll();
+    // UIManager::Poll()(=0x82803f00); TheSessionMgr->Poll(); mOvershell...) is
+    // what services the splash_screen kTransitionTo transition: it runs
+    // UIScreen::CheckIsLoaded -> UIPanel::PollForLoading, which ADOPTS each
+    // panel's finished DirLoader (mState kUnloaded->kDown) and, once all three
+    // panels are loaded, flips the transition to kTransitionFrom and Enter()s
+    // the screen. App::Poll (0x82270000, generic Pollables: Game/Rnd/Graph/
+    // Synth/...) and System::Poll (0x82510270, pumps TheLoadMgr so the panel
+    // loaders FINISH) round out the frame. main never returns, so the dead
+    // epilogue (0x82272EA0.. onward, up to the blr at 0x82272EB0) is free
+    // scratch. Overwrite 0x82272E94..0x82272EB0 with the 8-instruction loop:
+    //   82272E94 lis   r3, 0x82E0
+    //   82272E98 addi  r3, r3, -0x2D50   ; r3 = TheBandUI (0x82DFD2B0)
+    //   82272E9C bl    0x825381C0        ; BandUI::Poll(TheBandUI)
+    //   82272EA0 addi  r3, r31, 0x50     ; r3 = App*
+    //   82272EA4 bl    0x82270000        ; App::Poll(App*)  (Pollables)
+    //   82272EA8 addi  r3, r31, 0x50
+    //   82272EAC bl    0x82510270        ; System::Poll()   (LoadMgr)
+    //   82272EB0 b     0x82272E94        ; loop
+    const uint32_t kCall = 0x82272E98;   // bl 0x82270000 (pristine-image check)
+    const uint32_t kAfter = 0x82272E9C;  // li r3,0        (pristine-image check)
     auto* heap = memory_->LookupHeap(kCall);
     auto* mem = memory_->virtual_membase();
     uint32_t c0 = xe::load_and_swap<uint32_t>(mem + kCall);
@@ -5299,13 +5388,19 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
     if (c0 != 0x4BFFD169 || c1 != 0x38600000) {
       XELOGW("RB3: loop-main NOT installed (0x{:08X}=0x{:08X} 0x{:08X}=0x{:08X})",
              kCall, c0, kAfter, c1);
-    } else if (heap && heap->Protect(kCall & ~0xFFFu, 0x1000,
+    } else if (heap && heap->Protect(0x82272E94u & ~0xFFFu, 0x1000,
                                      kMemoryProtectRead | kMemoryProtectWrite)) {
-      // bl 0x82510270 from 0x82272E98: off = 0x82510270-0x82272E98 = 0x29D3D8.
-      xe::store_and_swap<uint32_t>(mem + kCall, 0x4829D3D9u);   // bl 0x82510270
-      xe::store_and_swap<uint32_t>(mem + kAfter, 0x4BFFFFF8u);  // b 0x82272E94
-      XELOGI("RB3: loop-main installed -- main() -> `while(1) System::Poll()` "
-             "(call@0x{:08X}=bl 0x82510270, loop@0x{:08X})", kCall, kAfter);
+      xe::store_and_swap<uint32_t>(mem + 0x82272E94u, 0x3C6082E0u);  // lis r3,0x82E0
+      xe::store_and_swap<uint32_t>(mem + 0x82272E98u, 0x3863D2B0u);  // addi r3,r3,-0x2D50
+      xe::store_and_swap<uint32_t>(mem + 0x82272E9Cu, 0x482C5325u);  // bl 0x825381C0 BandUI::Poll
+      xe::store_and_swap<uint32_t>(mem + 0x82272EA0u, 0x387F0050u);  // addi r3,r31,0x50
+      xe::store_and_swap<uint32_t>(mem + 0x82272EA4u, 0x4BFFD15Du);  // bl 0x82270000 App::Poll
+      xe::store_and_swap<uint32_t>(mem + 0x82272EA8u, 0x387F0050u);  // addi r3,r31,0x50
+      xe::store_and_swap<uint32_t>(mem + 0x82272EACu, 0x4829D3C5u);  // bl 0x82510270 System::Poll
+      xe::store_and_swap<uint32_t>(mem + 0x82272EB0u, 0x4BFFFFE4u);  // b 0x82272E94
+      XELOGI("RB3: loop-main installed -- main() -> `while(1){{ BandUI::Poll(); "
+             "App::Poll(); System::Poll(); }}` (UI+Pollables+LoadMgr) "
+             "loop@0x82272E94");
       // Also NOP LoadMgr::Poll's budget entry-gate (0x827BF720 `ble cr6,+0xA0`,
       // word 0x409900A0). Without a real per-frame load budget (this->0x10 at
       // 0x82E06E48, which the synthesized loop doesn't set), the gate makes Poll
