@@ -1839,6 +1839,20 @@ static void Rb3dxUiProbeThread(Memory* memory,
   for (;;) {
     if (!Rb3dxProbeSleep(2000)) return;
     ++sample;
+    // ROOT CAUSE (clean-TU5 splash->main_hub join gate, s63): under the
+    // truncated --rb3_tu5_loop_main boot the guest calls XamInputGetCapabilities
+    // and XamInputGetState ZERO times the whole run (verified with --log_level=4
+    // debug DIAG in xam_input.cc). The RB3 Xbox joypad reader is a dedicated
+    // thread (JoypadInit -> sub spawns entry 0x82516e78 in base game =
+    // InitXinputJoypadThreadData + a ~4ms sleep-loop that calls
+    // XInputGetCapabilities/XInput2Sample per pad). That thread never runs, so
+    // every gJoypadData pad stays conn=0 and no overshell join can fire.
+    // REFUTED HYPOTHESIS: re-broadcasting XN_SYS_INPUTDEVICESCHANGED (0x12) with
+    // a port-0 mask to all listeners did NOT make the guest poll input -- the
+    // reader thread simply isn't spawned/looping, it is not waiting on a
+    // device-change notification. The real fix must either drive the join from
+    // the host (populate gJoypadData / force the overshell slot state) or make
+    // the reader thread actually run.
     // --- UIManager / BandUI ---
     uint32_t ts = r32(kTheBandUI + 0x10);
     uint32_t cur = r32(kTheBandUI + 0x2C);
