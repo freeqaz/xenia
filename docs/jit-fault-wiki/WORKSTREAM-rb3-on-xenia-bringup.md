@@ -1550,7 +1550,11 @@ and no signin dialog is pushed, so signin is not the gate. **Two sub-gates:** (a
 `kState_ChooseProfile`. Fixing (a) then mirroring the native `kState_JoinedDefault` fix for (b) is
 the path to main_hub. Enum in `band3/meta_band/OvershellSlotState.h`. DC3 non-regression: 627 exact.
 
-### §8t — sub-gate (a) root cause: the Xbox joypad reader thread never spawns (s63)
+### §8t — sub-gate (a) root cause: the Xbox joypad reader thread never spawns (s63) — ⚠️ SUPERSEDED BY §8u
+
+> **CORRECTED by §8u:** the "reader never spawns / `JoypadInit` never runs" conclusion below is WRONG.
+> It used the *base-game* address range (`~0x82516xxx`) to scan for the reader thread, but the TU5
+> reader entry is `0x8252A3B0`. The reader thread DOES exist (tid7) and DOES poll. Read §8u.
 
 Sub-gate (a) — pads `conn=0`, no join — is **not** a notification or connection-state problem. The
 guest calls `XamInputGetCapabilities` and `XamInputGetState` **zero times the entire run** (verified
@@ -1588,6 +1592,46 @@ runs (understand why retail `main` returns after one `pollOnce` instead of runni
 host-drive the whole join / force the overshell slot to `kState_JoinedDefault` (DC3 `hack_pack`
 style), bypassing input entirely. Commit `a27922d7f` on `frag-alloc-trace` holds the diagnosis +
 DIAG instrumentation. DC3 non-regression: 627 exact.
+
+### §8u — CORRECTED boot model + the reader DOES poll; real gate is input routing (s63)
+
+Disassembling the actual TU5 image (`rb3-xenon/tools/tu5_va.py` over `orig/45410914/band.exe`, which
+matches the running binary byte-for-byte — thread-census start addresses line up exactly) overturns
+two earlier conclusions:
+
+**1. The boot model.** TU5 `main` (0x82272e68) is `App::_ct(0x82270e68); <bc-always-link>
+0x82270080; call 0x82270000; ret`. The middle instruction `0x4280D1F1` is a **branch-always-and-link**
+(`BO=20`), not the "bdnzl" capstone prints — an unconditional call to `App::Run` at **0x82270080**,
+the REAL infinite frame loop: `SystemPoll(false)(0x82510270)` + ~20 subsystem/vtable polls +
+`TheUI->Poll` + `App::DrawRegular(0x82270018)` + `b 0x822700d4` (never returns). `main`'s 3rd call
+(`0x82270000` → `0x8250f820`) is the **poll-once + shutdown/cleanup** path, reached only if `App::Run`
+unwinds. **Without any hack** (just `--rb3_no_char_preview`), `App::Run` runs the full session — the
+old "main returns / title quits ~15 s" was the char-cache head-of-line block, now avoided. So
+`--rb3_tu5_loop_main` is **not needed** to keep the title alive; it merely substitutes a stripped
+BandUI::Poll loop that happens to advance the splash transition (which the real `App::Run` leaves
+stuck at `transState=1`, a separate gate).
+
+**2. The joypad reader DOES run and poll.** TU5 reader entry = **0x8252A3B0** (tid7; = base-game
+0x82516e78: `bl InitXinput(0x82529890); bl loop(0x8252a0b8); li r3,0`). The loop enters a CS, iterates
+4 pads, and per pad calls **0x8283fb80** (`mr r5,r4; li r4,1; b <XamInputGetState import thunk
+0x82c4bf7c>`), then `CriticalSection::Exit` + `Sleep(4)`. A `--rb3_tu5_joypad_read` guest-function
+override on `0x8283fb80` **fires** for pads 0-3 across iterations (lr=0x8252A148) — the reader reaches
+the call.
+
+**The real anomaly:** with the reader reaching `0x8283fb80`, the kernel `XamInputGetState` handler
+still logs **poll#=0** — the guest's tail-branch (`b 0x82c4bf7c`) to the import thunk is **not routing
+to xenia's export handler**. (Contrast: the RB3DX gameplay boot *did* poll XamInputGetState, so the
+handler itself works.) The `--rb3_tu5_joypad_read` override sidesteps this by filling pad state
+straight from `input_system->GetState` — but pads still read `conn=0` because the reader's connection
+decision has more gates after the first read: `JoypadGetPadData(0x82524998)` → check `mConnected@0x48`
+→ if 0, call the connection gate **0x82531f08** (`beq` its result → disconnect/skip), then downstream
+processing that ultimately writes `mConnected` and feeds `GetXinputSinceLastFrame` → `gJoypadData`.
+
+**Remaining work (two threads):** (i) why the guest `XamInputGetState`/`XInput2*` import calls from
+the reader don't route to xenia's handlers (a general fix here would make the reader connect pads
+natively, no per-pad RE); (ii) the per-pad connection path (`0x82531f08` gate + downstream) — override
+`0x8283fb80` fully replicating the connect result, or hook higher. Commits `a27922d7f`, `bade8c652`,
+`b8a19ccbb` on `frag-alloc-trace`. DC3 non-regression: 627 exact.
 
 ---
 
