@@ -1853,6 +1853,22 @@ static void Rb3dxUiProbeThread(Memory* memory,
     // device-change notification. The real fix must either drive the join from
     // the host (populate gJoypadData / force the overshell slot state) or make
     // the reader thread actually run.
+    // ONE-SHOT thread census: list every live guest thread with its entry point
+    // so we can tell whether the Xbox joypad reader thread (base-game entry
+    // 0x82516e78) was ever spawned. If no thread's start_address lands in the
+    // Joypad_Xbox/Joypad_Xinput obj neighborhood, JoypadInit never ran.
+    static bool s_thread_census_done = false;
+    if (sample >= 3 && !s_thread_census_done && kernel_state) {
+      s_thread_census_done = true;
+      auto threads =
+          kernel_state->object_table()->GetObjectsByType<kernel::XThread>();
+      for (auto& t : threads) {
+        if (!t) continue;
+        uint32_t start = t->creation_params()->start_address;
+        XELOGE("RB3DX UI PROBE: THREAD tid={} start=0x{:08X} word0=0x{:08X} '{}'",
+               t->thread_id(), start, r32(start), t->name());
+      }
+    }
     // --- UIManager / BandUI ---
     uint32_t ts = r32(kTheBandUI + 0x10);
     uint32_t cur = r32(kTheBandUI + 0x2C);
