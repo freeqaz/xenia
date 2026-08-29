@@ -8,6 +8,7 @@
 */
 
 #include <algorithm>
+#include <mutex>
 
 #include "xenia/base/logging.h"
 #include "xenia/base/platform.h"
@@ -686,20 +687,67 @@ dword_result_t XeKeysHmacShaUsingKey_entry(lpvoid_t obscured_key,
 }
 DECLARE_XBOXKRNL_EXPORT1(XeKeysHmacShaUsingKey, kNone, kImplemented);
 
-// XeKeys stubs for DC3
-dword_result_t XeKeysAesCbc_entry(lpvoid_t key, lpvoid_t iv, lpvoid_t input,
-                                   dword_t input_size, lpvoid_t output,
-                                   dword_t encrypt) {
-  // TODO: AES-CBC encrypt/decrypt using console-specific keys
-  return X_STATUS_UNSUCCESSFUL;
-}
-DECLARE_XBOXKRNL_EXPORT1(XeKeysAesCbc, kNone, kStub);
+// XeKeysSetKey / XeKeysAesCbc: the kernel's software key-slot API. SetKey
+// installs a 16-byte key into a numbered slot; AesCbc later runs AES-CBC with
+// whatever key that slot holds. The two are only meaningful together, so they
+// are implemented together here.
+//
+// Previously both were stubs, and XeKeysAesCbc in particular returned
+// STATUS_UNSUCCESSFUL *without writing its output buffer* -- so a caller that
+// ignored the status (most do) silently consumed uninitialized memory as
+// "plaintext". Retail Rock Band 3 hits this decrypting the AES layer of its
+// .mogg song audio, which left its Vorbis reader unable to parse a single
+// header and its audio stream parked in kInit forever.
+//
+// CAVEAT: on real hardware SetKey applies a deobfuscation transform keyed on a
+// console key we do not have, so a title that supplies an *obscured* key still
+// ends up with the wrong bytes here. Slots are stored verbatim, which is
+// correct for any title that supplies a plaintext key.
+constexpr uint32_t kXeKeysSlotCount = 0x100;
+static uint8_t xe_keys_slots[kXeKeysSlotCount][16] = {};
+static bool xe_keys_slot_valid[kXeKeysSlotCount] = {};
+static std::mutex xe_keys_slot_mutex;
 
 dword_result_t XeKeysSetKey_entry(dword_t key_index, lpvoid_t key_data,
-                                   dword_t key_size) {
-  return 0;
+                                  dword_t key_size) {
+  if (!key_data || key_size != 16 || key_index >= kXeKeysSlotCount) {
+    return X_STATUS_INVALID_PARAMETER;
+  }
+  std::lock_guard<std::mutex> lock(xe_keys_slot_mutex);
+  std::memcpy(xe_keys_slots[key_index], key_data.as<const uint8_t*>(), 16);
+  xe_keys_slot_valid[key_index] = true;
+  return X_STATUS_SUCCESS;
 }
-DECLARE_XBOXKRNL_EXPORT1(XeKeysSetKey, kNone, kStub);
+DECLARE_XBOXKRNL_EXPORT1(XeKeysSetKey, kNone, kImplemented);
+
+dword_result_t XeKeysAesCbc_entry(dword_t key_index, lpvoid_t input,
+                                  dword_t input_size, lpvoid_t output,
+                                  lpvoid_t feed, dword_t encrypt) {
+  if (key_index >= kXeKeysSlotCount || !input || !output) {
+    return X_STATUS_INVALID_PARAMETER;
+  }
+  uint8_t key[16];
+  {
+    std::lock_guard<std::mutex> lock(xe_keys_slot_mutex);
+    if (!xe_keys_slot_valid[key_index]) {
+      return X_STATUS_UNSUCCESSFUL;
+    }
+    std::memcpy(key, xe_keys_slots[key_index], 16);
+  }
+  XECRYPT_AES_STATE aes;
+  XeCryptAesKey_entry(&aes, key);
+  if (feed) {
+    XeCryptAesCbc_entry(&aes, input, input_size, output, feed, encrypt);
+  } else {
+    // A null feedback pointer means "start from a zero IV". XeCryptAesCbc
+    // dereferences feed unconditionally, so give it a local one; it is also
+    // written back through, which is why this must not be shared or const.
+    uint8_t zero_feed[16] = {};
+    XeCryptAesCbc_entry(&aes, input, input_size, output, zero_feed, encrypt);
+  }
+  return X_STATUS_SUCCESS;
+}
+DECLARE_XBOXKRNL_EXPORT1(XeKeysAesCbc, kNone, kImplemented);
 
 dword_result_t XeKeysGetConsoleID_entry(lpvoid_t console_id_ptr,
                                          lpdword_t id_size_ptr) {
