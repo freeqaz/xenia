@@ -1748,6 +1748,66 @@ Commit `77ad3dcce`. DC3 non-regression: 627 exact.
 
 ---
 
+### §8x — SOLVED: the song-audio gate was two unimplemented kernel exports (s66)
+
+**Root cause.** Retail RB3 decrypts the AES layer of its `.mogg` song audio through
+`XeKeysSetKey` / `XeKeysAesCbc`. Both were `kStub` in this fork, and
+`XeKeysAesCbc_entry` returned `X_STATUS_UNSUCCESSFUL` **without writing its output
+buffer** — so the guest consumed uninitialized memory as the decrypted mogg key.
+
+Two independent lines of evidence converged on the same instruction:
+
+1. **Call-chain RE (from the symptom down).** `MasterAudio::IsLoaded` (0x8277B6E8) is a
+   five-word tail call — `return mStream->IsReady()`, i.e. `mState@+0x14 == kReady(2)`.
+   `mState` is written in exactly three places: the ctor stores `kInit(0)` (0x82704C84),
+   `PollStream` stores `kReady(2)` (0x82705780), and `kBuffering(1)` is stored at
+   **0x82704880 inside `StandardStream::InitInfo` (0x827046B8)**. That store is
+   *unconditional*, and the loop immediately above it is the only code that fills the
+   receivers vector (`+0x20`) from the channel array (`+0x78`). So an empty receivers
+   vector proves `InitInfo` **never ran** — a different claim from "it ran and failed".
+   Walking up: `InitInfo` ← `VorbisReader::Init` (0x82BB2A08) ← `VorbisReader::Poll`
+   (0x82BB4878), gated on `CheckHmxHeader` (0x82BB2E70), which for mogg crypt versions
+   0x0C–0x10 calls **`ByteGrinder::HvDecrypt` at 0x82727688**.
+2. **Image diff vs the RB3DX-lineage image (from the fix up).** 26 of the 53 differing
+   words are an audio patch centred on that same 0x82727688 and its two wrappers
+   (0x82840788 `SetKey`, 0x82840820 `AesCbc`), repointing the two imports at
+   `XeCryptAesKey` / `XeCryptAesCbc` — which xenia fully implements.
+
+**Fix.** `XeKeysSetKey` / `XeKeysAesCbc` implemented in `xboxkrnl_crypt.cc`: a 256-entry
+key-slot table, the **correct argument order** `(index, input, size, output, feed,
+encrypt)` — the stub had it wrong — and a zero IV when the guest passes a null feedback
+pointer, which retail does. This is a genuine gap, not an RB3 workaround.
+
+**Caveat + `--rb3_mogg_key_table`.** Slots are stored verbatim. On hardware `SetKey`
+first *deobfuscates* the supplied key with a console key we do not have, so a title that
+ships an **obscured** table still gets the wrong bytes. Verified: the retail and DX
+tables are not related by the placeholder zero obfuscation key, by `key19`, or by XOR —
+it is AES under an unknown key. So the deobscured 64 bytes are supplied at runtime via
+`--rb3_mogg_key_table` (default empty, title-gated). **No keys ship in-tree.**
+
+**Result** (retail TU5, pristine content, `--gpu=null`): the song stream goes from
+`{mState=0, 0 receivers}` to **`{mState=3 kPlaying, 11 channels, 11 receivers}`**, and
+`tv3_a_screen → game_screen` **completes** (`transState=0`) and holds, instead of parking
+at `transState=1` forever. Matches the DX image's own `{13 channels, 13 receivers}`.
+
+**New probe:** `--rb3_stream_census` finds `StandardStream`s by vtable (0x820F6A8C)
+rather than by walking the load queue, so it also works against an image that *does*
+reach playback — that is what made retail and DX directly comparable.
+
+**Corrections to §8w.** The s65 "empty channel vector" reading used a guessed offset:
+`+0x20` is the **receivers** vector and `+0x78` is the channel array, so the song stream
+did have channel data. The conclusion "`InitInfo` never ran" survives — via the receivers
+vector — but for a different reason than stated. Confirmed layout (RTTI-verified):
+`StandardStream` vtable 0x820F6A8C, `mState`+0x14, `mFile`+0x18, `mRdr`+0x1C,
+`mChannels`+0x20, `mChanParams`+0x78, sizeof 0x170; `MasterAudio` vtable 0x8210CC9C,
+`mStream`+0x38. The song's reader is a **`VorbisReader`** (vtable 0x821A1A34), not an
+`XMAReader` — moggs are Ogg Vorbis. Also ruled out: a missing/unopenable `.mogg` yields a
+`StreamNull` whose `IsReady` returns *true*, so it cannot cause this hang.
+
+DC3 non-regression: 627 forced trap hits, exact. Commit `f137bcedb`.
+
+---
+
 ## 9. Related docs
 
 Inside this wiki (`docs/jit-fault-wiki/`):
