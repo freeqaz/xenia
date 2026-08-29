@@ -301,6 +301,36 @@ DEFINE_bool(
     "_ReadDone spins on an OVERLAPPED xenia never clears). Read-only. "
     "Title-gated => DC3-inert.",
     "CPU");
+DEFINE_string(
+    rb3_mogg_key_table, "",
+    "RB3 TU5 (title 0x45410914), default empty (disabled): 64 hex bytes to "
+    "write over the mogg key-encryption table at 0x82C76258. Retail RB3 "
+    "decrypts .mogg song audio by installing a table key via XeKeysSetKey and "
+    "running XeKeysAesCbc. On hardware SetKey first DEOBFUSCATES the supplied "
+    "key using a console key we do not have, so the shipped (obscured) table "
+    "cannot work under emulation and the song stream never leaves kInit. "
+    "Passing the deobscured equivalent here makes the decrypt come out right. "
+    "No keys ship with xenia -- read the 64 bytes at 0x82C76258 out of an "
+    "already-deobscured RB3 image if you have one. Accepts whitespace between "
+    "bytes. Title-gated => DC3-inert.",
+    "CPU");
+DEFINE_bool(
+    rb3_stream_census, false,
+    "RB3 (title 0x45410914), default off, requires --rb3dx_ui_probe: sweep the "
+    "guest heap for live StandardStream objects (vtable 0x820F6A8C) and report "
+    "each one's mState(+0x14), receivers vector(+0x20..+0x24) and channel "
+    "array(+0x78..+0x80). The song-audio gate is MasterAudio::IsLoaded "
+    "(0x8277B6E8), which tail-calls mStream->IsReady() = (mState == kReady/2). "
+    "mState is written in exactly three places: the ctor stores kInit(0), "
+    "0x82704880 stores kBuffering(1), and PollStream stores kReady(2). The "
+    "kBuffering store is UNCONDITIONAL within 0x827046B8, and that same "
+    "function is the only code that fills the receivers vector from the "
+    "channel array -- so 'mState==0 with an empty receivers vector' is proof "
+    "that 0x827046B8 was never called, rather than that it ran and failed. "
+    "Finding streams by vtable instead of by walking the load queue lets this "
+    "run against an image that DOES reach playback, making the two directly "
+    "comparable. Read-only. Title-gated => DC3-inert.",
+    "CPU");
 DEFINE_bool(
     rb3_tu5_hash_poke, false,
     "RB3 TU5 (title 0x45410914), default off, requires --rb3dx_ui_probe: "
@@ -2199,8 +2229,56 @@ static void Rb3dxUiProbeThread(Memory* memory,
                 sample, au, st, r32(st), r32(st + 0x14), r32(st + 0x20),
                 r32(st + 0x24), r32(st + 0x1C),
                 r32(st + 0x1C) ? r32(r32(st + 0x1C)) : 0, recvs);
+            // Raw dumps. Every field offset above is INFERRED from a sibling
+            // title's layout, so before drawing any conclusion from
+            // streamState/chans we need the ground truth: the concrete class
+            // (vtable) and, most valuable of all, the song path the stream was
+            // constructed with. A '.mogg' string here proves the stream knows
+            // its file; its ABSENCE means the failure is upstream of the
+            // stream entirely (MasterAudio never handed it a path).
+            auto dump = [&](const char* tag, uint32_t base, uint32_t len) {
+              std::string hex, strs;
+              for (uint32_t d = 0; d < len; d += 4) {
+                uint32_t v = r32(base + d);
+                hex += fmt::format(" {:08X}", v);
+                if (v >= 0x1000 &&
+                    (v < 0x50000000 || (v >= 0x82000000 && v < 0x83000000))) {
+                  std::string s = rstr(v);
+                  if (s.size() >= 3 && s.size() < 63 && s != "<binary>") {
+                    strs += fmt::format(" +0x{:X}->'{}'", d, s);
+                  }
+                }
+              }
+              XELOGE("RB3DX UI PROBE[{}]: BM-{} 0x{:08X}:{}{}", sample, tag,
+                     base, hex, strs);
+            };
+            dump("AUDIO", au, 0x80);
+            dump("STREAM", st, 0xC0);
           }
         }
+      }
+      // StandardStream census -- see --rb3_stream_census help text. Scans
+      // page-at-a-time (one readability query per page, then a raw sweep) so a
+      // 256MB window costs a bounded ~64M word loads per sample.
+      if (cvars::rb3_stream_census) {
+        const uint32_t kStandardStreamVt = 0x820F6A8Cu;
+        int found = 0;
+        for (uint32_t page = 0x40000000u; page < 0x50000000u && found < 24;
+             page += 0x1000u) {
+          if (!readable(page)) continue;
+          for (uint32_t a = page; a < page + 0x1000u && found < 24; a += 4) {
+            if (load_and_swap<uint32_t>(base + a) != kStandardStreamVt) continue;
+            uint32_t rb = r32(a + 0x20), re = r32(a + 0x24);
+            uint32_t cb = r32(a + 0x78), ce = r32(a + 0x7C);
+            XELOGE(
+                "RB3DX UI PROBE[{}]: STREAM-CENSUS 0x{:08X} mState={} "
+                "recv=0x{:08X}..0x{:08X}(n={}) chans=0x{:08X}..0x{:08X}(n={})",
+                sample, a, r32(a + 0x14), rb, re, re > rb ? (re - rb) / 4 : 0,
+                cb, ce, ce > cb ? (ce - cb) / 4 : 0);
+            ++found;
+          }
+        }
+        XELOGE("RB3DX UI PROBE[{}]: STREAM-CENSUS total={}", sample, found);
       }
       // DirLoader mState locator: dump every .text-range word in the first two
       // queued loaders' objects [0,0x140). The FRONT loader (loadq[0]) is being
@@ -5424,6 +5502,50 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
     } else {
       XELOGW("RB3: app-run-direct NOT installed (Protect failed @0x{:08X})",
              kMainRunCall);
+    }
+  }
+
+  // Mogg key-encryption table override -- see --rb3_mogg_key_table help text.
+  if (title_id_.has_value() && title_id_.value() == 0x45410914 &&
+      !cvars::rb3_mogg_key_table.empty()) {
+    const uint32_t kMoggKeyTable = 0x82C76258;
+    std::vector<uint8_t> bytes;
+    int hi = -1;
+    bool bad = false;
+    for (char c : cvars::rb3_mogg_key_table) {
+      if (c == ' ' || c == '\t' || c == ',' || c == '\n') continue;
+      int v;
+      if (c >= '0' && c <= '9') {
+        v = c - '0';
+      } else if (c >= 'a' && c <= 'f') {
+        v = c - 'a' + 10;
+      } else if (c >= 'A' && c <= 'F') {
+        v = c - 'A' + 10;
+      } else {
+        bad = true;
+        break;
+      }
+      if (hi < 0) {
+        hi = v;
+      } else {
+        bytes.push_back(static_cast<uint8_t>((hi << 4) | v));
+        hi = -1;
+      }
+    }
+    auto* heap = memory_->LookupHeap(kMoggKeyTable);
+    if (bad || hi >= 0 || bytes.size() != 64) {
+      XELOGW(
+          "RB3: mogg-key-table NOT installed (need exactly 64 hex bytes, "
+          "parsed {})",
+          bytes.size());
+    } else if (heap && heap->Protect(kMoggKeyTable & ~0xFFFu, 0x1000,
+                                     kMemoryProtectRead | kMemoryProtectWrite)) {
+      std::memcpy(memory_->virtual_membase() + kMoggKeyTable, bytes.data(), 64);
+      XELOGI("RB3: mogg-key-table installed -- 64 bytes @0x{:08X}",
+             kMoggKeyTable);
+    } else {
+      XELOGW("RB3: mogg-key-table NOT installed (Protect failed @0x{:08X})",
+             kMoggKeyTable);
     }
   }
 
