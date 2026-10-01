@@ -31,6 +31,22 @@ GAME_MAX_S = 60.0
 GP2_MIN = 60
 
 
+
+def timeout_from_tail(log, tail_bytes=16384):
+    """`TIMEOUT: <ms>ms reached` is printed by the headless main thread while
+    other threads are still logging, so it can be split across lines
+    ('i> F8000004 XE_SWAPTIMEOUT: \\n230000ms reached', measured). Search the
+    log's tail across line breaks."""
+    try:
+        with open(log, "rb") as f:
+            f.seek(0, 2)
+            f.seek(max(0, f.tell() - tail_bytes))
+            tail = f.read().decode("utf-8", "replace")
+    except OSError:
+        return None
+    m = re.search(r"TIMEOUT:.{0,400}?(\d+)ms reached", tail, re.S)
+    return int(m.group(1)) if m else None
+
 def parse(log: Path) -> dict:
     now, seen, segv, gp2, reports = 0, {}, 0, 0, 0
     timeout_line, fail_msgs, tainted = None, [], 0
@@ -57,6 +73,8 @@ def parse(log: Path) -> dict:
                 fail_msgs.append(fm.group(2))
             if TAINT_RE.search(line):
                 tainted += 1
+    if timeout_line is None:
+        timeout_line = timeout_from_tail(log)
     return {
         "milestones_s": {n: (None if n not in seen else round(seen[n] / 1000, 1))
                          for n, _ in MILESTONES},

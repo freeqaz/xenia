@@ -30,6 +30,22 @@ TU5_MENU = ["main_hub_screen", "song_select_screen", "part_difficulty_screen", "
 DX_MENU = ["main_hub_screen", "song_select_screen"]
 
 
+
+def timeout_from_tail(log, tail_bytes=16384):
+    """`TIMEOUT: <ms>ms reached` is printed by the headless main thread while
+    other threads are still logging, so it can be split across lines
+    ('i> F8000004 XE_SWAPTIMEOUT: \\n230000ms reached', measured). Search the
+    log's tail across line breaks."""
+    try:
+        with open(log, "rb") as f:
+            f.seek(0, 2)
+            f.seek(max(0, f.tell() - tail_bytes))
+            tail = f.read().decode("utf-8", "replace")
+    except OSError:
+        return None
+    m = re.search(r"TIMEOUT:.{0,400}?(\d+)ms reached", tail, re.S)
+    return int(m.group(1)) if m else None
+
 def parse(log: Path) -> dict:
     now, seen, timeline, last = 0, {}, [], None
     stream_max = {}  # (stream addr) -> best (mState, recv, chans) after game_screen
@@ -86,6 +102,8 @@ def parse(log: Path) -> dict:
             t = TIMEOUT_RE.search(line)
             if t:
                 timeout_ms = int(t.group(1))
+    if timeout_ms is None:
+        timeout_ms = timeout_from_tail(log)
     playing = sorted(({"stream": k, "mState": v[0], "recv": v[1], "chans": v[2]}
                       for k, v in stream_max.items()),
                      key=lambda d: (-d["mState"], -d["recv"]))

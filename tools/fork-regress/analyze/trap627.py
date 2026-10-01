@@ -31,6 +31,22 @@ TIMEOUT_RE = re.compile(r"TIMEOUT: (\d+)ms reached")
 REF = Path(__file__).resolve().parent.parent / "reference" / "trap627_s66.json"
 
 
+
+def timeout_from_tail(log, tail_bytes=16384):
+    """`TIMEOUT: <ms>ms reached` is printed by the headless main thread while
+    other threads are still logging, so it can be split across lines
+    ('i> F8000004 XE_SWAPTIMEOUT: \\n230000ms reached', measured). Search the
+    log's tail across line breaks."""
+    try:
+        with open(log, "rb") as f:
+            f.seek(0, 2)
+            f.seek(max(0, f.tell() - tail_bytes))
+            tail = f.read().decode("utf-8", "replace")
+    except OSError:
+        return None
+    m = re.search(r"TIMEOUT:.{0,400}?(\d+)ms reached", tail, re.S)
+    return int(m.group(1)) if m else None
+
 def extract(log: Path) -> dict:
     lrs, layout, mismatch, syms, fnv, tmo = [], None, False, None, None, None
     with open(log, errors="replace") as f:
@@ -49,6 +65,8 @@ def extract(log: Path) -> dict:
                 fnv = m.group(1).upper()
             if (m := TIMEOUT_RE.search(line)):
                 tmo = int(m.group(1))
+    if tmo is None:
+        tmo = timeout_from_tail(log)
     hist = dict(sorted(Counter(lrs).items(), key=lambda kv: (-kv[1], kv[0])))
     return {"count": len(lrs), "lr_histogram": hist, "distinct_lrs": len(hist),
             "lr_sequence_sha256": hashlib.sha256(",".join(lrs).encode()).hexdigest(),
