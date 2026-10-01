@@ -148,17 +148,18 @@ PY
 # The resolver inputs are passed EXPLICITLY so no host path is auto-probed.
 dc3_original_args() {
   local gpu="$1" timeout_ms="$2"
-  xr_input xex "$CONTENT/dc3/debug.xex"
-  xr_input ymca "$CONTENT/dc3/xenia-ymca.txt"
-  xr_input symbols "$CONTENT/dc3/symbols.dc3-decomp-c362ede1c.txt"
-  xr_input fingerprints "$CONTENT/dc3/dc3_nui_fingerprints.xenia-a5fc2f1b6.txt"
-  xr_arg "--target=$CONTENT/dc3/debug.xex" "--gpu=$gpu" \
+  local I="$CONTENT/dc3-inputs"
+  xr_input xex "$CONTENT/dc3-original/debug.xex"
+  xr_input ymca "$I/xenia-ymca.txt"
+  xr_input symbols "$I/symbols.dc3-decomp-c362ede1c.txt"
+  xr_input fingerprints "$I/dc3_nui_fingerprints.xenia-a5fc2f1b6.txt"
+  xr_arg "--target=$CONTENT/dc3-original/debug.xex" "--gpu=$gpu" \
          --dc3_nui_patch_layout=original --dc3_crt_skip_nui=true \
          --stub_nui_functions=true --fake_kinect_data=true \
-         "--scripted_input_file=$CONTENT/dc3/xenia-ymca.txt" \
+         "--scripted_input_file=$I/xenia-ymca.txt" \
          "--headless_timeout_ms=$timeout_ms"
-  xr_opt dc3_nui_symbol_map_path "$CONTENT/dc3/symbols.dc3-decomp-c362ede1c.txt"
-  xr_opt dc3_nui_layout_fingerprint_cache_path "$CONTENT/dc3/dc3_nui_fingerprints.xenia-a5fc2f1b6.txt"
+  xr_opt dc3_nui_symbol_map_path "$I/symbols.dc3-decomp-c362ede1c.txt"
+  xr_opt dc3_nui_layout_fingerprint_cache_path "$I/dc3_nui_fingerprints.xenia-a5fc2f1b6.txt"
   # Without this the early manifest load auto-probes
   # dc3-decomp/build/373307D9/xenia_dc3_patch_manifest.json (measured: it did,
   # on the Aug-29 binary). On the original layout it is then disabled by the

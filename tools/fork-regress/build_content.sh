@@ -100,14 +100,27 @@ link_disc() {
 echo "content dir: $C"
 mkdir -p "$C"
 
-echo "[dc3] original layout (S1/S1V/S2)"
-pin "$DC3/orig/373307D9/debug.xex" "$C/dc3/debug.xex" \
+echo "[dc3] original layout (S1/S1V/S2): debug.xex + the game data next to it"
+# The xex's directory is mounted as game:\ -- the title reads its arks,
+# grammars and NUI speech packs from there. dc3-decomp/orig/373307D9 holds them
+# as symlinks into orig-assets; mirror exactly those (a dir with the xex alone
+# boot-hangs: guest thread 6 is created and never runs).
+O="$C/dc3-original"
+pin "$DC3/orig/373307D9/debug.xex" "$O/debug.xex" \
     2d5e4a320aabf272ef21f1ac6ae6518460fdf4892ec88fd8920f770bf29c4728
-pin "$DC3/scripts/dc3-input-flows/xenia-ymca.txt" "$C/dc3/xenia-ymca.txt" \
+for f in "$DC3"/orig/373307D9/*; do
+  b="$(basename "$f")"
+  [ -L "$f" ] || continue
+  case "$b" in *.xex|*.exe) continue ;; esac
+  ln -sfn "$(readlink -f "$f")" "$O/$b"
+done
+echo "  linked $(find "$O" -maxdepth 1 -type l | wc -l) data entries"
+I="$C/dc3-inputs"
+pin "$DC3/scripts/dc3-input-flows/xenia-ymca.txt" "$I/xenia-ymca.txt" \
     ea733eeeb809dc91fe4d97050866579364063a9b37e0e04f3f50519534331879
-pin_git "$DC3" c362ede1c config/373307D9/symbols.txt "$C/dc3/symbols.dc3-decomp-c362ede1c.txt"
+pin_git "$DC3" c362ede1c config/373307D9/symbols.txt "$I/symbols.dc3-decomp-c362ede1c.txt"
 pin_git "$XENIA_GIT" a5fc2f1b6 docs/dc3-boot/dc3_nui_fingerprints.txt \
-    "$C/dc3/dc3_nui_fingerprints.xenia-a5fc2f1b6.txt"
+    "$I/dc3_nui_fingerprints.xenia-a5fc2f1b6.txt"
 
 echo "[dc3] decomp layout 2026-08-24 (S3, 627 forced traps)"
 D="$C/dc3-decomp-2026-08-24"
@@ -118,6 +131,9 @@ pin "$DC3/build/373307D9/xenia_dc3_patch_manifest.json" "$D/xenia_dc3_patch_mani
 pin_git "$DC3" 3504a8a58 config/373307D9/symbols.txt "$D/symbols.dc3-decomp-3504a8a58.txt"
 pin_git "$XENIA_GIT" a5fc2f1b6 docs/dc3-boot/dc3_nui_fingerprints.txt \
     "$D/dc3_nui_fingerprints.xenia-a5fc2f1b6.txt"
+# dc3-decomp/build/373307D9 (where every 627 run booted from) carries gen ->
+# orig-assets/gen next to default.xex; mirror it.
+ln -sfn "$(readlink -f "$DC3/build/373307D9/gen")" "$D/gen"
 
 echo "[rb3] clean TU5, dirty-disc bypass (S4) -- pristine disc data, NO patch ark"
 pin "$RB3X/_tu5probe/clean/clean_tu5_nodd.xex" "$C/rb3/tu5-clean-nodd/default.xex" \
