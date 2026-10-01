@@ -90,19 +90,31 @@ and a FAIL next to a PASS at comparable load is a PAIRED-FAIL.
 
 ## Baselines (`baselines/`)
 
-Condensed summaries (`compare.py --make-baseline`), recorded 2026-10-01:
+Condensed summaries (`compare.py --make-baseline`), recorded 2026-10-01.
+**A** = `aug29-checked-783a0830c92e9cbc` (pinned Aug-29 Checked binary,
+frag-alloc-trace, ~f137bcedb). **C5** = `chan5-spike-3c48915b822b51d5` (the
+dc3-oracle spike c59ced098 on main 90eb07f81; DC3 scenarios only; S1 recorded
+at N=3). **I** = `integrate-6bf623353-33dc9e5a402fea0a` (Checked, built by
+this lane from integrate-2026-10 @ 6bf623353, which carries the bisect fix
+82acbded7 `--nop_audio_driver` and the lost-resume fix).
 
-| scenario | `aug29-checked-783a0830c92e9cbc` (frag-alloc-trace, ~f137bcedb) | `chan5-spike-3c48915b822b51d5` (dc3-oracle spike c59ced098, DC3 only) |
-|---|---|---|
-| S0 | PASS (210 cvars; ratchets 65 / 3 / 53) | PASS |
-| S1 | **FAIL 0/3** (+1 retry): fault at XMAHALWriteAndUnlockContexts+0x7C by 6 s, then FreestyleMotionFilter::IsActive faults, stall loading->game_screen (title 9 s, song_select 54 s) | **PASS 2/3**: title 9 s, game_screen 33-36 s, 75 gpState=2 samples, 0 SIGSEGV; one stall at load 15 |
-| S1V | FAIL: GPU-side swaps stop at ~100, 0 frames | PASS: 44 frames; Milo fail screen from swap 1200 at song_select (`preview.tmov`), never game_screen |
-| S2 | SKIPPED (no channel) | PASS 2/2: `3`, refused, `10`, `object_list main` = 702; first poll on 00000006 after 5-8 s; flow passes too |
-| S3 | **PASS 2/2: 627**, histogram + LR sequence identical to s66 | FAIL: 3009 traps (main lineage lacks the frag-alloc-trace manifest load; the 627 bar is frag-alloc-trace's) |
-| S4 | **PASS 2/2**: main_hub 36-39 s, game_screen 131-133 s, song stream mState=3 11/11 (tv3_a) and 13/13 (tv3_c) | n/a |
-| S5 | **PASS 2/2**: main_hub 27 s, game_screen 100-109 s | n/a |
-| S6 | FAIL: v1 (DC1) and v3 (RB3DX + DC3 cvars) leak the DC3 thread-6 "present pipeline" dump; v2 clean. v3 also aborted (rc 134) | same leaks; v2 clean |
-| passive | DC3 logs: 0 RB3 lines; RB3 logs: 472-524 DC3 dump lines each | DC3 logs: 0 RB3 lines |
+| | A | C5 | I |
+|---|---|---|---|
+| S0 | PASS (210 cvars; ratchets 65 / 3 / 53) | PASS | PASS |
+| S1 | **FAIL 0/3**: guest fault in XMAHALWriteAndUnlockContexts+0x7C by 6 s, then FreestyleMotionFilter::IsActive faults, stall loading->game_screen | PASS 2/3: title 9 s, game_screen 33-36 s, 75 gpState=2 samples, 0 SIGSEGV | PASS 2/5: same timings when it passes; 3 loading->game_screen stalls, no guest faults, mean load 15-42 |
+| S1V | FAIL: GPU-side swaps stop at ~100, 0 frames | PASS: 44 frames; Milo fail screen from swap 1200 at song_select (`preview.tmov`) | PASS: 43 frames; same fail screen at 1200 |
+| S2 | SKIPPED (no channel) | PASS 2/2: `3`, refused, `10`, `object_list main` = 702 | PASS 2/2, identical answers; first poll after 9 s |
+| S3 | **PASS 2/2: 627**, histogram + LR sequence identical to s66 | FAIL: 3009 traps (main lineage lacks the frag-alloc-trace manifest load) | **PASS 2/2: 627**, identical sequence |
+| S4 | PASS 2/2: main_hub 36-39 s, game_screen 131-133 s, song 11/11 (tv3_a), 13/13 (tv3_c) | n/a | PASS 2/2 (+1 retry): main_hub 42 s, game_screen 160-167 s, song 14/14, 15/15 |
+| S5 | PASS 2/2: main_hub 27 s, game_screen 100-109 s | n/a | PASS 2/2: main_hub 27-42 s, game_screen 91-100 s |
+| S6 | FAIL: v1 (DC1) and v3 (RB3DX + DC3 cvars) leak the DC3 thread-6 dump; v2 clean | same | same |
+| passive | RB3 logs carry 472-528 DC3 dump lines each; DC3 logs 0 RB3 lines | DC3 logs 0 RB3 lines | as A |
+
+Which song the RB3 autopilot lands on varies run to run (tv3_a..e, 11-15
+channels), so the song is a watched measurement, not a criterion. Three of
+~16 RB3 runs (A S5 seeded, A S6 v3, I S4 under load) aborted with the Checked
+assert `cs->owning_thread == 0` in RtlEnterCriticalSection
+(`xboxkrnl_rtl.cc:638`), the fork's CS fast path.
 
 ## Pinned inputs
 

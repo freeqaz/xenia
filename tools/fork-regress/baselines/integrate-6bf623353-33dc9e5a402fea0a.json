@@ -1,20 +1,22 @@
 {
  "schema": "fork-regress/baseline-v1",
- "note": "Baseline (a): pre-merge DC3 spike binary xenia-headless.chan5 (dc3-oracle c59ced098 on main 90eb07f81), DC3 scenarios only, recorded 2026-10-01, gate = mean 1-min load 80. S1 2/3 (the failure: a loading->game_screen stall at load 15 with no guest fault). S1V: Milo fail screen from swap 1200 at song_select, as on BASELINE.md b3/b4. S3 = 3009 traps: the main lineage lacks the frag-alloc-trace manifest load, so the 627 bar does not apply to it.",
- "binary_label": "chan5-spike",
- "binary_xxh3": "3c48915b822b51d5",
+ "note": "Baseline (b): Checked xenia-headless built by Lane H from integrate-2026-10 @ 6bf623353 (the DC3 bisect fix 82acbded7 --nop_audio_driver + the lost-resume fix), in the fork-regress worktree (tools/ only differs). Recorded 2026-10-01, gate = mean 1-min load 80. S1 PASS 2/5 at mean load 15-42 (3 loading->game_screen stalls, no guest faults: the nav-bridge race, not load). S1V 43 frames, Milo fail screen from swap 1200 at song_select. S2 PASS 2/2. S3 627 exact. S4 PASS 2/2 (one retry after an rc 134 RtlEnterCriticalSection assert under load). S5 PASS 2/2. S6 FAIL = the known thread-6 dump leak only. If the coordinator's own build of the fixed integrate differs, re-record with run.sh and replace this file.",
+ "binary_label": "integrate-6bf623353-checked",
+ "binary_xxh3": "33dc9e5a402fea0a",
  "binary_git": {
-  "head": "c59ced098",
+  "head": "6bf623353",
   "source": "--binary-rev"
  },
- "recorded": "2026-10-01T10:51:35+0000",
+ "recorded": "2026-10-01T11:33:43+0000",
  "load_max_gate": null,
  "verdicts": {
   "S0": "PASS",
   "S1": "PASS",
   "S1V": "PASS",
   "S2": "PASS",
-  "S3": "FAIL",
+  "S3": "PASS",
+  "S4": "PASS",
+  "S5": "PASS",
   "S6": "FAIL"
  },
  "passive_inertness": {
@@ -33,6 +35,20 @@
    "counts": {}
   },
   "S1/run-03": {
+   "forbid": [
+    "rb3"
+   ],
+   "total": 0,
+   "counts": {}
+  },
+  "S1/run-04": {
+   "forbid": [
+    "rb3"
+   ],
+   "total": 0,
+   "counts": {}
+  },
+  "S1/run-05": {
    "forbid": [
     "rb3"
    ],
@@ -73,6 +89,51 @@
    ],
    "total": 0,
    "counts": {}
+  },
+  "S4/run-01": {
+   "forbid": [
+    "dc3"
+   ],
+   "total": 528,
+   "counts": {
+    "dc3: DC3 thread-6 present-pipeline dump": 528
+   }
+  },
+  "S4/run-02": {
+   "forbid": [
+    "dc3"
+   ],
+   "total": 92,
+   "counts": {
+    "dc3: DC3 thread-6 present-pipeline dump": 92
+   }
+  },
+  "S4/run-02.retry1": {
+   "forbid": [
+    "dc3"
+   ],
+   "total": 524,
+   "counts": {
+    "dc3: DC3 thread-6 present-pipeline dump": 524
+   }
+  },
+  "S5/run-01": {
+   "forbid": [
+    "dc3"
+   ],
+   "total": 472,
+   "counts": {
+    "dc3: DC3 thread-6 present-pipeline dump": 472
+   }
+  },
+  "S5/run-02": {
+   "forbid": [
+    "dc3"
+   ],
+   "total": 472,
+   "counts": {
+    "dc3: DC3 thread-6 present-pipeline dump": 472
+   }
   }
  },
  "scenarios": {
@@ -91,8 +152,9 @@
      "verdict": "PASS",
      "loaded": false,
      "measurements": {
-      "cvar_count": 182,
+      "cvar_count": 214,
       "cvar_defaults": {
+       "autoinit_critical_sections": "true",
        "break_condition_gpr": "-1",
        "break_condition_op": "eq",
        "break_condition_truncate": "true",
@@ -108,17 +170,16 @@
        "content_root": "",
        "cpu": "any",
        "crt_critical_section_diagnostics": "false",
+       "dc3_clean_content_cache": "true",
        "dc3_crash_snapshot_path": "",
        "dc3_crt_bisect_max": "-1",
        "dc3_crt_skip_indices": "",
        "dc3_crt_skip_nui": "true",
        "dc3_debug_findarray_override_mode": "off",
-       "dc3_debug_memmgr_assert_nop_bypass": "false",
        "dc3_debug_mempool_alloc_probe": "false",
        "dc3_debug_read_cache_stream_step_override": "false",
        "dc3_dta_channel": "",
        "dc3_dta_channel_timeout_ms": "120000",
-       "dc3_enable_gameplay_bootstrap": "false",
        "dc3_game_screen_real_goto": "true",
        "dc3_gameplay_probe": "false",
        "dc3_gdb_rsp_break_on_connect": "true",
@@ -176,7 +237,9 @@
        "half_pixel_offset": "true",
        "headless": "false",
        "headless_capture_interval": "100",
+       "headless_capture_only_draws": "true",
        "headless_report_boot": "true",
+       "headless_skip_submission_wait": "true",
        "headless_thread_diagnostics": "false",
        "headless_timeout_ms": "0",
        "headless_verbose_diagnostics": "false",
@@ -186,11 +249,13 @@
        "ignore_thread_priorities": "true",
        "ignore_undefined_externs": "true",
        "inline_mmio_access": "true",
+       "io_force_synchronous_completion": "true",
        "kernel_cert_monitor": "false",
        "kernel_debug_monitor": "false",
        "kernel_display_gamma_power": "2.22222233",
        "kernel_display_gamma_type": "2",
        "kernel_pix": "false",
+       "kernel_stack_walk_frames": "64",
        "launch_module": "",
        "license_mask": "0",
        "load_module_map": "",
@@ -209,10 +274,13 @@
        "mount_cache": "false",
        "mount_scratch": "false",
        "mrt_edram_used_range_clamp_to_min": "true",
+       "mute": "false",
        "native_2x_msaa": "true",
        "native_stencil_value_output": "true",
        "non_seamless_cube_map": "true",
+       "nop_audio_driver": "auto",
        "pe_override": "",
+       "posix_allocfixed_zero_commit": "true",
        "present_letterbox": "true",
        "present_render_pass_clear": "true",
        "present_safe_area_x": "90",
@@ -223,28 +291,50 @@
        "protect_zero": "true",
        "pvr": "7407360",
        "query_occlusion_fake_sample_count": "1000",
+       "rb3_loadmgr_unbudget": "false",
+       "rb3_mogg_key_table": "",
        "rb3_mount_update": "false",
+       "rb3_no_char_preview": "false",
+       "rb3_overlapped_scan": "false",
+       "rb3_overlapped_writeback": "false",
+       "rb3_splash_unwedge": "false",
+       "rb3_stream_census": "false",
        "rb3_trace_shutdown": "false",
+       "rb3_tu5_app_run_direct": "false",
+       "rb3_tu5_hash_poke": "false",
        "rb3dx_alloc_probe": "false",
+       "rb3dx_alloc_trace_path": "",
+       "rb3dx_autoconfirm_p2_up": "0",
+       "rb3dx_autoconfirm_parts": "false",
        "rb3dx_clamp_alloc": "false",
        "rb3dx_force_zero_commit": "false",
+       "rb3dx_free_trace": "true",
        "rb3dx_hub_teardown_trace": "false",
        "rb3dx_offline_join": "false",
+       "rb3dx_ret_trace": "true",
+       "rb3dx_si_claim_anchor": "0",
        "rb3dx_skip_calibration": "false",
+       "rb3dx_stack_trace": "true",
        "rb3dx_ui_probe": "false",
        "render_target_path_vulkan": "",
        "resolve_resolution_scale_fill_half_pixel_offset": "true",
+       "rtl_leave_critical_section_force_release": "true",
+       "scanner_clamp_to_mapped_memory": "true",
+       "scanner_stop_on_invalid_run": "true",
        "scribble_heap": "false",
        "scripted_input": "",
        "scripted_input_file": "",
+       "scripted_pad_subtypes": "",
        "show_profiler": "false",
        "si_force_allow_va": "0",
+       "si_hook_vas": "",
        "si_hook_verify": "false",
        "si_init_va": "0",
        "si_load_dll": "false",
        "si_probe": "false",
        "si_selftest": "false",
        "snorm16_render_target_full_range": "true",
+       "soft_fault_unmapped_reads": "true",
        "storage_root": "",
        "store_all_context_values": "false",
        "store_shaders": "true",
@@ -254,6 +344,7 @@
        "texture_cache_memory_limit_soft": "384",
        "texture_cache_memory_limit_soft_lifetime": "30",
        "time_scalar": "1.0",
+       "tolerate_null_guest_calls": "true",
        "trace_function_coverage": "false",
        "trace_function_data": "false",
        "trace_function_data_path": "",
@@ -270,11 +361,13 @@
        "vulkan_allow_present_mode_mailbox": "true",
        "vulkan_device": "-1",
        "vulkan_log_debug_messages": "true",
+       "vulkan_pipeline_cache_path": "",
        "vulkan_sparse_shared_memory": "true",
        "vulkan_validation": "false",
        "writable_executable_memory": "true",
        "x64_extension_mask": "-1",
-       "xex_apply_patches": "true"
+       "xex_apply_patches": "true",
+       "xnet_random_constant_fill": "false"
       },
       "src_tree": "/home/free/tmp/xenia-regress",
       "src_git": {
@@ -305,7 +398,7 @@
    "verdict": "PASS",
    "counts": {
     "PASS": 2,
-    "FAIL": 1,
+    "FAIL": 3,
     "INCONCLUSIVE": 0,
     "SKIPPED": 0
    },
@@ -313,6 +406,31 @@
    "runs": [
     {
      "run": "run-01",
+     "verdict": "PASS",
+     "loaded": false,
+     "measurements": {
+      "milestones_s": {
+       "title_screen": 9.0,
+       "main_screen": 12.0,
+       "choose_mode_screen": 15.0,
+       "song_select_screen": 18.0,
+       "game_screen": 33.0,
+       "first_gpstate2_playing": 33.0,
+       "first_gpstate3": 180.3
+      },
+      "gpstate2_paused0_samples": 75,
+      "max_sigsegv": 0,
+      "status_reports": 76,
+      "last_report_s": 228.4,
+      "timeout_reached_ms": 230000,
+      "mfailthreadmsg_seen": [],
+      "tainted_lines": 0,
+      "last_line": "TIMEOUT: 230000ms reached",
+      "failure_class": null
+     }
+    },
+    {
+     "run": "run-02",
      "verdict": "FAIL",
      "loaded": false,
      "measurements": {
@@ -321,6 +439,31 @@
        "main_screen": 12.0,
        "choose_mode_screen": 15.0,
        "song_select_screen": 18.0,
+       "game_screen": null,
+       "first_gpstate2_playing": null,
+       "first_gpstate3": null
+      },
+      "gpstate2_paused0_samples": 0,
+      "max_sigsegv": 0,
+      "status_reports": 76,
+      "last_report_s": 228.2,
+      "timeout_reached_ms": 230000,
+      "mfailthreadmsg_seen": [],
+      "tainted_lines": 0,
+      "last_line": "TIMEOUT: 230000ms reached",
+      "failure_class": "flow_stall_before_game_screen"
+     }
+    },
+    {
+     "run": "run-03",
+     "verdict": "FAIL",
+     "loaded": false,
+     "measurements": {
+      "milestones_s": {
+       "title_screen": 9.0,
+       "main_screen": 12.0,
+       "choose_mode_screen": 15.0,
+       "song_select_screen": 21.0,
        "game_screen": null,
        "first_gpstate2_playing": null,
        "first_gpstate3": null
@@ -337,62 +480,69 @@
      }
     },
     {
-     "run": "run-02",
+     "run": "run-04",
      "verdict": "PASS",
      "loaded": false,
      "measurements": {
       "milestones_s": {
-       "title_screen": 9.0,
-       "main_screen": 15.0,
-       "choose_mode_screen": 18.0,
-       "song_select_screen": 21.0,
-       "game_screen": 36.1,
-       "first_gpstate2_playing": 36.1,
-       "first_gpstate3": 180.3
+       "title_screen": 12.0,
+       "main_screen": 18.0,
+       "choose_mode_screen": 21.0,
+       "song_select_screen": 24.0,
+       "game_screen": 39.1,
+       "first_gpstate2_playing": 39.1,
+       "first_gpstate3": 186.4
       },
-      "gpstate2_paused0_samples": 73,
+      "gpstate2_paused0_samples": 75,
       "max_sigsegv": 0,
       "status_reports": 76,
-      "last_report_s": 228.3,
+      "last_report_s": 228.5,
       "timeout_reached_ms": 230000,
       "mfailthreadmsg_seen": [],
       "tainted_lines": 0,
-      "last_line": "TIMEOUT: 230000ms reached",
+      "last_line": "230000ms reached",
       "failure_class": null
      }
     },
     {
-     "run": "run-03",
-     "verdict": "PASS",
+     "run": "run-05",
+     "verdict": "FAIL",
      "loaded": false,
      "measurements": {
       "milestones_s": {
-       "title_screen": 9.0,
-       "main_screen": 12.0,
-       "choose_mode_screen": 15.0,
-       "song_select_screen": 18.0,
-       "game_screen": 33.0,
-       "first_gpstate2_playing": 33.0,
-       "first_gpstate3": 177.2
+       "title_screen": 12.0,
+       "main_screen": 18.0,
+       "choose_mode_screen": 21.0,
+       "song_select_screen": 24.0,
+       "game_screen": null,
+       "first_gpstate2_playing": null,
+       "first_gpstate3": null
       },
-      "gpstate2_paused0_samples": 73,
+      "gpstate2_paused0_samples": 0,
       "max_sigsegv": 0,
       "status_reports": 76,
-      "last_report_s": 228.3,
+      "last_report_s": 228.4,
       "timeout_reached_ms": 230000,
       "mfailthreadmsg_seen": [],
       "tainted_lines": 0,
       "last_line": "TIMEOUT: 230000ms reached",
-      "failure_class": null
+      "failure_class": "flow_stall_before_game_screen"
      }
     }
    ],
    "attempts": [
     {
      "run": "run-01",
+     "verdict": "PASS",
+     "loaded": false,
+     "load1_max": 50.36,
+     "reasons": []
+    },
+    {
+     "run": "run-02",
      "verdict": "FAIL",
      "loaded": false,
-     "load1_max": 33.66,
+     "load1_max": 28.99,
      "reasons": [
       "game_screen None s (want <= 60.0)",
       "gpState=2&paused=0 samples 0 < 60",
@@ -400,18 +550,33 @@
      ]
     },
     {
-     "run": "run-02",
+     "run": "run-03",
+     "verdict": "FAIL",
+     "loaded": false,
+     "load1_max": 27.44,
+     "reasons": [
+      "game_screen None s (want <= 60.0)",
+      "gpState=2&paused=0 samples 0 < 60",
+      "first gpState=3 never seen"
+     ]
+    },
+    {
+     "run": "run-04",
      "verdict": "PASS",
      "loaded": false,
-     "load1_max": 32.45,
+     "load1_max": 58.77,
      "reasons": []
     },
     {
-     "run": "run-03",
-     "verdict": "PASS",
+     "run": "run-05",
+     "verdict": "FAIL",
      "loaded": false,
-     "load1_max": 18.02,
-     "reasons": []
+     "load1_max": 49.85,
+     "reasons": [
+      "game_screen None s (want <= 60.0)",
+      "gpState=2&paused=0 samples 0 < 60",
+      "first gpState=3 never seen"
+     ]
     }
    ]
   },
@@ -430,11 +595,11 @@
      "verdict": "PASS",
      "loaded": false,
      "measurements": {
-      "frames": 44,
-      "fail_screen_frames": 41,
+      "frames": 43,
+      "fail_screen_frames": 40,
       "fail_screen_first_swap": 1200,
       "fail_screen_screen": "song_select_screen",
-      "captures_logged": 44,
+      "captures_logged": 43,
       "kept_frame": {
        "swap": 1800,
        "screen": "song_select_screen",
@@ -452,14 +617,14 @@
         34.9,
         34.9
        ],
-       "png": "/home/free/tmp/fork-regress-baselines/chan5/S1V/run-01/kept_song_select_screen_1800.png"
+       "png": "/home/free/tmp/fork-regress-baselines/integrate-6bf623353/S1V/run-01/kept_song_select_screen_1800.png"
       },
       "flow": {
        "milestones_s": {
-        "title_screen": 9.0,
-        "main_screen": 12.0,
-        "choose_mode_screen": 15.0,
-        "song_select_screen": 18.0,
+        "title_screen": 12.0,
+        "main_screen": 18.1,
+        "choose_mode_screen": 21.1,
+        "song_select_screen": 24.1,
         "game_screen": null,
         "first_gpstate2_playing": null,
         "first_gpstate3": null
@@ -467,7 +632,7 @@
        "gpstate2_paused0_samples": 0,
        "max_sigsegv": 0,
        "status_reports": 76,
-       "last_report_s": 228.2,
+       "last_report_s": 228.4,
        "timeout_reached_ms": 230000,
        "mfailthreadmsg_seen": [],
        "tainted_lines": 0,
@@ -482,7 +647,7 @@
      "run": "run-01",
      "verdict": "PASS",
      "loaded": false,
-     "load1_max": 5.82,
+     "load1_max": 47.71,
      "reasons": []
     }
    ]
@@ -505,7 +670,7 @@
       "installed": true,
       "first_poll_thread": "00000006",
       "driver_error": null,
-      "first_poll_wait_s": 5.0,
+      "first_poll_wait_s": 9.0,
       "answers": {
        "{+ 1 2}": "3",
        "{no_such_func 1}": "!! refused: script error: no_such_func not function or object (file <unnamed>, line 1)",
@@ -513,29 +678,28 @@
        "{size {object_list main Object FALSE}}": "702"
       },
       "latency_s": {
-       "{+ 1 2}": 0.481,
-       "{no_such_func 1}": 0.066,
-       "{+ 5 5}": 0.065,
-       "{size {object_list main Object FALSE}}": 0.084
+       "{+ 1 2}": 0.184,
+       "{no_such_func 1}": 0.126,
+       "{+ 5 5}": 0.114,
+       "{size {object_list main Object FALSE}}": 0.152
       },
       "object_list_main_count": 702,
       "flow": {
        "milestones_s": {
-        "title_screen": 9.0,
-        "main_screen": 12.0,
-        "choose_mode_screen": 15.0,
-        "song_select_screen": 18.0,
-        "game_screen": 33.0,
-        "first_gpstate2_playing": 33.0,
-        "first_gpstate3": 177.2
+        "title_screen": 12.1,
+        "main_screen": 15.1,
+        "choose_mode_screen": 18.1,
+        "song_select_screen": 21.1,
+        "game_screen": 36.1,
+        "first_gpstate2_playing": 39.1,
+        "first_gpstate3": 183.5
        },
-       "gpstate2_paused0_samples": 73,
+       "gpstate2_paused0_samples": 74,
        "max_sigsegv": 0,
        "status_reports": 76,
-       "last_report_s": 228.2,
+       "last_report_s": 228.6,
        "timeout_reached_ms": 230000,
        "mfailthreadmsg_seen": [
-        "",
         "BinkMovieImpl::Ready called in the wrong thread (expected 6, cur thread is 15)",
         "Can"
        ],
@@ -553,7 +717,7 @@
       "installed": true,
       "first_poll_thread": "00000006",
       "driver_error": null,
-      "first_poll_wait_s": 8.0,
+      "first_poll_wait_s": 9.0,
       "answers": {
        "{+ 1 2}": "3",
        "{no_such_func 1}": "!! refused: script error: no_such_func not function or object (file <unnamed>, line 1)",
@@ -561,10 +725,10 @@
        "{size {object_list main Object FALSE}}": "702"
       },
       "latency_s": {
-       "{+ 1 2}": 0.101,
-       "{no_such_func 1}": 0.096,
-       "{+ 5 5}": 0.122,
-       "{size {object_list main Object FALSE}}": 0.121
+       "{+ 1 2}": 0.168,
+       "{no_such_func 1}": 0.119,
+       "{+ 5 5}": 0.094,
+       "{size {object_list main Object FALSE}}": 0.132
       },
       "object_list_main_count": 702,
       "flow": {
@@ -573,14 +737,14 @@
         "main_screen": 15.0,
         "choose_mode_screen": 18.0,
         "song_select_screen": 21.0,
-        "game_screen": 36.1,
-        "first_gpstate2_playing": 36.1,
-        "first_gpstate3": 180.2
+        "game_screen": 39.1,
+        "first_gpstate2_playing": 39.1,
+        "first_gpstate3": 183.4
        },
-       "gpstate2_paused0_samples": 73,
+       "gpstate2_paused0_samples": 74,
        "max_sigsegv": 0,
        "status_reports": 76,
-       "last_report_s": 228.3,
+       "last_report_s": 228.5,
        "timeout_reached_ms": 230000,
        "mfailthreadmsg_seen": [
         "BinkMovieImpl::Ready called in the wrong thread (expected 6, cur thread is 15)",
@@ -598,23 +762,23 @@
      "run": "run-01",
      "verdict": "PASS",
      "loaded": false,
-     "load1_max": 22.64,
+     "load1_max": 72.45,
      "reasons": []
     },
     {
      "run": "run-02",
      "verdict": "PASS",
      "loaded": false,
-     "load1_max": 26.68,
+     "load1_max": 89.49,
      "reasons": []
     }
    ]
   },
   "S3": {
-   "verdict": "FAIL",
+   "verdict": "PASS",
    "counts": {
-    "PASS": 0,
-    "FAIL": 2,
+    "PASS": 2,
+    "FAIL": 0,
     "INCONCLUSIVE": 0,
     "SKIPPED": 0
    },
@@ -622,507 +786,508 @@
    "runs": [
     {
      "run": "run-01",
-     "verdict": "FAIL",
+     "verdict": "PASS",
      "loaded": false,
      "measurements": {
-      "count": 3009,
+      "count": 627,
       "lr_histogram": {
-       "83523434": 539,
-       "835278F8": 537,
-       "83527908": 537,
-       "83527934": 537,
-       "830EB348": 183,
-       "830EB9EC": 182,
-       "831FF078": 179,
-       "831FDB70": 125,
-       "83209804": 125,
+       "831FDB70": 271,
+       "83209804": 271,
+       "831FE3B4": 15,
        "832095B4": 14,
-       "829395C4": 10,
-       "830E9634": 7,
-       "829395FC": 5,
-       "82A1C32C": 4,
-       "830EBF98": 2,
-       "830EC6D0": 2,
-       "83522A98": 2,
-       "82C68598": 1,
+       "830EB348": 5,
+       "830EB9EC": 5,
+       "830EBF98": 4,
+       "830EC6D0": 4,
+       "83522A98": 4,
+       "82905080": 1,
+       "82D665D4": 1,
+       "82F1A5FC": 1,
        "830E8254": 1,
        "830E8260": 1,
        "830E8298": 1,
-       "830E8E24": 1,
-       "830E8E64": 1,
-       "830E8E98": 1,
-       "830E8ED8": 1,
+       "830E8630": 1,
        "830E9014": 1,
-       "830E9248": 1,
        "830EB028": 1,
        "830EB078": 1,
        "830EB17C": 1,
        "830EB1D0": 1,
-       "830EBB78": 1,
        "831F4D1C": 1,
        "831FE5F8": 1,
        "831FE62C": 1,
-       "8352738C": 1
+       "83523384": 1,
+       "835233A8": 1,
+       "83523D74": 1,
+       "83524FAC": 1,
+       "83524FE0": 1,
+       "83525578": 1,
+       "8352564C": 1,
+       "83525774": 1,
+       "83526000": 1,
+       "8352738C": 1,
+       "83527FE4": 1,
+       "835292CC": 1,
+       "83529308": 1,
+       "83529334": 1,
+       "83529360": 1,
+       "835293B4": 1,
+       "83529408": 1,
+       "83529430": 1,
+       "83529460": 1
       },
-      "distinct_lrs": 36,
-      "lr_sequence_sha256": "741797ea8dcf4cc236939899eca6a19e2df6b8de2e2adcc36fb81290e3dbb920",
+      "distinct_lrs": 43,
+      "lr_sequence_sha256": "795c1bdec61d78f51c2d8699c9874fb6c3895062c8c29f841b0d7f4416af9d74",
       "layout": "decomp",
-      "manifest_fingerprint_mismatch_line": false,
+      "manifest_fingerprint_mismatch_line": true,
       "symbols_loaded": 77613,
       "text_fnv1a64": "F9D20174E8669EBA",
       "timeout_reached_ms": 120000,
-      "lr_histogram_diff": {
-       "82905080": {
-        "ref": 1,
-        "got": 0
-       },
-       "829395C4": {
-        "ref": 0,
-        "got": 10
-       },
-       "829395FC": {
-        "ref": 0,
-        "got": 5
-       },
-       "82A1C32C": {
-        "ref": 0,
-        "got": 4
-       },
-       "82C68598": {
-        "ref": 0,
-        "got": 1
-       },
-       "82D665D4": {
-        "ref": 1,
-        "got": 0
-       },
-       "82F1A5FC": {
-        "ref": 1,
-        "got": 0
-       },
-       "830E8630": {
-        "ref": 1,
-        "got": 0
-       },
-       "830E8E24": {
-        "ref": 0,
-        "got": 1
-       },
-       "830E8E64": {
-        "ref": 0,
-        "got": 1
-       },
-       "830E8E98": {
-        "ref": 0,
-        "got": 1
-       },
-       "830E8ED8": {
-        "ref": 0,
-        "got": 1
-       },
-       "830E9248": {
-        "ref": 0,
-        "got": 1
-       },
-       "830E9634": {
-        "ref": 0,
-        "got": 7
-       },
-       "830EB348": {
-        "ref": 5,
-        "got": 183
-       },
-       "830EB9EC": {
-        "ref": 5,
-        "got": 182
-       },
-       "830EBB78": {
-        "ref": 0,
-        "got": 1
-       },
-       "830EBF98": {
-        "ref": 4,
-        "got": 2
-       },
-       "830EC6D0": {
-        "ref": 4,
-        "got": 2
-       },
-       "831FDB70": {
-        "ref": 271,
-        "got": 125
-       },
-       "831FE3B4": {
-        "ref": 15,
-        "got": 0
-       },
-       "831FF078": {
-        "ref": 0,
-        "got": 179
-       },
-       "83209804": {
-        "ref": 271,
-        "got": 125
-       },
-       "83522A98": {
-        "ref": 4,
-        "got": 2
-       },
-       "83523384": {
-        "ref": 1,
-        "got": 0
-       },
-       "835233A8": {
-        "ref": 1,
-        "got": 0
-       },
-       "83523434": {
-        "ref": 0,
-        "got": 539
-       },
-       "83523D74": {
-        "ref": 1,
-        "got": 0
-       },
-       "83524FAC": {
-        "ref": 1,
-        "got": 0
-       },
-       "83524FE0": {
-        "ref": 1,
-        "got": 0
-       },
-       "83525578": {
-        "ref": 1,
-        "got": 0
-       },
-       "8352564C": {
-        "ref": 1,
-        "got": 0
-       },
-       "83525774": {
-        "ref": 1,
-        "got": 0
-       },
-       "83526000": {
-        "ref": 1,
-        "got": 0
-       },
-       "835278F8": {
-        "ref": 0,
-        "got": 537
-       },
-       "83527908": {
-        "ref": 0,
-        "got": 537
-       },
-       "83527934": {
-        "ref": 0,
-        "got": 537
-       },
-       "83527FE4": {
-        "ref": 1,
-        "got": 0
-       },
-       "835292CC": {
-        "ref": 1,
-        "got": 0
-       },
-       "83529308": {
-        "ref": 1,
-        "got": 0
-       },
-       "83529334": {
-        "ref": 1,
-        "got": 0
-       },
-       "83529360": {
-        "ref": 1,
-        "got": 0
-       },
-       "835293B4": {
-        "ref": 1,
-        "got": 0
-       },
-       "83529408": {
-        "ref": 1,
-        "got": 0
-       },
-       "83529430": {
-        "ref": 1,
-        "got": 0
-       },
-       "83529460": {
-        "ref": 1,
-        "got": 0
-       }
-      },
-      "lr_sequence_equal": false
+      "lr_sequence_equal": true
      }
     },
     {
      "run": "run-02",
-     "verdict": "FAIL",
+     "verdict": "PASS",
      "loaded": false,
      "measurements": {
-      "count": 3009,
+      "count": 627,
       "lr_histogram": {
-       "83523434": 539,
-       "835278F8": 537,
-       "83527908": 537,
-       "83527934": 537,
-       "830EB348": 183,
-       "830EB9EC": 182,
-       "831FF078": 179,
-       "831FDB70": 125,
-       "83209804": 125,
+       "831FDB70": 271,
+       "83209804": 271,
+       "831FE3B4": 15,
        "832095B4": 14,
-       "829395C4": 10,
-       "830E9634": 7,
-       "829395FC": 5,
-       "82A1C32C": 4,
-       "830EBF98": 2,
-       "830EC6D0": 2,
-       "83522A98": 2,
-       "82C68598": 1,
+       "830EB348": 5,
+       "830EB9EC": 5,
+       "830EBF98": 4,
+       "830EC6D0": 4,
+       "83522A98": 4,
+       "82905080": 1,
+       "82D665D4": 1,
+       "82F1A5FC": 1,
        "830E8254": 1,
        "830E8260": 1,
        "830E8298": 1,
-       "830E8E24": 1,
-       "830E8E64": 1,
-       "830E8E98": 1,
-       "830E8ED8": 1,
+       "830E8630": 1,
        "830E9014": 1,
-       "830E9248": 1,
        "830EB028": 1,
        "830EB078": 1,
        "830EB17C": 1,
        "830EB1D0": 1,
-       "830EBB78": 1,
        "831F4D1C": 1,
        "831FE5F8": 1,
        "831FE62C": 1,
-       "8352738C": 1
+       "83523384": 1,
+       "835233A8": 1,
+       "83523D74": 1,
+       "83524FAC": 1,
+       "83524FE0": 1,
+       "83525578": 1,
+       "8352564C": 1,
+       "83525774": 1,
+       "83526000": 1,
+       "8352738C": 1,
+       "83527FE4": 1,
+       "835292CC": 1,
+       "83529308": 1,
+       "83529334": 1,
+       "83529360": 1,
+       "835293B4": 1,
+       "83529408": 1,
+       "83529430": 1,
+       "83529460": 1
       },
-      "distinct_lrs": 36,
-      "lr_sequence_sha256": "741797ea8dcf4cc236939899eca6a19e2df6b8de2e2adcc36fb81290e3dbb920",
+      "distinct_lrs": 43,
+      "lr_sequence_sha256": "795c1bdec61d78f51c2d8699c9874fb6c3895062c8c29f841b0d7f4416af9d74",
       "layout": "decomp",
-      "manifest_fingerprint_mismatch_line": false,
+      "manifest_fingerprint_mismatch_line": true,
       "symbols_loaded": 77613,
       "text_fnv1a64": "F9D20174E8669EBA",
       "timeout_reached_ms": 120000,
-      "lr_histogram_diff": {
-       "82905080": {
-        "ref": 1,
-        "got": 0
-       },
-       "829395C4": {
-        "ref": 0,
-        "got": 10
-       },
-       "829395FC": {
-        "ref": 0,
-        "got": 5
-       },
-       "82A1C32C": {
-        "ref": 0,
-        "got": 4
-       },
-       "82C68598": {
-        "ref": 0,
-        "got": 1
-       },
-       "82D665D4": {
-        "ref": 1,
-        "got": 0
-       },
-       "82F1A5FC": {
-        "ref": 1,
-        "got": 0
-       },
-       "830E8630": {
-        "ref": 1,
-        "got": 0
-       },
-       "830E8E24": {
-        "ref": 0,
-        "got": 1
-       },
-       "830E8E64": {
-        "ref": 0,
-        "got": 1
-       },
-       "830E8E98": {
-        "ref": 0,
-        "got": 1
-       },
-       "830E8ED8": {
-        "ref": 0,
-        "got": 1
-       },
-       "830E9248": {
-        "ref": 0,
-        "got": 1
-       },
-       "830E9634": {
-        "ref": 0,
-        "got": 7
-       },
-       "830EB348": {
-        "ref": 5,
-        "got": 183
-       },
-       "830EB9EC": {
-        "ref": 5,
-        "got": 182
-       },
-       "830EBB78": {
-        "ref": 0,
-        "got": 1
-       },
-       "830EBF98": {
-        "ref": 4,
-        "got": 2
-       },
-       "830EC6D0": {
-        "ref": 4,
-        "got": 2
-       },
-       "831FDB70": {
-        "ref": 271,
-        "got": 125
-       },
-       "831FE3B4": {
-        "ref": 15,
-        "got": 0
-       },
-       "831FF078": {
-        "ref": 0,
-        "got": 179
-       },
-       "83209804": {
-        "ref": 271,
-        "got": 125
-       },
-       "83522A98": {
-        "ref": 4,
-        "got": 2
-       },
-       "83523384": {
-        "ref": 1,
-        "got": 0
-       },
-       "835233A8": {
-        "ref": 1,
-        "got": 0
-       },
-       "83523434": {
-        "ref": 0,
-        "got": 539
-       },
-       "83523D74": {
-        "ref": 1,
-        "got": 0
-       },
-       "83524FAC": {
-        "ref": 1,
-        "got": 0
-       },
-       "83524FE0": {
-        "ref": 1,
-        "got": 0
-       },
-       "83525578": {
-        "ref": 1,
-        "got": 0
-       },
-       "8352564C": {
-        "ref": 1,
-        "got": 0
-       },
-       "83525774": {
-        "ref": 1,
-        "got": 0
-       },
-       "83526000": {
-        "ref": 1,
-        "got": 0
-       },
-       "835278F8": {
-        "ref": 0,
-        "got": 537
-       },
-       "83527908": {
-        "ref": 0,
-        "got": 537
-       },
-       "83527934": {
-        "ref": 0,
-        "got": 537
-       },
-       "83527FE4": {
-        "ref": 1,
-        "got": 0
-       },
-       "835292CC": {
-        "ref": 1,
-        "got": 0
-       },
-       "83529308": {
-        "ref": 1,
-        "got": 0
-       },
-       "83529334": {
-        "ref": 1,
-        "got": 0
-       },
-       "83529360": {
-        "ref": 1,
-        "got": 0
-       },
-       "835293B4": {
-        "ref": 1,
-        "got": 0
-       },
-       "83529408": {
-        "ref": 1,
-        "got": 0
-       },
-       "83529430": {
-        "ref": 1,
-        "got": 0
-       },
-       "83529460": {
-        "ref": 1,
-        "got": 0
-       }
-      },
-      "lr_sequence_equal": false
+      "lr_sequence_equal": true
      }
     }
    ],
    "attempts": [
     {
      "run": "run-01",
-     "verdict": "FAIL",
+     "verdict": "PASS",
      "loaded": false,
-     "load1_max": 34.45,
-     "reasons": [
-      "forced trap count 3009 != 627",
-      "LR histogram differs at 46 LRs",
-      "manifest-fingerprint-mismatch line absent"
-     ]
+     "load1_max": 93.24,
+     "reasons": []
     },
     {
      "run": "run-02",
-     "verdict": "FAIL",
+     "verdict": "PASS",
      "loaded": false,
-     "load1_max": 48.08,
+     "load1_max": 92.82,
+     "reasons": []
+    }
+   ]
+  },
+  "S4": {
+   "verdict": "PASS",
+   "counts": {
+    "PASS": 2,
+    "FAIL": 0,
+    "INCONCLUSIVE": 0,
+    "SKIPPED": 0
+   },
+   "need_pass": 1,
+   "runs": [
+    {
+     "run": "run-01",
+     "verdict": "PASS",
+     "loaded": false,
+     "measurements": {
+      "screens_first_seen_s": {
+       "intro_movie_screen": 21.1,
+       "splash_screen": 33.1,
+       "main_hub_screen": 42.2,
+       "song_select_screen": 81.7,
+       "part_difficulty_screen": 90.7,
+       "tv3_b_screen": 154.4,
+       "game_screen": 154.4
+      },
+      "tv3_screens": [
+       "tv3_b_screen"
+      ],
+      "transition_to_game_screen_s": 154.4,
+      "game_screen_entered_s": 160.4,
+      "streams_after_game_screen": [
+       {
+        "stream": "4619D2C0",
+        "mState": 3,
+        "recv": 14,
+        "chans": 14
+       },
+       {
+        "stream": "45E29398",
+        "mState": 3,
+        "recv": 2,
+        "chans": 2
+       },
+       {
+        "stream": "4360B6A8",
+        "mState": 3,
+        "recv": 2,
+        "chans": 2
+       },
+       {
+        "stream": "45614D60",
+        "mState": 3,
+        "recv": 2,
+        "chans": 2
+       },
+       {
+        "stream": "45E6A418",
+        "mState": 3,
+        "recv": 2,
+        "chans": 2
+       },
+       {
+        "stream": "460FCE58",
+        "mState": 3,
+        "recv": 2,
+        "chans": 2
+       }
+      ],
+      "installs": {
+       "app_run_direct": true,
+       "mogg_key_table": true,
+       "mogg_key_table_rejected": false,
+       "no_char_preview": true
+      },
+      "livelock_aborts": 0,
+      "autopilot_actions": 17,
+      "timeout_reached_ms": 400000,
+      "max_sigsegv": 329135,
+      "last_report_s": 399.5,
+      "mode": "gameplay",
+      "song_stream": {
+       "stream": "4619D2C0",
+       "mState": 3,
+       "recv": 14,
+       "chans": 14
+      }
+     }
+    },
+    {
+     "run": "run-02.retry1",
+     "verdict": "PASS",
+     "loaded": true,
+     "measurements": {
+      "screens_first_seen_s": {
+       "intro_movie_screen": 24.4,
+       "splash_screen": 30.5,
+       "main_hub_screen": 42.6,
+       "song_select_screen": 91.0,
+       "part_difficulty_screen": 103.1,
+       "tv3_c_screen": 154.6,
+       "game_screen": 154.6
+      },
+      "tv3_screens": [
+       "tv3_c_screen"
+      ],
+      "transition_to_game_screen_s": 154.6,
+      "game_screen_entered_s": 166.7,
+      "streams_after_game_screen": [
+       {
+        "stream": "423CA7D8",
+        "mState": 3,
+        "recv": 15,
+        "chans": 15
+       },
+       {
+        "stream": "45DE9800",
+        "mState": 3,
+        "recv": 2,
+        "chans": 2
+       },
+       {
+        "stream": "458E8E90",
+        "mState": 3,
+        "recv": 2,
+        "chans": 2
+       },
+       {
+        "stream": "435D8B00",
+        "mState": 3,
+        "recv": 2,
+        "chans": 2
+       },
+       {
+        "stream": "45DFC458",
+        "mState": 3,
+        "recv": 2,
+        "chans": 2
+       },
+       {
+        "stream": "45E1B388",
+        "mState": 3,
+        "recv": 2,
+        "chans": 2
+       }
+      ],
+      "installs": {
+       "app_run_direct": true,
+       "mogg_key_table": true,
+       "mogg_key_table_rejected": false,
+       "no_char_preview": true
+      },
+      "livelock_aborts": 0,
+      "autopilot_actions": 17,
+      "timeout_reached_ms": 400000,
+      "max_sigsegv": 252620,
+      "last_report_s": 397.3,
+      "mode": "gameplay",
+      "song_stream": {
+       "stream": "423CA7D8",
+       "mState": 3,
+       "recv": 15,
+       "chans": 15
+      }
+     }
+    }
+   ],
+   "attempts": [
+    {
+     "run": "run-01",
+     "verdict": "PASS",
+     "loaded": false,
+     "load1_max": 117.78,
+     "reasons": []
+    },
+    {
+     "run": "run-02",
+     "verdict": "INCONCLUSIVE",
+     "loaded": true,
+     "load1_max": 147.25,
      "reasons": [
-      "forced trap count 3009 != 627",
-      "LR histogram differs at 46 LRs",
-      "manifest-fingerprint-mismatch line absent"
+      "never reached song_select_screen",
+      "never reached part_difficulty_screen",
+      "never reached a tv3_*_screen",
+      "game_screen never reached transState=0",
+      "rc 134 != 0",
+      "no 'TIMEOUT: <ms>ms reached' line",
+      "host loaded: 1-min load mean 133.6 > 80.0 (a FAIL under load is not evidence against the binary)"
      ]
+    },
+    {
+     "run": "run-02.retry1",
+     "verdict": "PASS",
+     "loaded": true,
+     "load1_max": 155.26,
+     "reasons": []
+    }
+   ]
+  },
+  "S5": {
+   "verdict": "PASS",
+   "counts": {
+    "PASS": 2,
+    "FAIL": 0,
+    "INCONCLUSIVE": 0,
+    "SKIPPED": 0
+   },
+   "need_pass": 1,
+   "runs": [
+    {
+     "run": "run-01",
+     "verdict": "PASS",
+     "loaded": false,
+     "measurements": {
+      "screens_first_seen_s": {
+       "intro_movie_screen": 24.2,
+       "splash_screen": 39.3,
+       "main_hub_screen": 42.3,
+       "dx_settings_error_screen": 48.4,
+       "song_select_screen": 69.5,
+       "part_difficulty_screen": 75.6,
+       "tv3_e_screen": 81.6,
+       "game_screen": 81.6,
+       "restart_sync_audio_net_screen": 142.2,
+       "sync_audio_net_screen": 142.2
+      },
+      "tv3_screens": [
+       "tv3_e_screen"
+      ],
+      "transition_to_game_screen_s": 81.6,
+      "game_screen_entered_s": 90.7,
+      "streams_after_game_screen": [
+       {
+        "stream": "46B52458",
+        "mState": 5,
+        "recv": 13,
+        "chans": 13
+       },
+       {
+        "stream": "461DE148",
+        "mState": 3,
+        "recv": 2,
+        "chans": 2
+       },
+       {
+        "stream": "435F1908",
+        "mState": 3,
+        "recv": 2,
+        "chans": 2
+       },
+       {
+        "stream": "46209848",
+        "mState": 3,
+        "recv": 2,
+        "chans": 2
+       },
+       {
+        "stream": "45E91318",
+        "mState": 3,
+        "recv": 2,
+        "chans": 2
+       }
+      ],
+      "installs": {
+       "app_run_direct": false,
+       "mogg_key_table": false,
+       "mogg_key_table_rejected": false,
+       "no_char_preview": false
+      },
+      "livelock_aborts": 0,
+      "autopilot_actions": 0,
+      "timeout_reached_ms": 360000,
+      "max_sigsegv": 70850,
+      "last_report_s": 357.6,
+      "mode": "rb3dx"
+     }
+    },
+    {
+     "run": "run-02",
+     "verdict": "PASS",
+     "loaded": false,
+     "measurements": {
+      "screens_first_seen_s": {
+       "intro_movie_screen": 18.2,
+       "splash_screen": 24.3,
+       "main_hub_screen": 27.3,
+       "dx_settings_error_screen": 33.4,
+       "song_select_screen": 78.8,
+       "part_difficulty_screen": 81.8,
+       "preloading_screen": 90.9,
+       "tv3_e_screen": 97.0,
+       "game_screen": 97.0,
+       "lose_screen": 193.6
+      },
+      "tv3_screens": [
+       "tv3_e_screen"
+      ],
+      "transition_to_game_screen_s": 97.0,
+      "game_screen_entered_s": 100.0,
+      "streams_after_game_screen": [
+       {
+        "stream": "46326380",
+        "mState": 5,
+        "recv": 15,
+        "chans": 15
+       },
+       {
+        "stream": "45F86E78",
+        "mState": 3,
+        "recv": 2,
+        "chans": 2
+       },
+       {
+        "stream": "435F39C0",
+        "mState": 3,
+        "recv": 2,
+        "chans": 2
+       },
+       {
+        "stream": "4629CB88",
+        "mState": 3,
+        "recv": 2,
+        "chans": 2
+       },
+       {
+        "stream": "461FD6D0",
+        "mState": 3,
+        "recv": 2,
+        "chans": 2
+       },
+       {
+        "stream": "45EF5068",
+        "mState": 3,
+        "recv": 2,
+        "chans": 2
+       }
+      ],
+      "installs": {
+       "app_run_direct": false,
+       "mogg_key_table": false,
+       "mogg_key_table_rejected": false,
+       "no_char_preview": false
+      },
+      "livelock_aborts": 0,
+      "autopilot_actions": 0,
+      "timeout_reached_ms": 360000,
+      "max_sigsegv": 80047,
+      "last_report_s": 357.1,
+      "mode": "rb3dx"
+     }
+    }
+   ],
+   "attempts": [
+    {
+     "run": "run-01",
+     "verdict": "PASS",
+     "loaded": false,
+     "load1_max": 123.94,
+     "reasons": []
+    },
+    {
+     "run": "run-02",
+     "verdict": "PASS",
+     "loaded": false,
+     "load1_max": 83.45,
+     "reasons": []
     }
    ]
   },
@@ -1200,7 +1365,7 @@
      "run": "run-01",
      "verdict": "FAIL",
      "loaded": false,
-     "load1_max": 5.26,
+     "load1_max": 43.24,
      "reasons": [
       "76 x dc3: DC3 thread-6 present-pipeline dump"
      ]
@@ -1209,14 +1374,14 @@
      "run": "run-02",
      "verdict": "PASS",
      "loaded": false,
-     "load1_max": 36.35,
+     "load1_max": 57.6,
      "reasons": []
     },
     {
      "run": "run-03",
      "verdict": "FAIL",
      "loaded": false,
-     "load1_max": 36.0,
+     "load1_max": 127.07,
      "reasons": [
       "224 x dc3: DC3 thread-6 present-pipeline dump"
      ]

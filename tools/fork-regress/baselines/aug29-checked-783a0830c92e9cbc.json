@@ -338,9 +338,9 @@
       "src_tree": "/home/free/tmp/xenia-regress",
       "src_git": {
        "tree": "/home/free/tmp/xenia-regress",
-       "head": "6663f8af88f253e2f15e643a4663c5dc3b5a6b4f",
+       "head": "d555cbb27d435b23ebaa6139b5bb0b8753c1711f",
        "branch": "fork-regress",
-       "dirty_files": 3
+       "dirty_files": 0
       },
       "ratchets": {
        "title_id_literals_outside_titles": 65,
