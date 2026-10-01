@@ -4,6 +4,14 @@
   compare.py <baseline.json> <candidate summary.json | out-dir>   compare
   compare.py --make-baseline <summary.json | out-dir> [--note TEXT] condense a run
                                                                   into a baseline
+  compare.py --paired <outA> <outB>                               ab.sh output: run i
+                                                                  of A vs run i of B
+
+--paired exists because the load gate cannot tell a load-induced failure from a
+real one on a single run, but an interleaved pair can: A and B started minutes
+apart see the same host. A loaded FAIL of A next to a PASS of B at a similar
+load is evidence against A (PAIRED-FAIL), even though each run alone is
+INCONCLUSIVE. Each pair prints both raw verdicts and both mean loads.
 
 A baseline is a condensed summary.json (baselines/*.json, small text). The
 comparison is per scenario:
@@ -152,7 +160,48 @@ def compare(base, cand):
     return findings
 
 
+def raw_verdict(v):
+    r = v["verdict"]
+    if r == "INCONCLUSIVE" and any("host loaded" in x for x in v.get("reasons", [])):
+        return "FAIL"
+    return r
+
+
+def paired(out_a, out_b):
+    rows, bad = [], 0
+    for va_path in sorted(Path(out_a).glob("*/run-*/verdict.json")):
+        rel = va_path.relative_to(out_a)
+        vb_path = Path(out_b) / rel
+        if not vb_path.exists() or ".retry" in rel.parts[1]:
+            continue
+        # Use each side's FINAL attempt for this index.
+        def final(p):
+            ds = sorted((d for d in p.parent.parent.glob(p.parent.name + "*")
+                         if (d / "verdict.json").exists()),
+                        key=lambda d: (len(d.name), d.name))
+            return json.loads((ds[-1] / "verdict.json").read_text())
+        va, vb = final(va_path), final(vb_path)
+        la = va["provenance"]["load"].get("load1_mean")
+        lb = vb["provenance"]["load"].get("load1_mean")
+        ra, rb = raw_verdict(va), raw_verdict(vb)
+        tag = ""
+        if ra == "FAIL" and rb == "PASS":
+            near = la is not None and lb is not None and la <= 1.25 * lb + 5
+            tag = "PAIRED-FAIL(A)" if near else "A-FAIL(load differs)"
+            bad += near
+        elif ra == "PASS" and rb == "FAIL":
+            near = la is not None and lb is not None and lb <= 1.25 * la + 5
+            tag = "PAIRED-FAIL(B)" if near else "B-FAIL(load differs)"
+        rows.append((str(rel.parent), ra, la, rb, lb, tag))
+    print(f"{'run':16s} {'A':8s} {'ldA':>6s}  {'B':8s} {'ldB':>6s}  note")
+    for r in rows:
+        print(f"{r[0]:16s} {r[1]:8s} {r[2] or 0:6.1f}  {r[3]:8s} {r[4] or 0:6.1f}  {r[5]}")
+    return 1 if bad else 0
+
+
 def main(argv):
+    if len(argv) == 4 and argv[1] == "--paired":
+        return paired(argv[2], argv[3])
     if len(argv) >= 3 and argv[1] == "--make-baseline":
         note = ""
         if "--note" in argv:

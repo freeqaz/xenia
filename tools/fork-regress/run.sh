@@ -138,6 +138,8 @@ for S in "${LIST[@]}"; do
     for a in $(seq 0 "$RETRY"); do
       [ "$INTERRUPTED" = 1 ] && break 3
       rd="$OUT/$S/$idx"; [ "$a" -gt 0 ] && rd="$rd.retry$a"
+      # A fresh attempt 0 supersedes every earlier attempt of this index.
+      [ "$a" -eq 0 ] && rm -rf "$OUT/$S/$idx".retry*
       rm -rf "$rd"
       [ "$S" != S0 ] && wait_for_load
       "$HARNESS/scenarios/$S.sh" "$rd" "$i"
