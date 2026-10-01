@@ -7,9 +7,14 @@ recv=…(n=<r>) chans=…(n=<c>)`, `RB3: app-run-direct installed`,
 `Thread Status Report (<ms>ms)` clock (time = preceding report, +0..3 s).
 
 S4 has two criteria sets. With the mogg key table installed (the content dir
-derived it), gameplay: game_screen at transState=0 AND the song stream at
-mState=3 (kPlaying) with 11 receivers/11 channels (§8x). Without the key,
-menu-only: reach tv3_*_screen and see the transition to game_screen begin.
+derived it), gameplay: game_screen at transState=0 AND the song stream (the
+widest StandardStream censused after game_screen) at mState=3 (kPlaying) with
+receivers == channels. Before the §8x fix the song stream sat at mState=0 with
+an EMPTY receiver vector (InitInfo never ran), so this is the §8x signal. The
+channel count depends on which song the autopilot lands on (s66: 11 on
+tv3_a; the post-s66 seed lands on a 14-channel song via tv3_c), so it is
+recorded, not required. Without the key, menu-only: reach tv3_*_screen and see
+the transition to game_screen begin.
 """
 import re
 from pathlib import Path
@@ -121,13 +126,15 @@ def analyze(run_dir: Path, meta: dict):
                 reasons.append("transition to game_screen never began")
         else:
             crit["game_screen"] = "transState=0"
-            crit["stream"] = "mState=3 with recv=11 chans=11 after game_screen"
+            crit["stream"] = ("widest stream after game_screen: mState=3, "
+                              "recv == chans > 2")
+            streams = m["streams_after_game_screen"]
+            song = max(streams, key=lambda d: (d["chans"], d["mState"]), default=None)
+            m["song_stream"] = song
             if m["game_screen_entered_s"] is None:
                 reasons.append("game_screen never reached transState=0")
-            elif not any(s["mState"] == 3 and s["recv"] == 11 and s["chans"] == 11
-                         for s in m["streams_after_game_screen"]):
-                reasons.append(f"no song stream at mState=3 11/11 after game_screen "
-                               f"(saw {m['streams_after_game_screen'][:3]})")
+            elif not song or not (song["mState"] == 3 and song["recv"] == song["chans"] > 2):
+                reasons.append(f"song stream not playing after game_screen (saw {streams[:3]})")
     else:
         m["mode"] = "rb3dx"
         crit["screens"] = DX_MENU

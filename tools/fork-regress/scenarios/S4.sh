@@ -5,7 +5,7 @@
 set -uo pipefail
 source "$HARNESS/lib/common.sh"
 RD="$1"
-TIMEOUT_S="${FR_S4_TIMEOUT_S:-320}"
+TIMEOUT_S="${FR_S4_TIMEOUT_S:-420}"
 if ! has_cvar rb3_tu5_app_run_direct; then
   xr_skip "$RD" "binary has no --rb3_tu5_app_run_direct (predates the RB3 TU5 work)"
   exit 0

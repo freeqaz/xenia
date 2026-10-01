@@ -14,6 +14,8 @@
 #   --label NAME            label recorded in provenance (default: binary basename)
 #   --binary-rev SHA        git rev the binary was built from, when the binary
 #                           does not live in a worktree's build/ (pinned copies)
+#   --runs i,j              run only these run indices (others already in
+#                           <out-dir> are kept and aggregated); used by ab.sh
 #   --content DIR           pinned content (default $FORK_REGRESS_CONTENT or
 #                           /home/free/tmp/fork-regress-content; build_content.sh)
 #
@@ -36,7 +38,7 @@ export PY="${PY:-/usr/bin/python3}"
 [ $# -ge 2 ] || { sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 BIN_ARG="$1"; OUT="$2"; shift 2
 SCENARIOS="S0,S1,S1V,S2,S3,S4,S5,S6"
-REPEAT=""; RETRY=1; WAIT_LOAD=0; LABEL=""; BIN_REV=""
+REPEAT=""; RUNS=""; RETRY=1; WAIT_LOAD=0; LABEL=""; BIN_REV=""
 CONTENT="${FORK_REGRESS_CONTENT:-/home/free/tmp/fork-regress-content}"
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -44,6 +46,7 @@ while [ $# -gt 0 ]; do
     --scenarios=*) SCENARIOS="${1#*=}"; shift ;;
     --repeat) REPEAT="$2"; shift 2 ;;
     --retry) RETRY="$2"; shift 2 ;;
+    --runs) RUNS="$2"; shift 2 ;;
     --wait-load) WAIT_LOAD="$2"; shift 2 ;;
     --label) LABEL="$2"; shift 2 ;;
     --binary-rev) BIN_REV="$2"; shift 2 ;;
@@ -126,9 +129,11 @@ for S in "${LIST[@]}"; do
   [ -x "$HARNESS/scenarios/$S.sh" ] || { echo "unknown scenario $S" >&2; continue; }
   N="$(scen_n "$S")"
   if [ -n "$REPEAT" ] && [ "$S" != S6 ] && [ "$S" != S0 ]; then N="$REPEAT"; fi
-  echo "== $S x$N"
+  echo "== $S x$N${RUNS:+ (runs $RUNS)}"
   mkdir -p "$OUT/$S"
-  for i in $(seq 1 "$N"); do
+  IDXS="$(seq 1 "$N")"
+  [ -n "$RUNS" ] && IDXS="$(echo "$RUNS" | tr ',' ' ')"
+  for i in $IDXS; do
     idx="$(printf 'run-%02d' "$i")"
     for a in $(seq 0 "$RETRY"); do
       [ "$INTERRUPTED" = 1 ] && break 3
