@@ -299,6 +299,26 @@ def classify_signal(rc):
     return None
 
 
+HOST_PATH_RE = re.compile(r"(/home/[^/\s'\"]+/(?:code|\.local/share/Xenia)/[^\s'\")]+)")
+
+
+def unpinned_host_paths(run_dir: Path, argv: list[str]) -> list[str]:
+    """Absolute paths into a source checkout or the shared Xenia storage that
+    the run's log mentions but its argv did not pass: an auto-probe (the
+    resolver and manifest loaders fall back to /home/free/... paths). Every
+    input must be pinned, so the comparator and the lane see these."""
+    log = run_dir / "run.log"
+    if not log.exists():
+        return []
+    found = set()
+    with open(log, errors="replace") as f:
+        for line in f:
+            if "/home/" in line:
+                found.update(HOST_PATH_RE.findall(line))
+    passed = " ".join(argv)
+    return sorted(p for p in found if p not in passed)
+
+
 def finalize(scenario: str, run_dir: Path) -> dict:
     meta = read_json(run_dir / "run_meta.json", {}) or {}
     spec = SCENARIOS[scenario]
@@ -313,6 +333,7 @@ def finalize(scenario: str, run_dir: Path) -> dict:
         return v
     an = load_analyzer(spec["analyzer"])
     verdict, reasons, measurements, criteria = an.analyze(run_dir, meta)
+    prov["unpinned_host_paths"] = unpinned_host_paths(run_dir, meta.get("argv", []))
     lmax = prov["load"].get("load1_max")
     loaded = bool(spec["flow"] and lmax is not None and lmax > load_max())
     if meta.get("interrupted"):

@@ -159,6 +159,12 @@ dc3_original_args() {
          "--headless_timeout_ms=$timeout_ms"
   xr_opt dc3_nui_symbol_map_path "$CONTENT/dc3/symbols.dc3-decomp-c362ede1c.txt"
   xr_opt dc3_nui_layout_fingerprint_cache_path "$CONTENT/dc3/dc3_nui_fingerprints.xenia-a5fc2f1b6.txt"
+  # Without this the early manifest load auto-probes
+  # dc3-decomp/build/373307D9/xenia_dc3_patch_manifest.json (measured: it did,
+  # on the Aug-29 binary). On the original layout it is then disabled by the
+  # fingerprint mismatch, but the path must still be a pinned input.
+  xr_input manifest "$CONTENT/dc3-decomp-2026-08-24/xenia_dc3_patch_manifest.json"
+  xr_opt dc3_nui_patch_manifest_path "$CONTENT/dc3-decomp-2026-08-24/xenia_dc3_patch_manifest.json"
 }
 
 # Common RB3 clean-TU5 cvars (plan §4.2 S4).
