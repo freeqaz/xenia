@@ -1413,16 +1413,24 @@ void* PosixCondition<Thread>::ThreadStartRoutine(void* parameter) {
   current_thread_ = thread;
   {
     std::unique_lock<std::mutex> lock(thread->handle_.state_mutex_);
+    // suspend_count_ must be set in the SAME critical section that publishes
+    // kSuspended. Upstream dropped the lock between the two: a Resume() that
+    // ran in that window (WaitStarted() returns as soon as state_ leaves
+    // kUninitialized) decremented a count of 0, and the thread then set it to
+    // 1 and waited for a 0 that never came -- the resume was lost and the
+    // thread never ran its start routine. DC3 hit it on the Main XThread and
+    // on App::App's KinectGuideThread (created suspended, then resumed), so
+    // the title never launched or main() waited forever on that thread.
+    if (create_suspended) {
+      thread->handle_.suspend_count_ = 1;
+    }
     thread->handle_.state_ =
         create_suspended ? State::kSuspended : State::kRunning;
     thread->handle_.state_signal_.notify_all();
-  }
-
-  if (create_suspended) {
-    std::unique_lock<std::mutex> lock(thread->handle_.state_mutex_);
-    thread->handle_.suspend_count_ = 1;
-    thread->handle_.state_signal_.wait(
-        lock, [thread] { return thread->handle_.suspend_count_ == 0; });
+    if (create_suspended) {
+      thread->handle_.state_signal_.wait(
+          lock, [thread] { return thread->handle_.suspend_count_ == 0; });
+    }
   }
 
   start_routine();
