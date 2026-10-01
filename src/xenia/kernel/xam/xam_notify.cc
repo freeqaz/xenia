@@ -97,7 +97,7 @@ dword_result_t XNotifyGetNext_entry(dword_t handle, dword_t match_id,
     *param_ptr = dequeued ? param : 0;
   }
   if (dequeued) {
-    XELOGI("XNotifyGetNext: dequeued notification id=0x{:08X} param=0x{:08X}",
+    XELOGD("XNotifyGetNext: dequeued notification id=0x{:08X} param=0x{:08X}",
            id, param);
   }
   return dequeued ? 1 : 0;

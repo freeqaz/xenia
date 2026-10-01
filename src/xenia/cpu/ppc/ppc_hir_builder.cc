@@ -10,6 +10,7 @@
 #include "xenia/cpu/ppc/ppc_hir_builder.h"
 
 #include <stddef.h>
+#include <atomic>
 #include <cstring>
 
 #include "third_party/fmt/include/fmt/format.h"
@@ -44,6 +45,19 @@ using namespace xe::cpu::hir;
 using xe::cpu::hir::Label;
 using xe::cpu::hir::TypeName;
 using xe::cpu::hir::Value;
+
+// Per-process budgets for the translation-time diagnostics below. These are
+// loud-but-bounded: the first N occurrences are reported in full, then a single
+// suppression notice. See docs/fork-cleanup-review.md, finding C1 -- the fork
+// had deleted / cvar-hidden both messages, which left every title able to
+// decode garbage or drop an opcode with a completely clean log.
+static constexpr uint32_t kInvalidInstrLogLimit = 64;
+static constexpr uint32_t kUnimplementedInstrLogLimit = 64;
+
+// Upper bound on the byte extent PPCHIRBuilder::Emit will translate, and the
+// budget for reporting that the bound was hit.
+static constexpr uint32_t kMaxFunctionSize = 1024 * 1024;
+static constexpr uint32_t kFunctionSizeCapLogLimit = 16;
 
 // The number of times each opcode has been translated.
 // Accumulated across the entire run.
@@ -91,9 +105,29 @@ bool PPCHIRBuilder::Emit(GuestFunction* function, uint32_t flags) {
   start_address_ = function_->address();
 
   // Cap function size to 1MB to prevent arena overflow from garbage functions.
+  // The cap stays -- a 1MB "function" is always a scanner failure and the arena
+  // allocation below is instr_count_ * 2 * sizeof(void*) -- but it must not be
+  // silent: everything past the cap is dropped from the translation, so the
+  // guest gets a function that returns early with no indication why.
+  // docs/fork-cleanup-review.md, section 2, ppc_hir_builder.cc:93-96.
   uint32_t fn_size = function_->end_address() - function_->address();
-  if (fn_size > 1024 * 1024) {
-    fn_size = 1024 * 1024;
+  if (fn_size > kMaxFunctionSize) {
+    static std::atomic<uint32_t> capped_count{0};
+    uint32_t n = capped_count.fetch_add(1, std::memory_order_relaxed);
+    if (n < kFunctionSizeCapLogLimit) {
+      XELOGW(
+          "Function {:08X}-{:08X} is {} bytes; truncating translation to {} "
+          "bytes (scanner almost certainly ran off the end of the function)",
+          function_->address(), function_->end_address(), fn_size,
+          kMaxFunctionSize);
+    } else if (n == kFunctionSizeCapLogLimit) {
+      XELOGW(
+          "Function {:08X} translation truncated to {} bytes (hit {} times; "
+          "suppressing further reports)",
+          function_->address(), kMaxFunctionSize,
+          kFunctionSizeCapLogLimit + 1);
+    }
+    fn_size = kMaxFunctionSize;
   }
   instr_count_ = fn_size / 4 + 1;
 
@@ -174,7 +208,22 @@ bool PPCHIRBuilder::Emit(GuestFunction* function, uint32_t flags) {
     instr_offset_list_[offset] = first_instr;
 
     if (opcode == PPCOpcode::kInvalid) {
+      // Rate-limited: a function that has been mis-scanned into a data blob can
+      // produce one of these per word, so log the head of the run and then go
+      // quiet. Silence here was finding C1 in docs/fork-cleanup-review.md --
+      // without it there is no way to tell a title decoded garbage.
+      static std::atomic<uint32_t> invalid_count{0};
+      uint32_t n = invalid_count.fetch_add(1, std::memory_order_relaxed);
+      if (n < kInvalidInstrLogLimit) {
+        XELOGE("Invalid instruction {:08X} {:08X}", address, code);
+      } else if (n == kInvalidInstrLogLimit) {
+        XELOGE(
+            "Invalid instruction {:08X} {:08X} (hit {} times; suppressing "
+            "further reports)",
+            address, code, kInvalidInstrLogLimit + 1);
+      }
       Comment("INVALID!");
+      // TraceInvalidInstruction(i);
       continue;
     }
     ++opcode_translation_counts[static_cast<int>(opcode)];
@@ -194,13 +243,31 @@ bool PPCHIRBuilder::Emit(GuestFunction* function, uint32_t flags) {
     i.opcode = opcode;
     i.opcode_info = &opcode_info;
     if (!opcode_info.emit || opcode_info.emit(*this, i)) {
+      // The report must be emitted whether or not the user opted into breaking
+      // -- the fork had moved it inside the cvar branch, which meant the only
+      // people who ever saw it were the ones who already knew to look
+      // (docs/fork-cleanup-review.md, C1). Rate-limited, since translation of a
+      // hot function can repeat this.
+      static std::atomic<uint32_t> unimplemented_count{0};
+      uint32_t n = unimplemented_count.fetch_add(1, std::memory_order_relaxed);
+      if (n <= kUnimplementedInstrLogLimit) {
+        auto& disasm_info = GetOpcodeDisasmInfo(opcode);
+        if (n < kUnimplementedInstrLogLimit) {
+          XELOGE(
+              "Unimplemented instr {:08X} {:08X} {} - report the game to Xenia "
+              "developers; to skip, disable "
+              "break_on_unimplemented_instructions",
+              address, code, disasm_info.name);
+        } else {
+          XELOGE(
+              "Unimplemented instr {:08X} {:08X} {} (hit {} times; suppressing "
+              "further reports)",
+              address, code, disasm_info.name,
+              kUnimplementedInstrLogLimit + 1);
+        }
+      }
       Comment("UNIMPLEMENTED!");
       if (cvars::break_on_unimplemented_instructions) {
-        auto& disasm_info = GetOpcodeDisasmInfo(opcode);
-        XELOGE(
-            "Unimplemented instr {:08X} {:08X} {} - report the game to Xenia "
-            "developers; to skip, disable break_on_unimplemented_instructions",
-            address, code, disasm_info.name);
         DebugBreak();
       }
     }

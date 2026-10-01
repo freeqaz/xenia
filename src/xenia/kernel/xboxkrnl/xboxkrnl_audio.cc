@@ -7,6 +7,8 @@
  ******************************************************************************
  */
 
+#include <atomic>
+
 #include "xenia/apu/audio_system.h"
 #include "xenia/base/clock.h"
 #include "xenia/base/logging.h"
@@ -53,8 +55,24 @@ DECLARE_XBOXKRNL_EXPORT2(XAudioGetVoiceCategoryVolume, kAudio, kStub,
 dword_result_t XAudioEnableDucker_entry(dword_t unk) { return X_ERROR_SUCCESS; }
 DECLARE_XBOXKRNL_EXPORT1(XAudioEnableDucker, kAudio, kStub);
 
-// Track whether we have a real audio driver or a dummy one
-static bool g_audio_driver_is_dummy = false;
+// A registration that the audio backend could not satisfy (e.g. the nop
+// backend) hands the guest a reserved dummy handle instead of failing, so the
+// XAudio2 library can still initialize -- without it CX2SourceVoice::Initialize
+// spins forever. Unregister/SubmitFrame then have to recognise that handle and
+// do nothing.
+//
+// This used to be a process-global `bool g_audio_driver_is_dummy`, which meant
+// one failed registration silently muted every OTHER client the title had
+// already registered successfully (games register several). It is per-handle
+// now. The reserved index is 0xFFFF, not 0: 0x41550000 is a legal handle --
+// it is real client index 0 -- so the old dummy value collided with the first
+// real client.
+static constexpr uint32_t kAudioDriverHandleBase = 0x41550000;
+static constexpr uint32_t kAudioDriverDummyHandle = 0x4155FFFF;
+
+static bool IsDummyAudioDriverHandle(uint32_t handle) {
+  return handle == kAudioDriverDummyHandle;
+}
 
 dword_result_t XAudioRegisterRenderDriverClient_entry(lpdword_t callback_ptr,
                                                       lpdword_t driver_ptr) {
@@ -69,14 +87,23 @@ dword_result_t XAudioRegisterRenderDriverClient_entry(lpdword_t callback_ptr,
     // If the audio backend can't create a driver (e.g., nop backend),
     // return a dummy handle so the XAudio2 library can still initialize.
     // Without this, CX2SourceVoice::Initialize will spin forever.
-    XELOGI("XAudioRegisterRenderDriverClient: CreateDriver failed ({:08X}), returning dummy handle", result);
-    g_audio_driver_is_dummy = true;
-    *driver_ptr = 0x41550000;
+    static std::atomic<uint32_t> s_dummy_count{0};
+    uint32_t n = s_dummy_count.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (n <= 4 || (n % 64) == 0) {
+      XELOGI(
+          "XAudioRegisterRenderDriverClient: CreateDriver failed ({:08X}), "
+          "returning dummy handle 0x{:08X} (#{})",
+          result, kAudioDriverDummyHandle, n);
+    }
+    *driver_ptr = kAudioDriverDummyHandle;
     return X_ERROR_SUCCESS;
   }
 
   assert_true(!(index & ~0x0000FFFF));
-  *driver_ptr = 0x41550000 | (static_cast<uint32_t>(index) & 0x0000FFFF);
+  // Guard against a real client ever being handed the reserved index.
+  assert_true((static_cast<uint32_t>(index) & 0x0000FFFF) != 0xFFFF);
+  *driver_ptr =
+      kAudioDriverHandleBase | (static_cast<uint32_t>(index) & 0x0000FFFF);
   return X_ERROR_SUCCESS;
 }
 DECLARE_XBOXKRNL_EXPORT1(XAudioRegisterRenderDriverClient, kAudio,
@@ -86,8 +113,9 @@ dword_result_t XAudioUnregisterRenderDriverClient_entry(
     lpunknown_t driver_ptr) {
   assert_true((driver_ptr.guest_address() & 0xFFFF0000) == 0x41550000);
 
-  // Skip for dummy handles (nop audio backend)
-  if (g_audio_driver_is_dummy) {
+  // Skip for the reserved dummy handle (nop audio backend). Other clients are
+  // unaffected.
+  if (IsDummyAudioDriverHandle(driver_ptr.guest_address())) {
     return X_ERROR_SUCCESS;
   }
 
@@ -102,8 +130,15 @@ dword_result_t XAudioSubmitRenderDriverFrame_entry(lpunknown_t driver_ptr,
                                                    lpunknown_t samples_ptr) {
   assert_true((driver_ptr.guest_address() & 0xFFFF0000) == 0x41550000);
 
-  // Skip submit for dummy handles (nop audio backend)
-  if (g_audio_driver_is_dummy) {
+  // Skip submit for the reserved dummy handle (nop audio backend). Other
+  // clients keep submitting.
+  if (IsDummyAudioDriverHandle(driver_ptr.guest_address())) {
+    static std::atomic<uint32_t> s_skipped{0};
+    uint32_t n = s_skipped.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (n == 1 || (n % 4096) == 0) {
+      XELOGD("XAudioSubmitRenderDriverFrame: dummy driver handle, dropped {}",
+             n);
+    }
     return X_ERROR_SUCCESS;
   }
 

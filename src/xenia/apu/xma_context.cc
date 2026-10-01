@@ -10,6 +10,7 @@
 #include "xenia/apu/xma_context.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstring>
 
 #include "xenia/apu/xma_decoder.h"
@@ -705,13 +706,29 @@ size_t XmaContext::GetNextFrame(uint8_t* block, size_t size,
 
   uint64_t len = stream.Read(15);
   if ((len - 15) > stream.BitsRemaining()) {
-    assert_always("TODO");
+    // Frame header claims more bits than remain in the block (split frame /
+    // malformed tail). Release builds skip the frame; keep that behavior in
+    // Checked instead of aborting on real-world streams (RB3 song audio hits
+    // this within seconds of the mixer running). Log once per process.
+    static std::atomic<bool> s_logged_overrun{false};
+    if (!s_logged_overrun.exchange(true)) {
+      XELOGW(
+          "XmaContext: frame length {} exceeds remaining bits {} at offset "
+          "{}; skipping frame (further occurrences unlogged)",
+          len, stream.BitsRemaining(), bit_offset);
+    }
     // *bit_offset = next_packet;
     // return false;
     // return next_packet;
     return 0;
   } else if (len >= xma::kMaxFrameLength) {
-    assert_always("TODO");
+    static std::atomic<bool> s_logged_toolong{false};
+    if (!s_logged_toolong.exchange(true)) {
+      XELOGW(
+          "XmaContext: frame length {} >= kMaxFrameLength at offset {}; "
+          "skipping frame (further occurrences unlogged)",
+          len, bit_offset);
+    }
     // *bit_offset = next_packet;
     // return false;
     return 0;

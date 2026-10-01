@@ -207,7 +207,14 @@ Module* Processor::GetModule(const std::string_view name) {
 
 std::vector<Module*> Processor::GetModules() {
   auto global_lock = global_critical_region_.Acquire();
-  std::vector<Module*> clone(modules_.size());
+  // reserve(), not resize() -- resize() default-constructs modules_.size()
+  // null entries and then push_back() appends the real ones after them, so
+  // every caller got a vector of twice the expected length whose first half was
+  // null. Pre-existing upstream bug; the fork started calling this from the JIT
+  // resolve path, which is what surfaced it. See docs/fork-cleanup-review.md,
+  // section 2, x64_emitter.cc:604-616.
+  std::vector<Module*> clone;
+  clone.reserve(modules_.size());
   for (const auto& module : modules_) {
     clone.push_back(module.get());
   }

@@ -7,6 +7,8 @@
  ******************************************************************************
  */
 
+#include <atomic>
+
 #include "xenia/base/logging.h"
 #include "xenia/emulator.h"
 #include "xenia/hid/input.h"
@@ -14,6 +16,7 @@
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/util/shim_utils.h"
 #include "xenia/kernel/xam/xam_private.h"
+#include "xenia/kernel/xthread.h"
 #include "xenia/xbox.h"
 
 namespace xe {
@@ -125,6 +128,20 @@ dword_result_t XamInputSetState_entry(dword_t user_index, dword_t unk,
 DECLARE_XAM_EXPORT1(XamInputSetState, kInput, kImplemented);
 
 // https://msdn.microsoft.com/en-us/library/windows/desktop/microsoft.directx_sdk.reference.xinputgetkeystroke(v=vs.85).aspx
+// dc3-oracle: record (a few times) that a title asked for a NON-gamepad
+// keystroke (e.g. a keyboard, flags=XINPUT_FLAG_KEYBOARD) and was told the
+// device is not connected. This is the measured blocker for driving a debug
+// title's keyboard console (DC3 RndConsole) under Xenia.
+static void LogNonGamepadKeystrokeQuery(const char* fn, uint32_t flags) {
+  static std::atomic<uint32_t> count{0};
+  uint32_t n = ++count;
+  if (n <= 3 || (n & (n - 1)) == 0) {
+    XELOGI("{}: non-gamepad keystroke query flags={:08X} -> "
+           "DEVICE_NOT_CONNECTED (call #{}, guest thread {:08X})",
+           fn, flags, n, XThread::GetCurrentThreadId());
+  }
+}
+
 dword_result_t XamInputGetKeystroke_entry(
     dword_t user_index, dword_t flags, pointer_t<X_INPUT_KEYSTROKE> keystroke) {
   // https://github.com/CodeAsm/ffplay360/blob/master/Common/AtgXime.cpp
@@ -137,6 +154,7 @@ dword_result_t XamInputGetKeystroke_entry(
 
   if ((flags & 0xFF) && (flags & XINPUT_FLAG_GAMEPAD) == 0) {
     // Ignore any query for other types of devices.
+    LogNonGamepadKeystrokeQuery(__func__, flags);
     return X_ERROR_DEVICE_NOT_CONNECTED;
   }
 
@@ -161,6 +179,7 @@ dword_result_t XamInputGetKeystrokeEx_entry(
 
   if ((flags & 0xFF) && (flags & XINPUT_FLAG_GAMEPAD) == 0) {
     // Ignore any query for other types of devices.
+    LogNonGamepadKeystrokeQuery(__func__, flags);
     return X_ERROR_DEVICE_NOT_CONNECTED;
   }
 

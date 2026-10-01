@@ -57,15 +57,20 @@ class NopInputDriver final : public InputDriver {
   // Set guest memory pointer so screen-aware scripting can read TheUI.
   void SetMemory(Memory* memory) { memory_ = memory; }
 
-  // Inject a one-shot button press from external code (e.g., NUI handler).
-  // Thread-safe. The press will be active for duration_ms.
-  void InjectButtonPress(uint16_t buttons, uint64_t duration_ms = 200);
+  // Inject a one-shot button press from external code (e.g., NUI handler,
+  // the RB3DX ui-probe autopilot). Thread-safe. The press will be active
+  // for duration_ms on the given pad.
+  void InjectButtonPress(uint16_t buttons, uint64_t duration_ms = 200,
+                         uint32_t pad = 0);
 
  private:
+  static constexpr uint32_t kMaxPads = 2;
+
   struct ScriptedEvent {
     uint64_t time_ms;      // Milliseconds after start
     uint16_t buttons;      // Button flags to press
     uint64_t duration_ms;  // How long to hold (default 200ms)
+    uint8_t pad = 0;       // Target controller port (0 or 1)
   };
 
   // Screen-aware script directive
@@ -82,13 +87,20 @@ class NopInputDriver final : public InputDriver {
     std::chrono::steady_clock::time_point start;
     uint64_t duration_ms;
     uint16_t buttons;
+    uint8_t pad = 0;
   };
 
-  uint16_t GetCurrentButtons();
+  uint16_t GetCurrentButtons(uint32_t pad);
   uint16_t ButtonToVK(uint16_t button) const;
 
   // Read the current screen name from guest memory (TheUI->mCurrentScreen->mName)
   std::string ReadCurrentScreenName() const;
+  // RB3 (BandUI) variant of the above; "" if this is not an RB3 title.
+  std::string ReadRb3ScreenName() const;
+  // Set by ReadCurrentScreenName: true when the name came from the RB3 BandUI
+  // layout. Guards the DC3-only gameplay pokes, whose hardcoded addresses would
+  // be meaningless (and destructive) in RB3's address space.
+  mutable bool screen_name_is_rb3_ = false;
 
   // Drive DC3 gameplay timelines from a callback that survives past
   // the final menu transition.
@@ -102,8 +114,8 @@ class NopInputDriver final : public InputDriver {
   std::vector<ScriptedEvent> scripted_events_;
   std::chrono::steady_clock::time_point start_time_;
   uint32_t packet_number_ = 0;
-  uint16_t prev_buttons_ = 0;  // For keystroke edge detection
-  std::deque<X_INPUT_KEYSTROKE> keystroke_queue_;
+  uint16_t prev_buttons_[kMaxPads] = {0, 0};  // Per-pad keystroke edge detection
+  std::deque<X_INPUT_KEYSTROKE> keystroke_queue_[kMaxPads];
 
   // Screen-aware scripting state
   bool screen_aware_mode_ = false;
@@ -136,6 +148,13 @@ class NopInputDriver final : public InputDriver {
   std::mutex inject_mutex_;
   std::vector<InjectedEvent> injected_events_;
 };
+
+// Process-wide bridge to the (single) live NopInputDriver instance so
+// host-side probe threads (e.g. the RB3DX ui-probe autopilot in emulator.cc)
+// can inject screen-conditional presses without holding an InputSystem
+// reference. No-op if no nop driver is active.
+void NopInjectButtonPress(uint32_t pad, uint16_t buttons,
+                          uint64_t duration_ms);
 
 }  // namespace nop
 }  // namespace hid

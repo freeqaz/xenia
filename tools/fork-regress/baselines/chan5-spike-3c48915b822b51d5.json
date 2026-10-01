@@ -1,0 +1,1227 @@
+{
+ "schema": "fork-regress/baseline-v1",
+ "note": "Baseline (a): pre-merge DC3 spike binary xenia-headless.chan5 (dc3-oracle c59ced098 on main 90eb07f81), DC3 scenarios only, recorded 2026-10-01, gate = mean 1-min load 80. S1 2/3 (the failure: a loading->game_screen stall at load 15 with no guest fault). S1V: Milo fail screen from swap 1200 at song_select, as on BASELINE.md b3/b4. S3 = 3009 traps: the main lineage lacks the frag-alloc-trace manifest load, so the 627 bar does not apply to it.",
+ "binary_label": "chan5-spike",
+ "binary_xxh3": "3c48915b822b51d5",
+ "binary_git": {
+  "head": "c59ced098",
+  "source": "--binary-rev"
+ },
+ "recorded": "2026-10-01T10:51:35+0000",
+ "load_max_gate": null,
+ "verdicts": {
+  "S0": "PASS",
+  "S1": "PASS",
+  "S1V": "PASS",
+  "S2": "PASS",
+  "S3": "FAIL",
+  "S6": "FAIL"
+ },
+ "passive_inertness": {
+  "S1/run-01": {
+   "forbid": [
+    "rb3"
+   ],
+   "total": 0,
+   "counts": {}
+  },
+  "S1/run-02": {
+   "forbid": [
+    "rb3"
+   ],
+   "total": 0,
+   "counts": {}
+  },
+  "S1/run-03": {
+   "forbid": [
+    "rb3"
+   ],
+   "total": 0,
+   "counts": {}
+  },
+  "S1V/run-01": {
+   "forbid": [
+    "rb3"
+   ],
+   "total": 0,
+   "counts": {}
+  },
+  "S2/run-01": {
+   "forbid": [
+    "rb3"
+   ],
+   "total": 0,
+   "counts": {}
+  },
+  "S2/run-02": {
+   "forbid": [
+    "rb3"
+   ],
+   "total": 0,
+   "counts": {}
+  },
+  "S3/run-01": {
+   "forbid": [
+    "rb3"
+   ],
+   "total": 0,
+   "counts": {}
+  },
+  "S3/run-02": {
+   "forbid": [
+    "rb3"
+   ],
+   "total": 0,
+   "counts": {}
+  }
+ },
+ "scenarios": {
+  "S0": {
+   "verdict": "PASS",
+   "counts": {
+    "PASS": 1,
+    "FAIL": 0,
+    "INCONCLUSIVE": 0,
+    "SKIPPED": 0
+   },
+   "need_pass": 1,
+   "runs": [
+    {
+     "run": "run-01",
+     "verdict": "PASS",
+     "loaded": false,
+     "measurements": {
+      "cvar_count": 182,
+      "cvar_defaults": {
+       "break_condition_gpr": "-1",
+       "break_condition_op": "eq",
+       "break_condition_truncate": "true",
+       "break_condition_value": "0",
+       "break_on_debugbreak": "true",
+       "break_on_instruction": "0",
+       "break_on_start": "false",
+       "break_on_unimplemented_instructions": "true",
+       "cache_root": "",
+       "cl": "",
+       "clock_no_scaling": "false",
+       "clock_source_raw": "false",
+       "content_root": "",
+       "cpu": "any",
+       "crt_critical_section_diagnostics": "false",
+       "dc3_crash_snapshot_path": "",
+       "dc3_crt_bisect_max": "-1",
+       "dc3_crt_skip_indices": "",
+       "dc3_crt_skip_nui": "true",
+       "dc3_debug_findarray_override_mode": "off",
+       "dc3_debug_memmgr_assert_nop_bypass": "false",
+       "dc3_debug_mempool_alloc_probe": "false",
+       "dc3_debug_read_cache_stream_step_override": "false",
+       "dc3_dta_channel": "",
+       "dc3_dta_channel_timeout_ms": "120000",
+       "dc3_enable_gameplay_bootstrap": "false",
+       "dc3_game_screen_real_goto": "true",
+       "dc3_gameplay_probe": "false",
+       "dc3_gdb_rsp_break_on_connect": "true",
+       "dc3_gdb_rsp_host": "127.0.0.1",
+       "dc3_gdb_rsp_port": "9001",
+       "dc3_gdb_rsp_prelaunch_sleep_ms": "0",
+       "dc3_gdb_rsp_stub": "false",
+       "dc3_guest_overrides": "true",
+       "dc3_ik_telemetry": "false",
+       "dc3_inline_render": "false",
+       "dc3_nui_enable_signature_resolver": "true",
+       "dc3_nui_layout_fingerprint_cache_path": "",
+       "dc3_nui_layout_fingerprint_decomp": "",
+       "dc3_nui_layout_fingerprint_original": "",
+       "dc3_nui_patch_layout": "auto",
+       "dc3_nui_patch_manifest_path": "",
+       "dc3_nui_patch_resolver_mode": "hybrid",
+       "dc3_nui_signature_trace": "false",
+       "dc3_nui_symbol_map_path": "",
+       "dc3_null_read_cache_stream": "false",
+       "dc3_persist_render_state": "true",
+       "dc3_replay_depth_disable": "false",
+       "dc3_runtime_telemetry_enable": "false",
+       "dc3_runtime_telemetry_include_ppc_words": "false",
+       "dc3_runtime_telemetry_path": "",
+       "debug": "false",
+       "debugprint_trap_log": "false",
+       "defaults_date": "2020123113",
+       "depth_float24_convert_in_pixel_shader": "false",
+       "depth_float24_round": "false",
+       "depth_transfer_not_equal_test": "true",
+       "devkit_root": "",
+       "disable_global_lock": "false",
+       "disassemble_functions": "false",
+       "draw_resolution_scale_x": "1",
+       "draw_resolution_scale_y": "1",
+       "draw_resolution_scaled_texture_offsets": "true",
+       "dump_frames_path": "",
+       "dump_shaders": "",
+       "emit_source_annotations": "false",
+       "execute_unclipped_draw_vs_on_cpu": "true",
+       "execute_unclipped_draw_vs_on_cpu_for_psi_render_backend": "true",
+       "execute_unclipped_draw_vs_on_cpu_with_scissor": "false",
+       "fake_kinect_data": "false",
+       "fault_spin_limit": "4096",
+       "ffmpeg_verbose": "false",
+       "flush_log": "true",
+       "force_all_draws": "false",
+       "force_convert_line_loops_to_strips": "false",
+       "force_convert_quad_lists_to_triangle_lists": "false",
+       "force_convert_triangle_fans_to_lists": "false",
+       "gamma_render_target_as_unorm16": "true",
+       "gpu": "null",
+       "gpu_allow_invalid_fetch_constants": "false",
+       "half_pixel_offset": "true",
+       "headless": "false",
+       "headless_capture_interval": "100",
+       "headless_report_boot": "true",
+       "headless_thread_diagnostics": "false",
+       "headless_timeout_ms": "0",
+       "headless_verbose_diagnostics": "false",
+       "host_present_from_non_ui_thread": "true",
+       "ignore_32bit_vertex_index_support": "false",
+       "ignore_thread_affinities": "true",
+       "ignore_thread_priorities": "true",
+       "ignore_undefined_externs": "true",
+       "inline_mmio_access": "true",
+       "kernel_cert_monitor": "false",
+       "kernel_debug_monitor": "false",
+       "kernel_display_gamma_power": "2.22222233",
+       "kernel_display_gamma_type": "2",
+       "kernel_pix": "false",
+       "launch_module": "",
+       "license_mask": "0",
+       "load_module_map": "",
+       "local_user_count": "1",
+       "log_file": "",
+       "log_high_frequency_kernel_calls": "false",
+       "log_level": "2",
+       "log_string_format_kernel_calls": "false",
+       "log_to_debugprint": "false",
+       "log_to_stdout": "true",
+       "milo_trace_call_effects": "false",
+       "milo_trace_enable": "false",
+       "milo_trace_exact_mem": "false",
+       "milo_trace_manifest": "",
+       "milo_trace_out": "",
+       "mount_cache": "false",
+       "mount_scratch": "false",
+       "mrt_edram_used_range_clamp_to_min": "true",
+       "native_2x_msaa": "true",
+       "native_stencil_value_output": "true",
+       "non_seamless_cube_map": "true",
+       "pe_override": "",
+       "present_letterbox": "true",
+       "present_render_pass_clear": "true",
+       "present_safe_area_x": "90",
+       "present_safe_area_y": "90",
+       "primitive_processor_cache_min_indices": "4096",
+       "profiler_dpi_scaling": "false",
+       "protect_on_release": "false",
+       "protect_zero": "true",
+       "pvr": "7407360",
+       "query_occlusion_fake_sample_count": "1000",
+       "rb3_mount_update": "false",
+       "rb3_trace_shutdown": "false",
+       "rb3dx_alloc_probe": "false",
+       "rb3dx_clamp_alloc": "false",
+       "rb3dx_force_zero_commit": "false",
+       "rb3dx_hub_teardown_trace": "false",
+       "rb3dx_offline_join": "false",
+       "rb3dx_skip_calibration": "false",
+       "rb3dx_ui_probe": "false",
+       "render_target_path_vulkan": "",
+       "resolve_resolution_scale_fill_half_pixel_offset": "true",
+       "scribble_heap": "false",
+       "scripted_input": "",
+       "scripted_input_file": "",
+       "show_profiler": "false",
+       "si_force_allow_va": "0",
+       "si_hook_verify": "false",
+       "si_init_va": "0",
+       "si_load_dll": "false",
+       "si_probe": "false",
+       "si_selftest": "false",
+       "snorm16_render_target_full_range": "true",
+       "storage_root": "",
+       "store_all_context_values": "false",
+       "store_shaders": "true",
+       "stub_nui_functions": "false",
+       "texture_cache_memory_limit_hard": "768",
+       "texture_cache_memory_limit_render_to_texture": "24",
+       "texture_cache_memory_limit_soft": "384",
+       "texture_cache_memory_limit_soft_lifetime": "30",
+       "time_scalar": "1.0",
+       "trace_function_coverage": "false",
+       "trace_function_data": "false",
+       "trace_function_data_path": "",
+       "trace_function_references": "false",
+       "trace_functions": "false",
+       "trace_gpu_prefix": "scratch/gpu/",
+       "trace_gpu_stream": "false",
+       "user_country": "103",
+       "user_language": "1",
+       "validate_hir": "false",
+       "vsync": "true",
+       "vulkan_allow_present_mode_fifo_relaxed": "true",
+       "vulkan_allow_present_mode_immediate": "true",
+       "vulkan_allow_present_mode_mailbox": "true",
+       "vulkan_device": "-1",
+       "vulkan_log_debug_messages": "true",
+       "vulkan_sparse_shared_memory": "true",
+       "vulkan_validation": "false",
+       "writable_executable_memory": "true",
+       "x64_extension_mask": "-1",
+       "xex_apply_patches": "true"
+      },
+      "src_tree": "/home/free/tmp/xenia-regress",
+      "src_git": {
+       "tree": "/home/free/tmp/xenia-regress",
+       "head": "d555cbb27d435b23ebaa6139b5bb0b8753c1711f",
+       "branch": "fork-regress",
+       "dirty_files": 0
+      },
+      "ratchets": {
+       "title_id_literals_outside_titles": 65,
+       "home_free_literals_in_src": 3,
+       "xelogi_in_gpu": 53
+      }
+     }
+    }
+   ],
+   "attempts": [
+    {
+     "run": "run-01",
+     "verdict": "PASS",
+     "loaded": false,
+     "load1_max": null,
+     "reasons": []
+    }
+   ]
+  },
+  "S1": {
+   "verdict": "PASS",
+   "counts": {
+    "PASS": 2,
+    "FAIL": 1,
+    "INCONCLUSIVE": 0,
+    "SKIPPED": 0
+   },
+   "need_pass": 2,
+   "runs": [
+    {
+     "run": "run-01",
+     "verdict": "FAIL",
+     "loaded": false,
+     "measurements": {
+      "milestones_s": {
+       "title_screen": 9.0,
+       "main_screen": 12.0,
+       "choose_mode_screen": 15.0,
+       "song_select_screen": 18.0,
+       "game_screen": null,
+       "first_gpstate2_playing": null,
+       "first_gpstate3": null
+      },
+      "gpstate2_paused0_samples": 0,
+      "max_sigsegv": 0,
+      "status_reports": 76,
+      "last_report_s": 228.3,
+      "timeout_reached_ms": 230000,
+      "mfailthreadmsg_seen": [],
+      "tainted_lines": 0,
+      "last_line": "TIMEOUT: 230000ms reached",
+      "failure_class": "flow_stall_before_game_screen"
+     }
+    },
+    {
+     "run": "run-02",
+     "verdict": "PASS",
+     "loaded": false,
+     "measurements": {
+      "milestones_s": {
+       "title_screen": 9.0,
+       "main_screen": 15.0,
+       "choose_mode_screen": 18.0,
+       "song_select_screen": 21.0,
+       "game_screen": 36.1,
+       "first_gpstate2_playing": 36.1,
+       "first_gpstate3": 180.3
+      },
+      "gpstate2_paused0_samples": 73,
+      "max_sigsegv": 0,
+      "status_reports": 76,
+      "last_report_s": 228.3,
+      "timeout_reached_ms": 230000,
+      "mfailthreadmsg_seen": [],
+      "tainted_lines": 0,
+      "last_line": "TIMEOUT: 230000ms reached",
+      "failure_class": null
+     }
+    },
+    {
+     "run": "run-03",
+     "verdict": "PASS",
+     "loaded": false,
+     "measurements": {
+      "milestones_s": {
+       "title_screen": 9.0,
+       "main_screen": 12.0,
+       "choose_mode_screen": 15.0,
+       "song_select_screen": 18.0,
+       "game_screen": 33.0,
+       "first_gpstate2_playing": 33.0,
+       "first_gpstate3": 177.2
+      },
+      "gpstate2_paused0_samples": 73,
+      "max_sigsegv": 0,
+      "status_reports": 76,
+      "last_report_s": 228.3,
+      "timeout_reached_ms": 230000,
+      "mfailthreadmsg_seen": [],
+      "tainted_lines": 0,
+      "last_line": "TIMEOUT: 230000ms reached",
+      "failure_class": null
+     }
+    }
+   ],
+   "attempts": [
+    {
+     "run": "run-01",
+     "verdict": "FAIL",
+     "loaded": false,
+     "load1_max": 33.66,
+     "reasons": [
+      "game_screen None s (want <= 60.0)",
+      "gpState=2&paused=0 samples 0 < 60",
+      "first gpState=3 never seen"
+     ]
+    },
+    {
+     "run": "run-02",
+     "verdict": "PASS",
+     "loaded": false,
+     "load1_max": 32.45,
+     "reasons": []
+    },
+    {
+     "run": "run-03",
+     "verdict": "PASS",
+     "loaded": false,
+     "load1_max": 18.02,
+     "reasons": []
+    }
+   ]
+  },
+  "S1V": {
+   "verdict": "PASS",
+   "counts": {
+    "PASS": 1,
+    "FAIL": 0,
+    "INCONCLUSIVE": 0,
+    "SKIPPED": 0
+   },
+   "need_pass": 1,
+   "runs": [
+    {
+     "run": "run-01",
+     "verdict": "PASS",
+     "loaded": false,
+     "measurements": {
+      "frames": 44,
+      "fail_screen_frames": 41,
+      "fail_screen_first_swap": 1200,
+      "fail_screen_screen": "song_select_screen",
+      "captures_logged": 44,
+      "kept_frame": {
+       "swap": 1800,
+       "screen": "song_select_screen",
+       "size": [
+        1280,
+        720
+       ],
+       "mean": [
+        138.3,
+        4.9,
+        4.9
+       ],
+       "stddev": [
+        16.3,
+        34.9,
+        34.9
+       ],
+       "png": "/home/free/tmp/fork-regress-baselines/chan5/S1V/run-01/kept_song_select_screen_1800.png"
+      },
+      "flow": {
+       "milestones_s": {
+        "title_screen": 9.0,
+        "main_screen": 12.0,
+        "choose_mode_screen": 15.0,
+        "song_select_screen": 18.0,
+        "game_screen": null,
+        "first_gpstate2_playing": null,
+        "first_gpstate3": null
+       },
+       "gpstate2_paused0_samples": 0,
+       "max_sigsegv": 0,
+       "status_reports": 76,
+       "last_report_s": 228.2,
+       "timeout_reached_ms": 230000,
+       "mfailthreadmsg_seen": [],
+       "tainted_lines": 0,
+       "last_line": "TIMEOUT: 230000ms reached"
+      },
+      "game_screen_reached": false
+     }
+    }
+   ],
+   "attempts": [
+    {
+     "run": "run-01",
+     "verdict": "PASS",
+     "loaded": false,
+     "load1_max": 5.82,
+     "reasons": []
+    }
+   ]
+  },
+  "S2": {
+   "verdict": "PASS",
+   "counts": {
+    "PASS": 2,
+    "FAIL": 0,
+    "INCONCLUSIVE": 0,
+    "SKIPPED": 0
+   },
+   "need_pass": 1,
+   "runs": [
+    {
+     "run": "run-01",
+     "verdict": "PASS",
+     "loaded": false,
+     "measurements": {
+      "installed": true,
+      "first_poll_thread": "00000006",
+      "driver_error": null,
+      "first_poll_wait_s": 5.0,
+      "answers": {
+       "{+ 1 2}": "3",
+       "{no_such_func 1}": "!! refused: script error: no_such_func not function or object (file <unnamed>, line 1)",
+       "{+ 5 5}": "10",
+       "{size {object_list main Object FALSE}}": "702"
+      },
+      "latency_s": {
+       "{+ 1 2}": 0.481,
+       "{no_such_func 1}": 0.066,
+       "{+ 5 5}": 0.065,
+       "{size {object_list main Object FALSE}}": 0.084
+      },
+      "object_list_main_count": 702,
+      "flow": {
+       "milestones_s": {
+        "title_screen": 9.0,
+        "main_screen": 12.0,
+        "choose_mode_screen": 15.0,
+        "song_select_screen": 18.0,
+        "game_screen": 33.0,
+        "first_gpstate2_playing": 33.0,
+        "first_gpstate3": 177.2
+       },
+       "gpstate2_paused0_samples": 73,
+       "max_sigsegv": 0,
+       "status_reports": 76,
+       "last_report_s": 228.2,
+       "timeout_reached_ms": 230000,
+       "mfailthreadmsg_seen": [
+        "",
+        "BinkMovieImpl::Ready called in the wrong thread (expected 6, cur thread is 15)",
+        "Can"
+       ],
+       "tainted_lines": 0,
+       "last_line": "TIMEOUT: 230000ms reached"
+      },
+      "flow_pass": true
+     }
+    },
+    {
+     "run": "run-02",
+     "verdict": "PASS",
+     "loaded": false,
+     "measurements": {
+      "installed": true,
+      "first_poll_thread": "00000006",
+      "driver_error": null,
+      "first_poll_wait_s": 8.0,
+      "answers": {
+       "{+ 1 2}": "3",
+       "{no_such_func 1}": "!! refused: script error: no_such_func not function or object (file <unnamed>, line 1)",
+       "{+ 5 5}": "10",
+       "{size {object_list main Object FALSE}}": "702"
+      },
+      "latency_s": {
+       "{+ 1 2}": 0.101,
+       "{no_such_func 1}": 0.096,
+       "{+ 5 5}": 0.122,
+       "{size {object_list main Object FALSE}}": 0.121
+      },
+      "object_list_main_count": 702,
+      "flow": {
+       "milestones_s": {
+        "title_screen": 12.0,
+        "main_screen": 15.0,
+        "choose_mode_screen": 18.0,
+        "song_select_screen": 21.0,
+        "game_screen": 36.1,
+        "first_gpstate2_playing": 36.1,
+        "first_gpstate3": 180.2
+       },
+       "gpstate2_paused0_samples": 73,
+       "max_sigsegv": 0,
+       "status_reports": 76,
+       "last_report_s": 228.3,
+       "timeout_reached_ms": 230000,
+       "mfailthreadmsg_seen": [
+        "BinkMovieImpl::Ready called in the wrong thread (expected 6, cur thread is 15)",
+        "Can"
+       ],
+       "tainted_lines": 0,
+       "last_line": "TIMEOUT: 230000ms reached"
+      },
+      "flow_pass": true
+     }
+    }
+   ],
+   "attempts": [
+    {
+     "run": "run-01",
+     "verdict": "PASS",
+     "loaded": false,
+     "load1_max": 22.64,
+     "reasons": []
+    },
+    {
+     "run": "run-02",
+     "verdict": "PASS",
+     "loaded": false,
+     "load1_max": 26.68,
+     "reasons": []
+    }
+   ]
+  },
+  "S3": {
+   "verdict": "FAIL",
+   "counts": {
+    "PASS": 0,
+    "FAIL": 2,
+    "INCONCLUSIVE": 0,
+    "SKIPPED": 0
+   },
+   "need_pass": 2,
+   "runs": [
+    {
+     "run": "run-01",
+     "verdict": "FAIL",
+     "loaded": false,
+     "measurements": {
+      "count": 3009,
+      "lr_histogram": {
+       "83523434": 539,
+       "835278F8": 537,
+       "83527908": 537,
+       "83527934": 537,
+       "830EB348": 183,
+       "830EB9EC": 182,
+       "831FF078": 179,
+       "831FDB70": 125,
+       "83209804": 125,
+       "832095B4": 14,
+       "829395C4": 10,
+       "830E9634": 7,
+       "829395FC": 5,
+       "82A1C32C": 4,
+       "830EBF98": 2,
+       "830EC6D0": 2,
+       "83522A98": 2,
+       "82C68598": 1,
+       "830E8254": 1,
+       "830E8260": 1,
+       "830E8298": 1,
+       "830E8E24": 1,
+       "830E8E64": 1,
+       "830E8E98": 1,
+       "830E8ED8": 1,
+       "830E9014": 1,
+       "830E9248": 1,
+       "830EB028": 1,
+       "830EB078": 1,
+       "830EB17C": 1,
+       "830EB1D0": 1,
+       "830EBB78": 1,
+       "831F4D1C": 1,
+       "831FE5F8": 1,
+       "831FE62C": 1,
+       "8352738C": 1
+      },
+      "distinct_lrs": 36,
+      "lr_sequence_sha256": "741797ea8dcf4cc236939899eca6a19e2df6b8de2e2adcc36fb81290e3dbb920",
+      "layout": "decomp",
+      "manifest_fingerprint_mismatch_line": false,
+      "symbols_loaded": 77613,
+      "text_fnv1a64": "F9D20174E8669EBA",
+      "timeout_reached_ms": 120000,
+      "lr_histogram_diff": {
+       "82905080": {
+        "ref": 1,
+        "got": 0
+       },
+       "829395C4": {
+        "ref": 0,
+        "got": 10
+       },
+       "829395FC": {
+        "ref": 0,
+        "got": 5
+       },
+       "82A1C32C": {
+        "ref": 0,
+        "got": 4
+       },
+       "82C68598": {
+        "ref": 0,
+        "got": 1
+       },
+       "82D665D4": {
+        "ref": 1,
+        "got": 0
+       },
+       "82F1A5FC": {
+        "ref": 1,
+        "got": 0
+       },
+       "830E8630": {
+        "ref": 1,
+        "got": 0
+       },
+       "830E8E24": {
+        "ref": 0,
+        "got": 1
+       },
+       "830E8E64": {
+        "ref": 0,
+        "got": 1
+       },
+       "830E8E98": {
+        "ref": 0,
+        "got": 1
+       },
+       "830E8ED8": {
+        "ref": 0,
+        "got": 1
+       },
+       "830E9248": {
+        "ref": 0,
+        "got": 1
+       },
+       "830E9634": {
+        "ref": 0,
+        "got": 7
+       },
+       "830EB348": {
+        "ref": 5,
+        "got": 183
+       },
+       "830EB9EC": {
+        "ref": 5,
+        "got": 182
+       },
+       "830EBB78": {
+        "ref": 0,
+        "got": 1
+       },
+       "830EBF98": {
+        "ref": 4,
+        "got": 2
+       },
+       "830EC6D0": {
+        "ref": 4,
+        "got": 2
+       },
+       "831FDB70": {
+        "ref": 271,
+        "got": 125
+       },
+       "831FE3B4": {
+        "ref": 15,
+        "got": 0
+       },
+       "831FF078": {
+        "ref": 0,
+        "got": 179
+       },
+       "83209804": {
+        "ref": 271,
+        "got": 125
+       },
+       "83522A98": {
+        "ref": 4,
+        "got": 2
+       },
+       "83523384": {
+        "ref": 1,
+        "got": 0
+       },
+       "835233A8": {
+        "ref": 1,
+        "got": 0
+       },
+       "83523434": {
+        "ref": 0,
+        "got": 539
+       },
+       "83523D74": {
+        "ref": 1,
+        "got": 0
+       },
+       "83524FAC": {
+        "ref": 1,
+        "got": 0
+       },
+       "83524FE0": {
+        "ref": 1,
+        "got": 0
+       },
+       "83525578": {
+        "ref": 1,
+        "got": 0
+       },
+       "8352564C": {
+        "ref": 1,
+        "got": 0
+       },
+       "83525774": {
+        "ref": 1,
+        "got": 0
+       },
+       "83526000": {
+        "ref": 1,
+        "got": 0
+       },
+       "835278F8": {
+        "ref": 0,
+        "got": 537
+       },
+       "83527908": {
+        "ref": 0,
+        "got": 537
+       },
+       "83527934": {
+        "ref": 0,
+        "got": 537
+       },
+       "83527FE4": {
+        "ref": 1,
+        "got": 0
+       },
+       "835292CC": {
+        "ref": 1,
+        "got": 0
+       },
+       "83529308": {
+        "ref": 1,
+        "got": 0
+       },
+       "83529334": {
+        "ref": 1,
+        "got": 0
+       },
+       "83529360": {
+        "ref": 1,
+        "got": 0
+       },
+       "835293B4": {
+        "ref": 1,
+        "got": 0
+       },
+       "83529408": {
+        "ref": 1,
+        "got": 0
+       },
+       "83529430": {
+        "ref": 1,
+        "got": 0
+       },
+       "83529460": {
+        "ref": 1,
+        "got": 0
+       }
+      },
+      "lr_sequence_equal": false
+     }
+    },
+    {
+     "run": "run-02",
+     "verdict": "FAIL",
+     "loaded": false,
+     "measurements": {
+      "count": 3009,
+      "lr_histogram": {
+       "83523434": 539,
+       "835278F8": 537,
+       "83527908": 537,
+       "83527934": 537,
+       "830EB348": 183,
+       "830EB9EC": 182,
+       "831FF078": 179,
+       "831FDB70": 125,
+       "83209804": 125,
+       "832095B4": 14,
+       "829395C4": 10,
+       "830E9634": 7,
+       "829395FC": 5,
+       "82A1C32C": 4,
+       "830EBF98": 2,
+       "830EC6D0": 2,
+       "83522A98": 2,
+       "82C68598": 1,
+       "830E8254": 1,
+       "830E8260": 1,
+       "830E8298": 1,
+       "830E8E24": 1,
+       "830E8E64": 1,
+       "830E8E98": 1,
+       "830E8ED8": 1,
+       "830E9014": 1,
+       "830E9248": 1,
+       "830EB028": 1,
+       "830EB078": 1,
+       "830EB17C": 1,
+       "830EB1D0": 1,
+       "830EBB78": 1,
+       "831F4D1C": 1,
+       "831FE5F8": 1,
+       "831FE62C": 1,
+       "8352738C": 1
+      },
+      "distinct_lrs": 36,
+      "lr_sequence_sha256": "741797ea8dcf4cc236939899eca6a19e2df6b8de2e2adcc36fb81290e3dbb920",
+      "layout": "decomp",
+      "manifest_fingerprint_mismatch_line": false,
+      "symbols_loaded": 77613,
+      "text_fnv1a64": "F9D20174E8669EBA",
+      "timeout_reached_ms": 120000,
+      "lr_histogram_diff": {
+       "82905080": {
+        "ref": 1,
+        "got": 0
+       },
+       "829395C4": {
+        "ref": 0,
+        "got": 10
+       },
+       "829395FC": {
+        "ref": 0,
+        "got": 5
+       },
+       "82A1C32C": {
+        "ref": 0,
+        "got": 4
+       },
+       "82C68598": {
+        "ref": 0,
+        "got": 1
+       },
+       "82D665D4": {
+        "ref": 1,
+        "got": 0
+       },
+       "82F1A5FC": {
+        "ref": 1,
+        "got": 0
+       },
+       "830E8630": {
+        "ref": 1,
+        "got": 0
+       },
+       "830E8E24": {
+        "ref": 0,
+        "got": 1
+       },
+       "830E8E64": {
+        "ref": 0,
+        "got": 1
+       },
+       "830E8E98": {
+        "ref": 0,
+        "got": 1
+       },
+       "830E8ED8": {
+        "ref": 0,
+        "got": 1
+       },
+       "830E9248": {
+        "ref": 0,
+        "got": 1
+       },
+       "830E9634": {
+        "ref": 0,
+        "got": 7
+       },
+       "830EB348": {
+        "ref": 5,
+        "got": 183
+       },
+       "830EB9EC": {
+        "ref": 5,
+        "got": 182
+       },
+       "830EBB78": {
+        "ref": 0,
+        "got": 1
+       },
+       "830EBF98": {
+        "ref": 4,
+        "got": 2
+       },
+       "830EC6D0": {
+        "ref": 4,
+        "got": 2
+       },
+       "831FDB70": {
+        "ref": 271,
+        "got": 125
+       },
+       "831FE3B4": {
+        "ref": 15,
+        "got": 0
+       },
+       "831FF078": {
+        "ref": 0,
+        "got": 179
+       },
+       "83209804": {
+        "ref": 271,
+        "got": 125
+       },
+       "83522A98": {
+        "ref": 4,
+        "got": 2
+       },
+       "83523384": {
+        "ref": 1,
+        "got": 0
+       },
+       "835233A8": {
+        "ref": 1,
+        "got": 0
+       },
+       "83523434": {
+        "ref": 0,
+        "got": 539
+       },
+       "83523D74": {
+        "ref": 1,
+        "got": 0
+       },
+       "83524FAC": {
+        "ref": 1,
+        "got": 0
+       },
+       "83524FE0": {
+        "ref": 1,
+        "got": 0
+       },
+       "83525578": {
+        "ref": 1,
+        "got": 0
+       },
+       "8352564C": {
+        "ref": 1,
+        "got": 0
+       },
+       "83525774": {
+        "ref": 1,
+        "got": 0
+       },
+       "83526000": {
+        "ref": 1,
+        "got": 0
+       },
+       "835278F8": {
+        "ref": 0,
+        "got": 537
+       },
+       "83527908": {
+        "ref": 0,
+        "got": 537
+       },
+       "83527934": {
+        "ref": 0,
+        "got": 537
+       },
+       "83527FE4": {
+        "ref": 1,
+        "got": 0
+       },
+       "835292CC": {
+        "ref": 1,
+        "got": 0
+       },
+       "83529308": {
+        "ref": 1,
+        "got": 0
+       },
+       "83529334": {
+        "ref": 1,
+        "got": 0
+       },
+       "83529360": {
+        "ref": 1,
+        "got": 0
+       },
+       "835293B4": {
+        "ref": 1,
+        "got": 0
+       },
+       "83529408": {
+        "ref": 1,
+        "got": 0
+       },
+       "83529430": {
+        "ref": 1,
+        "got": 0
+       },
+       "83529460": {
+        "ref": 1,
+        "got": 0
+       }
+      },
+      "lr_sequence_equal": false
+     }
+    }
+   ],
+   "attempts": [
+    {
+     "run": "run-01",
+     "verdict": "FAIL",
+     "loaded": false,
+     "load1_max": 34.45,
+     "reasons": [
+      "forced trap count 3009 != 627",
+      "LR histogram differs at 46 LRs",
+      "manifest-fingerprint-mismatch line absent"
+     ]
+    },
+    {
+     "run": "run-02",
+     "verdict": "FAIL",
+     "loaded": false,
+     "load1_max": 48.08,
+     "reasons": [
+      "forced trap count 3009 != 627",
+      "LR histogram differs at 46 LRs",
+      "manifest-fingerprint-mismatch line absent"
+     ]
+    }
+   ]
+  },
+  "S6": {
+   "verdict": "FAIL",
+   "counts": {
+    "PASS": 1,
+    "FAIL": 2,
+    "INCONCLUSIVE": 0,
+    "SKIPPED": 0
+   },
+   "need_pass": 3,
+   "runs": [
+    {
+     "run": "run-01",
+     "verdict": "FAIL",
+     "loaded": false,
+     "measurements": {
+      "variant": 1,
+      "title": "dc1",
+      "forbid": [
+       "dc3",
+       "rb3"
+      ],
+      "counts": {
+       "dc3: DC3 hook line": 0,
+       "dc3: DC3 script/gpState probe": 0,
+       "dc3: DC3 thread-6 present-pipeline dump": 76,
+       "dc3: DC3 DTA channel": 0,
+       "rb3: RB3 hook line": 0,
+       "rb3: RB3 stream census": 0
+      },
+      "total": 76
+     }
+    },
+    {
+     "run": "run-02",
+     "verdict": "PASS",
+     "loaded": false,
+     "measurements": {
+      "variant": 2,
+      "title": "dc3",
+      "forbid": [
+       "rb3"
+      ],
+      "counts": {
+       "rb3: RB3 hook line": 0,
+       "rb3: RB3 stream census": 0
+      },
+      "total": 0
+     }
+    },
+    {
+     "run": "run-03",
+     "verdict": "FAIL",
+     "loaded": false,
+     "measurements": {
+      "variant": 3,
+      "title": "rb3dx",
+      "forbid": [
+       "dc3"
+      ],
+      "counts": {
+       "dc3: DC3 hook line": 0,
+       "dc3: DC3 script/gpState probe": 0,
+       "dc3: DC3 thread-6 present-pipeline dump": 224,
+       "dc3: DC3 DTA channel": 0
+      },
+      "total": 224
+     }
+    }
+   ],
+   "attempts": [
+    {
+     "run": "run-01",
+     "verdict": "FAIL",
+     "loaded": false,
+     "load1_max": 5.26,
+     "reasons": [
+      "76 x dc3: DC3 thread-6 present-pipeline dump"
+     ]
+    },
+    {
+     "run": "run-02",
+     "verdict": "PASS",
+     "loaded": false,
+     "load1_max": 36.35,
+     "reasons": []
+    },
+    {
+     "run": "run-03",
+     "verdict": "FAIL",
+     "loaded": false,
+     "load1_max": 36.0,
+     "reasons": [
+      "224 x dc3: DC3 thread-6 present-pipeline dump"
+     ]
+    }
+   ]
+  }
+ }
+}

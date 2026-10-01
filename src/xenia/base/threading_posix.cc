@@ -192,6 +192,13 @@ static constexpr std::chrono::milliseconds kAlertablePollInterval{20};
 // Defined after PosixCondition<Thread>/current_thread_ are in scope.
 static bool DrainCurrentThreadAPCs();
 
+// Called when a running thread destroys its own Thread object (the guest
+// closed the thread handle before the thread exited, so the exiting thread's
+// final release destructs its own XThread). Clears the thread-local
+// current-thread pointer so Thread::Exit does not call into the freed object.
+// Defined after current_thread_ is in scope.
+static void ClearCurrentThreadPointer();
+
 // Lazily create this thread's alertable eventfd. Called only on the normal
 // (non-signal) alertable path.
 static void EnsureAlertableEventfd() {
@@ -742,6 +749,21 @@ class PosixCondition<Thread> : public PosixConditionBase {
 
   virtual ~PosixCondition() {
     if (thread_ && !signaled_) {
+      if (pthread_equal(thread_, pthread_self())) {
+        // A running thread is destroying its OWN handle: the guest closed the
+        // thread handle before the thread exited, so the exiting thread's
+        // final ReleaseHandle() in XThread::Exit ran ~XThread on itself.
+        // Never cancel/join self here: ThreadStartRoutine sets ASYNCHRONOUS
+        // cancel type, so pthread_cancel(self) force-unwinds through this
+        // noexcept destructor (std::terminate; pthread_join(self) is EDEADLK
+        // and a cancellation point besides). Detach so the OS reclaims the
+        // thread when it exits, and clear the TLS pointer so the caller's
+        // subsequent Thread::Exit uses plain pthread_exit instead of the
+        // freed PosixThread.
+        pthread_detach(thread_);
+        ClearCurrentThreadPointer();
+        return;
+      }
 #if XE_PLATFORM_ANDROID
       if (pthread_kill(thread_,
                        GetSystemSignal(SignalType::kThreadTerminate)) != 0) {
@@ -1360,6 +1382,8 @@ class PosixThread : public PosixConditionHandle<Thread> {
 
 thread_local PosixThread* current_thread_ = nullptr;
 
+static void ClearCurrentThreadPointer() { current_thread_ = nullptr; }
+
 static bool DrainCurrentThreadAPCs() {
   if (!current_thread_) {
     return false;
@@ -1389,16 +1413,24 @@ void* PosixCondition<Thread>::ThreadStartRoutine(void* parameter) {
   current_thread_ = thread;
   {
     std::unique_lock<std::mutex> lock(thread->handle_.state_mutex_);
+    // suspend_count_ must be set in the SAME critical section that publishes
+    // kSuspended. Upstream dropped the lock between the two: a Resume() that
+    // ran in that window (WaitStarted() returns as soon as state_ leaves
+    // kUninitialized) decremented a count of 0, and the thread then set it to
+    // 1 and waited for a 0 that never came -- the resume was lost and the
+    // thread never ran its start routine. DC3 hit it on the Main XThread and
+    // on App::App's KinectGuideThread (created suspended, then resumed), so
+    // the title never launched or main() waited forever on that thread.
+    if (create_suspended) {
+      thread->handle_.suspend_count_ = 1;
+    }
     thread->handle_.state_ =
         create_suspended ? State::kSuspended : State::kRunning;
     thread->handle_.state_signal_.notify_all();
-  }
-
-  if (create_suspended) {
-    std::unique_lock<std::mutex> lock(thread->handle_.state_mutex_);
-    thread->handle_.suspend_count_ = 1;
-    thread->handle_.state_signal_.wait(
-        lock, [thread] { return thread->handle_.suspend_count_ == 0; });
+    if (create_suspended) {
+      thread->handle_.state_signal_.wait(
+          lock, [thread] { return thread->handle_.suspend_count_ == 0; });
+    }
   }
 
   start_routine();
@@ -1452,7 +1484,9 @@ void Thread::Exit(int exit_code) {
   if (current_thread_) {
     current_thread_->Terminate(exit_code);
   } else {
-    // Should only happen with the main thread
+    // Main thread, or a thread whose own Thread object was already destroyed
+    // (guest closed the handle before thread exit; see ~PosixCondition<Thread>
+    // self-destruction path, which detaches and clears current_thread_).
     pthread_exit(reinterpret_cast<void*>(exit_code));
   }
   // Function must not return

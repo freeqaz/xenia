@@ -7,6 +7,8 @@
  ******************************************************************************
  */
 
+#include <atomic>
+
 #include "xenia/base/logging.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/util/shim_utils.h"
@@ -43,12 +45,13 @@ DECLARE_XBDM_EXPORT1(DmGetXbeInfo, kDebug, kStub);
 MAKE_DUMMY_STUB_STATUS(DmGetXboxName);
 
 dword_result_t DmIsDebuggerPresent_entry() {
-  static uint32_t call_count = 0;
-  call_count++;
-  if (call_count <= 5 || (call_count % 100) == 0) {
+  // Counter must be atomic: guest threads call this concurrently.
+  static std::atomic<uint32_t> call_count{0};
+  uint32_t n = call_count.fetch_add(1, std::memory_order_relaxed) + 1;
+  if (n <= 5 || (n % 100) == 0) {
     auto* thread = XThread::GetCurrentThread();
     uint32_t tid = thread ? thread->thread_id() : 0;
-    XELOGI("DmIsDebuggerPresent #{} tid={}", call_count, tid);
+    XELOGD("DmIsDebuggerPresent #{} tid={}", n, tid);
   }
   return 0;
 }
@@ -100,7 +103,9 @@ DECLARE_XBDM_EXPORT1(DmFindPdbSignature, kDebug, kStub);
 dword_result_t DmGetSystemInfo_entry(lpdword_t info_ptr) {
   // TODO: fill struct with plausible values if any game actually reads them
   if (info_ptr) {
-    // Zero out a reasonable struct size (0x24 bytes = 36 bytes)
+    // 0x24 is a GUESSED DM_SYSTEM_INFO size -- the real layout was never
+    // confirmed and the caller does not pass a buffer length, so this can
+    // over- or under-write. See C16 in docs/fork-cleanup-review.md.
     auto* p = reinterpret_cast<uint8_t*>(info_ptr.host_address());
     std::memset(p, 0, 0x24);
   }
