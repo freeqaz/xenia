@@ -18,12 +18,18 @@ _spec.loader.exec_module(dc3_flow)
 FIRST_POLL_RE = re.compile(r"DTA channel: first poll on guest thread ([0-9A-Fa-f]+)")
 INSTALLED_RE = re.compile(r"DC3 DTA channel: installed on")
 
+# dc3_eval.py prints each command's value with the wire's "=> " prefix
+# stripped (split_results); raw xchan.py keeps it. Accept both.
 EXPECT = {
-    "{+ 1 2}": ("exact", "=> 3"),
-    "{no_such_func 1}": ("prefix", "=> !! refused: script error"),
-    "{+ 5 5}": ("exact", "=> 10"),
+    "{+ 1 2}": ("exact", "3"),
+    "{no_such_func 1}": ("prefix", "!! refused: script error"),
+    "{+ 5 5}": ("exact", "10"),
     "{size {object_list main Object FALSE}}": ("int", None),
 }
+
+
+def strip_prefix(out: str) -> str:
+    return out[3:] if out.startswith("=> ") else out
 
 
 def analyze(run_dir: Path, meta: dict):
@@ -54,16 +60,16 @@ def analyze(run_dir: Path, meta: dict):
             if not drv.get("error"):
                 reasons.append(f"{q}: not sent")
             continue
-        out = r["stdout"].strip()
+        out = strip_prefix(r["stdout"].strip())
         m["answers"][q] = out
         m["latency_s"][q] = r["latency_s"]
         ok = (kind == "exact" and out == want) or \
              (kind == "prefix" and out.startswith(want)) or \
-             (kind == "int" and re.fullmatch(r"=> \d+", out) is not None)
+             (kind == "int" and re.fullmatch(r"\d+", out) is not None)
         if not ok:
             reasons.append(f"{q} -> {out!r} (rc {r['rc']}, {r['stderr'][:120]!r})")
     if "{size {object_list main Object FALSE}}" in m["answers"]:
-        mm = re.fullmatch(r"=> (\d+)", m["answers"]["{size {object_list main Object FALSE}}"])
+        mm = re.fullmatch(r"(\d+)", m["answers"]["{size {object_list main Object FALSE}}"])
         m["object_list_main_count"] = int(mm.group(1)) if mm else None
     flow = dc3_flow.parse(run_dir / "run.log")
     flow_reasons, flow_crit = dc3_flow.judge(flow, meta.get("rc"))

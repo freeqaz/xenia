@@ -25,8 +25,9 @@ comparison is per scenario:
                ratchet that increases is a REGRESSION
   S3           count + LR histogram are already judged against the s66
                reference inside the verdict
-  S6           RATCHET: each other-title pattern count must not exceed the
-               baseline's worst run for that variant
+  S6           RATCHET on the set of leaking patterns per variant: a pattern
+               that did not leak in the baseline is a REGRESSION; counts are
+               reported only (they scale with how long the run lived)
   S1/S2/S4/S5  milestone times (median over PASS runs that were not loaded)
                are reported as deltas, never judged: the flow is wall-clock
                driven
@@ -35,6 +36,7 @@ Exit: 0 no regression, 1 regression, 3 nothing regressed but something was
 INCONCLUSIVE, 2 usage.
 """
 import json
+import os
 import statistics
 import sys
 from pathlib import Path
@@ -145,22 +147,28 @@ def compare(base, cand):
                     findings.append(("IMPROVED", s, f"ratchet {k} {br[k]} -> {v}"))
 
         if s == "S6":
-            worst = {}
-            for r in b.get("runs", []):
-                m = r.get("measurements", {})
-                for k, n in (m.get("counts") or {}).items():
-                    key = (m.get("variant"), k)
-                    worst[key] = max(worst.get(key, 0), n)
-            for r in c.get("runs", []):
-                m = r.get("measurements", {})
-                for k, n in (m.get("counts") or {}).items():
-                    lim = worst.get((m.get("variant"), k))
-                    if lim is not None and n > lim:
-                        findings.append(("REGRESSION", s, f"variant {m.get('variant')} "
-                                         f"'{k}' {lim} -> {n} (ratchet)"))
-                    elif lim is not None and n < lim:
-                        findings.append(("IMPROVED", s, f"variant {m.get('variant')} "
-                                         f"'{k}' {lim} -> {n}"))
+            # Ratchet on the SET of leaking patterns per variant. Counts are
+            # reported but not judged: the thread-6 dump repeats every status
+            # report, so its count scales with how long the run lived (40 vs
+            # 224 lines for the same leak on two binaries).
+            def leaks(sc):
+                out = {}
+                for r in sc.get("runs", []):
+                    m = r.get("measurements", {})
+                    for k, n in (m.get("counts") or {}).items():
+                        if n:
+                            out.setdefault((m.get("variant"), k), []).append(n)
+                return out
+            bl, cl = leaks(b), leaks(c)
+            for key in sorted(set(cl) - set(bl), key=str):
+                findings.append(("REGRESSION", s, f"variant {key[0]} new leak '{key[1]}' "
+                                 f"x{max(cl[key])}"))
+            for key in sorted(set(bl) - set(cl), key=str):
+                findings.append(("IMPROVED", s, f"variant {key[0]} leak gone '{key[1]}' "
+                                 f"(was x{max(bl[key])})"))
+            for key in sorted(set(bl) & set(cl), key=str):
+                findings.append(("INFO", s, f"variant {key[0]} '{key[1]}' "
+                                 f"x{max(bl[key])} -> x{max(cl[key])}"))
 
         # Watched measurements: not pass criteria, but a change is worth a
         # line (e.g. Vulkan suddenly reaching game_screen, or the song the
@@ -209,13 +217,18 @@ def paired(out_a, out_b):
         lb = vb["provenance"]["load"].get("load1_mean")
         ra, rb = raw_verdict(va), raw_verdict(vb)
         tag = ""
+        # A failing side counts against its binary when it was not loaded
+        # itself (below the gate), or no more loaded than the passing side.
+        gate = float(os.environ.get("FR_LOAD_MAX", 80))
+        def comparable(lf, lp):
+            return lf is not None and lp is not None and (lf <= gate or lf <= 1.25 * lp + 5)
         if ra == "FAIL" and rb == "PASS":
-            near = la is not None and lb is not None and la <= 1.25 * lb + 5
-            tag = "PAIRED-FAIL(A)" if near else "A-FAIL(load differs)"
+            near = comparable(la, lb)
+            tag = "PAIRED-FAIL(A)" if near else "A-FAIL(A more loaded)"
             bad += near
         elif ra == "PASS" and rb == "FAIL":
-            near = la is not None and lb is not None and lb <= 1.25 * la + 5
-            tag = "PAIRED-FAIL(B)" if near else "B-FAIL(load differs)"
+            near = comparable(lb, la)
+            tag = "PAIRED-FAIL(B)" if near else "B-FAIL(B more loaded)"
         rows.append((str(rel.parent), ra, la, rb, lb, tag))
     print(f"{'run':16s} {'A':8s} {'ldA':>6s}  {'B':8s} {'ldB':>6s}  note")
     for r in rows:

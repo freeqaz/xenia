@@ -20,12 +20,12 @@ emulator, open unix sockets, and S1V uses GPU 1.
 |---|---|---|---|---|
 | S0 | nothing (static) | the binary's compiled-in cvar defaults (full map); source ratchets on this tree: title-ID literals outside `src/xenia/titles/`, `/home/free` in `src/`, `XELOGI(` in `src/xenia/gpu/` | measurements taken; the comparator lists every changed default and fails a ratchet increase | 1 (1) |
 | S1 | DC3 original `debug.xex`, null GPU, ymca flow, 230 s (the dc3-oracle command) | milestone times title/main/choose_mode/song_select/game_screen, first `gpState=2 paused=0`, first `gpState=3`, gpState=2 sample count, max SIGSEGV, `mFailThreadMsg`/TAINTED lines | title ≤ 30 s, game_screen ≤ 60 s, ≥ 60 gpState=2 samples, gpState=3 seen, rc 0 + `TIMEOUT` line, SIGSEGV 0 | 3 (2) |
-| S1V | S1 on Vulkan, `--vulkan_device=1`, capture every 300 swaps | frame count, capture swap indices, flow milestones; keeps one PNG from game_screen (else the furthest screen) | rc 0 + TIMEOUT, title reached, ≥ 10 frames, kept frame not a uniform fill. game_screen is recorded, not required (BASELINE.md: Vulkan gameplay 0/2) | 1 (1) |
+| S1V | S1 on Vulkan, `--vulkan_device=1`, capture every 300 swaps, private pipeline cache | frame count, capture swap indices, flow milestones, Milo fail-screen frames (first swap, screen, PNG); keeps one PNG from game_screen (else the furthest screen) | rc 0 + TIMEOUT, title reached, ≥ 10 frames, kept frame not a uniform fill. game_screen and the fail screen are recorded, not required: on chan5 and both BASELINE.md runs the Vulkan run hits a MILO_FAIL at song_select (`Could not find preview.tmov in dir song_info`) from swap 1200 | 1 (1) |
 | S2 | S1 + `--dc3_dta_channel=<run>/dta.sock`; `lib/dta_driver.py` drives `dc3-decomp/tools/console/dc3_eval.py -T xenia --socket` | channel installed, first poll thread, answers + latency, `object_list main` count, plus the S1 flow on the same run | thread `00000006`; `{+ 1 2}`→`=> 3`; `{no_such_func 1}`→`=> !! refused: script error…`; `{+ 5 5}`→`=> 10`; `{size {object_list main Object FALSE}}`→`=> <int>`; S1 criteria | 2 (1) |
 | S3 | DC3 decomp-layout `default.xex` (2026-08-24 build), 120 s, pinned 2026-08-29 shared toml | count of `tw/td forced trap hit!` and the per-LR histogram (a fingerprint of how far the decomp image boots and through which assert sites) | count == 627 and histogram == `reference/trap627_s66.json`; `layout=decomp`; manifest-fingerprint-mismatch line; TIMEOUT; rc 0. LR sequence equality recorded, not required | 2 (2) |
 | S4 | RB3 clean retail TU5 (`clean_tu5_nodd.xex`), autopilot, mogg key table | screen timeline, tv3 screens, game_screen entry, song-stream census after game_screen | `app-run-direct installed`; main_hub, song_select, part_difficulty, tv3_* reached; with key: game_screen transState=0 and a stream at mState=3 with 11 receivers/11 channels; no `FAULT_LIVELOCK_ABORT`; rc 0. Without key: menu-only (transition to game_screen begins) | 2 (1) |
 | S5 | RB3DX `default.xex`, A every 5 s | screen timeline, game_screen entry | main_hub + song_select reached, game_screen transState=0, no livelock abort, rc 0 | 2 (1) |
-| S6 | three variants: (1) DC1 TU0 60 s, no title cvars; (2) S1 with every RB3 cvar on; (3) RB3DX with every DC3 cvar on | per-pattern count of the OTHER title's hook lines | zero; the comparator treats each count as a ratchet (candidate ≤ baseline), because today's binaries leak (thread-6 dump, nop_input DC3 paths) | 3 (3) |
+| S6 | three variants: (1) DC1 TU0 60 s, no title cvars; (2) S1 with every RB3 cvar on; (3) RB3DX with every DC3 cvar on | per-pattern count of the OTHER title's hook lines | zero; the comparator ratchets the SET of leaking patterns per variant (a new leak is a regression; counts scale with run length and are only reported), because today's binaries leak (the thread-6 "present pipeline" dump) | 3 (3) |
 
 `summary.json` also carries **passive inertness**: every S1/S1V/S2/S3 log is
 scanned for RB3 hook lines and every S4/S5 log for DC3 hook lines.
@@ -55,9 +55,52 @@ the non-default subset with each value's source. Each scenario aggregates to
 
 ## Load threshold
 
-See the measured table in the baseline commit message and
-`load_evidence.py`. Default `FR_LOAD_MAX` is set in `lib/fr.py`
-(`DEFAULT_LOAD_MAX`).
+The gate is the **mean** of the 1-min loadavg sampled every 5 s over the run,
+threshold **80** (`FR_LOAD_MAX`, `FR_LOAD_METRIC=max` for the peak). The plan
+guessed "max > 30". The measurements below do not support either half of that
+guess.
+
+| evidence | load (1-min) | outcome |
+|---|---|---|
+| BASELINE.md spike runs b1, b2, c1, c2 | ~12-20 | 4/4 reached game_screen |
+| BASELINE.md x2 (chan5) | ~80-100 | reached game_screen |
+| BASELINE.md b5-b7, k1-k3, c4, x1 | 100-220 | 0/6 game_screen, 4/9 boot hangs |
+| chan5 S1/S2 here | mean 11, 12, 13, 23 / **72 (max 89)** | PASS ×5 |
+| chan5 S1 here | mean **15** | FAIL: loading->game_screen stall, no guest fault (the nav-bridge race) |
+| Aug-29 S1 here | mean 17, 28, 36, 36, 87 | FAIL ×5, every run with the same guest fault (a binary regression, not load) |
+| Aug-29 S1, run 1 | mean 28, **max 67**, PSI 3 | FAIL like the rest: a peak-based gate at 60 called it "loaded" |
+| Aug-29 S4 / S5 | mean 16-60 (max 78) / 17-71 (max 101) | PASS ×3 / ×3; the RB3 probe cadence halves under load, hence S4's 420 s timeout |
+| Aug-29 S3 | mean 11-116 | 627 exact every time: S3 is not load sensitive (`flow=False`) |
+
+So: below a mean of ~80, every failure observed here is a property of the
+binary or a race that also fails on a quiet host (chan5 at 15). Every failure
+the spike attributed to load sat at 100+. 80 is the conservative edge of the
+measured passes (72 here, x2 at 80-100). A short peak does not break a run; sustained
+contention does. Hence the mean, not the max. PSI cpu-some is recorded
+alongside (`psi_cpu_some_avg10_*`) but not gated: it tracked loadavg loosely
+(PSI 3 at load 28, 34 at load 72). A loaded PASS stays a PASS (`loaded: true`). Only a loaded FAIL becomes INCONCLUSIVE.
+
+Because one run cannot separate load from a real failure, use `ab.sh` and
+`compare.py --paired`: two binaries interleaved run by run see the same host,
+and a FAIL next to a PASS at comparable load is a PAIRED-FAIL.
+`load_evidence.py <out-dir>...` reprints this table from any set of runs; set
+`FR_LOAD_MAX` and `fr.py refinalize <out-dir>` to re-judge kept runs.
+
+## Baselines (`baselines/`)
+
+Condensed summaries (`compare.py --make-baseline`), recorded 2026-10-01:
+
+| scenario | `aug29-checked-783a0830c92e9cbc` (frag-alloc-trace, ~f137bcedb) | `chan5-spike-3c48915b822b51d5` (dc3-oracle spike c59ced098, DC3 only) |
+|---|---|---|
+| S0 | PASS (210 cvars; ratchets 65 / 3 / 53) | PASS |
+| S1 | **FAIL 0/3** (+1 retry): fault at XMAHALWriteAndUnlockContexts+0x7C by 6 s, then FreestyleMotionFilter::IsActive faults, stall loading->game_screen (title 9 s, song_select 54 s) | **PASS 2/3**: title 9 s, game_screen 33-36 s, 75 gpState=2 samples, 0 SIGSEGV; one stall at load 15 |
+| S1V | FAIL: GPU-side swaps stop at ~100, 0 frames | PASS: 44 frames; Milo fail screen from swap 1200 at song_select (`preview.tmov`), never game_screen |
+| S2 | SKIPPED (no channel) | PASS 2/2: `3`, refused, `10`, `object_list main` = 702; first poll on 00000006 after 5-8 s; flow passes too |
+| S3 | **PASS 2/2: 627**, histogram + LR sequence identical to s66 | FAIL: 3009 traps (main lineage lacks the frag-alloc-trace manifest load; the 627 bar is frag-alloc-trace's) |
+| S4 | **PASS 2/2**: main_hub 36-39 s, game_screen 131-133 s, song stream mState=3 11/11 (tv3_a) and 13/13 (tv3_c) | n/a |
+| S5 | **PASS 2/2**: main_hub 27 s, game_screen 100-109 s | n/a |
+| S6 | FAIL: v1 (DC1) and v3 (RB3DX + DC3 cvars) leak the DC3 thread-6 "present pipeline" dump; v2 clean. v3 also aborted (rc 134) | same leaks; v2 clean |
+| passive | DC3 logs: 0 RB3 lines; RB3 logs: 472-524 DC3 dump lines each | DC3 logs: 0 RB3 lines |
 
 ## Pinned inputs
 
