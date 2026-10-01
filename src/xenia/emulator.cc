@@ -10,11 +10,15 @@
 #include "xenia/emulator.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <cinttypes>
+#include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <memory>
+#include <mutex>
 #include <optional>
 #include <string_view>
 #include <set>
@@ -46,6 +50,7 @@
 #include "xenia/cpu/backend/null_backend.h"
 #include "xenia/cpu/cpu_flags.h"
 #include "xenia/cpu/milo_trace.h"
+#include "xenia/cpu/mmio_handler.h"
 #include "xenia/cpu/ppc/ppc_context.h"
 #include "xenia/cpu/processor.h"
 #include "xenia/cpu/thread_state.h"
@@ -55,7 +60,9 @@
 #include "xenia/gpu/gpu_flags.h"
 #include "xenia/gpu/graphics_system.h"
 #include "xenia/hid/input_driver.h"
+#include "xenia/hid/input.h"
 #include "xenia/hid/input_system.h"
+#include "xenia/hid/nop/nop_input_driver.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/user_module.h"
 #include "xenia/kernel/util/gameinfo_utils.h"
@@ -63,6 +70,7 @@
 #include "xenia/kernel/xam/xam_module.h"
 #include "xenia/kernel/xbdm/xbdm_module.h"
 #include "xenia/kernel/xboxkrnl/xboxkrnl_module.h"
+#include "xenia/kernel/xevent.h"
 #include "xenia/memory.h"
 #include "xenia/vfs/devices/disc_image_device.h"
 #include "xenia/vfs/devices/host_path_device.h"
@@ -109,11 +117,6 @@ DEFINE_bool(rb3_mount_update, false,
             "finds update:\\gen\\patch_xbox.hdr (title-update content). Default "
             "OFF (inert for DC3 and normal runs).",
             "RB3");
-DEFINE_bool(dc3_enable_gameplay_bootstrap, false,
-            "DC3: experimental host-driven guest bootstrap for CreateGame/"
-            "SetupAnims/OnSongLoaded/StartGame. Disabled by default because "
-            "current call sites are unstable.",
-            "DC3");
 DEFINE_bool(dc3_game_screen_real_goto, true,
             "DC3: drive loading->game_screen via the real UIManager::GotoScreen "
             "(runs game_panel Load()->CreateGame() and the per-frame Poll state "
@@ -146,11 +149,6 @@ DEFINE_bool(dc3_debug_read_cache_stream_step_override, false,
             "DC3: enable invasive ReadCacheStream step-by-step guest override "
             "for DTB debugging. WARNING: performs extra reads/seeks and can "
             "perturb checksum/parser behavior; use only in dedicated probe runs.",
-            "DC3");
-DEFINE_bool(dc3_debug_memmgr_assert_nop_bypass, false,
-            "DC3: debug-only bypass of selected MemMgr Debug::Fail callsites "
-            "(replaces assert calls with nop). Temporary progression tool only; "
-            "can mask data/config corruption.",
             "DC3");
 DEFINE_bool(dc3_debug_mempool_alloc_probe, false,
             "DC3: log-only probe for MemOrPoolAlloc. Captures caller LR, "
@@ -221,6 +219,46 @@ DEFINE_bool(
     "non-zero top byte (main_hub OOM corrupted-size investigation). Pure "
     "observer; no guest state is modified by the handler.",
     "CPU");
+DEFINE_string(
+    rb3dx_alloc_trace_path, "",
+    "RB3DX (title 0x45410914) DIAGNOSTIC, default off (empty): write a 32-byte "
+    "binary record for EVERY guest MemAlloc@0x827BCD38 entry (tag 1: "
+    "size/align/caller-LR/caller-SP), for its RETURN (tag 2: the pointer it "
+    "handed back, joined by seq), and -- with --rb3dx_free_trace -- for every "
+    "MemFree@0x827BC430 entry (tag 3: pointer, block header, caller-LR). "
+    "Offline attribution of heap-\"main\" fragmentation by call site. Text "
+    "logging is far too slow at the real call rate (~876 allocs/s mean, 1900/s "
+    "peak); this is a buffered binary sink. Implies the __savegprlr_23 probe "
+    "override. Title-gated so DC3-inert.",
+    "CPU");
+DEFINE_bool(
+    rb3dx_free_trace, true,
+    "RB3DX: with --rb3dx_alloc_trace_path, also trace MemFree@0x827BC430 (via "
+    "an exact override of its prologue helper __savegprlr_26 @0x82829250, "
+    "filter lr==0x827BC438) so allocations can be paired with their frees and "
+    "block lifetimes attributed. No effect without the trace path.",
+    "CPU");
+DEFINE_bool(
+    rb3dx_stack_trace, true,
+    "RB3DX: with --rb3dx_alloc_trace_path, also emit a tag-4 record per "
+    "MemAlloc carrying the next FOUR guest return addresses above the "
+    "immediate caller, walked from the stack backchain (each frame's saved LR "
+    "is at [caller_sp - 8] under the __savegprlr idiom). Needed because the "
+    "top allocation site is XMemAlloc -- a shim -- so the immediate caller LR "
+    "names the allocator, not the subsystem. Fully range-checked; unresolvable "
+    "frames are reported as 0. No effect without the trace path.",
+    "CPU");
+DEFINE_bool(
+    rb3dx_ret_trace, true,
+    "RB3DX: with --rb3dx_alloc_trace_path, also capture MemAlloc's RETURN "
+    "VALUE (the allocated pointer -- which says where in the arena the block "
+    "landed, i.e. FirstFit-bottom vs LastFit-top) by overriding the epilogue "
+    "helper __restgprlr_23 @0x82829294 that MemAlloc tail-branches through, "
+    "matching on (r1 == the entry SP recorded for this thread AND the "
+    "about-to-be-restored LR == that call's caller LR). Set false if the "
+    "epilogue override destabilises the guest; the alloc-entry trace still "
+    "works without it, only pointer-exact alloc/free pairing is lost.",
+    "CPU");
 DEFINE_bool(
     rb3dx_ui_probe, false,
     "RB3DX (title 0x45410914) DIAGNOSTIC, default off: passively sample the "
@@ -230,6 +268,138 @@ DEFINE_bool(
     "objects found via ObjectDir::sMainDir @0x82E054B8). Read-only guest "
     "memory access; no hooks, no patches; title-gated so DC3-inert. For the "
     "main_hub load-stall investigation.",
+    "CPU");
+DEFINE_bool(
+    rb3_loadmgr_unbudget, false,
+    "RB3 TU5/DX (title 0x45410914), default off, requires --rb3dx_ui_probe: "
+    "poke TheLoadMgr's per-frame Poll() time budget (the 10.0f period/split "
+    "pair at 0x82E06E48/4C) to 1e30 -- the value the game itself uses inside "
+    "PollUntilEmpty() for unbudgeted synchronous drains. Under Checked-config "
+    "xenia a budgeted Poll() pass can exhaust its 10ms before the front "
+    "loader's first state step (DirLoader::PollLoading checks CheckSplit() "
+    "BEFORE advancing), starving the front loader forever: the clean-TU5 "
+    "boot freeze at the char-cache extras milos. Guest-data poke only; no "
+    "code patches. Title-gated => DC3-inert.",
+    "CPU");
+DEFINE_bool(
+    rb3_splash_unwedge, false,
+    "RB3 TU5 (title 0x45410914), default off, requires --rb3dx_ui_probe: break "
+    "the clean-TU5 boot deadlock in Splash::EndSplasher. App::App's EndSplasher "
+    "calls SetImmutableState(kTerminating) which no-ops when a Suspend is "
+    "in-flight (mState<kResumed), then blocks in WaitForState(kTerminated) "
+    "forever while the SplashThread worker is parked in WaitForState(kResuming). "
+    "This finds the live Splash (tid=6 stack) and drives the state machine to "
+    "completion (resume the worker, then terminate it) so App::App returns and "
+    "the frame loop resumes pumping the loader. Guest-memory poke + NtSetEvent "
+    "only. Title-gated => DC3-inert.",
+    "CPU");
+DEFINE_bool(
+    rb3_overlapped_scan, false,
+    "RB3 (title 0x45410914), default off, requires --rb3dx_ui_probe: scan the "
+    "guest heap for OVERLAPPED structs stuck at Internal==STATUS_PENDING "
+    "(0x103) to test the clean-TU5 loader-freeze hypothesis (AsyncFileWin::"
+    "_ReadDone spins on an OVERLAPPED xenia never clears). Read-only. "
+    "Title-gated => DC3-inert.",
+    "CPU");
+DEFINE_string(
+    rb3_mogg_key_table, "",
+    "RB3 TU5 (title 0x45410914), default empty (disabled): 64 hex bytes to "
+    "write over the mogg key-encryption table at 0x82C76258. Retail RB3 "
+    "decrypts .mogg song audio by installing a table key via XeKeysSetKey and "
+    "running XeKeysAesCbc. On hardware SetKey first DEOBFUSCATES the supplied "
+    "key using a console key we do not have, so the shipped (obscured) table "
+    "cannot work under emulation and the song stream never leaves kInit. "
+    "Passing the deobscured equivalent here makes the decrypt come out right. "
+    "No keys ship with xenia -- read the 64 bytes at 0x82C76258 out of an "
+    "already-deobscured RB3 image if you have one. Accepts whitespace between "
+    "bytes. Title-gated => DC3-inert.",
+    "CPU");
+DEFINE_bool(
+    rb3_stream_census, false,
+    "RB3 (title 0x45410914), default off, requires --rb3dx_ui_probe: sweep the "
+    "guest heap for live StandardStream objects (vtable 0x820F6A8C) and report "
+    "each one's mState(+0x14), receivers vector(+0x20..+0x24) and channel "
+    "array(+0x78..+0x80). The song-audio gate is MasterAudio::IsLoaded "
+    "(0x8277B6E8), which tail-calls mStream->IsReady() = (mState == kReady/2). "
+    "mState is written in exactly three places: the ctor stores kInit(0), "
+    "0x82704880 stores kBuffering(1), and PollStream stores kReady(2). The "
+    "kBuffering store is UNCONDITIONAL within 0x827046B8, and that same "
+    "function is the only code that fills the receivers vector from the "
+    "channel array -- so 'mState==0 with an empty receivers vector' is proof "
+    "that 0x827046B8 was never called, rather than that it ran and failed. "
+    "Finding streams by vtable instead of by walking the load queue lets this "
+    "run against an image that DOES reach playback, making the two directly "
+    "comparable. Read-only. Title-gated => DC3-inert.",
+    "CPU");
+DEFINE_bool(
+    rb3_tu5_hash_poke, false,
+    "RB3 TU5 (title 0x45410914), default off, requires --rb3dx_ui_probe: "
+    "rewrite the exe's embedded ark-integrity SHA1s for the two dtbs the "
+    "clean-TU5 boot patch modifies (ui.dtb, splash.dtb) so the anti-tamper "
+    "check stops silently quitting the game during App::App. Equivalent to "
+    "arkhelper patchcreator's exePath hash patching, applied in guest memory. "
+    "Title-gated => DC3-inert.",
+    "CPU");
+DEFINE_bool(
+    rb3_no_char_preview, false,
+    "RB3 TU5 (title 0x45410914), default off: no-op CharSync::UpdateCharCache "
+    "(0x82564698) via a guest-function override so the band-member preview "
+    "char-cache extras (world/shared/extras/male_extras0N.milo) are never "
+    "queued. Those loaders sit kLoadFront at the head of the single main-thread "
+    "load FIFO and, when one stalls, head-of-line-block the splash_screen "
+    "panels behind them -- freezing the whole cooperative-loader frame loop "
+    "~13s into boot (clean-TU5 wedge). Byte-for-byte equivalent to the rb3 "
+    "native port's RB3_NO_CHAR_PREVIEW early-return; previews are cosmetic and "
+    "off the boot-to-menu path. Title-gated + default-off => DC3-inert.",
+    "CPU");
+DEFINE_bool(
+    rb3_tu5_app_run_direct, false,
+    "RB3 TU5 (title 0x45410914), default off: enter the real frame loop "
+    "directly. Retail App::Run (0x822703D0) installs an unhandled-exception "
+    "filter (0x822703A8) and then deliberately writes to guest address 0 "
+    "(`stw r10,0(0)` at 0x822703FC); on hardware the access violation invokes "
+    "the filter, and the FILTER calls App::RunWithoutDebugging (0x82270080) -- "
+    "the actual unconditional frame loop (SystemPoll + all subsystem polls + "
+    "TheUI.Poll + Draw). Under --protect_zero=false (required for the separate "
+    "0x8275026C page-0 read) the null store succeeds silently, the filter "
+    "never runs, App::Run returns, and main falls into App::~App -> clean "
+    "teardown ('the flow-quit'). Byte-patch main's `bl 0x822703D0` at "
+    "0x82272E90 into `bl 0x82270080` -- the exact one-word patch the patched "
+    "TU5 image (RB3DX lineage) already ships at that site. Supersedes "
+    "--rb3_tu5_loop_main/--rb3_tu5_hold_main. Title-gated + default-off => "
+    "DC3-inert.",
+    "CPU");
+DEFINE_uint64(
+    rb3dx_si_claim_anchor, 0,
+    "RB3DX (title 0x45410914), default 0 (off), requires --rb3dx_ui_probe: "
+    "guest VA of the RB3Enhanced.dll SI claim-table anchor (the lis/addi "
+    "base register in SIInstallClone; wt-integration build: 0x84055FD8, "
+    "decoded from the packed DLL with capstone). Layout from "
+    "SameInstrumentHooks.c: gClaims[] {track,count} pairs at +0 stride 8, "
+    "gImpls[] at +0xC0 stride 0xC, gClaimCount at +0x1C8, gImplCount at "
+    "+0x1CC. When set, the ui probe logs these each sample -- the "
+    "machine-readable twin evidence (two players on one track => a claim "
+    "with count 2 and implCount 2). Read-only. Title-gated => DC3-inert.",
+    "CPU");
+DEFINE_bool(
+    rb3dx_autoconfirm_parts, false,
+    "RB3DX (title 0x45410914), default off, requires --rb3dx_ui_probe: "
+    "closed-loop autopilot for the two-player part/difficulty confirm. "
+    "Fixed-time --scripted_input presses cannot hit the part_difficulty_"
+    "screen window reliably (menu/ark load times vary tens of seconds "
+    "between runs; measured si6..si10). When the probe sees "
+    "song_select_screen it injects A on pad 0 (advance/pick song); on "
+    "part_difficulty_screen it alternates A on pad 1 / pad 0 each ~2s "
+    "sample so both players confirm part and difficulty regardless of when "
+    "the cards appear. Injection goes through the nop HID driver's "
+    "per-pad InjectButtonPress; no guest writes. Title-gated => DC3-inert.",
+    "CPU");
+DEFINE_int32(
+    rb3dx_autoconfirm_p2_up, 0,
+    "RB3DX autopilot: press DPAD-UP on pad 1 for the first N samples at "
+    "part_difficulty_screen before the A confirms, to navigate P2's CHOOSE "
+    "INSTRUMENT list off the default first-free part (e.g. 1 = select the "
+    "entry above BASS -- GUITAR when the same-instrument un-grey is armed).",
     "CPU");
 DEFINE_bool(
     rb3dx_offline_join, false,
@@ -348,6 +518,19 @@ DEFINE_uint64(
     "Xenia pokes 1 to this VA right after the DLL loads, arming the hook bodies. "
     "REQUIRED for behavioral (Phase-5) runs; harmless for install-only (Phase-3) "
     "verification. Title-gated + default-off => DC3-inert.",
+    "CPU");
+DEFINE_string(
+    si_hook_vas, "",
+    "RB3DX / RB3 TU5 (title 0x45410914), default empty: comma-separated FOUR "
+    "from-source RB3Enhanced.dll hook VAs, in fixed site order "
+    "IsActiveHook,ResolveWaitStatesHook,ProcessConfigHook,RecalcGemListHook "
+    "(hex, e.g. 0x84027B88,0x84027BC8,0x84027E30,0x84028FC8). Read from the "
+    "current build's K-link/RB3Enhanced.map -- the hook VAs move on EVERY DLL "
+    "rebuild, so the 2026-07 kFromSrcHooks constants in approach (b) are stale "
+    "the moment the DLL is relinked. When set, overrides those constants; when "
+    "empty, the retired 2026-07 constants are used unchanged (only correct for "
+    "the July fromsource.dll artifact). The four game-site addresses are "
+    "title-side and stable. Title-gated + default-off => DC3-inert.",
     "CPU");
 
 namespace xe {
@@ -482,6 +665,213 @@ void Dc3NuiReturn1Extern(cpu::ppc::PPCContext* ppc_context,
   ppc_context->r[3] = 1;
 }
 
+// RB3DX heap-"main" fragmentation attribution (--rb3dx_alloc_trace_path).
+//
+// A per-allocation binary trace. Every record is 32 bytes, little-endian host
+// order, appended to one file:
+//
+//   u8  tag    1 = MemAlloc entry, 2 = MemAlloc return, 3 = MemFree entry
+//   u8  pad
+//   u16 tid    guest thread id (low 16 bits)
+//   u32 seq    MemAlloc ordinal (tags 1 and 2 share it; MemFree ordinal for 3)
+//   u64 ns     steady_clock ns since the sink opened
+//   u32 a      tag1: size (r3)      tag2: returned pointer (r3)  tag3: ptr (r3)
+//   u32 b      tag1: align (r4)     tag2: 0                      tag3: header
+//   u32 lr     caller LR (r12 at the callee's entry)
+//   u32 sp     caller SP (r1 at the callee's entry, before its stwu)
+//
+// Why binary: the measured rate is ~876 MemAlloc/s mean and 1900/s peak, so a
+// formatted log line per call would cost more than the emulation. A record is
+// a memcpy under a mutex into a 1 MiB-buffered FILE.
+namespace {
+
+struct Rb3dxTraceRec {
+  uint8_t tag;
+  uint8_t pad;
+  uint16_t tid;
+  uint32_t seq;
+  uint64_t ns;
+  uint32_t a;
+  uint32_t b;
+  uint32_t lr;
+  uint32_t sp;
+};
+static_assert(sizeof(Rb3dxTraceRec) == 32, "trace record must stay 32 bytes");
+
+class Rb3dxAllocTraceSink {
+ public:
+  explicit Rb3dxAllocTraceSink(const std::string& path)
+      : f_(fopen(path.c_str(), "wb")),
+        t0_(std::chrono::steady_clock::now()) {
+    if (f_) {
+      setvbuf(f_, nullptr, _IOFBF, 1 << 20);
+    }
+  }
+  ~Rb3dxAllocTraceSink() {
+    if (f_) {
+      fflush(f_);
+      fclose(f_);
+    }
+  }
+  bool ok() const { return f_ != nullptr; }
+  uint64_t written() const { return count_.load(std::memory_order_relaxed); }
+
+  void Emit(uint8_t tag, uint32_t tid, uint32_t seq, uint32_t a, uint32_t b,
+            uint32_t lr, uint32_t sp) {
+    if (!f_) {
+      return;
+    }
+    Rb3dxTraceRec r{};
+    r.tag = tag;
+    r.tid = static_cast<uint16_t>(tid);
+    r.seq = seq;
+    r.ns = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - t0_)
+            .count());
+    r.a = a;
+    r.b = b;
+    r.lr = lr;
+    r.sp = sp;
+    std::lock_guard<std::mutex> g(m_);
+    fwrite(&r, sizeof(r), 1, f_);
+    count_.fetch_add(1, std::memory_order_relaxed);
+  }
+  void Flush() {
+    std::lock_guard<std::mutex> g(m_);
+    if (f_) {
+      fflush(f_);
+    }
+  }
+
+ private:
+  FILE* f_;
+  std::chrono::steady_clock::time_point t0_;
+  std::mutex m_;
+  std::atomic<uint64_t> count_{0};
+};
+
+// Owned by the emulator for the process lifetime once CompleteLaunch installs
+// it; read without synchronisation from the guest-thread handlers (published
+// before the guest module is launched, never torn down while the guest runs).
+std::unique_ptr<Rb3dxAllocTraceSink> rb3dx_alloc_trace_sink;
+
+// Per-guest-thread record of the MemAlloc call currently in flight, so that
+// the __restgprlr_23 epilogue override can attribute the returned pointer back
+// to the entry record. MemAlloc cannot recurse into itself, so one slot per
+// thread is exact.
+struct Rb3dxPendingAlloc {
+  bool active = false;
+  uint32_t sp = 0;   // MemAlloc's entry SP (== r1 at the epilogue restore)
+  uint32_t lr = 0;   // caller LR (== the word reloaded from [sp-8])
+  uint32_t seq = 0;  // MemAlloc ordinal of the entry record
+};
+thread_local Rb3dxPendingAlloc t_rb3dx_pending_alloc;
+
+// Free-side ordinal (tag 3).
+std::atomic<uint32_t> rb3dx_memfree_calls{0};
+// Diagnostics for the epilogue override: how many returns we matched.
+std::atomic<uint64_t> rb3dx_ret_matches{0};
+
+}  // namespace
+
+// RB3DX: MemFree@0x827BC430 entry probe (--rb3dx_free_trace).
+//
+// Same recipe as the MemAlloc side, one helper down the save chain: MemFree's
+// prologue is `mflr r12 ; bl 0x82829250 ; addi r31,r1,-0x90 ; stwu r1,-0x90(r1)`,
+// i.e. it calls __savegprlr_26 and returns to 0x827BC438 -- a unique filter key.
+// The handler emulates __savegprlr_26 exactly (std r26..r31 at r1-0x38..r1-0x10,
+// stw r12 at r1-8) so every other caller of that helper is unaffected.
+// At the filter point r3 = the pointer being freed, r12 = the caller LR.
+void Rb3dxSaveGprLr26ProbeExtern(cpu::ppc::PPCContext* ppc_context,
+                                 kernel::KernelState* kernel_state) {
+  if (!ppc_context || !kernel_state) {
+    return;
+  }
+  uint8_t* base = kernel_state->memory()->virtual_membase();
+  uint32_t sp = static_cast<uint32_t>(ppc_context->r[1]);
+  // --- exact __savegprlr_26 emulation (must be semantically transparent) ---
+  for (int i = 0; i < 6; ++i) {
+    xe::store_and_swap<uint64_t>(base + sp - 0x38 + i * 8,
+                                 ppc_context->r[26 + i]);
+  }
+  xe::store_and_swap<uint32_t>(base + sp - 8,
+                               static_cast<uint32_t>(ppc_context->r[12]));
+  // --- probe part ---
+  const uint32_t kMemFreeRet = 0x827BC438;  // bl at 0x827BC434 in MemFree
+  if (static_cast<uint32_t>(ppc_context->lr) != kMemFreeRet) {
+    return;
+  }
+  auto* sink = rb3dx_alloc_trace_sink.get();
+  if (!sink) {
+    return;
+  }
+  uint32_t ptr = static_cast<uint32_t>(ppc_context->r[3]);
+  // The allocated-block header is the word immediately below the payload:
+  // (totalUsedWords << 8) | (padWords << 4) | flags. Only read it for pointers
+  // that plausibly live in a guest heap arena, so a MemFree(NULL) or a wild
+  // pointer can never fault the host.
+  uint32_t header = 0;
+  if (ptr >= 0x30000000u && ptr < 0x60000000u && (ptr & 3u) == 0u) {
+    header = xe::load_and_swap<uint32_t>(base + ptr - 4);
+  }
+  uint32_t seq = rb3dx_memfree_calls.fetch_add(1, std::memory_order_relaxed);
+  uint32_t tid =
+      ppc_context->thread_state ? ppc_context->thread_state->thread_id() : 0;
+  sink->Emit(3, tid, seq, ptr, header,
+             static_cast<uint32_t>(ppc_context->r[12]), sp);
+}
+
+// RB3DX: MemAlloc RETURN probe (--rb3dx_ret_trace).
+//
+// MemAlloc's epilogue is `mr r3,r30 ; addi r1,r31,0xb0 ; b 0x82c5ffc0`, and
+// that thunk lands in __restgprlr_23 @0x82829294 (the shared restore chain:
+// ld r23..r31 from r1-0x50..r1-0x10, lwz r12,-8(r1), mtlr r12, blr). Overriding
+// it gives us the one thing the entry hook cannot see: r3, the pointer handed
+// back -- which is what says whether a caller's blocks land at the FirstFit
+// bottom or the LastFit top of the arena.
+//
+// The override is exact (it performs the same reloads and sets LR), and Xenia
+// compiles the guest tail-branch as CallExtern + jmp epilog, so control still
+// unwinds through the host call chain to MemAlloc's caller.
+//
+// Attribution filter: this helper is shared by every function that saved
+// r23..r31, so we match against the per-thread pending slot -- r1 must equal
+// the SP recorded at MemAlloc's entry (callees are strictly below it, callers
+// strictly above) AND the LR being restored must equal that call's caller LR
+// (a different call site from the same frame would restore a different one).
+void Rb3dxRestGprLr23TraceExtern(cpu::ppc::PPCContext* ppc_context,
+                                 kernel::KernelState* kernel_state) {
+  if (!ppc_context || !kernel_state) {
+    return;
+  }
+  uint8_t* base = kernel_state->memory()->virtual_membase();
+  uint32_t sp = static_cast<uint32_t>(ppc_context->r[1]);
+  // --- exact __restgprlr_23 emulation ---
+  for (int i = 0; i < 9; ++i) {
+    ppc_context->r[23 + i] =
+        xe::load_and_swap<uint64_t>(base + sp - 0x50 + i * 8);
+  }
+  uint32_t restored_lr = xe::load_and_swap<uint32_t>(base + sp - 8);
+  ppc_context->r[12] = restored_lr;
+  ppc_context->lr = restored_lr;
+  // --- probe part ---
+  auto& p = t_rb3dx_pending_alloc;
+  if (!p.active || p.sp != sp || p.lr != restored_lr) {
+    return;
+  }
+  p.active = false;
+  auto* sink = rb3dx_alloc_trace_sink.get();
+  if (!sink) {
+    return;
+  }
+  rb3dx_ret_matches.fetch_add(1, std::memory_order_relaxed);
+  uint32_t tid =
+      ppc_context->thread_state ? ppc_context->thread_state->thread_id() : 0;
+  sink->Emit(2, tid, p.seq, static_cast<uint32_t>(ppc_context->r[3]), 0,
+             restored_lr, sp);
+}
+
 // RB3DX main_hub OOM investigation (--rb3dx_alloc_probe).
 //
 // We need MemAlloc's entry args (r3=size bytes, r4=align) plus the caller
@@ -546,6 +936,57 @@ void Rb3dxSaveGprLr23ProbeExtern(cpu::ppc::PPCContext* ppc_context,
           size, clamped, m);
     }
     size = clamped;
+  }
+  // --- per-allocation binary trace (--rb3dx_alloc_trace_path) ---
+  // Emitted BEFORE the suspicious/big filter below, so the trace is complete;
+  // also arms this thread's pending slot so the __restgprlr_23 epilogue
+  // override can attach the returned pointer to this record.
+  if (auto* sink = rb3dx_alloc_trace_sink.get()) {
+    uint32_t tid =
+        ppc_context->thread_state ? ppc_context->thread_state->thread_id() : 0;
+    uint32_t seq32 = static_cast<uint32_t>(m);
+    sink->Emit(1, tid, seq32, size, static_cast<uint32_t>(ppc_context->r[4]),
+               static_cast<uint32_t>(ppc_context->r[12]), sp);
+    // --- caller-of-caller backtrace (tag 4, --rb3dx_stack_trace) ---
+    // The immediate caller LR alone is not enough when the caller is a thin
+    // shim: the dominant idle-churn site turned out to be XMemAlloc's
+    // `bl MemAlloc`, which tells you the XDK allocator was used but not by
+    // whom. Four more frames are recoverable for free from the guest stack.
+    //
+    // Idiom: every non-leaf here starts `mflr r12 ; bl __savegprlr_N ;
+    // stwu r1,-F(r1)`, and __savegprlr_N stores r12 at [entry_r1 - 8]. So for
+    // a frame at F_sp, the backchain word [F_sp] is the SP of that function's
+    // CALLER, and that function's own return address sits at (caller_sp - 8)
+    // -- frame-size independent, which is what makes this walk cheap.
+    //
+    // Everything is range-checked and the walk stops on the first implausible
+    // link, so a frameless/leaf caller yields 0 rather than a wild host read.
+    if (cvars::rb3dx_stack_trace) {
+      uint32_t frames[4] = {0, 0, 0, 0};
+      uint32_t f_sp = sp;
+      for (int k = 0; k < 4; ++k) {
+        // Guest stacks live well below the code; require a plausible, aligned,
+        // strictly-upward backchain link (the stack grows down).
+        if (f_sp < 0x40000000u || f_sp >= 0x80000000u || (f_sp & 3u)) {
+          break;
+        }
+        uint32_t parent = xe::load_and_swap<uint32_t>(base + f_sp);
+        if (parent <= f_sp || parent < 0x40000000u || parent >= 0x80000000u ||
+            (parent & 3u)) {
+          break;
+        }
+        uint32_t ret = xe::load_and_swap<uint32_t>(base + parent - 8);
+        // Only accept something that looks like a guest .text return address.
+        frames[k] = (ret >= 0x82000000u && ret < 0x83000000u) ? ret : 0;
+        f_sp = parent;
+      }
+      sink->Emit(4, tid, seq32, frames[0], frames[1], frames[2], frames[3]);
+    }
+    auto& p = t_rb3dx_pending_alloc;
+    p.active = true;
+    p.sp = sp;
+    p.lr = static_cast<uint32_t>(ppc_context->r[12]);
+    p.seq = seq32;
   }
   // --- Same-instrument cave-execution self-test (--si_selftest) ---
   // Fire ONCE, well into boot (guest heaps up, 0x826684C0 resolvable), on this
@@ -642,6 +1083,69 @@ void Rb3dxSaveGprLr23ProbeExtern(cpu::ppc::PPCContext* ppc_context,
         // guest-thread ABI/r13 sdata-base); use approach (b) below for the
         // validated install-verify harness.
         uint32_t init_va = static_cast<uint32_t>(cvars::si_init_va);
+        // InitSameInstrument's RB3E_PokeBranch/HookFunction are plain guest
+        // stores into title .text (game hook sites) and DLL .text (call-stub
+        // pokes, trampoline second halves) with NO dcbst/icbi -- on hardware
+        // the pages are writable, under Xenia they are mapped read-only and
+        // the first SI_POKE_B guest-faults (proven /tmp/rb3-si2: guest crash
+        // PC inside RB3E_PokeBranch @0x8402B458+0x40, wedging the hijacked
+        // boot thread; the July "r13/sdata ABI" suspicion was wrong). Same
+        // cure as the DC3 patch procedure: guest-heap Protect the committed
+        // regions to R+W first. At MemAlloc #800 none of the poked sites has
+        // been JIT-compiled yet (pre-UI), so lazy compilation picks up the
+        // patched bytes and no invalidation is needed.
+        auto make_writable = [&](uint32_t lo, uint32_t hi, const char* tag) {
+          uint32_t a = lo, pages = 0;
+          while (a < hi) {
+            auto* heap = mem_for_emu->LookupHeap(a);
+            if (!heap) {
+              a += 0x10000;
+              continue;
+            }
+            HeapAllocationInfo info = {};
+            if (!heap->QueryRegionInfo(a, &info) || !info.region_size) {
+              a += 0x10000;
+              continue;
+            }
+            uint32_t region_end = static_cast<uint32_t>(
+                std::min<uint64_t>(hi, static_cast<uint64_t>(info.base_address) +
+                                           info.region_size));
+            if ((info.state & kMemoryAllocationCommit) &&
+                region_end > a) {
+              heap->Protect(a, region_end - a,
+                            kMemoryProtectRead | kMemoryProtectWrite);
+              pages += (region_end - a) >> 12;
+            }
+            a = region_end > a ? region_end : a + 0x10000;
+          }
+          XELOGW(
+              "SI LOADDLL: (a) made [0x{:08X},0x{:08X}) guest-writable for "
+              "the DLL's self-installed pokes ({}; ~{} 4K pages)",
+              lo, hi, tag, pages);
+        };
+        make_writable(0x82000000u, 0x83000000u, "title image");
+        make_writable(0x84000000u, 0x84860000u, "RB3Enhanced.dll image");
+        // The guest-heap walk above is bookkeeping-only and finds ZERO
+        // committed pages for the title image (PROT TRACE run /tmp/rb3-si4:
+        // the only Protect ever touching H1's page is the loader's
+        // prot=0x1, yet QueryRegionInfo reports the range uncommitted -- the
+        // title image's real state isn't tracked by the heap page table in
+        // this fork). What actually faults the DLL's orig[0] store is the
+        // HOST mapping, so unprotect that directly -- same mechanism
+        // approach (b) uses per-page, widened to the poke surface.
+        // fork-cleanup-review flags raw xe::memory::Protect as bypassing
+        // heap bookkeeping and never restoring: INTENTIONAL here. The DLL
+        // and its game-call stubs keep poking these ranges for the whole
+        // run, so the surface must stay RWX; --si_load_dll is RB3-only and
+        // default-off, and the heap page table doesn't track module images
+        // in this fork anyway (see PROT TRACE note above).
+        xe::memory::Protect(mb2 + 0x82000000u, 0x1000000u,
+                            xe::memory::PageAccess::kExecuteReadWrite);
+        xe::memory::Protect(mb2 + 0x84000000u, 0x860000u,
+                            xe::memory::PageAccess::kExecuteReadWrite);
+        XELOGW(
+            "SI LOADDLL: (a) host mappings [0x82000000,+16MB) and "
+            "[0x84000000,+0x860000) set RWX for the installer's pokes");
         uint64_t saved_r[32];
         for (int i = 0; i < 32; ++i) saved_r[i] = ppc_context->r[i];
         uint64_t saved_lr = ppc_context->lr;
@@ -677,12 +1181,40 @@ void Rb3dxSaveGprLr23ProbeExtern(cpu::ppc::PPCContext* ppc_context,
           uint32_t site, hook;
           const char* tag;
         };
-        const SiHook kFromSrcHooks[4] = {
+        SiHook kFromSrcHooks[4] = {
             {0x826684C0u, 0x840191A8u, "IsActive"},
             {0x825B6488u, 0x840191E8u, "ResolveWaitStates"},
             {0x8276FA08u, 0x84019780u, "H1 ProcessConfig"},
             {0x82794740u, 0x84019450u, "H2 RecalcGemList"},
         };
+        // The hook VAs above are the July 2026 fromsource.dll layout and go
+        // stale on every DLL relink; --si_hook_vas carries the current
+        // build's addresses (site order fixed: IsActive, ResolveWaitStates,
+        // ProcessConfig, RecalcGemList).
+        if (!cvars::si_hook_vas.empty()) {
+          uint32_t vas[4] = {};
+          int n = 0;
+          const char* p = cvars::si_hook_vas.c_str();
+          while (n < 4 && *p) {
+            char* endp = nullptr;
+            vas[n] = static_cast<uint32_t>(std::strtoul(p, &endp, 16));
+            if (endp == p) break;
+            ++n;
+            p = (*endp == ',') ? endp + 1 : endp;
+          }
+          if (n == 4) {
+            for (int i = 0; i < 4; ++i) kFromSrcHooks[i].hook = vas[i];
+            XELOGW(
+                "SI LOADDLL: (b) hook VAs overridden from --si_hook_vas: "
+                "0x{:08X} 0x{:08X} 0x{:08X} 0x{:08X}",
+                vas[0], vas[1], vas[2], vas[3]);
+          } else {
+            XELOGE(
+                "SI LOADDLL: (b) --si_hook_vas parsed {} of 4 required VAs "
+                "('{}') -- falling back to the stale 2026-07 constants",
+                n, cvars::si_hook_vas);
+          }
+        }
         const size_t host_pg = xe::memory::page_size();
         for (const auto& h : kFromSrcHooks) {
           uint8_t* host_addr = mb2 + h.site;
@@ -893,6 +1425,24 @@ void Rb3dxIsHostOfflineExtern(cpu::ppc::PPCContext* ppc_context,
   ppc_context->r[3] = 1;
 }
 
+// RB3 TU5 clean-boot: no-op CharSync::UpdateCharCache (0x82564698, void ret).
+// Register as a guest-function override so the band-member preview char cache
+// is never streamed -- its extras milos (world/shared/extras/male_extras0N.milo)
+// are queued kLoadFront at the head of the single main-thread load FIFO and
+// head-of-line-block the splash_screen panels behind them, freezing the whole
+// cooperative-loader frame loop ~13s in. Empty body = the guest fn returns
+// immediately, exactly like the rb3 native port's RB3_NO_CHAR_PREVIEW.
+void Rb3NoCharPreviewExtern(cpu::ppc::PPCContext* ppc_context,
+                            kernel::KernelState* kernel_state) {
+  static std::atomic<uint32_t> s_calls{0};
+  uint32_t n = s_calls.fetch_add(1, std::memory_order_relaxed);
+  if (n < 4 && ppc_context) {
+    XELOGI("RB3 no-char-preview: UpdateCharCache hit #{} suppressed (lr=0x{:08X})",
+           n, static_cast<uint32_t>(ppc_context->lr));
+  }
+  // void return; do not touch r[3].
+}
+
 // RB3DX / RB3 TU5 first-boot calibration skip (--rb3dx_skip_calibration).
 //
 // The splash flow, at kSplashScreen_EndOvershell, evaluates the DTA condition
@@ -914,6 +1464,54 @@ void Rb3dxIsHostOfflineExtern(cpu::ppc::PPCContext* ppc_context,
 // member offset (0x54) is the RB3 xbox360 layout verified from the ProfileMgr
 // ctor (rb3-xenon). Guest-memory write is confined to this single bool byte;
 // title-gated + default-off so DC3-inert.
+
+// Probe-thread ownership (fork-cleanup-review.md C10). These samplers used to
+// be detached std::threads with for(;;) bodies capturing Memory*; ~Emulator()
+// destroyed memory_ under them mid-LookupHeap — a guaranteed shutdown
+// use-after-free on every probe-enabled run. They are now owned here: spawned
+// via Rb3dxSpawnProbeThread(), polling Rb3dxProbeSleep() instead of a bare
+// sleep_for, and joined from Emulator::TerminateTitle() / ~Emulator().
+static std::mutex s_rb3dx_probe_thread_mutex;
+static std::vector<std::thread> s_rb3dx_probe_threads;
+static std::atomic<bool> s_rb3dx_probe_threads_stop{false};
+
+static bool Rb3dxProbeThreadsShouldStop() {
+  return s_rb3dx_probe_threads_stop.load(std::memory_order_relaxed);
+}
+
+// Sleep in short slices so a stopping emulator never waits out a full probe
+// period. Returns false (caller should exit) when a stop was requested.
+static bool Rb3dxProbeSleep(uint64_t ms) {
+  for (uint64_t waited = 0; waited < ms; waited += 250) {
+    if (Rb3dxProbeThreadsShouldStop()) {
+      return false;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(
+        std::min<uint64_t>(250, ms - waited)));
+  }
+  return !Rb3dxProbeThreadsShouldStop();
+}
+
+template <typename Fn>
+static void Rb3dxSpawnProbeThread(Fn&& fn) {
+  std::lock_guard<std::mutex> lock(s_rb3dx_probe_thread_mutex);
+  s_rb3dx_probe_threads.emplace_back(std::forward<Fn>(fn));
+}
+
+static void Rb3dxJoinProbeThreads() {
+  s_rb3dx_probe_threads_stop.store(true, std::memory_order_relaxed);
+  std::vector<std::thread> threads;
+  {
+    std::lock_guard<std::mutex> lock(s_rb3dx_probe_thread_mutex);
+    threads.swap(s_rb3dx_probe_threads);
+  }
+  for (auto& t : threads) {
+    if (t.joinable()) {
+      t.join();
+    }
+  }
+}
+
 static void Rb3dxSkipCalibrationPokeThread(Memory* memory) {
   using xe::load_and_swap;
   uint8_t* base = memory->virtual_membase();
@@ -991,7 +1589,7 @@ static void Rb3dxSkipCalibrationPokeThread(Memory* memory) {
         ++pokes;
       }
     }
-    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    if (!Rb3dxProbeSleep(150)) return;
   }
 }
 
@@ -1074,7 +1672,7 @@ static void Rb3dxSiProbeThread(Memory* memory) {
     last_flagw = flagw;
     last_detour = detour;
     ++n;
-    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    if (!Rb3dxProbeSleep(500)) return;
   }
 }
 
@@ -1108,9 +1706,15 @@ static void Rb3dxSiHookVerifyThread(Memory* memory) {
     if (a < 0x1000) return false;
     auto* heap = memory->LookupHeap(a);
     if (!heap) return false;
-    uint32_t prot = 0;
-    if (!heap->QueryProtect(a, &prot)) return false;
-    return (prot & kMemoryProtectRead) != 0;
+    // Gate on COMMITTED state, not protect bits: /tmp/rb3-si2 showed the
+    // title's .text page-table entries flip to protect=0x0 once the SI DLL
+    // is loaded (guest-side protect bookkeeping), while the host mapping
+    // stays readable -- the guest-thread detour writes at the same
+    // addresses read real words throughout. What actually SIGSEGVs a host
+    // probe read is an uncommitted/unmapped page, so that is the check.
+    HeapAllocationInfo info = {};
+    if (!heap->QueryRegionInfo(a, &info)) return false;
+    return (info.state & kMemoryAllocationCommit) != 0;
   };
   auto r32 = [&](uint32_t a) -> uint32_t {
     return readable(a) ? load_and_swap<uint32_t>(base + a) : 0xEEEEEEEEu;
@@ -1166,7 +1770,7 @@ static void Rb3dxSiHookVerifyThread(Memory* memory) {
       classify("H2", kH2);
     }
     ++n;
-    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    if (!Rb3dxProbeSleep(500)) return;
   }
 }
 
@@ -1199,16 +1803,33 @@ static void Rb3dxSiHookVerifyThread(Memory* memory) {
 //     mUILockStep @+0x2C -> LockStepMgr: mLockMachine @+0x1C (InLock() =
 //     mLockMachine != 0), mWaitList.mList vector {begin@+0x20, end@+0x24},
 //     mHasResponded @+0x28, mLockSuccess @+0x29.
-static void Rb3dxUiProbeThread(Memory* memory) {
+static void Rb3dxUiProbeThread(Memory* memory,
+                               kernel::KernelState* kernel_state,
+                               cpu::Processor* processor) {
   using xe::load_and_swap;
   uint8_t* base = memory->virtual_membase();
   auto readable = [&](uint32_t addr) -> bool {
     if (addr < 0x1000) return false;
+    // The title image and any user DLL image are not tracked by the guest
+    // heap page table (QueryProtect reads 0x0 / QueryRegionInfo reads
+    // uncommitted the moment a user module loads -- see jit-fault wiki 8f),
+    // which blinded every probe read for the whole --si_load_dll family of
+    // runs. Their host pages are resident for the entire run (the JIT
+    // executes from them), so treat those windows as readable and gate the
+    // rest on commit state.
+    if ((addr >= 0x82000000u && addr < 0x83000000u) ||
+        (addr >= 0x84000000u && addr < 0x84860000u)) {
+      return true;
+    }
     auto* heap = memory->LookupHeap(addr);
     if (!heap) return false;
     uint32_t prot = 0;
-    if (!heap->QueryProtect(addr, &prot)) return false;
-    return (prot & kMemoryProtectRead) != 0;
+    if (heap->QueryProtect(addr, &prot) && (prot & kMemoryProtectRead)) {
+      return true;
+    }
+    HeapAllocationInfo info = {};
+    if (!heap->QueryRegionInfo(addr, &info)) return false;
+    return (info.state & kMemoryAllocationCommit) != 0;
   };
   auto r32 = [&](uint32_t a) -> uint32_t {
     return readable(a) ? load_and_swap<uint32_t>(base + a) : 0;
@@ -1238,10 +1859,42 @@ static void Rb3dxUiProbeThread(Memory* memory) {
   const uint32_t kTheBandUI = 0x82DFD2B0;
   const uint32_t kMainDirPtr = 0x82E054B8;
   uint32_t saveload_obj = 0, netsync_obj = 0, session_obj = 0;
+  uint32_t overshell_obj = 0;
   int sample = 0;
   for (;;) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+    if (!Rb3dxProbeSleep(2000)) return;
     ++sample;
+    // Thread census (bounded window): every live guest thread with its entry
+    // point + a saved-LR backchain. This is what located the joypad reader
+    // (tid7, entry 0x8252A3B0) and, in s64, proved the main thread spent
+    // 35s+ inside App::App and never entered the frame loop (wiki §8v).
+    if (sample >= 3 && sample <= 9 && kernel_state) {
+      auto threads =
+          kernel_state->object_table()->GetObjectsByType<kernel::XThread>();
+      for (auto& t : threads) {
+        if (!t) continue;
+        uint32_t start = t->creation_params()->start_address;
+        // Where is it executing NOW? Xenia's JIT keeps no live PC, so use
+        // lr + saved-LR backchain from sp (same trick as the TID6 walk). This
+        // reveals whether e.g. the joypad reader (start 0x8252A3B0) is blocked
+        // in CriticalSection::Enter vs actually looping.
+        std::string chain;
+        uint32_t susp = t->suspend_count();
+        if (t->thread_state() && t->thread_state()->context()) {
+          auto* c = t->thread_state()->context();
+          uint32_t s = static_cast<uint32_t>(c->r[1]);
+          chain = fmt::format(" lr={:08X} bc:", static_cast<uint32_t>(c->lr));
+          for (int i = 0; i < 10 && s; ++i) {
+            uint32_t bc = r32(s);
+            if (bc <= s || bc - s > 0x100000) break;
+            chain += fmt::format(" {:08X}", r32(bc - 8));
+            s = bc;
+          }
+        }
+        XELOGE("RB3DX UI PROBE: THREAD tid={} start=0x{:08X} susp={}{}",
+               t->thread_id(), start, susp, chain);
+      }
+    }
     // --- UIManager / BandUI ---
     uint32_t ts = r32(kTheBandUI + 0x10);
     uint32_t cur = r32(kTheBandUI + 0x2C);
@@ -1252,6 +1905,985 @@ static void Rb3dxUiProbeThread(Memory* memory) {
         "RB3DX UI PROBE[{}]: transState={} curScreen=0x{:08X}'{}' "
         "transScreen=0x{:08X}'{}'",
         sample, ts, cur, cur_name, trans, trans_name);
+    // ONE-SHOT: locate BandUI/UIManager::Poll in TheBandUI's vtable. The real
+    // per-frame body (App::RunOneFrame in the decomp) is `SystemPoll();
+    // TheUI.Poll(); ...; TheUI.Draw();`. Our synthesized main loop pumps
+    // SystemPoll + App::Poll(Pollables) but never TheUI.Poll(), so the
+    // splash_screen kTransitionTo transition is never serviced. UIManager::Poll
+    // is the vtable slot whose body calls UIScreen::CheckIsLoaded (0x827A3A00),
+    // Exiting (0x827A35C0) and Enter (0x827A51E0). Scan slots for those bl
+    // targets and report the address so we can add it to the frame loop.
+    static bool s_vt_scanned = false;
+    if (!s_vt_scanned && sample >= 2 && readable(kTheBandUI)) {
+      s_vt_scanned = true;
+      uint32_t vt = r32(kTheBandUI);
+      XELOGE("RB3DX UI PROBE: TheBandUI@0x{:08X} vtable=0x{:08X}", kTheBandUI, vt);
+      auto is_text = [&](uint32_t a) {
+        return a >= 0x82000000 && a < 0x83000000 && readable(a);
+      };
+      auto bl_target = [&](uint32_t at, uint32_t w) -> uint32_t {
+        if ((w & 0xFC000003u) != 0x48000001u) return 0;  // bl (LK=1, AA=0)
+        int32_t off = (int32_t)(w & 0x03FFFFFCu);
+        if (off & 0x02000000) off |= 0xFC000000;  // sign-extend 26-bit
+        return at + (uint32_t)off;
+      };
+      // BandUI::Poll (decomp band3/meta_band/BandUI.cpp:198) is the vtable Poll
+      // slot; its body does a DIRECT `bl UIManager::Poll` (UI.obj, 0x827Dxxxx).
+      // The slot with such a bl IS BandUI::Poll, and the bl target IS
+      // UIManager::Poll -- exactly the two addresses the frame loop needs.
+      for (int slot = 0; slot < 16; ++slot) {
+        uint32_t fn = r32(vt + slot * 4);
+        if (!is_text(fn)) continue;
+        (void)bl_target;
+        std::string words;
+        for (int w = 0; w < 0x40; ++w) {
+          uint32_t a = fn + w * 4;
+          if (!readable(a)) break;
+          words += fmt::format(" {:08X}", r32(a));
+        }
+        XELOGE("RB3DX UI PROBE: SLOTCODE vt[{}]=0x{:08X}:{}", slot, fn, words);
+      }
+    }
+    // --- Main-thread guest stack sample (clean-TU5 flow bring-up). The TU5
+    // intro_movie transition never completes and nothing in the probe surface
+    // says where the main loop actually spins, so sample thid 6's live guest
+    // context and walk the back-chain. Unsynchronised read of a running
+    // thread's context: individual samples may tear; consistent repetition
+    // across samples is the signal, single odd frames are not.
+    if (processor) {
+      // Definitive tid=6 (Main XThread) liveness probe every sample: is main
+      // Alive(0)/Waiting(1)/Exited(2)/Zombie(3), or entirely ABSENT from the
+      // registry? Distinguishes "main busy-spins" from "main already exited and
+      // a worker spins" -- the linchpin for the clean-TU5 wedge diagnosis.
+      {
+        auto* i6 = processor->QueryThreadDebugInfo(6);
+        if (!i6) {
+          XELOGE("RB3DX UI PROBE[{}]: TID6 ABSENT (erased from registry)",
+                 sample);
+        } else {
+          // Also walk tid6's guest stack EVERY sample so we can see the exact
+          // frame it exits from (the teardown happens in one ~2s window between
+          // two full-sweep ticks). chain = saved-LR back-chain from sp.
+          std::string chain;
+          if (i6->thread && i6->thread->thread_state()) {
+            auto* c6 = i6->thread->thread_state()->context();
+            if (c6) {
+              uint32_t s = static_cast<uint32_t>(c6->r[1]);
+              chain = fmt::format(" lr={:08X}", static_cast<uint32_t>(c6->lr));
+              for (int i = 0; i < 12 && s; ++i) {
+                uint32_t bc = r32(s);
+                if (bc <= s || bc - s > 0x100000) break;
+                chain += fmt::format(" {:08X}", r32(bc - 8));
+                s = bc;
+              }
+            }
+          }
+          XELOGE("RB3DX UI PROBE[{}]: TID6 state={} thread_ptr={} chain:{}",
+                 sample, static_cast<int>(i6->state), i6->thread ? 1 : 0, chain);
+        }
+      }
+      // Direct per-tid state census (tids 6..31) EVERY sample. The plural
+      // QueryThreadDebugInfos() sweep filters out kExited/kZombie threads, so a
+      // thread that has TORN DOWN silently drops from the roster and reads as a
+      // "head-of-line spin" when it is actually a mass thread teardown. Query by
+      // id (entries persist post-exit) to get the true state of every game
+      // thread at the freeze: 0=Alive 1=Waiting 2=Exited 3=Zombie -=absent.
+      {
+        std::string census;
+        for (uint32_t tid = 6; tid <= 31; ++tid) {
+          auto* ti = processor->QueryThreadDebugInfo(tid);
+          if (!ti) continue;
+          census += fmt::format(" {}:{}", tid, static_cast<int>(ti->state));
+        }
+        XELOGE("RB3DX UI PROBE[{}]: TIDCENSUS{}", sample, census);
+      }
+      // Walk every live guest thread every 5th tick; the stuck party in a
+      // lockstep handshake is usually NOT the thread you first suspected, so
+      // sample them all. Enumerate via the debugger's ThreadDebugInfo registry:
+      // both threads_by_id_ (fork exited-thread sweep) and the object table
+      // (title closes thread handles after spawn) lose guest threads within
+      // ~20s of boot, which blinded the two earlier samplers in turn.
+      bool full_sweep = (sample % 5) == 1;
+      for (auto* info : processor->QueryThreadDebugInfos()) {
+        // Accept kAlive AND kWaiting: a busy-spin that momentarily dips into a
+        // guest wait gets stuck marked kWaiting (OnThreadLeavingWait is not
+        // always paired), which silently dropped the main thread from the dump
+        // ~20s in. Only a null thread ptr (kZombie/destroyed) is truly unreadable.
+        if (!info || !info->thread ||
+            (info->state != cpu::ThreadDebugInfo::State::kAlive &&
+             info->state != cpu::ThreadDebugInfo::State::kWaiting)) {
+          continue;
+        }
+        uint32_t tid = info->thread_id;
+        if (!full_sweep && tid != 6) continue;
+        int dbg_state = static_cast<int>(info->state);
+        auto* tstate = info->thread->thread_state();
+        auto* ctx = tstate ? tstate->context() : nullptr;
+        if (!ctx) continue;
+        uint32_t mlr = static_cast<uint32_t>(ctx->lr);
+        uint32_t msp = static_cast<uint32_t>(ctx->r[1]);
+        std::string chain;
+        uint32_t s = msp;
+        for (int i = 0; i < 16 && s; ++i) {
+          uint32_t bc = r32(s);
+          if (bc <= s || bc - s > 0x100000) break;
+          uint32_t slr = r32(bc - 8);
+          chain += fmt::format(" {:08X}", slr);
+          s = bc;
+        }
+        XELOGE(
+            "RB3DX UI PROBE[{}]:   thr{} st={} lr={:08X} sp={:08X} r3={:08X} "
+            "r4={:08X} r5={:08X} chain:{}",
+            sample, tid, dbg_state, mlr, msp, static_cast<uint32_t>(ctx->r[3]),
+            static_cast<uint32_t>(ctx->r[4]),
+            static_cast<uint32_t>(ctx->r[5]), chain);
+      }
+      // --rb3_splash_unwedge: break the Splash::EndSplasher boot deadlock.
+      // App::App's EndSplasher (0x82742620) calls SetImmutableState(kTerminating)
+      // which no-ops when a Suspend is in-flight (mState<kResumed), then blocks
+      // in WaitForState(kTerminated) at ret 0x82742668 forever while the
+      // SplashThread worker is parked in WaitForState(kResuming). Locate the live
+      // Splash via tid=6's stack: the WaitForState frame (saved_lr==0x82742668)
+      // saved r31 = Splash at (back-chain - 0x10). 360 layout: unk_0x88 event
+      // handle @ +0x8C (worker->main, tid6 waits), unk_0xAC @ +0x90 (main->worker,
+      // tid13 waits), mState @ +0x94. Drive the state machine to termination.
+      if (cvars::rb3_splash_unwedge) {
+        uint32_t splash = 0;
+        for (auto* info : processor->QueryThreadDebugInfos()) {
+          if (!info || info->state != cpu::ThreadDebugInfo::State::kAlive ||
+              !info->thread || info->thread_id != 6) {
+            continue;
+          }
+          auto* tstate = info->thread->thread_state();
+          auto* ctx = tstate ? tstate->context() : nullptr;
+          if (!ctx) continue;
+          uint32_t s = static_cast<uint32_t>(ctx->r[1]);
+          for (int i = 0; i < 24 && s; ++i) {
+            uint32_t bc = r32(s);
+            if (bc <= s || bc - s > 0x100000) break;
+            if (r32(bc - 8) == 0x82742668u) {
+              splash = r32(bc - 0x10);
+              break;
+            }
+            s = bc;
+          }
+        }
+        if (splash >= 0x40000000u && splash < 0x50000000u) {
+          uint32_t mstate = r32(splash + 0x94);
+          uint32_t ev_main = r32(splash + 0x8C);
+          uint32_t ev_wrk = r32(splash + 0x90);
+          XELOGE(
+              "RB3DX UI PROBE[{}]: SPLASH-UNWEDGE splash={:08X} mState={} "
+              "ev_main={:08X} ev_wrk={:08X}",
+              sample, splash, mstate, ev_main, ev_wrk);
+          auto poke = [&](uint32_t a, uint32_t v) {
+            if (auto* heap = memory->LookupHeap(a)) {
+              heap->Protect(a & ~0xFFFu, 0x2000,
+                            kMemoryProtectRead | kMemoryProtectWrite);
+            }
+            xe::store_and_swap<uint32_t>(base + a, v);
+          };
+          auto sig = [&](uint32_t handle) {
+            if (!handle) return;
+            auto ev = kernel_state->object_table()->LookupObject<kernel::XEvent>(
+                handle);
+            if (ev) ev->Set(0, false);
+          };
+          // State-driven drive toward kTerminated(8): satisfy the worker's
+          // WaitForState(kResuming=4) first, let it advance, then terminate and
+          // wake main. mState<8 means main is still stuck in EndSplasher.
+          if (mstate != 8) {
+            if (mstate < 4) {
+              poke(splash + 0x94, 4);  // kResuming -> release the worker
+              sig(ev_wrk);
+            } else if (mstate == 4 || mstate == 5) {
+              poke(splash + 0x94, 7);  // kTerminating
+              sig(ev_wrk);
+            } else {  // 6/7
+              poke(splash + 0x94, 8);  // kTerminated
+              sig(ev_wrk);
+              sig(ev_main);  // wake main out of WaitForState(kTerminated)
+            }
+          } else {
+            sig(ev_main);  // ensure main woke to observe kTerminated
+          }
+        }
+      }
+    }
+    // --- TheLoadMgr candidate dump (clean-TU5 stall): the loader-code region
+    // 0x82740000-0x82760000 materializes 0x82E00050/58/60/68/80 far more than
+    // any other data address, so the LoadMgr singleton almost certainly lives
+    // at ~0x82E00040. Dump the window each tick; if this is right, the queued
+    // panel DirLoader pointers show up in the mLoading list nodes and the
+    // mPeriod float (10.0f/26.67f/0) is directly readable.
+    {
+      // TheLoadMgr located via the si46 list-node prev-walk: the mLoading
+      // embedded dummy is 0x82E06E38, mPeriod (10.0f) sits at 0x82E06E48.
+      // Dump the object window every tick -- mTimer restarting between ticks
+      // distinguishes "Poll runs but starves" from "Poll never called".
+      std::string row;
+      uint32_t win_lo = 0x82E06DE0, win_hi = 0x82E06EA0;
+      for (uint32_t a = win_lo; a < win_hi; a += 4) {
+        if (((a - win_lo) & 0x1F) == 0 && !row.empty()) {
+          XELOGE("RB3DX UI PROBE[{}]:   loadmgr[{:08X}]:{}", sample, a - 0x20,
+                 row);
+          row.clear();
+        }
+        row += fmt::format(" {:08X}", r32(a));
+      }
+      if (!row.empty()) {
+        XELOGE("RB3DX UI PROBE[{}]:   loadmgr[{:08X}]:{}", sample,
+               win_hi - 0x20, row);
+      }
+      // LoadMgr layout probe: LoadMgr::Poll (0x827bf700) gets this=0x82E06E38
+      // and drains this->0x18 (list sentinel @0x82E06E50). Dump BOTH candidate
+      // list heads to resolve which list the pump actually walks vs which one
+      // the stuck inline_help_center loader sits in. For each: raw {next,prev}
+      // and the front loader's file.
+      for (uint32_t lh : {0x82E06E38u, 0x82E06E50u}) {
+        uint32_t nx = r32(lh), pv = r32(lh + 4);
+        std::string ff;
+        if (nx && nx != lh) {
+          uint32_t l = r32(nx + 8);
+          ff = fmt::format(" front_ldr={:08X} mState20={:08X}", l, r32(l + 0x20));
+          std::string s = rstr(r32(l + 0x14));
+          if (s.size() >= 3 && s.size() < 47) ff += " '" + s + "'";
+        }
+        XELOGE("RB3DX UI PROBE[{}]: LISTHEAD {:08X} next={:08X} prev={:08X}{}",
+               sample, lh, nx, pv, ff);
+      }
+      // Walk mLoading (embedded dummy @0x82E06E38, nodes {next,prev,Loader*})
+      // and dump each queued loader's header + any string its early fields
+      // point at -- names the file the front (stuck) loader is on.
+      uint32_t dummy = 0x82E06E38;
+      uint32_t node = r32(dummy);
+      for (int n = 0; n < 4 && node && node != dummy; ++n) {
+        uint32_t ldr = r32(node + 8);
+        std::string hdr, strs;
+        for (uint32_t d = 0; d < 0x80; d += 4) {  // extend to 0x80 to reach
+                                                  // FileLoader mState (PTMF @0x44)
+          uint32_t v = r32(ldr + d);
+          hdr += fmt::format(" {:08X}", v);
+          if (v >= 0x1000 && (v < 0x50000000 || (v >= 0x82000000 &&
+                                                 v < 0x83000000))) {
+            std::string s = rstr(v);
+            if (s.size() >= 3 && s.size() < 47 && s != "<binary>") {
+              strs += fmt::format(" +0x{:X}->'{}'", d, s);
+            }
+          }
+        }
+        // The loader's vtable (word[0]) names its class; dump the first 6 vptr
+        // slots so IsLoaded/PollLoading/StateName can be mapped via scope_map.
+        uint32_t vt = r32(ldr);
+        std::string vts;
+        for (uint32_t s = 0; s < 0x18; s += 4) vts += fmt::format(" {:08X}", r32(vt + s));
+        XELOGE("RB3DX UI PROBE[{}]:   loadq[{}] node={:08X} ldr={:08X}:{}{} vt[{:08X}]:{}",
+               sample, n, node, ldr, hdr, strs, vt, vts);
+        node = r32(node);
+      }
+      // BeatMasterLoader phase probe (song load -> game_screen gate). When the
+      // LoadMgr's head is a BeatMasterLoader (vtable 0x8210A9C0, RTTI-confirmed)
+      // it is loading the selected song, and because it is kLoadFrontStayBack
+      // it starves the whole queue until it completes. BeatMaster::LoaderPoll
+      // (0x8276E478) has three phases and only two can wedge, so dump the two
+      // phase bytes plus the state each phase waits on:
+      //   phase 1 (!mLoaded): MIDI parse -- MidiReader.mState/track/tick must
+      //     advance; frozen tick = a parse wedge, moving tick = merely slow.
+      //   phase 3 (unk2d): audio -- StandardStream.mState must leave
+      //     kBuffering(1) for kReady(2), which needs every StreamReceiver's
+      //     mState (recv+0x18010) to leave kInit(0), which needs decoded PCM
+      //     (recv+0x1800C ring write pos; 0 = the decoder delivered nothing).
+      {
+        uint32_t head = r32(dummy);
+        uint32_t bml = head && head != dummy ? r32(head + 8) : 0;
+        if (bml && r32(bml) == 0x8210A9C0u) {
+          uint32_t bm = r32(bml + 0x1C);
+          uint32_t sd = r32(bm + 0x0C), au = r32(bm + 0x1C);
+          uint32_t sp = sd ? r32(sd + 0x124) : 0;
+          uint32_t mr = sp ? r32(sp + 0x20) : 0;
+          XELOGE(
+              "RB3DX UI PROBE[{}]: BEATMASTER bm=0x{:08X} mLoaded={} unk2d={} "
+              "songData=0x{:08X} parser=0x{:08X} midiRdr=0x{:08X} "
+              "mrState={} track={} tick={} fail={}",
+              sample, bm, r8(bm + 0x30), r8(bm + 0x31), sd, sp, mr,
+              mr ? r32(mr + 0x18) : 0, mr ? r32(mr + 0x28) : 0,
+              mr ? r32(mr + 0x2C) : 0, mr ? r8(mr + 0x6C) : 0);
+          uint32_t st = au ? r32(au + 0x38) : 0;
+          if (st) {
+            std::string recvs;
+            for (uint32_t c = r32(st + 0x20), e = r32(st + 0x24);
+                 c && c + 4 <= e && recvs.size() < 200; c += 4) {
+              uint32_t rv = r32(c);
+              if (!rv) continue;
+              recvs += fmt::format(" {{recv=0x{:08X} state={} ringWr=0x{:X}}}",
+                                   rv, r32(rv + 0x18010), r32(rv + 0x1800C));
+            }
+            // streamVt identifies the concrete Stream class (StandardStream is
+            // 0x820F6A8C) and so validates the +0x14/+0x20 offsets below it;
+            // chans begin==end means SetupChannels produced NO channels, which
+            // is a different failure from "channels exist but never buffer".
+            XELOGE(
+                "RB3DX UI PROBE[{}]: BEATMASTER audio=0x{:08X} stream=0x{:08X} "
+                "streamVt=0x{:08X} streamState={} chans=0x{:08X}..0x{:08X} "
+                "rdr=0x{:08X} rdrVt=0x{:08X}{}",
+                sample, au, st, r32(st), r32(st + 0x14), r32(st + 0x20),
+                r32(st + 0x24), r32(st + 0x1C),
+                r32(st + 0x1C) ? r32(r32(st + 0x1C)) : 0, recvs);
+            // Raw dumps. Every field offset above is INFERRED from a sibling
+            // title's layout, so before drawing any conclusion from
+            // streamState/chans we need the ground truth: the concrete class
+            // (vtable) and, most valuable of all, the song path the stream was
+            // constructed with. A '.mogg' string here proves the stream knows
+            // its file; its ABSENCE means the failure is upstream of the
+            // stream entirely (MasterAudio never handed it a path).
+            auto dump = [&](const char* tag, uint32_t base, uint32_t len) {
+              std::string hex, strs;
+              for (uint32_t d = 0; d < len; d += 4) {
+                uint32_t v = r32(base + d);
+                hex += fmt::format(" {:08X}", v);
+                if (v >= 0x1000 &&
+                    (v < 0x50000000 || (v >= 0x82000000 && v < 0x83000000))) {
+                  std::string s = rstr(v);
+                  if (s.size() >= 3 && s.size() < 63 && s != "<binary>") {
+                    strs += fmt::format(" +0x{:X}->'{}'", d, s);
+                  }
+                }
+              }
+              XELOGE("RB3DX UI PROBE[{}]: BM-{} 0x{:08X}:{}{}", sample, tag,
+                     base, hex, strs);
+            };
+            dump("AUDIO", au, 0x80);
+            dump("STREAM", st, 0xC0);
+          }
+        }
+      }
+      // StandardStream census -- see --rb3_stream_census help text. Scans
+      // page-at-a-time (one readability query per page, then a raw sweep) so a
+      // 256MB window costs a bounded ~64M word loads per sample.
+      if (cvars::rb3_stream_census) {
+        const uint32_t kStandardStreamVt = 0x820F6A8Cu;
+        int found = 0;
+        for (uint32_t page = 0x40000000u; page < 0x50000000u && found < 24;
+             page += 0x1000u) {
+          if (!readable(page)) continue;
+          for (uint32_t a = page; a < page + 0x1000u && found < 24; a += 4) {
+            if (load_and_swap<uint32_t>(base + a) != kStandardStreamVt) continue;
+            uint32_t rb = r32(a + 0x20), re = r32(a + 0x24);
+            uint32_t cb = r32(a + 0x78), ce = r32(a + 0x7C);
+            XELOGE(
+                "RB3DX UI PROBE[{}]: STREAM-CENSUS 0x{:08X} mState={} "
+                "recv=0x{:08X}..0x{:08X}(n={}) chans=0x{:08X}..0x{:08X}(n={})",
+                sample, a, r32(a + 0x14), rb, re, re > rb ? (re - rb) / 4 : 0,
+                cb, ce, ce > cb ? (ce - cb) / 4 : 0);
+            ++found;
+          }
+        }
+        XELOGE("RB3DX UI PROBE[{}]: STREAM-CENSUS total={}", sample, found);
+      }
+      // DirLoader mState locator: dump every .text-range word in the first two
+      // queued loaders' objects [0,0x140). The FRONT loader (loadq[0]) is being
+      // actively polled so its mState PTMF has advanced past &DirLoader::OpenFile,
+      // while the loader behind it (loadq[1]) has never been polled and still
+      // holds &OpenFile. The offset whose code-address VALUE differs between the
+      // two is mState; front's value names the stuck state (OpenFile/LoadHeader/
+      // LoadDir/LoadResources/CreateObjects/LoadObjs/DoneLoading, declared in
+      // that order so their addresses tend to be monotonic).
+      {
+        uint32_t n2 = r32(dummy);
+        uint32_t objs[2] = {0, 0};
+        for (int q = 0; q < 2 && n2 && n2 != dummy; ++q) {
+          uint32_t ldr = r32(n2 + 8);
+          objs[q] = ldr;
+          std::string all;
+          for (uint32_t d = 0; d < 0xB0; d += 4) {
+            all += fmt::format(" {:08X}", r32(ldr + d));
+          }
+          XELOGE("RB3DX UI PROBE[{}]:   ldr-all[{}] {:08X}:{}", sample, q, ldr,
+                 all);
+          n2 = r32(n2);
+        }
+        // Explicit per-word diff of the two loader objects: names exactly which
+        // offset(s) the actively-polled front loader has advanced vs the queued
+        // (OpenFile-state) one behind it.
+        if (objs[0] && objs[1]) {
+          std::string diff;
+          for (uint32_t d = 0; d < 0xB0; d += 4) {
+            uint32_t a = r32(objs[0] + d), b = r32(objs[1] + d);
+            if (a != b) diff += fmt::format(" +{:X}:{:08X}vs{:08X}", d, a, b);
+          }
+          XELOGE("RB3DX UI PROBE[{}]:   ldr-diff front-vs-queued:{}", sample,
+                 diff.empty() ? " (identical)" : diff.c_str());
+        }
+      }
+      // Front-loader change detector: distinguishes "PollLoading body never
+      // runs" (frozen bytes = budget starvation before the first state step,
+      // the HX_NATIVE-documented CheckSplit gate) from "OpenFile runs but
+      // retries forever" (fields churn).
+      uint32_t front_node = r32(dummy);
+      if (front_node && front_node != dummy) {
+        uint32_t fldr = r32(front_node + 8);
+        uint64_t h = 1469598103934665603ull;
+        for (uint32_t d = 0; d < 0x80; d += 4) {
+          h = (h ^ r32(fldr + d)) * 1099511628211ull;
+        }
+        static uint32_t s_front_ldr = 0;
+        static uint64_t s_front_hash = 0;
+        static int s_front_frozen = 0;
+        if (fldr == s_front_ldr && h == s_front_hash) {
+          s_front_frozen++;
+        } else {
+          s_front_frozen = 0;
+        }
+        s_front_ldr = fldr;
+        s_front_hash = h;
+        XELOGE("RB3DX UI PROBE[{}]:   front-ldr {:08X} hash={:016X} frozen x{}",
+               sample, fldr, h, s_front_frozen);
+      }
+      // --rb3_loadmgr_unbudget: poke the LoadMgr period/split floats
+      // (10.0f pair at 0x82E06E48/4C) to 1e30 -- the game's own
+      // PollUntilEmpty() value -- so every per-frame Poll() drains
+      // unbudgeted. If the boot then proceeds, the CheckSplit starvation
+      // diagnosis is confirmed AND the flow is unblocked in one stroke.
+      if (cvars::rb3_loadmgr_unbudget) {
+        // 0x82E06Exx is title .data (RW pages; host mapping writable -- no
+        // heap->Protect needed, unlike code pages).
+        for (uint32_t a : {0x82E06E48u, 0x82E06E4Cu}) {
+          if (readable(a) && r32(a) != 0x7149F2CAu) {
+            xe::store_and_swap<uint32_t>(base + a, 0x7149F2CAu);  // 1e30f
+            XELOGE("RB3DX UI PROBE[{}]: loadmgr unbudget poke @{:08X}", sample,
+                   a);
+          }
+        }
+      }
+    }
+    // --- SI claim-table dump (--rb3dx_si_claim_anchor): the DLL's own
+    // gClaims/gImpls, the ground truth for "two players on one track".
+    if (cvars::rb3dx_si_claim_anchor != 0) {
+      uint32_t anchor = static_cast<uint32_t>(cvars::rb3dx_si_claim_anchor);
+      uint32_t claim_count = r32(anchor + 0x1C8);
+      uint32_t impl_count = r32(anchor + 0x1CC);
+      std::string claims;
+      for (uint32_t i = 0; i < 3; ++i) {
+        claims += fmt::format(" claim{}={{track={},cnt={}}}", i,
+                              static_cast<int32_t>(r32(anchor + i * 8)),
+                              r32(anchor + i * 8 + 4));
+      }
+      XELOGE("RB3DX UI PROBE[{}]:   SI claims: claimCount={} implCount={}{}",
+             sample, claim_count, impl_count, claims);
+      // --- band/pad snapshot: TheBandUserMgr slot-map guids, the
+      // participants vector (BandUser subobjects), and the Joypad
+      // pad->LocalUser association table. Layouts re-derived from
+      // GetBandUserFromSlot @0x82682B60 (slot guids at mgr+0x50 stride
+      // 0x10, empty == all-zero; participants vector begin/end at
+      // mgr+0x28/+0x2C of BandUser*, guid on the vbase-adjusted subobject
+      // +0x30) and RB3E ports_xbox360.h (PORT_THEBANDUSERMGR,
+      // PORT_JOYPAD_USERPTR_BASE/PADFLAG_BASE; button messages self-filter
+      // on pad-stamped LocalUser identity, so two same-instrument players
+      // need two distinct connected pads with distinct LocalUsers).
+      const uint32_t kTheBandUserMgr = 0x82E023B8;
+      const uint32_t kJoypadUserBase = 0x82CCB30C;  // + p*0xD4
+      const uint32_t kJoypadFlagBase = 0x82CCB2A0;  // + p; 0 == connected
+      uint32_t mgr = r32(kTheBandUserMgr);
+      if (mgr) {
+        std::string slots;
+        for (uint32_t s = 0; s < 4; ++s) {
+          uint32_t g0 = r32(mgr + 0x50 + s * 0x10);
+          uint32_t g1 = r32(mgr + 0x50 + s * 0x10 + 4);
+          uint32_t g2 = r32(mgr + 0x50 + s * 0x10 + 8);
+          uint32_t g3 = r32(mgr + 0x50 + s * 0x10 + 12);
+          slots += fmt::format(" slot{}={:08X}{:08X}{:08X}{:08X}", s, g0, g1,
+                               g2, g3);
+        }
+        uint32_t vb = r32(mgr + 0x28);
+        uint32_t ve = r32(mgr + 0x2C);
+        uint32_t n = (ve > vb && ve - vb < 0x100) ? (ve - vb) / 4 : 0;
+        std::string parts;
+        for (uint32_t i = 0; i < n && i < 4; ++i) {
+          uint32_t u = r32(vb + i * 4);
+          if (!u) continue;
+          uint32_t inner = r32(u + 4);
+          uint32_t adj = inner ? r32(inner + 4) : 0;
+          uint32_t lb = (adj < 0x1000) ? u + adj : u;
+          parts += fmt::format(
+              " user{}={{bu=0x{:08X} track={} diff={} shell={} adj=0x{:X} "
+              "guid={:08X}{:08X}{:08X}{:08X}}}",
+              i, u, static_cast<int32_t>(r32(u + 0x10)),
+              static_cast<int32_t>(r32(u + 0x8)), r32(u + 0x20), adj,
+              r32(lb + 0x30), r32(lb + 0x34), r32(lb + 0x38), r32(lb + 0x3C));
+        }
+        std::string pads;
+        for (uint32_t p = 0; p < 4; ++p) {
+          uint32_t flag = r8(kJoypadFlagBase + p);
+          uint32_t lu = r32(kJoypadUserBase + p * 0xD4);
+          pads += fmt::format(" pad{}={{conn={} lu=0x{:08X}}}", p,
+                              flag == 0 ? 1 : 0, lu);
+        }
+        XELOGE("RB3DX UI PROBE[{}]:   band: mgr=0x{:08X} n={}{} |{} |{}",
+               sample, mgr, n, slots, parts, pads);
+      }
+    }
+    // --- closed-loop part/difficulty autopilot (--rb3dx_autoconfirm_parts).
+    // Screen-conditional so it is immune to the tens-of-seconds menu-load
+    // variance that made fixed-time A@1 presses land at the hub (opening
+    // P2's overshell menu) or after the cards were gone (si6..si10).
+    if (cvars::rb3dx_autoconfirm_parts && ts == 0) {
+      // Pad-1-first ordering is load-bearing: if P1 confirms while P2's card
+      // is untouched, the game leaves part_difficulty_screen immediately and
+      // AutoAssignMissingSlots handles P2 -- with the SI hooks armed that
+      // auto-assign path wedges in the classic track_-1 vector[-1] fault
+      // livelock at guest EA 0xFFFFFFFC (si12; the exact crash family H1/
+      // #32b were built against, but on hardware players always picked
+      // explicitly so auto-assign+SI was never exercised). Give P2 the first
+      // three samples (part + difficulty confirms), then bring P1 along.
+      static int s_part_screen_samples = 0;
+      static int s_p2_ups_done = 0;
+      // Occupied slots in BandUserMgr's guid-keyed slot map: the real "who
+      // has joined the band" signal (pad-table LocalUser binding is just
+      // sign-in and is nonzero for every --local_user_count user).
+      auto slots_occupied = [&]() {
+        uint32_t mgr = r32(0x82E023B8 /*kTheBandUserMgr*/);
+        if (!mgr) return 0;
+        int n = 0;
+        for (uint32_t s = 0; s < 4; ++s) {
+          uint32_t base = mgr + 0x50 + s * 0x10;
+          if (r32(base) | r32(base + 4) | r32(base + 8) | r32(base + 12)) ++n;
+        }
+        return n;
+      };
+      if (cur_name == "part_difficulty_screen") {
+        ++s_part_screen_samples;
+        // si33: an A on pad 1 at the part screen JOINS P2 directly (no START
+        // dance needed), so the join happens here -- late enough that the
+        // instrument pick stays in this screen instead of resolving inside
+        // the hub join overshell (si30). Sequence: A@1 until the slot map
+        // shows a second member, then N UPs (--rb3dx_autoconfirm_p2_up) to
+        // walk P2's CHOOSE INSTRUMENT list off its slot default (BASS even
+        // when guitar is free, si22) onto the SI-un-greyed duplicate, then
+        // the confirm cadence.
+        if (slots_occupied() < 2) {
+          xe::hid::nop::NopInjectButtonPress(1, 0x1000 /*A*/, 250);
+          XELOGW(
+              "RB3DX UI PROBE[{}]: autopilot A@1 join (part_difficulty_screen "
+              "sample {}, slots={})",
+              sample, s_part_screen_samples, slots_occupied());
+        } else if (s_p2_ups_done < cvars::rb3dx_autoconfirm_p2_up) {
+          ++s_p2_ups_done;
+          xe::hid::nop::NopInjectButtonPress(1, 0x0001 /*DPAD_UP*/, 250);
+          XELOGW(
+              "RB3DX UI PROBE[{}]: autopilot UP@1 (part_difficulty_screen "
+              "up {}/{})",
+              sample, s_p2_ups_done, cvars::rb3dx_autoconfirm_p2_up);
+        } else {
+          uint32_t pad = (s_part_screen_samples <= 6 || (sample & 1)) ? 1u : 0u;
+          xe::hid::nop::NopInjectButtonPress(pad, 0x1000 /*X_INPUT_GAMEPAD_A*/,
+                                             250);
+          XELOGW(
+              "RB3DX UI PROBE[{}]: autopilot A@{} (part_difficulty_screen "
+              "sample {})",
+              sample, pad, s_part_screen_samples);
+        }
+      } else {
+        s_part_screen_samples = 0;
+        s_p2_ups_done = 0;
+        static int s_hub_samples = 0;
+        if (cur_name != "main_hub_screen") s_hub_samples = 0;
+        if (cur_name == "song_select_screen" && (sample & 1)) {
+          // P2 joins HERE, state-driven: a join initiated from the hub (si30)
+          // resolves the instrument inside the join overshell (u1 went
+          // straight to ChooseDiff on BASS before the part screen could be
+          // navigated), while a join from song_select defers the part pick to
+          // part_difficulty_screen -- the si18/si26 shape the p2_up
+          // navigation was built for. Alternate START/A on pad 1 until its
+          // LocalUser binds, and only then confirm the song: confirming with
+          // P2 unjoined hands the empty slot to AutoAssignMissingSlots, the
+          // auto-assign+SI track_-1 livelock (si12).
+          const uint32_t kJoypadUserBaseNav = 0x82CCB30C;  // + p*0xD4
+          uint32_t p2_lu = r32(kJoypadUserBaseNav + 1 * 0xD4);
+          if (p2_lu != 0) {
+            xe::hid::nop::NopInjectButtonPress(0, 0x1000, 250);
+            XELOGW("RB3DX UI PROBE[{}]: autopilot A@0 (song_select_screen)",
+                   sample);
+          } else {
+            uint32_t mask = (sample & 2) ? 0x0010u /*START*/ : 0x1000u /*A*/;
+            xe::hid::nop::NopInjectButtonPress(1, mask, 250);
+            XELOGW(
+                "RB3DX UI PROBE[{}]: autopilot {}@1 (song_select_screen, "
+                "joining P2)",
+                sample, (mask == 0x0010u) ? "START" : "A");
+          }
+        } else if (cur_name == "intro_movie_screen" ||
+                   cur_name == "splash_screen" ||
+                   cur_name == "dx_welcome_screen" ||
+                   cur_name == "dx_settings_error_screen") {
+          if (sample & 1) {
+            xe::hid::nop::NopInjectButtonPress(0, 0x1000, 250);
+            XELOGW("RB3DX UI PROBE[{}]: autopilot A@0 ({})", sample, cur_name);
+          }
+        } else if (cur_name == "hint_rb3_welcome_screen") {
+          // Fresh-save first-boot chain: message page(s), then a
+          // CUSTOMIZE BAND / CONTINUE choice whose default is CUSTOMIZE.
+          // Alternate DOWN / A: DOWN is a no-op on message pages and moves
+          // focus to CONTINUE on the choice page, so either phase of the
+          // alternation dismisses the chain without entering Customize Band
+          // (si28/si29: blind A landed on CUSTOMIZE and parked the run in
+          // manage_band_screen for 250s).
+          uint32_t mask = (sample & 1) ? 0x1000u /*A*/ : 0x0002u /*DPAD_DOWN*/;
+          xe::hid::nop::NopInjectButtonPress(0, mask, 250);
+          XELOGW("RB3DX UI PROBE[{}]: autopilot {}@0 (hint_rb3_welcome_screen)",
+                 sample, (mask == 0x1000u) ? "A" : "DOWN");
+        } else if (cur_name == "manage_band_screen") {
+          // Recovery: a stray confirm entered Customize Band; B backs out.
+          if (sample & 1) {
+            xe::hid::nop::NopInjectButtonPress(0, 0x2000 /*B*/, 250);
+            XELOGW("RB3DX UI PROBE[{}]: autopilot B@0 (manage_band_screen)",
+                   sample);
+          }
+        } else if (cur_name == "main_hub_screen") {
+          // Deterministic PLAY NOW: the hub list has PLAY NOW at the top, so
+          // two UPs pin focus there from any tile, then A enters it.
+          ++s_hub_samples;
+          if (s_hub_samples <= 2) {
+            xe::hid::nop::NopInjectButtonPress(0, 0x0001 /*DPAD_UP*/, 250);
+            XELOGW("RB3DX UI PROBE[{}]: autopilot UP@0 (main_hub_screen {})",
+                   sample, s_hub_samples);
+          } else if (sample & 1) {
+            xe::hid::nop::NopInjectButtonPress(0, 0x1000, 250);
+            XELOGW("RB3DX UI PROBE[{}]: autopilot A@0 (main_hub_screen)",
+                   sample);
+          }
+        }
+      }
+    }
+    // --- one-shot guest-code dump: the xex-file-offset disasm used off-line
+    // is shifted (section raw/virtual gaps), so dump live code for offline
+    // capstone at the chain addresses of interest.
+    static bool s_codedump_done = false;
+    static uint32_t s_gmainthread_addr = 0;
+    if (!s_codedump_done && sample == 8) {
+      s_codedump_done = true;
+      // 0x82741200..0x82741B00: the WaitForState/SetMutableState/Resume fn
+      // cluster (WaitForState proper at 0x827414E0; callers 0x827413A4,
+      // 0x82741948, 0x82741A58 seen in wait-census frames).
+      // 0x824A4C10: MainThread() -- the bl target inside WaitForState's
+      // event-pick branch. 0x827CAFxx: the parked worker's loop fn (census
+      // frame[1] ret 0x827CAFD0). 0x82736800/0x8246B880: main-thread caller
+      // frames above the stuck WaitForState.
+      // Second wave (si57 analysis): the 130s post-App-ctor wedge lives in
+      // the chain 0x8250F854 -> 0x823E0804 -> 0x823EDCE8 -> 0x82A89AEC ->
+      // leaf 0x82A8BA6C (looks like DTA dispatch into a spinning native
+      // handler); dump those regions plus 0x82742620 (the App-boot
+      // WaitForState caller that DID complete) and the boot fn 0x82272E00.
+      for (uint32_t fn :
+           {0x8279A650u, 0x82742600u, 0x82527A80u, 0x82844C80u, 0x82271500u,
+            0x824A4C10u, 0x827CAF00u, 0x827CB000u, 0x827CB100u, 0x82736800u,
+            0x8246B880u, 0x82741200u, 0x82741300u, 0x82741400u, 0x82741500u,
+            0x82741600u, 0x82741700u, 0x82741800u, 0x82741900u, 0x82741A00u,
+            0x82A89A00u, 0x82A8B900u, 0x82A8BA00u, 0x823E0700u, 0x823EDC00u,
+            0x8250F800u, 0x82272E00u, 0x822703D0u, 0x82270400u,
+            // tid=9 loader/consumer wait site (lr 0x8286C5BC), the worker-pool
+            // producer that sets events (lr 0x8283D3D4), and the worker idle
+            // loop (0x82844CF8) -- to identify the thread-pool dispatch path.
+            0x8286C580u, 0x8283D380u, 0x82844CC0u,
+            // The tid=6 WaitForState handshake stall: SetMutableState/WaitForState
+            // cluster (0x82741400/500/E80), the scoped caller (0x82742620), the
+            // boot/frame fn that invokes it (0x82271500), and main's caller frames
+            // (0x82272E40..0x82272F80) to place this in App::App vs the frame loop.
+            0x82742620u, 0x827414C0u, 0x82741E80u, 0x82271580u, 0x82271600u,
+            0x82272E40u, 0x82272EC0u, 0x82272F40u,
+            // Sample-9 busy-spin chain (post-EndSplasher App::App init): main
+            // loops here forever without pumping TheLoadMgr (mTimer frozen).
+            // Return sites: 82272E9C(App::App) -> 8250F854 -> 8240EE38 ->
+            // 8273B2CC -> 82739BB8 -> 827334CC -> 8273CD10 -> 82858408 ->
+            // 82857F40, lr=82273334. Dump 0x180 around each to decode the loop.
+            0x8250F780u, 0x8240ED80u, 0x8273B200u, 0x82739B00u, 0x82733400u,
+            0x8273CC80u, 0x82858380u, 0x82857E80u, 0x82273280u, 0x82272E00u,
+            // main_impl(0x82272E60) calls three fns in order: 0x82270E68
+            // (the big boot fn -- main BLOCKS ~15s here inside EndSplasher's
+            // WaitForState at 0x8227158C), then 0x822703D0 (tiny: register App
+            // singleton), then 0x82270000 (subscriber broadcast). NONE loops;
+            // 0x82270E68's tail (0x822715AC) is an UNCONDITIONAL return after
+            // EndSplasher. Dump 0x82270E68..0x822715B0 CONTIGUOUSLY to find any
+            // loop-vs-return gate EARLIER in the fn (the 0x82271068..0x82271500
+            // stretch was previously an un-dumped gap).
+            0x82270000u, 0x82270100u, 0x82270200u, 0x82270300u, 0x822703D0u,
+            0x82270E68u, 0x82271068u, 0x82271200u, 0x82271400u,
+            0x8250F820u, 0x8250F890u, 0x8240EE10u, 0x82270E00u,
+            // Splash-WORKER (thr14) call chain: entry 8284D6DC -> 0x82742978
+            // -> 0x82742884 -> 0x8274279C -> 0x82741948 -> WaitForState. This
+            // is where the terminate-vs-transition-to-frontend decision lives
+            // (main/thr6 parks in EndSplasher 0x82742620 until thr14 sets
+            // kTerminated). Dump the whole 0x82742700..0x82742B00 worker region
+            // + PollTheSplasher 0x827429E0.
+            0x82742700u, 0x82742780u, 0x82742880u, 0x82742900u, 0x82742978u,
+            0x82742A00u, 0x82742A80u, 0x82741940u,
+            // CRT after main_impl returns (thr6 chain bottom 0x8283CEB0 = the
+            // caller of main). Decode whether the CRT loops/keeps a frame loop
+            // or just exits -- the structural "where is App::Run" question.
+            0x8283CE00u, 0x8283CE80u, 0x8283CF00u,
+            // The broadcast's post-loop callees: 0x82718880 (Pollable.cpp),
+            // 0x8250F4E0 (Debug.cpp), and 0x8283D4F0 (residual, fired only when
+            // r5=1, with string 0x82000C55) -- the teardown-trigger suspects.
+            0x82718840u, 0x8250F4C0u, 0x8283D4C0u, 0x8283D540u,
+            // os/System.cpp frame functions: the real per-frame System::Poll
+            // (pumps TheLoadMgr.Poll + pollables + render) that main should be
+            // looping on. Decode 0x825100C8 (size 292) + 0x82510510 (size 120).
+            0x82510080u, 0x82510180u, 0x82510280u, 0x82510480u, 0x82510500u,
+            // DirLoader state dispatcher: PollLoading 0x82754A58, IsLoaded
+            // 0x82754DB0, StateName 0x82757998. Decode how mState is loaded/
+            // called to confirm its offset + what a stuck value means. Plus the
+            // 0x82106900 region (holds the stuck loader's mState=0x8210693C).
+            0x82754A40u, 0x82754D80u, 0x82757980u, 0x82106900u, 0x82106980u,
+            // The loader-pump System::Poll invokes (bl 0x827bf700, r3=0x82E06E38
+            // = TheLoadMgr.mLoading): is it LoadMgr::Poll -> PollFrontLoader (which
+            // should POP a front loader whose IsLoaded()==true)? The stuck front
+            // reports IsLoaded=true yet is never popped. Dump 0x827BF700 + the
+            // Loader.cpp poll cluster around it.
+            0x827BF700u, 0x827BF7D0u, 0x827BFA00u, 0x827BFAC0u}) {
+        std::string row;
+        for (uint32_t d = 0; d < 0x200; d += 4) {
+          row += fmt::format(" {:08X}", r32(fn + d));
+        }
+        XELOGE("RB3DX UI PROBE[{}]: CODE {:08X}:{}", sample, fn, row);
+      }
+      // Pollable-list walk: main's 3rd call (0x82270000) broadcasts to the list
+      // at source 0x82CC9874 (r3 = lis -0x7d33 + addi -0x678c). Each node has
+      // next=[node+0], handler=[node+8]. Walk it and log each node + handler so
+      // we can name the Pollables (via rb3-xenon scope_map) and find which
+      // fires the teardown. Head = [0x82CC9874 + 0x28]; sentinel = 0x82CC989C.
+      {
+        const uint32_t src = 0x82CC9874u;
+        const uint32_t sentinel = src + 0x28u;
+        uint32_t node = r32(sentinel);
+        std::string pl;
+        for (int i = 0; i < 32 && node && node != sentinel; ++i) {
+          uint32_t handler = r32(node + 8);
+          pl += fmt::format(" [{:08X}]h={:08X}", node, handler);
+          node = r32(node);
+        }
+        XELOGE("RB3DX UI PROBE[{}]: POLLABLES src={:08X}:{}", sample, src, pl);
+      }
+      // Poll-singleton dump: 0x8240EE10 loads *(0x82C76B68) then calls its
+      // vtable slot 0x60. Dump the pointer, its vtable head, and the object so
+      // we can name the manager main polls each loop iteration.
+      {
+        uint32_t obj = r32(0x82C76B68u);
+        uint32_t vt = r32(obj);
+        std::string orow, vrow;
+        for (uint32_t d = 0; d < 0x40; d += 4) orow += fmt::format(" {:08X}", r32(obj + d));
+        for (uint32_t d = 0; d < 0x80; d += 4) vrow += fmt::format(" {:08X}", r32(vt + d));
+        XELOGE("RB3DX UI PROBE[{}]: POLLSINGLETON obj={:08X} vt={:08X} obj:[{}] vt:[{}]",
+               sample, obj, vt, orow, vrow);
+      }
+      // Decode &gMainThreadID out of MainThread() at 0x824A4C10: find the
+      // first lis rD,H / lwz rT,L(rD) pair (MSVC absolute-address global
+      // load). MainThread() returns true for EVERY thread when the global is
+      // 0 -- which would send every worker onto the main-side event and
+      // explain a multi-object handshake wedge -- so watch its value live.
+      {
+        uint32_t hi_val[32] = {0};
+        bool hi_set[32] = {false};
+        for (uint32_t d = 0; d < 0x60 && !s_gmainthread_addr; d += 4) {
+          uint32_t insn = r32(0x824A4C10u + d);
+          if ((insn & 0xFC1F0000u) == 0x3C000000u) {  // lis rD, IMM
+            uint32_t rd = (insn >> 21) & 31;
+            hi_val[rd] = insn << 16;
+            hi_set[rd] = true;
+          } else if ((insn & 0xFC000000u) == 0x80000000u) {  // lwz rT, d(rB)
+            uint32_t rb = (insn >> 16) & 31;
+            if (rb != 0 && hi_set[rb]) {
+              int16_t lo = static_cast<int16_t>(insn & 0xFFFF);
+              s_gmainthread_addr = hi_val[rb] + lo;
+            }
+          }
+        }
+        XELOGE("RB3DX UI PROBE[{}]: gMainThreadID decode -> addr={:08X}",
+               sample, s_gmainthread_addr);
+      }
+    }
+    if (s_gmainthread_addr) {
+      XELOGE("RB3DX UI PROBE[{}]: gMainThreadID @{:08X} = {:08X}", sample,
+             s_gmainthread_addr, r32(s_gmainthread_addr));
+    }
+    // --rb3_overlapped_scan: test the async-completion hypothesis for the
+    // clean-TU5 loader freeze. AsyncFileWin::_ReadDone spins while
+    // OVERLAPPED.Internal == STATUS_PENDING (0x103); if xenia's synchronous
+    // read completion never clears it, exactly one OVERLAPPED stays 0x103
+    // across the whole stuck phase. Scan the guest heap for words == 0x103
+    // whose following word (InternalHigh) is a plausible byte count, and
+    // report any address that reads 0x103 on two consecutive samples.
+    if (cvars::rb3_overlapped_scan && (sample % 4) == 0) {
+      static std::map<uint32_t, int> s_pending_seen;
+      std::map<uint32_t, int> now_pending;
+      auto scan = [&](uint32_t lo, uint32_t hi) {
+        for (uint32_t page = lo; page < hi; page += 0x1000) {
+          if (!readable(page)) continue;
+          for (uint32_t a = page; a < page + 0x1000 - 8; a += 4) {
+            if (r32(a) != 0x00000103u) continue;
+            uint32_t high = r32(a + 4);
+            if (high <= 0x400000u) {  // plausible InternalHigh (bytes)
+              now_pending[a] = s_pending_seen.count(a) ? s_pending_seen[a] + 1
+                                                       : 1;
+            }
+          }
+        }
+      };
+      scan(0x40000000u, 0x44000000u);
+      int persistent = 0;
+      for (auto& [a, cnt] : now_pending) {
+        if (cnt >= 2) {
+          persistent++;
+          if (persistent <= 6) {
+            XELOGE(
+                "RB3DX UI PROBE[{}]: OVERLAPPED-PENDING @{:08X} Internal=103 "
+                "InternalHigh={:08X} persisted x{}",
+                sample, a, r32(a + 4), cnt);
+          }
+        }
+      }
+      XELOGE("RB3DX UI PROBE[{}]: overlapped-scan: {} words==0x103, {} persistent",
+             sample, (int)now_pending.size(), persistent);
+      s_pending_seen = std::move(now_pending);
+    }
+    // --rb3_tu5_hash_poke: the TU5 exe embeds 922 per-file SHA1s of ark
+    // entries (arkhelper hashfinder verified); a patchcreator ark whose
+    // ui.dtb/splash.dtb no longer match makes the game silently set its quit
+    // flag during App::App and exit App::Run before the first frame (the
+    // "clean-TU5 boot freeze" = that quit + a teardown spin). arkhelper's own
+    // fix is patching the hashes into the exe; do the equivalent in guest
+    // memory: find the two original 20-byte hashes in the image once, then
+    // overwrite (and re-assert each tick) with the patched files' hashes.
+    if (cvars::rb3_tu5_hash_poke) {
+      struct HashFix {
+        uint8_t orig[20];
+        uint8_t fixed[20];
+        uint32_t addr;  // 0 until found
+      };
+      // ui/gen/ui.dtb, ui/splash/gen/splash.dtb (patched 2026-08-26).
+      static HashFix s_fixes[2] = {
+          {{0xE0, 0x16, 0x62, 0x1C, 0xAF, 0xDA, 0xFD, 0xAB, 0xDA, 0xDA,
+            0x1A, 0x3A, 0x91, 0xB1, 0x83, 0xA4, 0x9E, 0x00, 0xC8, 0x8A},
+           {0x57, 0x35, 0xA7, 0xC1, 0x74, 0x04, 0xE4, 0xCB, 0xE1, 0x15,
+            0xCA, 0x21, 0x22, 0xA9, 0x46, 0x71, 0xD4, 0x5D, 0x90, 0x30},
+           0},
+          {{0x5B, 0x7B, 0x45, 0xD9, 0x12, 0x5A, 0xF5, 0x4D, 0xC0, 0xE7,
+            0x5E, 0x9B, 0xF3, 0x89, 0x03, 0x5B, 0x30, 0xC3, 0x0C, 0x25},
+           {0x53, 0xB2, 0x51, 0x54, 0x50, 0xFA, 0x40, 0xD9, 0xDC, 0x15,
+            0x31, 0x85, 0xDE, 0xDE, 0x23, 0x9C, 0x02, 0x49, 0xAA, 0x16},
+           0}};
+      for (auto& fix : s_fixes) {
+        if (!fix.addr) {
+          for (uint32_t a = 0x82000000u; a < 0x82E00000u && !fix.addr;
+               a += 4) {
+            if (r32(a) != (uint32_t(fix.orig[0]) << 24 |
+                           uint32_t(fix.orig[1]) << 16 |
+                           uint32_t(fix.orig[2]) << 8 | fix.orig[3])) {
+              continue;
+            }
+            bool all = true;
+            for (int k = 4; k < 20 && all; ++k) {
+              all = *(base + a + k) == fix.orig[k];
+            }
+            if (all) fix.addr = a;
+          }
+          if (fix.addr) {
+            XELOGE("RB3DX UI PROBE[{}]: TU5 hash table entry found @{:08X}",
+                   sample, fix.addr);
+          }
+        }
+        if (fix.addr && *(base + fix.addr) != fix.fixed[0]) {
+          // The table likely lives in a read-only image section; unprotect
+          // the pages first (same rule as PPC bytepatches).
+          if (auto* heap = memory->LookupHeap(fix.addr)) {
+            heap->Protect(fix.addr & ~0xFFFu, 0x2000,
+                          kMemoryProtectRead | kMemoryProtectWrite);
+          }
+          std::memcpy(base + fix.addr, fix.fixed, 20);
+          XELOGE("RB3DX UI PROBE[{}]: TU5 hash poked @{:08X}", sample,
+                 fix.addr);
+        }
+      }
+    }
+    // --- one-shot handshake-object locator: the boot-blocking wait loop
+    // (fn 0x827414E0) waits on two event handles at obj+0x8C/+0x90 with the
+    // state word at obj+0x94. Kernel handles are 0xF80000xx; find adjacent
+    // handle pairs in heap/statics and dump the surrounding object.
+    static bool s_hs_locate_done = false;
+    if (!s_hs_locate_done && sample == 12) {
+      s_hs_locate_done = true;
+      int found = 0;
+      auto scan_range = [&](uint32_t lo, uint32_t hi) {
+        for (uint32_t page = lo; page < hi && found < 10; page += 0x1000) {
+          if (!readable(page)) continue;
+          for (uint32_t a = page; a < page + 0x1000 - 8; a += 4) {
+            uint32_t v1 = r32(a), v2 = r32(a + 4);
+            if ((v1 & 0xFFFFFF03) == 0xF8000000 && v1 != v2 &&
+                (v2 & 0xFFFFFF03) == 0xF8000000 && (v2 - v1) < 0x40) {
+              uint32_t obj = a - 0x8C;
+              std::string row;
+              for (uint32_t d = 0x80; d <= 0xA8; d += 4) {
+                row += fmt::format(" +{:02X}={:08X}", d, r32(obj + d));
+              }
+              XELOGE(
+                  "RB3DX UI PROBE[{}]: HS-OBJ candidate obj={:08X} "
+                  "handles={:08X}/{:08X}{}",
+                  sample, obj, v1, v2, row);
+              if (++found >= 10) break;
+            }
+          }
+        }
+      };
+      scan_range(0x82C34400, 0x83000000);
+      scan_range(0x40000000, 0x44000000);
+    }
+    // --- one-shot TheLoadMgr locator (clean-TU5 loader-freeze) ---
+    // Milo std::list embeds its dummy node inside the owning object, so any
+    // queued Loader* value found in a heap list node whose next/prev points
+    // into static .data/.bss locates TheLoadMgr.mLoading directly -- no
+    // symbols needed. Armed by the first nonzero panel mLoader seen below.
+    static uint32_t s_locate_loader_target = 0;
+    static bool s_locate_done = false;
+    if (s_locate_loader_target && !s_locate_done) {
+      s_locate_done = true;
+      const uint32_t lo = 0x40000000, hi = 0x48000000;
+      int hits = 0;
+      for (uint32_t page = lo; page < hi && hits < 8; page += 0x1000) {
+        if (!readable(page)) continue;
+        for (uint32_t a = page; a < page + 0x1000; a += 4) {
+          if (r32(a) != s_locate_loader_target) continue;
+          uint32_t node = a - 8;
+          uint32_t nxt = r32(node), prv = r32(node + 4);
+          bool nxt_static = nxt >= 0x82C34400 && nxt < 0x83000000;
+          bool prv_static = prv >= 0x82C34400 && prv < 0x83000000;
+          XELOGE(
+              "RB3DX UI PROBE[{}]: LOADMGR-LOCATE hit value@{:08X} node={:08X} "
+              "next={:08X}{} prev={:08X}{}",
+              sample, a, node, nxt, nxt_static ? "(STATIC)" : "", prv,
+              prv_static ? "(STATIC)" : "");
+          // Walk the prev chain until it leaves the heap: the terminal static
+          // address is the embedded list dummy inside TheLoadMgr.
+          uint32_t walk = prv;
+          std::string walked;
+          for (int w = 0; w < 32 && walk; ++w) {
+            walked += fmt::format(" {:08X}", walk);
+            if (walk >= 0x82C34400 && walk < 0x83000000) break;
+            if (walk < 0x40000000 || walk >= 0x50000000) break;
+            walk = r32(walk + 4);
+          }
+          XELOGE("RB3DX UI PROBE[{}]: LOADMGR-LOCATE prevwalk:{}", sample,
+                 walked);
+          for (uint32_t st : {nxt_static ? nxt : 0u, prv_static ? prv : 0u}) {
+            if (!st) continue;
+            std::string row;
+            for (uint32_t d = st - 0x20; d < st + 0x40; d += 4) {
+              row += fmt::format(" {:08X}", r32(d));
+            }
+            XELOGE("RB3DX UI PROBE[{}]: LOADMGR-LOCATE static {:08X}-0x20:{}"
+                   , sample, st, row);
+          }
+          if (++hits >= 8) break;
+        }
+      }
+    }
     // --- panels of the transition screen and current screen ---
     // RB3-360 UIScreen: mPanelList is an EMBEDDED circular {next,prev} dummy
     // at screen+0x28 (calibrated empirically: walking with s+0x2C as the
@@ -1273,12 +2905,49 @@ static void Rb3dxUiProbeThread(Memory* memory) {
           uint32_t ploaded = r8(panel + 0x1C);
           uint32_t ploader = r32(panel + 0xC);
           uint32_t prefs = r32(panel + 0x28);
+          if (ploader && !s_locate_loader_target) {
+            s_locate_loader_target = ploader;
+          }
           XELOGE(
               "RB3DX UI PROBE[{}]:   {}panel[{}]@0x{:08X} 0x{:08X}'{}' "
               "active={} refLoaded={} mState={} mLoaded={} mLoader=0x{:08X} "
-              "mLoadRefs={}",
+              "mLoadRefs={} mDir=0x{:08X}",
               sample, tag, n, node, panel, pname, active, loaded_ref, pstate,
-              ploaded, ploader, prefs);
+              ploaded, ploader, prefs, r32(panel + 0x8));
+          // Panel stuck at mState=kUnloaded with a live mLoader => the panel's
+          // DirLoader never reaches IsLoaded (UIPanel::PollForLoading only
+          // adopts when mLoader->IsLoaded()). Dump the loader's internals to
+          // tell apart "still mid-load" from "done-but-not-adopted": DirLoader
+          // vtable @+0 (expect 0x82106950), mState PTMF code @+0x20 (DONE stub
+          // = 0x826C3888 as seen on the startup_autosave loaders), the file
+          // path @+0x14/+0x30, and a strip of status words. Pure reads.
+          if (ploader && readable(ploader)) {
+            uint32_t lvt = r32(ploader);
+            uint32_t lstate = r32(ploader + 0x20);
+            std::string lfile = rstr(r32(ploader + 0x14));
+            std::string row;
+            for (uint32_t d = ploader; d < ploader + 0x40; d += 4) {
+              row += fmt::format(" {:08X}", r32(d));
+            }
+            XELOGE("RB3DX UI PROBE[{}]:     {}ldr 0x{:08X} vt={:08X} "
+                   "stateCode={:08X}{} file='{}':{}",
+                   sample, tag, ploader, lvt, lstate,
+                   lstate == 0x826C3888 ? "(DONE)" : "(mid)", lfile, row);
+          }
+          // SyncGameStartPanel ('sync_audio_net_panel'): the song-start sync
+          // gate. Retail layout (rb3-xenon SyncGameStartPanel.h, verified vs
+          // retail ctor): own mState @0x3C (0..3 lockstep, 4=StartGame issued,
+          // 5=synced/IsLoaded), LockStepMgr member @0x40 with mLockMachine
+          // @+0x1C (InLock != 0), mHasResponded @+0x28, mLockSuccess @+0x29.
+          if (pname == "sync_audio_net_panel") {
+            XELOGE(
+                "RB3DX UI PROBE[{}]:     syncstart mState={} "
+                "lockMachine=0x{:08X} hasResponded={} lockSuccess={} "
+                "externalBlock={}",
+                sample, r32(panel + 0x3C), r32(panel + 0x40 + 0x1C),
+                r8(panel + 0x40 + 0x28), r8(panel + 0x40 + 0x29),
+                r8(panel + 0x80));
+          }
         }
         node = r32(node);
         ++n;
@@ -1288,7 +2957,7 @@ static void Rb3dxUiProbeThread(Memory* memory) {
     if (cur != trans) dump_panels(cur, "C:");
     // --- find saveload_mgr / net_sync via main-dir hash (once) ---
     static bool s_dumped_names = false;
-    if (!saveload_obj || !netsync_obj || !session_obj ||
+    if (!saveload_obj || !netsync_obj || !session_obj || !overshell_obj ||
         (!s_dumped_names && cur)) {
       uint32_t dir = r32(kMainDirPtr);
       if (dir) {
@@ -1311,8 +2980,13 @@ static void Rb3dxUiProbeThread(Memory* memory) {
             } else if (nm == "session" && !session_obj) {
               session_obj = obj;
               XELOGE("RB3DX UI PROBE: found session obj=0x{:08X}", session_obj);
+            } else if (nm == "overshell" && !overshell_obj) {
+              overshell_obj = obj;
+              XELOGE("RB3DX UI PROBE: found overshell obj=0x{:08X}",
+                     overshell_obj);
             }
-            if (saveload_obj && netsync_obj && session_obj) break;
+            if (saveload_obj && netsync_obj && session_obj && overshell_obj)
+              break;
           }
           // One-time: dump the whole main-dir name table so session/overshell
           // objects can be located offline.
@@ -1383,6 +3057,94 @@ static void Rb3dxUiProbeThread(Memory* memory) {
           sample, b, r32(b + 0x68), r32(b + 0x70), r32(b + 0x14),
           r32(b + 0x18));
     }
+    // --- gJoypadData[4]: the two-pad join gate. Base/stride decoded from the
+    // running xex's JoypadGetPadData @0x82524998 (RB3E PORT_JOYPADGETPADDATA):
+    // lis 0x82CD; mulli r10,r3,0xD4; addi -0x4D38 => gJoypadData = 0x82CCB2C8,
+    // 0xD4 per pad. Offsets from rb3-xenon Joypad.h: mButtons@0x00,
+    // mUser@0x44, mConnected@0x48, mType@0x6C. If a pad polls SUCCESS at the
+    // XamInput layer but mConnected stays 0 here, the connection is dying
+    // inside the guest reader thread, not in the HID driver.
+    {
+      const uint32_t kJoypadData = 0x82CCB2C8;
+      std::string pads;
+      for (int p = 0; p < 4; ++p) {
+        uint32_t b2 = kJoypadData + p * 0xD4;
+        pads += fmt::format(" [{}]conn={} user=0x{:08X} type={} btn=0x{:04X}",
+                            p, r8(b2 + 0x48), r32(b2 + 0x44),
+                            static_cast<int32_t>(r32(b2 + 0x6C)),
+                            r32(b2 + 0x0));
+      }
+      XELOGE("RB3DX UI PROBE[{}]:   joypads:{}", sample, pads);
+      // s64 connect-chain forensics: mConnected is set by JoypadPollCommon
+      // (TU5 0x82526a00) iff gLastXInputState[pad].dwPacketNumber != -1; the
+      // packet is written by the reader loop unless XInput2Sample
+      // (0x8284e388) or XInput2GetDeviceId (0x8284e6a0) fail, whose beq's
+      // skip the state write entirely. pkt==FFFFFFFF => reader taking a
+      // fatal skip; pkt real but conn=0 => JoypadPollCommon isn't running.
+      const uint32_t kLastXInputState = 0x82CCB8D8;
+      std::string pkts;
+      for (int p = 0; p < 4; ++p) {
+        pkts += fmt::format(" [{}]pkt=0x{:08X}", p,
+                            r32(kLastXInputState + p * 0x10));
+      }
+      XELOGE("RB3DX UI PROBE[{}]:   xinput:{}", sample, pkts);
+    }
+    // --- overshell slots + per-slot join lists ---
+    // maindir['overshell'] is the OvershellPanel's Hmx::Object VBASE (tail,
+    // +0x4D4 from the head per the rb3-xenon RTTI note). Rather than trust
+    // that constant, auto-locate mSlots ONCE: scan the head region for a
+    // vector triple {begin<=end<=cap} of 3..8 guest pointers whose pointees
+    // read a plausible mSlotNum (int 0..7 at slot+0x40, matching its index).
+    // Slot layout (retail, rb3-xenon OvershellSlot.h): mState@0x2C,
+    // mSlotNum@0x40, mPotentialUsers vector@0x6C of {LocalBandUser*, JoinState}
+    // 8-byte entries.
+    static uint32_t s_overshell_slots_vec = 0;
+    if (overshell_obj && !s_overshell_slots_vec) {
+      uint32_t head = overshell_obj - 0x4D4;
+      for (uint32_t off = 0; off < 0x200 && !s_overshell_slots_vec; off += 4) {
+        uint32_t b2 = r32(head + off), e2 = r32(head + off + 4);
+        if (!b2 || e2 <= b2 || (e2 - b2) % 4 != 0) continue;
+        uint32_t n = (e2 - b2) / 4;
+        if (n < 3 || n > 8) continue;
+        bool ok = true;
+        for (uint32_t i = 0; i < n && ok; ++i) {
+          uint32_t slot = r32(b2 + i * 4);
+          if (slot < 0x40000000 || slot >= 0x80000000 ||
+              r32(slot + 0x40) != i) {
+            ok = false;
+          }
+        }
+        if (ok) {
+          s_overshell_slots_vec = head + off;
+          XELOGE(
+              "RB3DX UI PROBE: overshell head=0x{:08X} mSlots located at "
+              "+0x{:X} ({} slots)",
+              head, off, n);
+        }
+      }
+    }
+    if (s_overshell_slots_vec) {
+      uint32_t b2 = r32(s_overshell_slots_vec), e2 = r32(s_overshell_slots_vec + 4);
+      for (uint32_t sp = b2; sp < e2 && sp < b2 + 0x20; sp += 4) {
+        uint32_t slot = r32(sp);
+        if (!slot) continue;
+        uint32_t pu_b = r32(slot + 0x6C), pu_e = r32(slot + 0x70);
+        std::string pus;
+        for (uint32_t p = pu_b; p + 8 <= pu_e && p < pu_b + 0x40; p += 8) {
+          pus += fmt::format(" {{user=0x{:08X} join={}}}", r32(p), r32(p + 4));
+        }
+        // mState is a pointer to a state object; its vtable (state+0x0)
+        // identifies which OvershellSlotState class it is, so log it -- the
+        // pointer alone says nothing, but the vtable is a stable code address
+        // we can name. Also log the slot's own vtable for orientation.
+        uint32_t st = r32(slot + 0x2C);
+        XELOGE(
+            "RB3DX UI PROBE[{}]:   oshell slot{} @0x{:08X} state=0x{:08X} "
+            "stateVt=0x{:08X} npot={}{}",
+            sample, r32(slot + 0x40), slot, st, st ? r32(st) : 0,
+            (pu_e > pu_b) ? (pu_e - pu_b) / 8 : 0, pus);
+      }
+    }
   }
 }
 
@@ -1393,7 +3155,6 @@ void Dc3NuiSequencerExtern(
   static int s_skel_calls = 0;
   static uint32_t s_last_screen = 0;
   static int s_screen_stable_count = 0;
-  static bool s_gameplay_setup_done = false;
   static uint32_t s_fake_frame_number = 0;
   static bool s_nui_entry_logged = false;
   static bool s_screen_name_scan_range_logged = false;
@@ -1403,13 +3164,6 @@ void Dc3NuiSequencerExtern(
   static bool s_loadsong_probe_logged = false;
   static bool s_loadsong_repair_attempted = false;
   static bool s_content_refresh_forced = false;
-  // Auto-enable gameplay bootstrap when IK telemetry wants to reach game_screen
-  static bool s_ik_bootstrap_override_applied = false;
-  if (cvars::dc3_ik_telemetry && !s_ik_bootstrap_override_applied) {
-    cvars::dc3_enable_gameplay_bootstrap = true;
-    s_ik_bootstrap_override_applied = true;
-    XELOGI("DC3: IK telemetry auto-enabled gameplay bootstrap");
-  }
   static bool s_host_beat_drive_active = false;
   static float s_host_song_seconds = 0.0f;
   static float s_host_song_beat = 0.0f;
@@ -1701,8 +3455,6 @@ void Dc3NuiSequencerExtern(
       if (raw_trans_name.empty()) {
         raw_trans_name = read_name_at(trans_screen_h, 0x20, false);
       }
-      auto* scr_obj = memory->TranslateVirtual<uint8_t*>(cur_screen_h);
-      (void)scr_obj;
       std::string cur_name = raw_name;
       if (cur_name.empty()) {
         cur_name = "attract_screen";
@@ -1862,83 +3614,8 @@ void Dc3NuiSequencerExtern(
         }
       }
 
-      auto try_bootstrap_gameplay = [&](const std::string& cur_name_for_log,
-                                        const std::string& trans_name_for_log) {
-        if (s_gameplay_setup_done || !cvars::dc3_enable_gameplay_bootstrap) {
-          return;
-        }
-        constexpr uint32_t kTheHamDirector = 0x82F603A0;
-        constexpr uint32_t kTheGamePanel = 0x83117410;
-        constexpr uint32_t kGamePanelCreateGame = 0x8287ACD0;
-        constexpr uint32_t kHamDirectorSetupAnims = 0x82474868;
-        constexpr uint32_t kSongSequenceOnSongLoaded = 0x8288BDF8;
-        constexpr uint32_t kGamePanelStartGame = 0x8287AE28;
-        constexpr uint32_t kSongSequenceSingleton = 0x8311787C;
-
-        auto* hd_ptr = memory->TranslateVirtual<uint8_t*>(kTheHamDirector);
-        auto* gp_ptr = memory->TranslateVirtual<uint8_t*>(kTheGamePanel);
-        uint32_t hd_addr = hd_ptr ? xe::load_and_swap<uint32_t>(hd_ptr) : 0;
-        uint32_t gp_addr = gp_ptr ? xe::load_and_swap<uint32_t>(gp_ptr) : 0;
-        if (!hd_addr || !gp_addr || hd_addr >= 0xF0000000 ||
-            gp_addr >= 0xF0000000) {
-          return;
-        }
-
-        auto* processor = kernel_state->processor();
-        auto* thread_state = ppc_context->thread_state;
-        kernel::XThread* execute_thread = nullptr;
-        uint32_t execute_thread_id = 0;
-        auto threads =
-            kernel_state->object_table()->GetObjectsByType<kernel::XThread>(
-                kernel::XObject::Type::Thread);
-        for (auto thread : threads) {
-          if (thread->main_thread() && thread->thread_state()) {
-            execute_thread = thread.get();
-            thread_state = thread->thread_state();
-            execute_thread_id = thread->thread_id();
-            break;
-          }
-        }
-        if (!execute_thread_id && kernel::XThread::IsInThread() &&
-            thread_state) {
-          execute_thread = kernel::XThread::GetCurrentThread();
-          execute_thread_id = kernel::XThread::GetCurrentThread()->thread_id();
-        }
-        if (!processor || !thread_state || !execute_thread) {
-          return;
-        }
-
-        auto load_u32 = [&](uint32_t guest_addr) -> uint32_t {
-          auto* ptr = is_guest_readable(guest_addr, 4)
-                          ? memory->TranslateVirtual<uint8_t*>(guest_addr)
-                          : nullptr;
-          return ptr ? xe::load_and_swap<uint32_t>(ptr) : 0;
-        };
-        uint32_t game_addr =
-            is_guest_readable(gp_addr + 0x38, 4) ? load_u32(gp_addr + 0x38) : 0;
-        uint32_t gp_state =
-            is_guest_readable(gp_addr + 0x80, 4) ? load_u32(gp_addr + 0x80) : 0;
-        XELOGI(
-            "DC3: Gameplay bootstrap cur='{}' trans='{}' hd={:08X} "
-            "gp={:08X} game={:08X} gpState={} execThread={}",
-            cur_name_for_log, trans_name_for_log, hd_addr, gp_addr, game_addr,
-            gp_state, execute_thread_id);
-        auto queue_member_apc = [&](uint32_t fn, uint32_t tp) {
-          execute_thread->EnqueueApc(fn, tp, 0, 0);
-        };
-        // APC queue is LIFO, so insert the desired call chain in reverse.
-        queue_member_apc(kGamePanelStartGame, gp_addr);
-        queue_member_apc(kSongSequenceOnSongLoaded, kSongSequenceSingleton);
-        queue_member_apc(kHamDirectorSetupAnims, hd_addr);
-        if (!game_addr) {
-          queue_member_apc(kGamePanelCreateGame, gp_addr);
-        }
-        XELOGI(
-            "DC3: Gameplay bootstrap queued APC chain on thread {} "
-            "(createGame={} setupAnims=1 onSongLoaded=1 startGame=1)",
-            execute_thread_id, game_addr ? 0 : 1);
-        s_gameplay_setup_done = true;
-      };
+      // (try_bootstrap_gameplay lambda deleted -- retired experiment;
+      // see the NOTE below about GamePanel::CreateGame blocking. fork-cleanup C.)
 
       if ((s_skel_calls % 60) == 0) {
         XELOGI("DC3: Nav diag: scr={:08X} raw='{}' name='{}' stable={} nui={}",
@@ -2417,7 +4094,6 @@ void Dc3NuiSequencerExtern(
           constexpr uint32_t kTheHamSongMgr = 0x83118C6C;
           constexpr uint32_t kTheMoveMgr = 0x82F60308;
           constexpr uint32_t kTheGameMode = 0x83117710;
-          constexpr uint32_t kContentMgrRefreshSynchronously = 0x825FEBA8;
           constexpr uint32_t kMetaPerformerCurrent = 0x828CB8A8;
           constexpr uint32_t kDataReadFile = 0x825C1AD0;
           constexpr uint32_t kHamSongMgrAddSongs = 0x828C5BC0;
@@ -2820,6 +4496,11 @@ Emulator::Emulator(const std::filesystem::path& command_line,
 Emulator::~Emulator() {
   // Note that we delete things in the reverse order they were initialized.
 
+  // The probe samplers capture memory_.get(); join them before anything is
+  // torn down (fork-cleanup-review.md C10). No-op if TerminateTitle already
+  // joined or no probes were armed.
+  Rb3dxJoinProbeThreads();
+
   // Give the systems time to shutdown before we delete them.
   if (graphics_system_) {
     graphics_system_->Shutdown();
@@ -2975,6 +4656,10 @@ X_STATUS Emulator::TerminateTitle() {
   if (!is_title_open()) {
     return X_STATUS_UNSUCCESSFUL;
   }
+
+  // Stop and join the RB3DX/DC3 probe sampler threads before the title (and
+  // later memory_) goes away under them (fork-cleanup-review.md C10).
+  Rb3dxJoinProbeThreads();
 
   if (processor_) {
     processor_->ClearGuestFunctionOverrides();
@@ -3383,24 +5068,43 @@ bool Emulator::ExceptionCallback(Exception* ex) {
   }
 
   // Walk the PPC stack to identify call chain (helps diagnose recursion).
+  // fork-cleanup-review C9: this runs INSIDE the exception handler for a
+  // guest fault. TranslateVirtual is membase+addr and can NEVER return null
+  // (the old `if (!ptr) break` guards were dead), so every read must first
+  // prove the page is committed or a decommitted stack page turns a
+  // diagnosable guest crash into a nested host SIGSEGV with no output.
   {
+    auto stack_word_readable = [&](uint32_t addr) -> bool {
+      if (addr < 0x70000000 || addr >= 0x78000000) return false;
+      auto* heap = memory_->LookupHeap(addr);
+      if (!heap) return false;
+      HeapAllocationInfo info = {};
+      if (!heap->QueryRegionInfo(addr, &info)) return false;
+      return (info.state & kMemoryAllocationCommit) != 0;
+    };
     uint32_t sp = static_cast<uint32_t>(context->r[1]);
     XELOGE("==== STACK WALK (SP=0x{:08X}) ====", sp);
     int frame = 0;
     uint32_t last_lr = 0;
     int repeat_count = 0;
-    for (; frame < 20000 && sp >= 0x70000000 && sp < 0x78000000; frame++) {
+    constexpr int kMaxWalkFrames = 512;
+    for (; frame < kMaxWalkFrames && sp >= 0x70000000 && sp < 0x78000000;
+         frame++) {
+      if (!stack_word_readable(sp) || !stack_word_readable(sp + 8)) {
+        XELOGE("  [{}] sp=0x{:08X} not committed -- stopping walk", frame, sp);
+        break;
+      }
       auto* host_ptr = memory_->TranslateVirtual<uint8_t*>(sp);
-      if (!host_ptr) break;
       uint32_t back_chain = xe::load_and_swap<uint32_t>(host_ptr);
       // Try multiple LR save locations:
       uint32_t lr_sp4 = xe::load_and_swap<uint32_t>(host_ptr + 4);
       uint32_t lr_sp8 = xe::load_and_swap<uint32_t>(host_ptr + 8);
       // Also try __savegprlr convention: LR at back_chain - 8
       uint32_t lr_bc8 = 0;
-      if (back_chain >= 0x70000000 && back_chain < 0x78000000) {
+      if (back_chain >= 0x70000008 && back_chain < 0x78000000 &&
+          stack_word_readable(back_chain - 8)) {
         auto* bc_ptr = memory_->TranslateVirtual<uint8_t*>(back_chain - 8);
-        if (bc_ptr) lr_bc8 = xe::load_and_swap<uint32_t>(bc_ptr);
+        lr_bc8 = xe::load_and_swap<uint32_t>(bc_ptr);
       }
       // Pick the most likely LR (first non-BEBEBEBE, non-zero, in code range)
       uint32_t best_lr = 0;
@@ -3714,6 +5418,12 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
                                             true);
   on_shader_storage_initialization(false);
 
+  // Push --rb3dx_alloc_probe down into the MMIO fault handler. src/xenia/cpu
+  // used to DECLARE_bool this cvar, which made the CPU library depend on a
+  // symbol DEFINEd here; the setter keeps the dependency pointing downwards.
+  // Unconditional (not title-gated) to match the previous cvar read.
+  cpu::MMIOHandler::SetAllocProbeEnabled(cvars::rb3dx_alloc_probe);
+
   // RB3DX (0x45410914) DIAGNOSTIC: MemAlloc argument probe for the main_hub
   // corrupted-size OOM investigation. Default off (--rb3dx_alloc_probe).
   // No guest byte patches: overrides the pre-declared __savegprlr_23 helper
@@ -3723,7 +5433,8 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
   // default-off cvar.
   if (title_id_.has_value() && title_id_.value() == 0x45410914 &&
       (cvars::rb3dx_alloc_probe || cvars::rb3dx_clamp_alloc ||
-       cvars::si_selftest || cvars::si_load_dll)) {
+       cvars::si_selftest || cvars::si_load_dll ||
+       !cvars::rb3dx_alloc_trace_path.empty())) {
     const uint32_t kSaveGprLr23 = 0x82829244;
     auto* mem = memory_->virtual_membase();
     uint32_t insn0 = xe::load_and_swap<uint32_t>(mem + kSaveGprLr23);
@@ -3743,6 +5454,173 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
     }
   }
 
+  // RB3 TU5 (0x45410914): no-op CharSync::UpdateCharCache to clear the
+  // head-of-line char-cache stall that freezes the clean-TU5 boot at the
+  // splash_screen transition (--rb3_no_char_preview). Register early here,
+  // before the JIT compiles the direct `bl 0x82564698` in App::App (0x82271490),
+  // so the override takes. Title-gated + default-off => DC3-inert.
+  if (title_id_.has_value() && title_id_.value() == 0x45410914 &&
+      cvars::rb3_no_char_preview) {
+    const uint32_t kUpdateCharCache = 0x82564698;
+    processor_->RegisterGuestFunctionOverride(
+        kUpdateCharCache, Rb3NoCharPreviewExtern,
+        "RB3:CharSync::UpdateCharCache(no-op)");
+    XELOGI("RB3: UpdateCharCache no-op override installed at 0x{:08X}",
+           kUpdateCharCache);
+  }
+
+  // RB3 TU5 (0x45410914): enter the real frame loop directly
+  // (--rb3_tu5_app_run_direct). See the cvar help for the full story: retail
+  // App::Run (0x822703D0) reaches the frame loop App::RunWithoutDebugging
+  // (0x82270080) only through a deliberate null-store -> unhandled-exception
+  // -> filter chain, which --protect_zero=false silently defuses. Patch
+  // main's `bl App::Run` to call the frame loop directly (r3 = App* is
+  // already set by the addi at 0x82272E8C).
+  if (title_id_.has_value() && title_id_.value() == 0x45410914 &&
+      cvars::rb3_tu5_app_run_direct) {
+    const uint32_t kMainRunCall = 0x82272E90;
+    auto* heap = memory_->LookupHeap(kMainRunCall);
+    auto* mem = memory_->virtual_membase();
+    uint32_t cur = xe::load_and_swap<uint32_t>(mem + kMainRunCall);
+    if (cur == 0x4BFFD1F1u || cur == 0x4280D1F1u) {
+      // Already calls 0x82270080 (a pre-patched image, e.g. RB3DX lineage).
+      XELOGI("RB3: app-run-direct: image already patched @0x{:08X} (0x{:08X})",
+             kMainRunCall, cur);
+    } else if (cur != 0x4BFFD541u) {  // bl 0x822703D0 (pristine clean TU5)
+      XELOGW(
+          "RB3: app-run-direct NOT installed (0x{:08X} is 0x{:08X}, not the "
+          "App::Run bl)",
+          kMainRunCall, cur);
+    } else if (heap && heap->Protect(kMainRunCall & ~0xFFFu, 0x1000,
+                                     kMemoryProtectRead | kMemoryProtectWrite)) {
+      // bl 0x82270080 = App::RunWithoutDebugging (the frame loop).
+      xe::store_and_swap<uint32_t>(mem + kMainRunCall, 0x4BFFD1F1u);
+      XELOGI(
+          "RB3: app-run-direct installed -- main's `bl App::Run(0x822703D0)` "
+          "@0x{:08X} -> `bl App::RunWithoutDebugging(0x82270080)`",
+          kMainRunCall);
+    } else {
+      XELOGW("RB3: app-run-direct NOT installed (Protect failed @0x{:08X})",
+             kMainRunCall);
+    }
+  }
+
+  // Mogg key-encryption table override -- see --rb3_mogg_key_table help text.
+  if (title_id_.has_value() && title_id_.value() == 0x45410914 &&
+      !cvars::rb3_mogg_key_table.empty()) {
+    const uint32_t kMoggKeyTable = 0x82C76258;
+    std::vector<uint8_t> bytes;
+    int hi = -1;
+    bool bad = false;
+    for (char c : cvars::rb3_mogg_key_table) {
+      if (c == ' ' || c == '\t' || c == ',' || c == '\n') continue;
+      int v;
+      if (c >= '0' && c <= '9') {
+        v = c - '0';
+      } else if (c >= 'a' && c <= 'f') {
+        v = c - 'a' + 10;
+      } else if (c >= 'A' && c <= 'F') {
+        v = c - 'A' + 10;
+      } else {
+        bad = true;
+        break;
+      }
+      if (hi < 0) {
+        hi = v;
+      } else {
+        bytes.push_back(static_cast<uint8_t>((hi << 4) | v));
+        hi = -1;
+      }
+    }
+    auto* heap = memory_->LookupHeap(kMoggKeyTable);
+    if (bad || hi >= 0 || bytes.size() != 64) {
+      XELOGW(
+          "RB3: mogg-key-table NOT installed (need exactly 64 hex bytes, "
+          "parsed {})",
+          bytes.size());
+    } else if (heap && heap->Protect(kMoggKeyTable & ~0xFFFu, 0x1000,
+                                     kMemoryProtectRead | kMemoryProtectWrite)) {
+      std::memcpy(memory_->virtual_membase() + kMoggKeyTable, bytes.data(), 64);
+      XELOGI("RB3: mogg-key-table installed -- 64 bytes @0x{:08X}",
+             kMoggKeyTable);
+    } else {
+      XELOGW("RB3: mogg-key-table NOT installed (Protect failed @0x{:08X})",
+             kMoggKeyTable);
+    }
+  }
+
+  // RB3DX (0x45410914): per-allocation binary trace for the heap-"main"
+  // fragmentation attribution (--rb3dx_alloc_trace_path). Opens the sink and
+  // registers the two extra overrides -- MemFree's prologue helper
+  // __savegprlr_26 and MemAlloc's epilogue helper __restgprlr_23 -- both of
+  // which are exact emulations of the pre-declared save/restore stubs, same
+  // recipe as the alloc-entry probe above. Title-gated + empty-by-default =>
+  // DC3-inert.
+  if (title_id_.has_value() && title_id_.value() == 0x45410914 &&
+      !cvars::rb3dx_alloc_trace_path.empty()) {
+    rb3dx_alloc_trace_sink =
+        std::make_unique<Rb3dxAllocTraceSink>(cvars::rb3dx_alloc_trace_path);
+    if (!rb3dx_alloc_trace_sink->ok()) {
+      XELOGE("RB3DX: alloc trace could NOT open '{}' -- tracing disabled",
+             cvars::rb3dx_alloc_trace_path);
+      rb3dx_alloc_trace_sink.reset();
+    } else {
+      XELOGI("RB3DX: alloc trace -> '{}' (32-byte records)",
+             cvars::rb3dx_alloc_trace_path);
+      auto* mem = memory_->virtual_membase();
+      if (cvars::rb3dx_free_trace) {
+        const uint32_t kSaveGprLr26 = 0x82829250;
+        uint32_t w = xe::load_and_swap<uint32_t>(mem + kSaveGprLr26);
+        if (w != 0xFB41FFC8) {  // std r26,-0x38(r1)
+          XELOGW(
+              "RB3DX: MemFree trace NOT installed (unexpected __savegprlr_26 "
+              "word 0x{:08X})",
+              w);
+        } else {
+          processor_->RegisterGuestFunctionOverride(
+              kSaveGprLr26, Rb3dxSaveGprLr26ProbeExtern,
+              "RB3DX:__savegprlr_26(free probe)");
+          XELOGI(
+              "RB3DX: MemFree probe installed via __savegprlr_26 override at "
+              "0x{:08X} (filter lr=0x827BC438)",
+              kSaveGprLr26);
+        }
+      }
+      if (cvars::rb3dx_ret_trace) {
+        const uint32_t kRestGprLr23 = 0x82829294;
+        uint32_t w = xe::load_and_swap<uint32_t>(mem + kRestGprLr23);
+        if (w != 0xEAE1FFB0) {  // ld r23,-0x50(r1)
+          XELOGW(
+              "RB3DX: MemAlloc return trace NOT installed (unexpected "
+              "__restgprlr_23 word 0x{:08X})",
+              w);
+        } else {
+          processor_->RegisterGuestFunctionOverride(
+              kRestGprLr23, Rb3dxRestGprLr23TraceExtern,
+              "RB3DX:__restgprlr_23(alloc return)");
+          XELOGI(
+              "RB3DX: MemAlloc return probe installed via __restgprlr_23 "
+              "override at 0x{:08X}",
+              kRestGprLr23);
+        }
+      }
+      // Periodic flush + progress so a run that is killed on a wall-clock
+      // deadline still leaves a complete-to-the-second trace on disk.
+      Rb3dxSpawnProbeThread([]() {
+        while (Rb3dxProbeSleep(10000)) {
+          auto* sink = rb3dx_alloc_trace_sink.get();
+          if (!sink) {
+            return;
+          }
+          sink->Flush();
+          XELOGI("RB3DX alloc trace: {} records ({} alloc returns matched)",
+                 sink->written(),
+                 rb3dx_ret_matches.load(std::memory_order_relaxed));
+        }
+      });
+    }
+  }
+
   // RB3DX (0x45410914) DIAGNOSTIC: passive UI-state sampler for the main_hub
   // load-stall investigation (--rb3dx_ui_probe). Read-only guest-memory
   // sampler on a detached host thread; no hooks, no patches. DC3-inert:
@@ -3750,7 +5628,11 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
   if (title_id_.has_value() && title_id_.value() == 0x45410914 &&
       cvars::rb3dx_ui_probe) {
     Memory* probe_mem = memory_.get();
-    std::thread([probe_mem]() { Rb3dxUiProbeThread(probe_mem); }).detach();
+    kernel::KernelState* probe_ks = kernel_state_.get();
+    cpu::Processor* probe_proc = processor_.get();
+    Rb3dxSpawnProbeThread([probe_mem, probe_ks, probe_proc]() {
+      Rb3dxUiProbeThread(probe_mem, probe_ks, probe_proc);
+    });
     XELOGI("RB3DX: UI probe sampler thread started (--rb3dx_ui_probe)");
   }
 
@@ -3759,7 +5641,7 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
   if (title_id_.has_value() && title_id_.value() == 0x45410914 &&
       cvars::si_probe) {
     Memory* si_mem = memory_.get();
-    std::thread([si_mem]() { Rb3dxSiProbeThread(si_mem); }).detach();
+    Rb3dxSpawnProbeThread([si_mem]() { Rb3dxSiProbeThread(si_mem); });
     XELOGI("RB3DX: SI static-patch probe thread started (--si_probe)");
   }
 
@@ -3771,7 +5653,7 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
   if (title_id_.has_value() && title_id_.value() == 0x45410914 &&
       cvars::si_hook_verify) {
     Memory* hv_mem = memory_.get();
-    std::thread([hv_mem]() { Rb3dxSiHookVerifyThread(hv_mem); }).detach();
+    Rb3dxSpawnProbeThread([hv_mem]() { Rb3dxSiHookVerifyThread(hv_mem); });
     XELOGI("RB3DX: SI DLL-hook verify thread started (--si_hook_verify)");
   }
 
@@ -3874,8 +5756,8 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
   if (title_id_.has_value() && title_id_.value() == 0x45410914 &&
       cvars::rb3dx_skip_calibration) {
     Memory* poke_mem = memory_.get();
-    std::thread([poke_mem]() { Rb3dxSkipCalibrationPokeThread(poke_mem); })
-        .detach();
+    Rb3dxSpawnProbeThread(
+        [poke_mem]() { Rb3dxSkipCalibrationPokeThread(poke_mem); });
     XELOGI(
         "RB3DX: first-boot calibration skip thread started "
         "(--rb3dx_skip_calibration)");
@@ -3885,9 +5767,31 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
   // DC3 Title ID: 0x373307D9 (Dance Central 3)
   bool dc3_is_decomp_layout = false;
   std::optional<Dc3NuiPatchManifest> dc3_patch_manifest;
-  if (title_id_.has_value() && title_id_.value() == 0x373307D9 &&
-      dc3_is_decomp_layout) {
+  // Title-gated only: dc3_is_decomp_layout is not known yet (layout detection
+  // runs ~500 lines below), so gating on it here made this whole block dead
+  // code -- the manifest never loaded and Dc3PopulateAddressesFromCatalog
+  // never ran, leaving kAddr on compiled-in defaults for every boot.  Loading
+  // the manifest for an original-layout image is harmless: every consumer
+  // (hack pack, kAddr populate) is separately gated on the detected layout.
+  if (title_id_.has_value() && title_id_.value() == 0x373307D9) {
     Dc3MaybeCleanStaleContentCache(content_root_);
+
+    // Opt this title in to the MMIO write soft-fault (64KB-vs-4KB protect
+    // granularity conflict in the XEX image data region). These two constants
+    // track the DC3 debug build's data layout and used to be hardcoded inside
+    // the shared fault handler, where they applied to every game; they are the
+    // exact values that were in mmio_handler.cc, kept verbatim so DC3 boot
+    // behavior is unchanged. Log the module's .data bounds next to them so
+    // drift is visible after a relink (the range deliberately spans more than
+    // .data alone, so it is not derived from the section table).
+    cpu::MMIOHandler::SetSoftFaultWritableRange(0x83320000, 0x836C0000);
+    if (auto* xex = module->xex_module()) {
+      if (auto* data = xex->GetPESection(".data")) {
+        XELOGI("DC3: module .data is [{:08X}, {:08X}) (soft-fault writable "
+               "range is [83320000, 836C0000))",
+               data->address, data->address + data->size);
+      }
+    }
 
     // Load the patch manifest early so it's available for both NUI patching
     // and the hack pack (which runs independently of --stub_nui_functions).

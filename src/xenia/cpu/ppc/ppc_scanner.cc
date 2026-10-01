@@ -10,8 +10,10 @@
 #include "xenia/cpu/ppc/ppc_scanner.h"
 
 #include <algorithm>
+#include <atomic>
 #include <map>
 
+#include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/memory.h"
 #include "xenia/base/profiling.h"
@@ -19,6 +21,27 @@
 #include "xenia/cpu/ppc/ppc_frontend.h"
 #include "xenia/cpu/ppc/ppc_opcode_info.h"
 #include "xenia/cpu/processor.h"
+
+DEFINE_bool(
+    scanner_stop_on_invalid_run, true,
+    "Terminate function-boundary detection after 8 consecutive undecodable "
+    "instructions with no reachable branch target beyond them. Keeps the "
+    "scanner from walking megabytes of data when a /FORCE-linked decomp image "
+    "puts an unresolved stub where code should be. Upstream Xenia does not do "
+    "this (it ignores invalid words and keeps scanning); a legitimate function "
+    "with 8+ words of embedded data -- jump tables, constant pools -- will be "
+    "truncated here, so set this to false if a title's functions look short.",
+    "CPU");
+
+DEFINE_bool(
+    scanner_clamp_to_mapped_memory, true,
+    "Stop function-boundary detection at the end of the heap region backing "
+    "the function's start address instead of reading past it. Upstream Xenia "
+    "scans to the declared end address unconditionally, which dereferences "
+    "unmapped host memory when a function record runs off the end of its "
+    "mapping. Disabling this restores upstream behaviour (and upstream's "
+    "segfault).",
+    "CPU");
 
 #if 0
 #define LOGPPC(fmt, ...) XELOGCORE('p', fmt, ##__VA_ARGS__)
@@ -31,6 +54,28 @@
 namespace xe {
 namespace cpu {
 namespace ppc {
+
+// Both scanner truncations below silently shorten a function's detected extent,
+// which is indistinguishable downstream from the function genuinely ending
+// there. LOGPPC is compiled out (see the #if 0 above), so until now they left no
+// trace at all -- docs/fork-cleanup-review.md, section 2, ppc_scanner.cc.
+// Rate-limited per-process; a bad module can trip these on every function.
+static constexpr uint32_t kScannerTruncationLogLimit = 32;
+
+static void LogScannerTruncation(const char* what, uint32_t fn_address,
+                                 uint32_t at_address) {
+  static std::atomic<uint32_t> count{0};
+  uint32_t n = count.fetch_add(1, std::memory_order_relaxed);
+  if (n < kScannerTruncationLogLimit) {
+    XELOGD("PPCScanner: fn {:08X} truncated at {:08X} ({})", fn_address,
+           at_address, what);
+  } else if (n == kScannerTruncationLogLimit) {
+    XELOGD(
+        "PPCScanner: fn {:08X} truncated at {:08X} ({}) -- hit {} times, "
+        "suppressing further reports",
+        fn_address, at_address, what, kScannerTruncationLogLimit + 1);
+  }
+}
 
 PPCScanner::PPCScanner(PPCFrontend* frontend) : frontend_(frontend) {}
 
@@ -67,7 +112,7 @@ bool PPCScanner::Scan(GuestFunction* function, FunctionDebugInfo* debug_info) {
   int consecutive_invalid = 0;
   // Determine the maximum scannable address from the heap backing this range.
   uint32_t max_scan_address = 0xFFFFFFFF;
-  {
+  if (cvars::scanner_clamp_to_mapped_memory) {
     auto* heap = memory->LookupHeap(start_address);
     if (heap) {
       uint32_t base = start_address;
@@ -80,6 +125,7 @@ bool PPCScanner::Scan(GuestFunction* function, FunctionDebugInfo* debug_info) {
   while (true) {
     if (address >= max_scan_address) {
       LOGPPC("function end {:08X} (past mapped memory)", address);
+      LogScannerTruncation("past mapped memory", start_address, address);
       address -= 4;
       break;
     }
@@ -132,8 +178,11 @@ bool PPCScanner::Scan(GuestFunction* function, FunctionDebugInfo* debug_info) {
       // wandered into unresolved stub / data territory.  Terminate the
       // function here to avoid scanning megabytes of garbage.
       consecutive_invalid++;
-      if (consecutive_invalid >= 8 && furthest_target <= address) {
+      if (cvars::scanner_stop_on_invalid_run && consecutive_invalid >= 8 &&
+          furthest_target <= address) {
         LOGPPC("function end {:08X} (too many invalid instructions)", address);
+        LogScannerTruncation("8+ consecutive invalid instructions",
+                             start_address, address);
         ends_fn = true;
         ends_block = true;
       }

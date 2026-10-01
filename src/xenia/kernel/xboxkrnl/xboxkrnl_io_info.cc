@@ -24,7 +24,12 @@
 #include "xenia/vfs/device.h"
 #include "xenia/xbox.h"
 
-DECLARE_bool(rb3dx_alloc_probe);
+// NOTE(fork-cleanup 2026-08-25, C3): this used to be
+// `DECLARE_bool(rb3dx_alloc_probe);`, a layering inversion -- src/xenia/kernel/
+// reaching up for a cvar defined in src/xenia/emulator.cc. It gated exactly
+// one diagnostic log line below, so the dependency is gone: the line is now an
+// unconditional XELOGD, which is off at the default log level and reachable
+// with --log_level=3 without any cross-layer coupling.
 
 namespace xe {
 namespace kernel {
@@ -126,15 +131,14 @@ dword_result_t NtQueryInformationFile_entry(
       info->end_of_file = file->entry()->size();
       info->attributes = file->entry()->attributes();
       out_length = sizeof(*info);
-      if (cvars::rb3dx_alloc_probe) {
-        // RB3DX main_hub OOM diagnostic (--rb3dx_alloc_probe): the guest
-        // GetFileSize (xapilib @ 0x82840070) sources allocation sizes here.
-        XELOGI(
-            "RB3DX QIF PROBE: NtQueryInformationFile(NetworkOpen) path='{}' "
-            "end_of_file={} (0x{:X}) info_ptr=0x{:08X}",
-            file->path(), uint64_t(file->entry()->size()),
-            uint64_t(file->entry()->size()), info_ptr.guest_address());
-      }
+      // RB3DX main_hub OOM diagnostic: the guest GetFileSize (xapilib @
+      // 0x82840070) sources allocation sizes here. Was gated on
+      // --rb3dx_alloc_probe; see the note at the top of this file.
+      XELOGD(
+          "RB3DX QIF PROBE: NtQueryInformationFile(NetworkOpen) path='{}' "
+          "end_of_file={} (0x{:X}) info_ptr=0x{:08X}",
+          file->path(), uint64_t(file->entry()->size()),
+          uint64_t(file->entry()->size()), info_ptr.guest_address());
       break;
     }
     case XFileAlignmentInformation: {

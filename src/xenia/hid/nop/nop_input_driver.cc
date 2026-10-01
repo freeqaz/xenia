@@ -22,6 +22,16 @@
 #include "xenia/memory.h"
 #include "xenia/ui/virtual_key.h"
 
+DEFINE_string(
+    scripted_pad_subtypes, "",
+    "Comma-separated XINPUT_DEVSUBTYPE per scripted pad, e.g. \"1,8\" = pad0 "
+    "gamepad, pad1 drums. Empty entries / missing pads default to 1 "
+    "(XINPUT_DEVSUBTYPE_GAMEPAD). RB3 maps controllers to overshell slots by "
+    "subtype (6/11=guitar, 8=drums, 15=keytar, 25=pro guitar), and only ONE "
+    "slot accepts plain gamepads -- two scripted pads can only both join a "
+    "band if they present as different instrument subtypes.",
+    "HID");
+
 namespace xe {
 namespace hid {
 namespace nop {
@@ -98,10 +108,26 @@ std::string ReadGuestScreenName(Memory* memory, uint32_t screen_ptr,
 
 }  // namespace
 
-NopInputDriver::NopInputDriver(xe::ui::Window* window, size_t window_z_order)
-    : InputDriver(window, window_z_order) {}
+// Singleton bridge for NopInjectButtonPress (one nop driver per process in
+// practice; last-created wins, cleared on destruction).
+static std::atomic<NopInputDriver*> s_nop_driver_instance{nullptr};
 
-NopInputDriver::~NopInputDriver() = default;
+void NopInjectButtonPress(uint32_t pad, uint16_t buttons,
+                          uint64_t duration_ms) {
+  NopInputDriver* driver = s_nop_driver_instance.load(std::memory_order_acquire);
+  if (driver) {
+    driver->InjectButtonPress(buttons, duration_ms, pad);
+  }
+}
+
+NopInputDriver::NopInputDriver(xe::ui::Window* window, size_t window_z_order)
+    : InputDriver(window, window_z_order) {
+  s_nop_driver_instance.store(this, std::memory_order_release);
+}
+
+NopInputDriver::~NopInputDriver() {
+  s_nop_driver_instance.store(nullptr, std::memory_order_release);
+}
 
 X_STATUS NopInputDriver::Setup() { return X_STATUS_SUCCESS; }
 
@@ -176,6 +202,19 @@ void NopInputDriver::SetScriptedInput(const std::string& script) {
       }
     }
 
+    // Parse optional pad-target suffix "@N" (default pad 0), e.g. "A@1".
+    uint8_t pad = 0;
+    size_t at = button_str.find('@');
+    if (at != std::string::npos) {
+      std::string pad_str = button_str.substr(at + 1);
+      button_str = button_str.substr(0, at);
+      try {
+        int p = std::stoi(pad_str);
+        if (p >= 0 && p < static_cast<int>(kMaxPads)) pad = static_cast<uint8_t>(p);
+      } catch (...) {
+      }
+    }
+
     // Parse button (support + for combos like "A+START")
     uint16_t buttons = 0;
     std::istringstream btn_ss(button_str);
@@ -185,9 +224,9 @@ void NopInputDriver::SetScriptedInput(const std::string& script) {
     }
 
     if (buttons) {
-      scripted_events_.push_back({time_ms, buttons, duration_ms});
-      XELOGI("Scripted input: {}ms button=0x{:04X} hold={}ms", time_ms,
-             buttons, duration_ms);
+      scripted_events_.push_back({time_ms, buttons, duration_ms, pad});
+      XELOGI("Scripted input: {}ms button=0x{:04X} hold={}ms pad={}", time_ms,
+             buttons, duration_ms, pad);
     }
   }
 
@@ -299,17 +338,65 @@ void NopInputDriver::LoadScriptFile(const std::string& path) {
          script_directives_.size(), path);
 }
 
-void NopInputDriver::InjectButtonPress(uint16_t buttons, uint64_t duration_ms) {
+void NopInputDriver::InjectButtonPress(uint16_t buttons, uint64_t duration_ms,
+                                       uint32_t pad) {
+  if (pad >= kMaxPads) {
+    return;
+  }
   std::lock_guard<std::mutex> lock(inject_mutex_);
   InjectedEvent ev;
   ev.start = std::chrono::steady_clock::now();
   ev.duration_ms = duration_ms;
   ev.buttons = buttons;
+  ev.pad = static_cast<uint8_t>(pad);
   injected_events_.push_back(ev);
+}
+
+// RB3 (TU5, title 0x45410914) screen-name read. The RB3 UI singleton is a
+// BandUI at a FIXED address (TheBandUI = 0x82DFD2B0 -- the object itself, not
+// a pointer to it; the frame loop's TheUI pointer global 0x82C721F0 is
+// statically initialized to it), with mCurrentScreen @ +0x2C and the screen's
+// name pointer @ +0x18. This layout is unrelated to DC3's (a pointer global at
+// 0x82F1A8E0, mCurrentScreen @ +0x48, name @ +0x1C/+0x20), so screen-aware
+// scripts need both readers. Returns "" if the layout does not read plausibly,
+// which is how the caller decides which game it is looking at.
+std::string NopInputDriver::ReadRb3ScreenName() const {
+  if (!memory_) return "";
+  constexpr uint32_t kTheBandUI = 0x82DFD2B0;
+  if (!IsGuestReadable(memory_, kTheBandUI + 0x30, 4)) return "";
+  auto* ui_obj = memory_->TranslateVirtual<uint8_t*>(kTheBandUI);
+  uint32_t cur_screen = xe::load_and_swap<uint32_t>(ui_obj + 0x2C);
+  if (!cur_screen || cur_screen >= 0xF0000000) return "";
+  if (!IsGuestReadable(memory_, cur_screen + 0x18, 4)) return "";
+  auto* scr = memory_->TranslateVirtual<uint8_t*>(cur_screen);
+  uint32_t name_ptr = xe::load_and_swap<uint32_t>(scr + 0x18);
+  if (!name_ptr || name_ptr >= 0xF0000000) return "";
+  std::string result;
+  for (uint32_t i = 0; i < 64; ++i) {
+    if (!IsGuestReadable(memory_, name_ptr + i, 1)) return "";
+    char ch = static_cast<char>(*memory_->TranslateVirtual<uint8_t*>(name_ptr + i));
+    if (!ch) return result;
+    unsigned char uch = static_cast<unsigned char>(ch);
+    if (!(std::isalnum(uch) || ch == '_')) return "";
+    result.push_back(ch);
+  }
+  return "";
 }
 
 std::string NopInputDriver::ReadCurrentScreenName() const {
   if (!memory_) return "";
+
+  // RB3 first: its read is strictly validated (fixed object address, name must
+  // be a clean identifier), so a hit is unambiguous and a miss costs two loads.
+  // Record which layout answered: RB3 and DC3 share screen names ("game_screen"
+  // exists in both) but NOT addresses, so the DC3 gameplay poking below must
+  // never fire on an RB3 name.
+  std::string rb3 = ReadRb3ScreenName();
+  if (!rb3.empty()) {
+    screen_name_is_rb3_ = true;
+    return rb3;
+  }
+  screen_name_is_rb3_ = false;
 
   constexpr uint32_t kTheUI = 0x82F1A8E0;
   auto* ui_ptr =
@@ -350,7 +437,10 @@ void NopInputDriver::UpdateDc3HostBeatDrive() {
     last_screen_read_time_ = now;
   }
 
-  if (last_screen_name_ != "game_screen") {
+  // RB3 also has a screen literally named "game_screen"; everything below this
+  // point addresses DC3 singletons by absolute guest address and WRITES to
+  // some of them, so it must not run for RB3.
+  if (last_screen_name_ != "game_screen" || screen_name_is_rb3_) {
     if (dc3_host_beat_drive_active_) {
       XELOGI("DC3 Script: host beat drive deactivated on '{}'",
              last_screen_name_);
@@ -493,7 +583,7 @@ void NopInputDriver::UpdateDc3HostBeatDrive() {
 }
 
 void NopInputDriver::ProbeDc3GameplayState() {
-  if (!memory_ || last_screen_name_ != "game_screen") {
+  if (!memory_ || last_screen_name_ != "game_screen" || screen_name_is_rb3_) {
     return;
   }
 
@@ -914,14 +1004,28 @@ uint16_t NopInputDriver::GetScreenAwareButtons() {
 
 X_RESULT NopInputDriver::GetCapabilities(uint32_t user_index, uint32_t flags,
                                          X_INPUT_CAPABILITIES* out_caps) {
-  if (!scripted_mode_ || user_index != 0) {
+  if (!scripted_mode_ || user_index >= kMaxPads) {
     return X_ERROR_DEVICE_NOT_CONNECTED;
   }
 
-  // Report a standard wired gamepad on port 0
+  // Report a wired pad on this port. Subtype defaults to plain gamepad but is
+  // overridable per pad via --scripted_pad_subtypes (RB3 slot-maps by subtype;
+  // see the cvar help).
+  static uint8_t s_pad_subtypes[kMaxPads] = {0};
+  static bool s_subtypes_parsed = false;
+  if (!s_subtypes_parsed) {
+    s_subtypes_parsed = true;
+    for (uint32_t i = 0; i < kMaxPads; ++i) s_pad_subtypes[i] = 0x01;
+    std::stringstream ss(cvars::scripted_pad_subtypes);
+    std::string item;
+    for (uint32_t i = 0; i < kMaxPads && std::getline(ss, item, ','); ++i) {
+      int v = item.empty() ? 1 : std::atoi(item.c_str());
+      if (v > 0 && v < 256) s_pad_subtypes[i] = static_cast<uint8_t>(v);
+    }
+  }
   std::memset(reinterpret_cast<void*>(out_caps), 0, sizeof(*out_caps));
-  out_caps->type = 0x01;      // XINPUT_DEVTYPE_GAMEPAD
-  out_caps->sub_type = 0x01;  // XINPUT_DEVSUBTYPE_GAMEPAD
+  out_caps->type = 0x01;  // XINPUT_DEVTYPE_GAMEPAD
+  out_caps->sub_type = s_pad_subtypes[user_index];
   out_caps->flags = 0;
   out_caps->gamepad.buttons = 0xFFFF;  // All buttons supported
   out_caps->gamepad.left_trigger = 0xFF;
@@ -936,12 +1040,16 @@ X_RESULT NopInputDriver::GetCapabilities(uint32_t user_index, uint32_t flags,
   return X_ERROR_SUCCESS;
 }
 
-uint16_t NopInputDriver::GetCurrentButtons() {
-  UpdateDc3HostBeatDrive();
+uint16_t NopInputDriver::GetCurrentButtons(uint32_t pad) {
+  // DC3 host-beat drive + screen-aware nav + dynamic injection are all global
+  // (single-driver) state; only evaluate them once, on the primary pad.
+  if (pad == 0) {
+    UpdateDc3HostBeatDrive();
+  }
 
   uint16_t active_buttons = 0;
 
-  // Time-based scripted events
+  // Time-based scripted events (filtered by target pad)
   if (!scripted_events_.empty()) {
     auto now = std::chrono::steady_clock::now();
     auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -949,6 +1057,7 @@ uint16_t NopInputDriver::GetCurrentButtons() {
                           .count();
 
     for (const auto& event : scripted_events_) {
+      if (event.pad != pad) continue;
       if (elapsed_ms >= (int64_t)event.time_ms &&
           elapsed_ms < (int64_t)(event.time_ms + event.duration_ms)) {
         active_buttons |= event.buttons;
@@ -956,25 +1065,29 @@ uint16_t NopInputDriver::GetCurrentButtons() {
     }
   }
 
-  // Screen-aware scripted events
-  if (screen_aware_mode_) {
-    active_buttons |= GetScreenAwareButtons();
+  if (pad == 0) {
+    // Screen-aware scripted events (DC3 nav, primary pad only)
+    if (screen_aware_mode_) {
+      active_buttons |= GetScreenAwareButtons();
+    }
   }
 
-  // Dynamic injected events
   {
+    // Dynamic injected events (per-pad)
     std::lock_guard<std::mutex> lock(inject_mutex_);
     auto now = std::chrono::steady_clock::now();
     for (auto it = injected_events_.begin(); it != injected_events_.end();) {
       auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                          now - it->start)
                          .count();
-      if (elapsed < (int64_t)it->duration_ms) {
-        active_buttons |= it->buttons;
-        ++it;
-      } else {
+      if (elapsed >= (int64_t)it->duration_ms) {
         it = injected_events_.erase(it);
+        continue;
       }
+      if (it->pad == pad) {
+        active_buttons |= it->buttons;
+      }
+      ++it;
     }
   }
 
@@ -1018,15 +1131,15 @@ uint16_t NopInputDriver::ButtonToVK(uint16_t button) const {
 
 X_RESULT NopInputDriver::GetState(uint32_t user_index,
                                   X_INPUT_STATE* out_state) {
-  if (!scripted_mode_ || user_index != 0) {
+  if (!scripted_mode_ || user_index >= kMaxPads) {
     return X_ERROR_DEVICE_NOT_CONNECTED;
   }
 
-  uint16_t active_buttons = GetCurrentButtons();
+  uint16_t active_buttons = GetCurrentButtons(user_index);
 
   // Generate keystroke events for button transitions
-  uint16_t pressed = active_buttons & ~prev_buttons_;
-  uint16_t released = prev_buttons_ & ~active_buttons;
+  uint16_t pressed = active_buttons & ~prev_buttons_[user_index];
+  uint16_t released = prev_buttons_[user_index] & ~active_buttons;
 
   // Check each button bit for transitions
   for (uint16_t bit = 1; bit != 0; bit <<= 1) {
@@ -1034,24 +1147,24 @@ X_RESULT NopInputDriver::GetState(uint32_t user_index,
       X_INPUT_KEYSTROKE ks = {};
       ks.virtual_key = ButtonToVK(bit);
       ks.flags = X_INPUT_KEYSTROKE_KEYDOWN;
-      ks.user_index = 0;
+      ks.user_index = static_cast<uint8_t>(user_index);
       if (ks.virtual_key) {
-        keystroke_queue_.push_back(ks);
-        XELOGI("Keystroke KEYDOWN: VK=0x{:04X} button=0x{:04X}",
-               (uint16_t)ks.virtual_key, bit);
+        keystroke_queue_[user_index].push_back(ks);
+        XELOGI("Keystroke KEYDOWN: VK=0x{:04X} button=0x{:04X} pad={}",
+               (uint16_t)ks.virtual_key, bit, user_index);
       }
     }
     if (released & bit) {
       X_INPUT_KEYSTROKE ks = {};
       ks.virtual_key = ButtonToVK(bit);
       ks.flags = X_INPUT_KEYSTROKE_KEYUP;
-      ks.user_index = 0;
+      ks.user_index = static_cast<uint8_t>(user_index);
       if (ks.virtual_key) {
-        keystroke_queue_.push_back(ks);
+        keystroke_queue_[user_index].push_back(ks);
       }
     }
   }
-  prev_buttons_ = active_buttons;
+  prev_buttons_[user_index] = active_buttons;
 
   std::memset(reinterpret_cast<void*>(out_state), 0, sizeof(*out_state));
   out_state->packet_number = packet_number_++;
@@ -1062,7 +1175,7 @@ X_RESULT NopInputDriver::GetState(uint32_t user_index,
 
 X_RESULT NopInputDriver::SetState(uint32_t user_index,
                                   X_INPUT_VIBRATION* vibration) {
-  if (!scripted_mode_ || user_index != 0) {
+  if (!scripted_mode_ || user_index >= kMaxPads) {
     return X_ERROR_DEVICE_NOT_CONNECTED;
   }
   return X_ERROR_SUCCESS;
@@ -1070,40 +1183,40 @@ X_RESULT NopInputDriver::SetState(uint32_t user_index,
 
 X_RESULT NopInputDriver::GetKeystroke(uint32_t user_index, uint32_t flags,
                                       X_INPUT_KEYSTROKE* out_keystroke) {
-  if (!scripted_mode_ || user_index != 0) {
+  if (!scripted_mode_ || user_index >= kMaxPads) {
     return X_ERROR_DEVICE_NOT_CONNECTED;
   }
 
   // Poll current state to generate any pending keystroke events
   // (in case GetKeystroke is called without GetState)
-  uint16_t active_buttons = GetCurrentButtons();
-  uint16_t pressed = active_buttons & ~prev_buttons_;
-  uint16_t released = prev_buttons_ & ~active_buttons;
+  uint16_t active_buttons = GetCurrentButtons(user_index);
+  uint16_t pressed = active_buttons & ~prev_buttons_[user_index];
+  uint16_t released = prev_buttons_[user_index] & ~active_buttons;
   for (uint16_t bit = 1; bit != 0; bit <<= 1) {
     if (pressed & bit) {
       X_INPUT_KEYSTROKE ks = {};
       ks.virtual_key = ButtonToVK(bit);
       ks.flags = X_INPUT_KEYSTROKE_KEYDOWN;
-      ks.user_index = 0;
+      ks.user_index = static_cast<uint8_t>(user_index);
       if (ks.virtual_key) {
-        keystroke_queue_.push_back(ks);
-        XELOGI("Keystroke KEYDOWN: VK=0x{:04X} button=0x{:04X}",
-               (uint16_t)ks.virtual_key, bit);
+        keystroke_queue_[user_index].push_back(ks);
+        XELOGI("Keystroke KEYDOWN: VK=0x{:04X} button=0x{:04X} pad={}",
+               (uint16_t)ks.virtual_key, bit, user_index);
       }
     }
     if (released & bit) {
       X_INPUT_KEYSTROKE ks = {};
       ks.virtual_key = ButtonToVK(bit);
       ks.flags = X_INPUT_KEYSTROKE_KEYUP;
-      ks.user_index = 0;
-      if (ks.virtual_key) keystroke_queue_.push_back(ks);
+      ks.user_index = static_cast<uint8_t>(user_index);
+      if (ks.virtual_key) keystroke_queue_[user_index].push_back(ks);
     }
   }
-  prev_buttons_ = active_buttons;
+  prev_buttons_[user_index] = active_buttons;
 
-  if (!keystroke_queue_.empty()) {
-    *out_keystroke = keystroke_queue_.front();
-    keystroke_queue_.pop_front();
+  if (!keystroke_queue_[user_index].empty()) {
+    *out_keystroke = keystroke_queue_[user_index].front();
+    keystroke_queue_[user_index].pop_front();
     return X_ERROR_SUCCESS;
   }
 

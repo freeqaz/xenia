@@ -20,6 +20,8 @@
 
 #include "third_party/fmt/include/fmt/format.h"
 #include "xenia/base/assert.h"
+#include "xenia/base/cvar.h"
+#include "xenia/base/filesystem.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
 #include "xenia/base/profiling.h"
@@ -34,6 +36,17 @@
 #include "xenia/gpu/vulkan/vulkan_shader.h"
 #include "xenia/gpu/xenos.h"
 #include "xenia/ui/vulkan/vulkan_util.h"
+
+DEFINE_string(
+    vulkan_pipeline_cache_path, "",
+    "Directory to persist the VkPipelineCache blob "
+    "(xenia_vulkan_pipeline_cache.bin) in. Empty = "
+    "<temp_directory_path>/xenia-pipeline-cache. Warming this cache takes "
+    "pipeline creation from ~15ms to ~0.1ms and is what the DC3 "
+    "--dc3_inline_render path needs to avoid its CP-stall deadlock. Before "
+    "this cvar existed the path was hardcoded to /tmp/claude, which only "
+    "existed on one bring-up machine.",
+    "GPU");
 
 namespace xe {
 namespace gpu {
@@ -52,6 +65,10 @@ VulkanPipelineCache::VulkanPipelineCache(
 VulkanPipelineCache::~VulkanPipelineCache() { Shutdown(); }
 
 bool VulkanPipelineCache::Initialize() {
+  // Re-arm the creation threads after a previous Shutdown() (the cache is
+  // re-Initialize()able, e.g. across a device-lost recreate).
+  creation_threads_stopping_.store(false, std::memory_order_release);
+
   const ui::vulkan::VulkanDevice* const vulkan_device =
       command_processor_.GetVulkanDevice();
 
@@ -94,8 +111,25 @@ bool VulkanPipelineCache::Initialize() {
     cache_create_info.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
 
     // Try to load existing cache from disk.
-    pipeline_cache_path_ = std::filesystem::path("/tmp/claude") /
-                           "xenia_vulkan_pipeline_cache.bin";
+    //
+    // This used to be a hardcoded "/tmp/claude" -- a scratch directory from
+    // the bring-up box that does not exist anywhere else, so on every other
+    // machine the load silently missed and the save silently created it.
+    // Derive it instead; --vulkan_pipeline_cache_path overrides.
+    if (!cvars::vulkan_pipeline_cache_path.empty()) {
+      pipeline_cache_path_ =
+          xe::to_path(cvars::vulkan_pipeline_cache_path) /
+          "xenia_vulkan_pipeline_cache.bin";
+    } else {
+      std::error_code temp_dir_ec;
+      std::filesystem::path temp_dir =
+          std::filesystem::temp_directory_path(temp_dir_ec);
+      if (temp_dir_ec) {
+        temp_dir = std::filesystem::path("/tmp");
+      }
+      pipeline_cache_path_ = temp_dir / "xenia-pipeline-cache" /
+                             "xenia_vulkan_pipeline_cache.bin";
+    }
     std::vector<uint8_t> cache_data;
     if (std::filesystem::exists(pipeline_cache_path_)) {
       FILE* cache_file = fopen(pipeline_cache_path_.c_str(), "rb");
@@ -127,7 +161,42 @@ bool VulkanPipelineCache::Initialize() {
   return true;
 }
 
+void VulkanPipelineCache::ReapFinishedCreationThreads() {
+  std::lock_guard<std::mutex> lock(creation_threads_mutex_);
+  for (auto it = creation_threads_.begin(); it != creation_threads_.end();) {
+    // `done` is the worker's last store, so join() here returns promptly.
+    if (it->pending->done.load(std::memory_order_acquire)) {
+      if (it->thread.joinable()) {
+        it->thread.join();
+      }
+      it = creation_threads_.erase(it);
+    } else {
+      ++it;
+    }
+  }
+}
+
+void VulkanPipelineCache::ShutdownCreationThreads() {
+  creation_threads_stopping_.store(true, std::memory_order_release);
+  std::vector<CreationThread> threads;
+  {
+    std::lock_guard<std::mutex> lock(creation_threads_mutex_);
+    threads.swap(creation_threads_);
+  }
+  for (auto& entry : threads) {
+    if (entry.thread.joinable()) {
+      entry.thread.join();
+    }
+  }
+}
+
 void VulkanPipelineCache::Shutdown() {
+  // Join the background creation threads FIRST. They run EnsurePipelineCreated
+  // against `this` and touch shaders_ / geometry_shaders_ / vk_pipeline_cache_,
+  // all of which are torn down below. Once this returns no worker is running,
+  // so the pending_pipelines_ spin that follows only collects results.
+  ShutdownCreationThreads();
+
   const ui::vulkan::VulkanDevice* const vulkan_device =
       command_processor_.GetVulkanDevice();
   const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
@@ -483,14 +552,29 @@ bool VulkanPipelineCache::ConfigurePipeline(
     creation_args.geometry_shader = geometry_shader;
     creation_args.render_pass = render_pass;
 
-    std::thread([this, pending, temp_entry,
-                 creation_args]() mutable {
-      creation_args.pipeline = temp_entry.get();
-      if (EnsurePipelineCreated(creation_args)) {
-        pending->result = temp_entry->second.pipeline;
+    // Reap threads that have already finished before adding another, so the
+    // vector tracks only live work.
+    ReapFinishedCreationThreads();
+
+    std::thread creation_thread([this, pending, temp_entry,
+                                 creation_args]() mutable {
+      // Bail if Shutdown() has started -- nobody will read the result, and
+      // vkCreateGraphicsPipelines can take 10-100ms we would be holding the
+      // join up for. `done` is still set so the Shutdown() spin below cannot
+      // wait forever on this entry.
+      if (!creation_threads_stopping_.load(std::memory_order_acquire)) {
+        creation_args.pipeline = temp_entry.get();
+        if (EnsurePipelineCreated(creation_args)) {
+          pending->result = temp_entry->second.pipeline;
+        }
       }
       pending->done.store(true, std::memory_order_release);
-    }).detach();
+    });
+    {
+      std::lock_guard<std::mutex> lock(creation_threads_mutex_);
+      creation_threads_.push_back(
+          CreationThread{std::move(creation_thread), pending});
+    }
 
     // In warmup mode, wait for the pipeline we just submitted.
     if (warmup_wait_) {

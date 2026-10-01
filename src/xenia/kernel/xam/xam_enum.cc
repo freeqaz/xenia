@@ -77,6 +77,13 @@ uint32_t xeXamEnumerate(uint32_t handle, uint32_t flags, lpvoid_t buffer_ptr,
     // and count=0 rather than propagating ERROR_NO_MORE_FILES (0x12) through
     // XGetOverlappedResult. Games like Dance Central 3 only handle result
     // codes 0 and 0x65B. Keep that conversion HERE ONLY (overlapped path).
+    //
+    // This is DELIBERATE ALL-TITLE BEHAVIOUR, not a DC3 hack, and is
+    // intentionally left ungated (fork-cleanup C-section review 2026-08-25,
+    // option b): it matches what the real console's overlapped completion
+    // does, and the synchronous path above -- the one that actually regressed
+    // a title -- is explicitly excluded. A cvar here would only add a way to
+    // reintroduce the DC3 failure.
     auto run_overlapped = [run](uint32_t& extended_error,
                                 uint32_t& length) -> X_RESULT {
       X_RESULT result = run(extended_error, length);

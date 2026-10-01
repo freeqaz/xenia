@@ -320,6 +320,16 @@ void XamLoaderLaunchTitle_entry(lpstring_t raw_name_ptr, dword_t flags) {
 DECLARE_XAM_EXPORT1(XamLoaderLaunchTitle, kNone, kSketchy);
 
 void XamLoaderTerminateTitle_entry() {
+  // clean-TU5 diag: retail RB3 cleanly terminates ~16s into boot; capture the
+  // guest caller so we can name the code path that gives up on the title.
+  auto* cur = XThread::GetCurrentThread();
+  uint32_t lr = 0, tid = 0;
+  if (cur && cur->thread_state() && cur->thread_state()->context()) {
+    lr = static_cast<uint32_t>(cur->thread_state()->context()->lr);
+    tid = cur->thread_id();
+  }
+  XELOGE("RB3DX TERMINATE: XamLoaderTerminateTitle called tid={} guest_lr={:08X}",
+         tid, lr);
   // This function does not return.
   kernel_state()->TerminateTitle();
 }
@@ -357,7 +367,19 @@ DECLARE_XAM_EXPORT1(XamQueryLiveHiveW, kNone, kStub);
 
 // Xbox 360 SYSTEMTIME: 8 big-endian WORD fields (16 bytes total)
 // wYear, wMonth, wDayOfWeek, wDay, wHour, wMinute, wSecond, wMilliseconds
+//
+// NOTE(fork-cleanup 2026-08-25): GetLocalTime / GetSystemTime / GetTickCount /
+// OutputDebugStringA/W / RtlOutputDebugString below are kernel32-shaped names
+// registered in the XAM export table. They resolve for the titles that need
+// them, but xboxkrnl is arguably where they belong; moving them means moving
+// the ordinals too, so it is left as an open question rather than churned.
 static void FillSystemTime(lpvoid_t out_ptr, const struct tm* t, int millis) {
+  if (!out_ptr) {
+    // Guest passed a null buffer; writing 16 bytes at membase+0 would corrupt
+    // the low guest page rather than fault.
+    XELOGW("FillSystemTime: null out_ptr, ignoring");
+    return;
+  }
   auto* p = reinterpret_cast<uint8_t*>(out_ptr.host_address());
   xe::store_and_swap<uint16_t>(p + 0, static_cast<uint16_t>(t->tm_year + 1900));
   xe::store_and_swap<uint16_t>(p + 2, static_cast<uint16_t>(t->tm_mon + 1));
