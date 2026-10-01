@@ -54,6 +54,7 @@
 #include "xenia/cpu/ppc/ppc_context.h"
 #include "xenia/cpu/processor.h"
 #include "xenia/cpu/thread_state.h"
+#include "xenia/dc3_dta_channel.h"
 #include "xenia/dc3_hack_pack.h"
 #include "xenia/dc3_nui_patch_resolver.h"
 #include "xenia/dc3_runtime_telemetry.h"
@@ -90,6 +91,8 @@
 #endif  // XE_ARCH
 
 DECLARE_int32(user_language);
+
+DECLARE_string(dc3_dta_channel);
 
 DEFINE_double(time_scalar, 1.0,
               "Scalar used to speed or slow time (1x, 2x, 1/2x, etc).",
@@ -7058,6 +7061,13 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
       auto ik_result = ApplyDc3IKTelemetry(ik_ctx);
       XELOGI("DC3: IK telemetry (original XEX): applied={} skipped={} failed={}",
              ik_result.applied, ik_result.skipped, ik_result.failed);
+    }
+
+    // dc3-oracle: DTA evaluation channel (default off => no override, no
+    // behaviour change). See src/xenia/dc3_dta_channel.h.
+    if (!cvars::dc3_dta_channel.empty()) {
+      Dc3DtaChannelInstall(processor_.get(), memory_.get(),
+                           cvars::dc3_dta_channel);
     }
   }
   // RB3DX / RB3 TU5 (0x45410914): load the from-source RB3Enhanced.dll for the

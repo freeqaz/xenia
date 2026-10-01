@@ -11,6 +11,7 @@
 #include "xenia/base/logging.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/util/shim_utils.h"
+#include "xenia/kernel/xboxkrnl/xboxkrnl_cpp_throw_hook.h"
 #include "xenia/kernel/xboxkrnl/xboxkrnl_private.h"
 #include "xenia/kernel/xthread.h"
 #include "xenia/xbox.h"
@@ -100,7 +101,15 @@ typedef struct {
   xe::be<uint32_t> catchable_type_array_ptr;
 } x_s__ThrowInfo;
 
+CppThrowHook g_cpp_throw_hook = nullptr;
+
 void HandleCppException(pointer_t<X_EXCEPTION_RECORD> record) {
+  // A registered hook with a recovery point armed on this thread longjmps out
+  // and never returns (see xboxkrnl_cpp_throw_hook.h).
+  if (g_cpp_throw_hook && record->number_parameters >= 2) {
+    g_cpp_throw_hook(record->exception_information[1]);
+  }
+
   // C++ exception.
   // https://blogs.msdn.com/b/oldnewthing/archive/2010/07/30/10044061.aspx
   // http://www.drdobbs.com/visual-c-exception-handling-instrumentat/184416600
