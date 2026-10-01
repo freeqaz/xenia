@@ -61,20 +61,33 @@ See the measured table in the baseline commit message and
 
 ## Pinned inputs
 
-- Content: `build_content.sh` → `$FORK_REGRESS_CONTENT` (default
-  `/home/free/tmp/fork-regress-content`, not `/tmp`, never in git), with
-  `MANIFEST.sha256`. Every copied input is verified against an expected
-  sha256; an existing file is never overwritten with different bytes.
-- Configs (in git, small text): `config/dc3-oracle.defaults.toml` (= the
-  dc3-oracle all-defaults toml, for S1/S1V/S2/S6.1-2) and
-  `config/shared-2026-08-29.toml` (the shared toml every 627 and RB3 §8v-8x
-  result was measured under, for S3/S4/S5/S6.3). Each run gets a private copy.
-- Resolver inputs passed explicitly so no host path is auto-probed:
-  `symbols.txt` @ dc3-decomp `c362ede1c` (S1 family) / `3504a8a58` (S3, the
-  copy in force on 2026-08-29), fingerprints @ xenia `a5fc2f1b6`, the
-  2026-08-24 patch manifest.
-- `reference/trap627_s66.json`: count, LR histogram and sequence hash of
-  `dc3_nonreg_s66.log`.
+Content: `build_content.sh` → `$FORK_REGRESS_CONTENT` (default
+`/home/free/tmp/fork-regress-content`, not `/tmp`, never in git), with
+`MANIFEST.sha256` (sha256 for files, target + size + mtime for symlinks).
+Every copied input is verified against an expected sha256; an existing file is
+never overwritten with different bytes.
+
+| dir | what | used by |
+|---|---|---|
+| `dc3-original/` | `debug.xex` (sha256 `2d5e4a32…`) + symlinks to the 15 data entries that sit next to it in `dc3-decomp/orig/373307D9` (`gen`, `grammar`, `nuisp*`, `nxeart`, …). The xex's directory is `game:\`; without the data the boot hangs | S1 S1V S2 S6.2 |
+| `dc3-inputs/` | `xenia-ymca.txt` (`ea733eee…`), `symbols.txt` @ dc3-decomp `c362ede1c`, fingerprints @ xenia `a5fc2f1b6` | S1 family |
+| `dc3-decomp-2026-08-24/` | decomp `default.xex` (`b4af75f8…`, written 2026-08-24 10:19), its patch manifest, `symbols.txt` @ `3504a8a58` (in force on 2026-08-29), fingerprints, `gen` link | S3; the manifest also for S1 (else it is auto-probed) |
+| `rb3/tu5-clean-nodd/` | `clean_tu5_nodd.xex` (`6d73992c…`) + `gen/` of per-file links to the torrent's 10 main arks + `main_xbox.hdr` (no `patch_xbox*`: that is RB3DX's LOLZ-encrypted ark, which retail cannot read; per-file links also avoid the torrent's `gen/gen` self-loop) + `AvatarAwards`, `nxeart`, `charnames.zbm` | S4 |
+| `rb3/rb3dx/` | RB3DX `default.xex` (`6639ce25…`) + the same links, patch ark included | S5 S6.3 |
+| `rb3/mogg_key_table.hex` | 64 bytes at VA `0x82C76258` of `rb3-xenon/orig/45410914/band.exe` (the deobscured RB3DX-lineage image; `dx_vs_retail_diff.txt`). Mode 0400, refused unless its sha256 is `4321690f…` | S4 |
+| `rb3/seed-post-s66-2026-08-29/` | the RB3 profile content s66 ran on (`globaloptions`, `songcache`, `rbdxcache`, `band3/save.dat`), copied into the private content root before S4. Fresh: the boot reaches splash but the A-press join never fires; globaloptions without band3: parks in the startup autosave | S4 |
+| `dc1/` | DC1 TU0 `default.xex` alone (no disc data: it only has to boot far enough for title hooks to fire or not) | S6.1 |
+
+Configs (in git, small text): `config/dc3-oracle.defaults.toml` (the
+dc3-oracle all-defaults toml) for the DC3 original runs and
+`config/shared-2026-08-29.toml` (the shared toml every 627 and RB3 §8v-8x
+result was measured under) for S3/S4/S5/S6.3. Each run gets a private copy.
+A pinned toml FREEZES every cvar it names, so a cleanup lane that flips a
+compiled-in default is not seen by those runs: S0's defaults diff is what
+catches it.
+
+`reference/trap627_s66.json`: count, LR histogram and LR-sequence hash of
+`dc3_nonreg_s66.log`.
 
 ## Rules the harness keeps
 

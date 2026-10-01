@@ -12,6 +12,8 @@ xenia itself):
   finalize   <scenario> <run-dir>            analyse one run, write verdict.json
   aggregate  <scenario> <scenario-dir>       combine runs -> scenario.json
   summary    <out-dir>                       combine scenarios -> summary.json
+  refinalize <out-dir>                       re-judge every kept run (new gate or
+                                             analyzer), re-aggregate, re-summarize
 
 verdict.json schema "fork-regress/v1":
   scenario, run_dir, verdict (PASS|FAIL|INCONCLUSIVE|SKIPPED), reasons[],
@@ -62,9 +64,12 @@ SCENARIOS = {
                 analyzer="inertness"),
 }
 
-# Load gate. Max sampled 1-min loadavg during the run. Chosen from measured
-# outcomes, see README.md "Load threshold". Overridable with FR_LOAD_MAX.
-DEFAULT_LOAD_MAX = 60.0
+# Load gate: the MEAN of the 1-min loadavg sampled every 5 s over the run
+# (FR_LOAD_METRIC=max gates on the peak instead). Chosen from measured outcomes,
+# see README.md "Load threshold": a single spike in an otherwise quiet run
+# (max 67, mean 28) is not what breaks the flow, sustained contention is.
+# Overridable with FR_LOAD_MAX.
+DEFAULT_LOAD_MAX = 80.0
 
 
 def load_max() -> float:
@@ -72,6 +77,11 @@ def load_max() -> float:
         return float(os.environ.get("FR_LOAD_MAX", DEFAULT_LOAD_MAX))
     except ValueError:
         return DEFAULT_LOAD_MAX
+
+
+def load_metric() -> str:
+    m = os.environ.get("FR_LOAD_METRIC", "mean")
+    return m if m in ("mean", "max") else "mean"
 
 
 # --------------------------------------------------------------------------
@@ -235,7 +245,7 @@ def load_stats(run_dir: Path) -> dict:
         "psi_cpu_some_avg10_max": max(psi),
         "psi_cpu_some_avg10_mean": round(sum(psi) / len(psi), 2),
         "nproc": os.cpu_count(),
-        "threshold_load1_max": load_max(),
+        "gate": {"metric": f"load1_{load_metric()}", "threshold": load_max()},
     }
 
 
@@ -334,8 +344,8 @@ def finalize(scenario: str, run_dir: Path) -> dict:
     an = load_analyzer(spec["analyzer"])
     verdict, reasons, measurements, criteria = an.analyze(run_dir, meta)
     prov["unpinned_host_paths"] = unpinned_host_paths(run_dir, meta.get("argv", []))
-    lmax = prov["load"].get("load1_max")
-    loaded = bool(spec["flow"] and lmax is not None and lmax > load_max())
+    lval = prov["load"].get(f"load1_{load_metric()}")
+    loaded = bool(spec["flow"] and lval is not None and lval > load_max())
     if meta.get("interrupted"):
         verdict, reasons = "INCONCLUSIVE", reasons + ["harness interrupted"]
     sig = classify_signal(meta.get("rc"))
@@ -346,7 +356,7 @@ def finalize(scenario: str, run_dir: Path) -> dict:
         reasons.append(f"process died from external {sig}")
     if loaded and verdict == "FAIL":
         verdict = "INCONCLUSIVE"
-        reasons.append(f"host loaded: 1-min load max {lmax} > {load_max()} "
+        reasons.append(f"host loaded: 1-min load {load_metric()} {lval} > {load_max()} "
                        f"(a FAIL under load is not evidence against the binary)")
     v = {"schema": SCHEMA, "scenario": scenario, "scenario_name": spec["name"],
          "run_dir": str(run_dir), "verdict": verdict, "reasons": reasons,
@@ -457,6 +467,23 @@ def main(argv):
         return 0
     if cmd == "summary":
         v = summary(Path(argv[2]))
+        for s, verdict in v["verdicts"].items():
+            print(f"  {s:4s} {verdict}")
+        return 0
+    if cmd == "refinalize":
+        # Re-judge every run in an out-dir from its kept artefacts (run.log,
+        # run_meta.json, load.tsv), e.g. after changing FR_LOAD_MAX or an
+        # analyzer. Does not re-run anything; retries already taken stay.
+        out = Path(argv[2])
+        for s in SCENARIOS:
+            sd = out / s
+            if not sd.is_dir():
+                continue
+            for rd in sorted(sd.glob("run-*")):
+                if (rd / "run_meta.json").exists():
+                    finalize(s, rd)
+            aggregate(s, sd)
+        v = summary(out)
         for s, verdict in v["verdicts"].items():
             print(f"  {s:4s} {verdict}")
         return 0

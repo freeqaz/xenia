@@ -70,6 +70,21 @@ def condense(summary, note=""):
     return out
 
 
+WATCH = {
+    "S1V": ["game_screen_reached", "fail_screen_first_swap", "fail_screen_screen"],
+    "S2": ["answers.{+ 1 2}", "answers.{+ 5 5}", "first_poll_thread"],
+    "S3": ["count", "lr_sequence_equal", "text_fnv1a64"],
+    "S4": ["mode", "tv3_screens", "song_stream.chans", "song_stream.mState"],
+    "S5": ["tv3_screens"],
+}
+
+
+def dig(m, dotted):
+    for part in dotted.split(".") if not dotted.startswith("answers.") else ["answers", dotted[8:]]:
+        m = m.get(part) if isinstance(m, dict) else None
+    return m
+
+
 def median_milestones(sc, key_path):
     vals = {}
     for r in sc.get("runs", []):
@@ -146,6 +161,15 @@ def compare(base, cand):
                     elif lim is not None and n < lim:
                         findings.append(("IMPROVED", s, f"variant {m.get('variant')} "
                                          f"'{k}' {lim} -> {n}"))
+
+        # Watched measurements: not pass criteria, but a change is worth a
+        # line (e.g. Vulkan suddenly reaching game_screen, or the song the
+        # RB3 autopilot lands on).
+        for key in WATCH.get(s, []):
+            bvals = sorted({json.dumps(dig(r.get("measurements", {}), key)) for r in b.get("runs", [])})
+            cvals = sorted({json.dumps(dig(r.get("measurements", {}), key)) for r in c.get("runs", [])})
+            if bvals != cvals:
+                findings.append(("CHANGED", s, f"{key}: {', '.join(bvals)} -> {', '.join(cvals)}"))
 
         paths = {"S1": ["milestones_s"], "S2": ["flow", "milestones_s"],
                  "S1V": ["flow", "milestones_s"], "S4": ["screens_first_seen_s"],
