@@ -19,7 +19,7 @@ emulator, open unix sockets, and S1V uses GPU 1.
 | ID | What runs | What it measures | PASS | N (need) |
 |---|---|---|---|---|
 | S0 | nothing (static) | the binary's compiled-in cvar defaults (full map); source ratchets on this tree: title-ID literals outside `src/xenia/titles/`, `/home/free` in `src/`, `XELOGI(` in `src/xenia/gpu/` | measurements taken; the comparator lists every changed default and fails a ratchet increase | 1 (1) |
-| S1 | DC3 original `debug.xex`, null GPU, ymca flow, 230 s (the dc3-oracle command) | milestone times title/main/choose_mode/song_select/game_screen, first `gpState=2 paused=0`, first `gpState=3`, gpState=2 sample count, max SIGSEGV, `mFailThreadMsg`/TAINTED lines | title ≤ 30 s, game_screen ≤ 60 s, ≥ 60 gpState=2 samples, gpState=3 seen, rc 0 + `TIMEOUT` line, SIGSEGV 0 | 3 (2) |
+| S1 | DC3 original `debug.xex`, null GPU, ymca flow, 230 s (the dc3-oracle command) | milestone times title/main/choose_mode/song_select/game_screen, first `gpState=2 paused=0`, first `gpState=3`, gpState=2 sample count, max SIGSEGV, `mFailThreadMsg`/TAINTED lines | title ≤ 30 s, game_screen ≤ 60 s, ≥ 60 gpState=2 samples, gpState=3 seen, rc 0 + `TIMEOUT` line, SIGSEGV 0 | 5 (2): the reference chan5 passes only 5 of 8 flows on a quiet host, so "2 of 3" would fail a good binary 32% of the time |
 | S1V | S1 on Vulkan, `--vulkan_device=1`, capture every 300 swaps, private pipeline cache | frame count, capture swap indices, flow milestones, Milo fail-screen frames (first swap, screen, PNG); keeps one PNG from game_screen (else the furthest screen) | rc 0 + TIMEOUT, title reached, ≥ 10 frames, kept frame not a uniform fill. game_screen and the fail screen are recorded, not required: on chan5 and both BASELINE.md runs the Vulkan run hits a MILO_FAIL at song_select (`Could not find preview.tmov in dir song_info`) from swap 1200 | 1 (1) |
 | S2 | S1 + `--dc3_dta_channel=<run>/dta.sock`; `lib/dta_driver.py` drives `dc3-decomp/tools/console/dc3_eval.py -T xenia --socket` | channel installed, first poll thread, answers + latency, `object_list main` count, plus the S1 flow on the same run | thread `00000006`; `{+ 1 2}`→`=> 3`; `{no_such_func 1}`→`=> !! refused: script error…`; `{+ 5 5}`→`=> 10`; `{size {object_list main Object FALSE}}`→`=> <int>`; S1 criteria | 2 (1) |
 | S3 | DC3 decomp-layout `default.xex` (2026-08-24 build), 120 s, pinned 2026-08-29 shared toml | count of `tw/td forced trap hit!` and the per-LR histogram (a fingerprint of how far the decomp image boots and through which assert sites) | count == 627 and histogram == `reference/trap627_s66.json`; `layout=decomp`; manifest-fingerprint-mismatch line; TIMEOUT; rc 0. LR sequence equality recorded, not required | 2 (2) |
@@ -67,13 +67,15 @@ guess.
 | BASELINE.md b5-b7, k1-k3, c4, x1 | 100-220 | 0/6 game_screen, 4/9 boot hangs |
 | chan5 S1/S2 here | mean 11, 12, 13, 23 / **72 (max 89)** | PASS ×5 |
 | chan5 S1 here | mean **15** | FAIL: loading->game_screen stall, no guest fault (the nav-bridge race) |
+| chan5 S1, 3 more runs | mean 37 / 24 / 28 | PASS / FAIL boot hang (thread 6 never ran: the lost-resume race fixed in integrate `6bf623353`) / FAIL stall |
 | Aug-29 S1 here | mean 17, 28, 36, 36, 87 | FAIL ×5, every run with the same guest fault (a binary regression, not load) |
 | Aug-29 S1, run 1 | mean 28, **max 67**, PSI 3 | FAIL like the rest: a peak-based gate at 60 called it "loaded" |
 | Aug-29 S4 / S5 | mean 16-60 (max 78) / 17-71 (max 101) | PASS ×3 / ×3; the RB3 probe cadence halves under load, hence S4's 420 s timeout |
 | Aug-29 S3 | mean 11-116 | 627 exact every time: S3 is not load sensitive (`flow=False`) |
 
 So: below a mean of ~80, every failure observed here is a property of the
-binary or a race that also fails on a quiet host (chan5 at 15). Every failure
+binary or a race that also fails on a quiet host (chan5: 5 of 8 flows at mean
+11-37). Every failure
 the spike attributed to load sat at 100+. 80 is the conservative edge of the
 measured passes (72 here, x2 at 80-100). A short peak does not break a run; sustained
 contention does. Hence the mean, not the max. PSI cpu-some is recorded

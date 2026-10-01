@@ -48,7 +48,11 @@ SCHEMA = "fork-regress/v1"
 SCENARIOS = {
     "S0":  dict(name="static: cvar defaults + source ratchets", N=1, need=1, flow=False,
                 analyzer="static"),
-    "S1":  dict(name="DC3 original, null GPU, ymca flow", N=3, need=2, flow=True,
+    # S1 is flaky on a QUIET host even on the good reference: chan5 passed 5 of
+    # 8 flow runs at mean load 11-37 (2 loading->game_screen stalls, 1 boot
+    # hang = the lost-resume race fixed in 6bf623353). With p(pass)=0.625,
+    # the plan's "2 of 3" fails a good binary 32% of the time; "2 of 5", 7%.
+    "S1":  dict(name="DC3 original, null GPU, ymca flow", N=5, need=2, flow=True,
                 analyzer="dc3_flow"),
     "S1V": dict(name="DC3 original, Vulkan GPU 1, frame dump", N=1, need=1, flow=True,
                 analyzer="vulkan_frames"),
