@@ -34,6 +34,7 @@
 #include "third_party/rapidjson/include/rapidjson/document.h"
 #include "third_party/rapidjson/include/rapidjson/error/en.h"
 #include "third_party/fmt/include/fmt/format.h"
+#include "xenia/apu/apu_flags.h"
 #include "xenia/apu/audio_system.h"
 #include "xenia/base/assert.h"
 #include "xenia/base/byte_stream.h"
@@ -7018,6 +7019,21 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
                                  "at {:08X} to return S_OK",
                                  kXMAHALAlloc);
                         });
+
+      // The stub above leaves the XMA HAL with no contexts, which is only
+      // survivable while the guest's audio render callback never runs. The
+      // paced nop audio driver (77d85acaa) made it run: ~15 s into boot the
+      // callback faults in XMAHALWriteAndUnlockContexts (0x82E77C64) holding
+      // a lock that D3DDevice_Resume then waits on forever, so the main
+      // thread stops (no System::Poll, no DTA channel, menus only advance
+      // through the forced-transition fallbacks, game_screen never loads).
+      // Keep this title on the dummy driver unless explicitly asked for
+      // --nop_audio_driver=paced.
+      if (cvars::nop_audio_driver == "auto") {
+        cvars::nop_audio_driver = "dummy";
+        XELOGI("DC3: Audio fix: --nop_audio_driver auto -> dummy (XMA HAL "
+               "contexts are stubbed; the render callback must not run)");
+      }
 
       patch4(0x82867288 + 0x90, 0x48000024,
              "HandleWait+0x90: bne 40820024 -> b 48000024");

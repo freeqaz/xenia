@@ -86,6 +86,17 @@ X_STATUS NopAudioSystem::CreateDriver(size_t index,
                                       xe::threading::Semaphore* semaphore,
                                       AudioDriver** out_driver) {
   assert_not_null(out_driver);
+  const bool dummy = cvars::nop_audio_driver == "dummy";
+  static std::atomic<bool> s_logged{false};
+  if (!s_logged.exchange(true)) {
+    XELOGI("NopAudioSystem: render driver is {} (--nop_audio_driver={})",
+           dummy ? "DUMMY (guest render callback never runs)" : "PACED",
+           cvars::nop_audio_driver);
+  }
+  if (dummy) {
+    // Pre-pacer behaviour: the caller falls back to a dummy driver handle.
+    return X_STATUS_NOT_IMPLEMENTED;
+  }
   *out_driver = new NopAudioDriver(memory_, semaphore);
   return X_STATUS_SUCCESS;
 }
