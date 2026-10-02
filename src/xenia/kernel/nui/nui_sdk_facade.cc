@@ -106,6 +106,24 @@ uint32_t DoGetNextFrame(NuiDevice* d, cpu::ppc::PPCContext* ctx) {
   return d->SkeletonGetNextFrame(Arg(ctx, 0), Arg(ctx, 1));
 }
 
+// NuiIdentityGetEnrollmentInformation(index, NUI_ENROLLMENT_INFORMATION*):
+// identityapi.s -- index >= 8 is E_INVALIDARG; an index nobody is enrolled
+// in writes { dwUserIndex = 0xFE, dwEnrollmentFlags = 0 } and returns S_OK.
+// The sensor knows no faces, so every index is "not enrolled". (The legacy
+// stub returned S_OK WITHOUT writing it: DC3's SkeletonIdentifier then read
+// an uninitialised stack struct, a run-to-run random path.)
+uint32_t DoGetEnrollmentInformation(NuiDevice* d, cpu::ppc::PPCContext* ctx) {
+  const uint32_t index = Arg(ctx, 0);
+  const uint32_t info_ptr = Arg(ctx, 1);
+  if (index >= 8 || !info_ptr) {
+    return kE_INVALIDARG;
+  }
+  auto* info = d->memory()->TranslateVirtual<xe::be<uint32_t>*>(info_ptr);
+  info[0] = 0xFE;  // dwUserIndex
+  info[1] = 0;     // dwEnrollmentFlags
+  return kS_OK;
+}
+
 // --- Phase 1 "legacy-equivalent" entries -----------------------------------
 // The value the DC3 title table returned for each (li r3,0|-1; blr), now
 // resolved by SDK version instead of by title address, so a title behaves as
@@ -123,6 +141,7 @@ const Behaviour kBehaviours[] = {
     {"NuiSkeletonTrackingDisable", DoTrackingDisable, 0},
     {"NuiSkeletonSetTrackedSkeletons", DoSetTracked, 0},
     {"NuiSkeletonGetNextFrame", DoGetNextFrame, 0},
+    {"NuiIdentityGetEnrollmentInformation", DoGetEnrollmentInformation, 0},
     {"NuiImageStreamGetNextFrame", nullptr, 0xFFFFFFFF},
     {"NuiAudioCreate", nullptr, 0xFFFFFFFF},
     {"NuiAudioCreatePrivate", nullptr, 0xFFFFFFFF},

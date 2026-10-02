@@ -77,6 +77,7 @@ class NuiDevice {
   // The sensor is plugged in (--nui_device_present; profile-set for Kinect
   // titles). Read at NuiInitialize.
   bool connected() const { return connected_; }
+  Memory* memory() const { return memory_; }
 
   // NUI SDK API semantics (return HRESULTs).
   uint32_t Initialize(uint32_t flags);
