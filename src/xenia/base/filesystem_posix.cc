@@ -195,11 +195,20 @@ std::unique_ptr<FileHandle> FileHandle::OpenExisting(
 bool GetInfo(const std::filesystem::path& path, FileInfo* out_info) {
   struct stat st;
   if (stat(path.c_str(), &st) == 0) {
+    // Keep every FileInfo field assigned (filesystem_win.cc zero-fills).
+    // An uninitialised total_size leaks host stack garbage into guest-visible
+    // file sizes (HostPathEntry::update() -> NtQueryInformationFile ->
+    // GetFileSize), and a title that allocates a buffer of that size runs
+    // out of memory intermittently.
     if (S_ISDIR(st.st_mode)) {
       out_info->type = FileInfo::Type::kDirectory;
+      out_info->total_size = 0;
     } else {
       out_info->type = FileInfo::Type::kFile;
+      out_info->total_size = static_cast<size_t>(st.st_size);
     }
+    out_info->name = path.filename();
+    out_info->path = path.parent_path();
     out_info->create_timestamp = convertUnixtimeToWinFiletime(st.st_ctime);
     out_info->access_timestamp = convertUnixtimeToWinFiletime(st.st_atime);
     out_info->write_timestamp = convertUnixtimeToWinFiletime(st.st_mtime);
@@ -230,7 +239,7 @@ std::vector<FileInfo> ListFiles(const std::filesystem::path& path) {
     info.access_timestamp = convertUnixtimeToWinFiletime(st.st_atime);
     info.write_timestamp = convertUnixtimeToWinFiletime(st.st_mtime);
     info.path = path;
-    if (ent->d_type == DT_DIR) {
+    if (S_ISDIR(st.st_mode)) {
       info.type = FileInfo::Type::kDirectory;
       info.total_size = 0;
     } else {
