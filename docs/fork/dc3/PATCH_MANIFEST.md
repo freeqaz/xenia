@@ -50,8 +50,6 @@ tools/fork-regress/compare.py --paired out/cand out/ctrl
 | `speech.grammar_unload` | `SpeechMgr::Grammar::Unload` 0x82439F38 | `blr` | O7: the NUI S_OK stubs | kept (NUI) |
 | `calib.player_present_guard`, `calib.choose_player_sides`, `calib.warning_data`, `calib.nav_data`, `calib.wait_recovery`, `calib.exit_controller_mode` | SkeletonChooser / ShellInput (0x8290834C, 0x82909968, 0x82907880, 0x82909340, 0x82904CD0, 0x82902748) | `nop` / `blr` / rewrite | O8-O13: a constant skeleton is not a calibrated player | kept (NUI) |
 | `game.pause_for_skeleton_loss` | `Game::PauseForSkeletonLoss` 0x82866D50 | `blr` | O14 | kept (NUI) |
-| `audio.xmahal_alloc` | `XMAHALAllocateContexts` 0x82E77250 | `return 0` | O38 | kept: real contexts livelock the MMIO handler (core apu/mmio bug, BASELINE.md finding 5) |
-| `audio.dummy_driver` | `--nop_audio_driver` | `auto` -> `dummy` for DC3 | O39 | kept with `audio.xmahal_alloc` (the paced driver runs the render callback into the same fault) |
 | `anim.song_anim_expert` | `HamDirector::SongAnim` 0x82475578 | `li r4,2; b SongAnimByDifficulty` | O34 | kept: changes which anim plays |
 
 ## `dc3_hack_pack_skeleton.cc` (with `--fake_kinect_data`)
@@ -76,8 +74,6 @@ These were removed:
 | `seq.transition_force` | **main thread**, autonav | force-enter/complete transitions stuck for 120 or more ticks | O30 | `--dc3_headless_autonav` only |
 | `seq.nav_bridge` | **main thread**, autonav | `UIManager::GotoScreen` walk to game_screen, held while the song merge is busy | O31, O32 | `--dc3_headless_autonav` only |
 | `seq.loadsong_repair` | **main thread**, autonav | `DataReadFile`, `HamSongMgr::AddSongs`, ymca injection | O33 | `--dc3_headless_autonav` only |
-| `seq.beat_drive` | **main thread**, autonav | 120 BPM TaskMgr timeline drive | O42 | kept: the only song clock while no render callback runs (dummy driver) |
-| `input.beat_drive` | pad poll | second 120 BPM drive | O43 | see BASELINE.md (e2) |
 | `input.attract_press` | pad poll | press A every 3 s at attract | O45 | `--dc3_headless_autonav` only |
 | `input.attract_force` | pad poll | 4 MiB scan + UIManager stomp, attract -> title | O46 | `--dc3_headless_autonav` only |
 
@@ -113,6 +109,8 @@ override fix merged.
 | `ui.goto_first_screen` | 0x8277B140 (override) | "boot-ordering race" | not needed: S1 x5 A/B |
 | `io.cd_read_done` | `CDReadDone` 0x826026E0 | the separate-IOSB OVERLAPPED theory, refuted by `ac0052e5b` | not needed: S1 x5 A/B |
 | `audio.hamaudio_ready`, `audio.handle_wait`, `input.unpause_nudge` | 0x8252BA50, 0x82867318, Game +0x5E/+0x60/+0xA4 | "HamAudio never reaches IsReady headless" | They CAUSED "StandardStream::Play() failed. IsReady=0 mState=0" (finding 4). Without them, Game::PostWaitStart unpauses by itself |
+| `audio.xmahal_alloc`, `audio.dummy_driver` | `XMAHALAllocateContexts` 0x82E77250; `--nop_audio_driver` | "stubbed contexts; the render callback must not run" | Once the MMIO handler emulates the HAL's 16-byte `stvx128` context kicks (lane-d-mmio-vector), real contexts and the paced driver run cleanly (finding 5) |
+| `seq.beat_drive`, `input.beat_drive` | TheTaskMgr 0x82F64A58 timelines | "song time comes from the audio stream, which never advances" | With real audio the game's clock reaches gpState=3 with no host clock writer (finding 6) |
 | `skel.ppc_get_next_frame` | 0x829C2790 | pre-override fake frame | shadowed by `nui.get_next_frame` (audit) |
 | `debug.fail_spin` | 0x825CE2DC | survive a worker FAIL | faithful spin restored; the worker FAIL it survived was self-inflicted (finding 2) |
 | `seq.transition_diag`, `--dc3_gameplay_probe` | off-thread Executes | diagnostics | deleted |
