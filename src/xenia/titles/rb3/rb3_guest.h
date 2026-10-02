@@ -39,13 +39,7 @@ constexpr uint32_t kScreenName = 0x18;
 // faults the host; an unreadable word reads as 0.
 class GuestReader {
  public:
-  // trust_image_windows: treat the title image [0x82000000,0x83000000) and the
-  // RB3Enhanced.dll image [0x84000000,0x84860000) as readable without asking
-  // the heap. Needed only after --si_load_dll: XexModule::Load resets the
-  // whole image heap's page table when a second module loads, so those pages
-  // read as uncommitted although the host mapping is live (an emulator gap,
-  // reported for the core lane; remove this once it is fixed).
-  explicit GuestReader(Memory* memory, bool trust_image_windows = false);
+  explicit GuestReader(Memory* memory);
 
   bool Readable(uint32_t address) const;
   uint32_t R32(uint32_t address) const;
@@ -67,7 +61,6 @@ class GuestReader {
  private:
   Memory* memory_;
   uint8_t* membase_;
-  bool trust_image_windows_;
 };
 
 // The BandUI's current screen name ("" if the RB3 layout does not read

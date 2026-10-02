@@ -57,7 +57,7 @@ const char* ButtonName(uint16_t button) {
 class Autopilot {
  public:
   explicit Autopilot(Memory* memory)
-      : reader_(memory, /*trust_image_windows=*/cvars::si_load_dll) {}
+      : reader_(memory) {}
 
   void Run() {
     while (ProbeSleep(2000)) {

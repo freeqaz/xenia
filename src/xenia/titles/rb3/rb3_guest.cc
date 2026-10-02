@@ -17,19 +17,12 @@ namespace xe {
 namespace titles {
 namespace rb3 {
 
-GuestReader::GuestReader(Memory* memory, bool trust_image_windows)
-    : memory_(memory),
-      membase_(memory->virtual_membase()),
-      trust_image_windows_(trust_image_windows) {}
+GuestReader::GuestReader(Memory* memory)
+    : memory_(memory), membase_(memory->virtual_membase()) {}
 
 bool GuestReader::Readable(uint32_t address) const {
   if (address < 0x1000) {
     return false;
-  }
-  if (trust_image_windows_ &&
-      ((address >= 0x82000000u && address < 0x83000000u) ||
-       (address >= 0x84000000u && address < 0x84860000u))) {
-    return true;
   }
   // Readable means the guest heap grants read access. "Committed" is not
   // enough: thread stacks are bracketed by committed kMemoryProtectNoAccess
