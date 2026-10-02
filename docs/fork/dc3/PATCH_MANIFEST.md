@@ -69,9 +69,7 @@ These were removed:
 | id | where | what | masks | status |
 |---|---|---|---|---|
 | `seq.controller_mode` | NUI callback (worker) | `TheGestureMgr`+0x426D := 1 each frame | O6 | kept (NUI) |
-| `seq.nav_bridge` | **main thread**, autonav | `UIManager::GotoScreen` walk to game_screen, held while the song merge is busy | O31, O32 | `--dc3_headless_autonav` only |
-| `input.attract_press` | pad poll | press A every 3 s at attract | O45 | `--dc3_headless_autonav` only |
-| `input.attract_force` | pad poll | 4 MiB scan + UIManager stomp, attract -> title | O46 | `--dc3_headless_autonav` only |
+| `input.attract_press` | pad poll | press A every 3 s while attract blocks `wait_screen title_screen` | O45: the attract movie plays for real (Bink is real since lane B), and the shared flow has no attract step because the native port's movie fails to open | `--dc3_headless_autonav` only; the one host input left. It takes attract -> autosave_warning -> title through the game's own handlers |
 
 These were removed:
 
@@ -87,8 +85,9 @@ These were removed:
 | Debug::Fail tripwire | host probe thread (`dc3_fail_tripwire.cc`) | `--dc3_fail_tripwire` (on). Reads `TheDebug` 0x82F655D8 |
 | Override audit | same thread, every 30 s | per override: handler hits, `resolved_indirect` |
 | `gpState=` gameplay probe | pad poll (`dc3_scripted_input.cc`) | read-only; counted by the harness |
+| `screen ->` and `song` lines | pad poll (`dc3_scripted_input.cc`) | read-only: one line per screen change, and the selected song (`TheGameData`+0x30) once on game_screen. S1 milestones and the S1 song criterion |
 | DTA channel | main-thread hook | `--dc3_dta_channel`. Scratch is allocated on the first request |
-| main-thread hook | `HolmesClientPollKeyboard` 0x825F0F78 override | installed only when a task exists (autonav or the DTA channel). It skips the stock body, which does nothing while `gHolmesStream` is 0 (logged; a non-zero value is logged as TAINTED) |
+| main-thread hook | `HolmesClientPollKeyboard` 0x825F0F78 override | installed only when a task exists: the DTA channel, or the scripted-input frame clock (`input_frame_clock`, a no-op task whose poll count is the flow's frame number) when a screen-aware flow is loaded. It skips the stock body, which does nothing while `gHolmesStream` is 0 (logged; a non-zero value is logged as TAINTED) |
 | IK telemetry | code caves in the zero padding after `.text` | `--dc3_ik_telemetry`. Refuses if there is no padding. It no longer writes inside `UtilDrawPlane` |
 
 ## Retired in this lane (2026-10-02)
@@ -124,6 +123,8 @@ table, so naming one in `--dc3_disable_hacks` is now a launch error.
 | `seq.loadsong_repair` | main-thread autonav | `DataReadFile` + `HamSongMgr::AddSongs` on a guessed path and a constructed `ymca` Symbol (O33) | same runs. The flow selects the song on song_select |
 | decomp `Splash::PrepareNext`, `Splash::BeginSplasher`, `Splash::Suspend`, `Splash::Resume` | decomp layout | lost-resume (thread created suspended, resume lost) | Lane B d7: S3 2/2 PASS, 627 traps, histogram identical, with the 7 off. B2: S3 2/2 PASS, 627, with the code deleted |
 | decomp `BinkStartAsyncThread`, `BinkMovieSys::PlatformInit` | decomp layout (both resolve to one noop 0x826B0EF0) | same | same |
+| `seq.nav_bridge` | main-thread autonav: `UIManager::GotoScreen` walk attract -> ... -> game_screen, `merge_busy` hold, `--dc3_game_screen_real_goto` | Kinect-only menus; scripted A "does not navigate" (O31, O32) | It skipped each screen's own handler (title -> wait_main without `NAV_SELECT_MSG` latched "Data 0 is not String (file ui/title/title.dta, line 261)"). The native-semantics player and `flows/dc3-ymca.txt` drive every screen: e13 S2 PASS with it off, then S1 x5 (BASELINE "Flow"). The cvar `dc3_game_screen_real_goto` is deleted |
+| `input.attract_force` | scripted-input adapter | 4 MiB heap scan + UIManager stomp attract -> title (O46) | The attract press goes through the game: attract -> autosave_warning -> title (e7, e13) |
 | `anim.song_anim_expert` | `HamDirector::SongAnim` 0x82475578 -> `li r4,2; b SongAnimByDifficulty` | "routine-builder anim empty headless, the remixer never runs" (O34) | Self-sustaining: `MoveMgr::InsertMoveInSong` writes the remix into `TheHamDirector->SongAnim(player)`, which the patch made the authored EXPERT song.anim. DTA, patch on: SongAnim = song.anim, 85 clip keys, routine-builder 0. Off: SongAnim = player_1_routine_builder.anim, 71 keys, expert song.anim back to its authored 17. S2 2/2 PASS off (e3). **Intentional oracle change**: the dancers now evaluate the remixed routine, as on the 360 |
 | decomp `UIManager::GotoFirstScreen` | decomp layout | "ChunkStream's async I/O threads fail to start" (same race) | same |
 
@@ -133,5 +134,5 @@ table, so naming one in `--dc3_disable_hacks` is now a launch error.
 |---|---|
 | kept (NUI) | Needed until a NUI HLE with a pose source exists (analysis L8). A Kinect title genuinely requires it |
 | kept (L6) | Content/XAM enumeration, owned by a later lane |
-| `--dc3_headless_autonav` only | Harness automation. Off by default; the harness passes the cvar |
+| `--dc3_headless_autonav` only | Harness input. Off by default; the harness passes the cvar. Since lane B2 it arms only `input.attract_press` |
 | see results | Measured in this lane. The outcome is in `BASELINE.md` |

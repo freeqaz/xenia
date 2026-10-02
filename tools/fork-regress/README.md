@@ -19,9 +19,9 @@ emulator, open unix sockets, and S1V uses GPU 1.
 | ID | What runs | What it measures | PASS | N (need) |
 |---|---|---|---|---|
 | S0 | nothing (static) | the binary's compiled-in cvar defaults (full map); source ratchets on this tree: title-ID literals outside `src/xenia/titles/`, `/home/free` in `src/`, `XELOGI(` in `src/xenia/gpu/`; the title-ID **allow-list** | measurements taken, and no title-ID line (`373307D9`/`45410914`, any case, `0x` optional, or `kTitleDc3`/`kTitleRb3`) outside `src/xenia/titles/` beyond `scenarios/S0.title-id-allowlist` (path, max lines, reason; a file below its allowance is reported as a stale entry); the comparator lists every changed default and fails a ratchet increase | 1 (1) |
-| S1 | DC3 original `debug.xex`, null GPU, ymca flow, 230 s (the dc3-oracle command) | milestone times title/main/choose_mode/song_select/game_screen, first `gpState=2 paused=0`, first `gpState=3`, gpState=2 sample count, max SIGSEGV, `mFailThreadMsg`/TAINTED lines | title ≤ 30 s, game_screen ≤ 60 s, ≥ 60 gpState=2 samples, gpState=3 seen, rc 0 + `TIMEOUT` line, SIGSEGV 0 | 5 (2): the reference chan5 passes only 5 of 8 flows on a quiet host, so "2 of 3" would fail a good binary 32% of the time |
+| S1 | DC3 original `debug.xex`, null GPU, the shared flow `flows/dc3-ymca.txt` (native-port semantics, frame clock), 230 s (the dc3-oracle command) | milestone times title/main/choose_mode/song_select/game_screen, first `gpState=2 paused=0`, first `gpState=3`, gpState=2 sample count, max SIGSEGV, `mFailThreadMsg`/TAINTED lines | title ≤ 30 s, game_screen ≤ 60 s, ≥ 60 gpState=2 samples, gpState=3 seen, rc 0 + `TIMEOUT` line, NON_XMA 0 (SIGSEGV 0 on a binary without `DC3 FAULTS`), song (`DC3 Script: song`) == `ymca` on a binary whose adapter logs `screen ->` lines | 5 (2): the reference chan5 passes only 5 of 8 flows on a quiet host, so "2 of 3" would fail a good binary 32% of the time |
 | S1V | S1 on Vulkan, `--vulkan_device=1`, capture every 300 swaps, private pipeline cache | frame count, capture swap indices, flow milestones, Milo fail-screen frames (first swap, screen, PNG); keeps one PNG from game_screen (else the furthest screen) | rc 0 + TIMEOUT, title reached, ≥ 10 frames, kept frame not a uniform fill. game_screen and the fail screen are recorded, not required: on chan5 and both BASELINE.md runs the Vulkan run hits a MILO_FAIL at song_select (`Could not find preview.tmov in dir song_info`) from swap 1200 | 1 (1) |
-| S2 | S1 + `--dc3_dta_channel=<run>/dta.sock`; `lib/dta_driver.py` drives `dc3-decomp/tools/console/dc3_eval.py -T xenia --socket` | channel installed, first poll thread, answers + latency, `object_list main` count, plus the S1 flow on the same run | thread `00000006`; `{+ 1 2}`→`=> 3`; `{no_such_func 1}`→`=> !! refused: script error…`; `{+ 5 5}`→`=> 10`; `{size {object_list main Object FALSE}}`→`=> <int>`; S1 criteria | 2 (1) |
+| S2 | S1 + `--dc3_dta_channel=<run>/dta.sock`; `lib/dta_driver.py` drives `dc3-decomp/tools/console/dc3_eval.py -T xenia --socket` | channel installed, first poll thread, answers + latency, `object_list main` count, plus the S1 flow on the same run | thread `00000006`; `{+ 1 2}`→`=> 3`; `{no_such_func 1}`→`=> !! refused: script error…`; `{+ 5 5}`→`=> 10`; `{size {object_list main Object FALSE}}`→`=> <int>`; `{gamedata get song}` (sent once the song plays) == `ymca` (`FR_DTA_EXPECT_SONG`); S1 criteria | 2 (1) |
 | S3 | DC3 decomp-layout `default.xex` (2026-08-24 build), 120 s, pinned 2026-08-29 shared toml | count of `tw/td forced trap hit!` and the per-LR histogram (a fingerprint of how far the decomp image boots and through which assert sites) | count == 627 and histogram == `reference/trap627_s66.json`; `layout=decomp`; manifest-fingerprint-mismatch line; TIMEOUT; rc 0. LR sequence equality recorded, not required | 2 (2) |
 | S4 | RB3 clean retail TU5 (`clean_tu5_nodd.xex`), autopilot, mogg key table | screen timeline, tv3 screens, game_screen entry, song-stream census after game_screen | `app-run-direct installed`; main_hub, song_select, part_difficulty, tv3_* reached; with key: game_screen transState=0 and a stream at mState=3 with 11 receivers/11 channels; no `FAULT_LIVELOCK_ABORT`; rc 0. Without key: menu-only (transition to game_screen begins) | 2 (1) |
 | S5 | RB3DX `default.xex`, A every 5 s | screen timeline, game_screen entry | main_hub + song_select reached, game_screen transState=0, no livelock abort, rc 0 | 2 (1) |
@@ -52,6 +52,24 @@ the non-default subset with each value's source. Each scenario aggregates to
   busy. Never counted as PASS or FAIL. `--retry K` re-runs it (default 1).
 - A PASS under load stays a PASS (marked `loaded: true`): it is a stronger
   result, but the comparator leaves loaded runs out of timing medians.
+
+## The DC3 flow (`flows/dc3-ymca.txt`)
+
+The scripted-input player (`hid/nop/nop_input_driver.cc`) runs the native
+port's format and semantics (`dc3-decomp native/src/platform/Joypad_Native.cpp`)
+when the title supplies a guest frame clock (DC3: the main-thread hook, one tick
+per `SystemPoll`, ~59 frames/s measured): `+N` is N frames after the last
+satisfied `wait_screen`, `N` is absolute, a press lasts one frame,
+`wait_screen` needs a settled screen (`UIManager::InTransition` false) and gives
+up after 1800 frames, and `cancel`/`option`/`l1`/`r2`/... are accepted. Titles
+without a clock keep the legacy timing (`+N` = N x 50 ms, 350 ms hold).
+
+`flows/dc3-ymca.txt` is dc3-decomp `scripts/dc3-input-flows/ymca.txt`
+@ `6d9785b8f` with seven timing lines moved (`docs/fork/dc3/BASELINE.md`,
+"Flow"); the same file drives the native port to ymca and game_screen.
+`FR_DC3_FLOW=<file>` overrides it (exploration). `FR_DTA_SCREEN_PROBE=
+"<screen>|<query>|<seconds>"` makes S2's driver send one DTA query back to back
+once the adapter logs that screen (answers in `driver.json`).
 
 ## Load threshold
 
@@ -174,7 +192,8 @@ catches it.
 
 A cleanup lane that changes one of these must update the analyzer in the same
 commit: `Thread Status Report (<ms>ms)… SIGSEGV=<n>`, `TIMEOUT: <ms>ms reached`,
-`DC3 Script: wait_screen '<x>' SATISFIED`, `gpState=… paused=…`,
+`DC3 Script: wait_screen '<x>' SATISFIED`, `DC3 Script: screen -> '<x>'`,
+`DC3 Script: song '<sym>'`, `gpState=… paused=…`,
 `tw/td forced trap hit! … LR=<hex>`, `DC3: NUI patch layout=<x>`,
 `Disabling patch manifest target resolution due fingerprint mismatch`,
 `DC3 DTA channel: installed on`, `DTA channel: first poll on guest thread <tid>`,
