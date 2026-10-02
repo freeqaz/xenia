@@ -18,6 +18,11 @@
 #                           <out-dir> are kept and aggregated); used by ab.sh
 #   --content DIR           pinned content (default $FORK_REGRESS_CONTENT or
 #                           /home/free/tmp/fork-regress-content; build_content.sh)
+#   --extra-arg ARG         append ARG (one --cvar=value) to every xenia command
+#                           line of this invocation; repeatable. For same-binary
+#                           A/Bs of one switch (e.g. --dc3_disable_hacks=X): an
+#                           unknown cvar makes xenia print help and exit 0, so
+#                           only pass cvars the binary defines.
 #
 # Output: <out-dir>/<scenario>/run-NN[.retryK]/{run.log,verdict.json,...},
 #         <out-dir>/<scenario>/scenario.json, <out-dir>/summary.json.
@@ -38,7 +43,7 @@ export PY="${PY:-/usr/bin/python3}"
 [ $# -ge 2 ] || { sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 BIN_ARG="$1"; OUT="$2"; shift 2
 SCENARIOS="S0,S1,S1V,S2,S3,S4,S5,S6"
-REPEAT=""; RUNS=""; RETRY=1; WAIT_LOAD=0; LABEL=""; BIN_REV=""
+REPEAT=""; RUNS=""; RETRY=1; WAIT_LOAD=0; LABEL=""; BIN_REV=""; EXTRA_ARGS=()
 CONTENT="${FORK_REGRESS_CONTENT:-/home/free/tmp/fork-regress-content}"
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -51,6 +56,7 @@ while [ $# -gt 0 ]; do
     --label) LABEL="$2"; shift 2 ;;
     --binary-rev) BIN_REV="$2"; shift 2 ;;
     --content) CONTENT="$2"; shift 2 ;;
+    --extra-arg) EXTRA_ARGS+=("$2"); shift 2 ;;
     *) echo "unknown option $1" >&2; exit 2 ;;
   esac
 done
@@ -60,6 +66,9 @@ BIN="$(readlink -f "$BIN_ARG")"
 [ -f "$CONTENT/MANIFEST.sha256" ] || { echo "no content at $CONTENT -- run build_content.sh" >&2; exit 2; }
 mkdir -p "$OUT"; OUT="$(readlink -f "$OUT")"
 export BIN CONTENT
+# Newline-separated; xr_run appends each line as one argv entry.
+FR_EXTRA_ARGS="$(printf '%s\n' "${EXTRA_ARGS[@]}")"
+export FR_EXTRA_ARGS
 export BIN_LABEL="${LABEL:-$(basename "$BIN")}"
 export BIN_XXH3="$(xxhsum -H3 "$BIN" | awk '{print $1}' | sed 's/^XXH3_//')"
 

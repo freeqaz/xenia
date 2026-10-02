@@ -31,12 +31,6 @@ DECLARE_bool(force_all_draws);
 
 DECLARE_bool(headless_verbose_diagnostics);
 
-// TRANSITIONAL (fork cleanup, Lane E): stub_nui_functions / fake_kinect_data
-// are DC3 cvars and leave the GPU layer. Lane B defines them in
-// titles/dc3/dc3_flags.cc; when that lands, delete dc3_nui_flags_transitional.*
-// and this include (the titles/dc3 TUs must then declare them themselves).
-#include "xenia/gpu/dc3_nui_flags_transitional.h"
-
 DECLARE_int32(query_occlusion_fake_sample_count);
 
 #define XE_GPU_FINE_GRAINED_DRAW_SCOPES 1

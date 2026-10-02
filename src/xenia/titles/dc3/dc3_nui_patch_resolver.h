@@ -84,9 +84,6 @@ struct Dc3FingerprintCache {
 };
 
 bool Dc3TryParseHexU64(std::string_view str, uint64_t* out_value);
-std::optional<std::filesystem::path> Dc3AutoProbeNuiSymbolMapPath();
-std::optional<std::filesystem::path> Dc3AutoProbeFingerprintCachePath();
-std::optional<std::filesystem::path> Dc3AutoProbePatchManifestPath();
 
 std::optional<Dc3NuiSymbolManifest> Dc3LoadNuiSymbolManifest(
     const std::filesystem::path& path);

@@ -38,9 +38,6 @@ namespace nop {
 
 namespace {
 
-constexpr uint32_t kDc3OriginalXexNameMin = 0x82000000;
-constexpr uint32_t kDc3OriginalXexNameMax = 0x82400000;
-
 bool IsGuestReadable(Memory* memory, uint32_t guest_addr, uint32_t size) {
   if (!memory || !guest_addr || guest_addr >= 0xF0000000 || !size) {
     return false;
@@ -57,56 +54,47 @@ bool IsGuestReadable(Memory* memory, uint32_t guest_addr, uint32_t size) {
          xe::memory::PageAccess::kNoAccess;
 }
 
-std::string ReadGuestScreenName(Memory* memory, uint32_t screen_ptr,
-                                bool strict_scan_range) {
-  if (!memory || !screen_ptr || screen_ptr >= 0xF0000000) {
-    return "";
-  }
-  if (!IsGuestReadable(memory, screen_ptr + 0x20, 4)) {
-    return "";
-  }
-  auto* scr_obj = memory->TranslateVirtual<uint8_t*>(screen_ptr);
-
-  auto read_guest_name = [&](uint32_t name_ptr) -> std::string {
-    if (!name_ptr || name_ptr >= 0xF0000000) {
-      return "";
-    }
-    if (strict_scan_range &&
-        (name_ptr < kDc3OriginalXexNameMin || name_ptr >= kDc3OriginalXexNameMax)) {
-      return "";
-    }
-
-    std::string result;
-    result.reserve(32);
-    for (uint32_t i = 0; i < 64; ++i) {
-      if (!IsGuestReadable(memory, name_ptr + i, 1)) {
-        return "";
-      }
-      auto* ch_ptr = memory->TranslateVirtual<uint8_t*>(name_ptr + i);
-      char ch = static_cast<char>(*ch_ptr);
-      if (!ch) {
-        return result;
-      }
-      unsigned char uch = static_cast<unsigned char>(ch);
-      if (!(std::isalnum(uch) || ch == '_')) {
-        return "";
-      }
-      result.push_back(ch);
-    }
-    return "";
-  };
-
-  for (uint32_t offset : {0x1C, 0x20}) {
-    uint32_t name_ptr = xe::load_and_swap<uint32_t>(scr_obj + offset);
-    std::string name = read_guest_name(name_ptr);
-    if (!name.empty()) {
-      return name;
-    }
+// RB3 (TU5, title 0x45410914) screen-name read. The RB3 UI singleton is a
+// BandUI at a FIXED address (TheBandUI = 0x82DFD2B0 -- the object itself, not
+// a pointer to it; the frame loop's TheUI pointer global 0x82C721F0 is
+// statically initialized to it), with mCurrentScreen @ +0x2C and the screen's
+// name pointer @ +0x18. Returns "" if the layout does not read plausibly.
+//
+// LEGACY: the reader used when no title adapter is installed. It belongs in
+// an RB3 ScriptedInputTitleAdapter in titles/rb3/ (fork-cleanup Lane C);
+// delete it here once that adapter registers itself.
+std::string ReadLegacyRb3ScreenName(Memory* memory) {
+  if (!memory) return "";
+  constexpr uint32_t kTheBandUI = 0x82DFD2B0;
+  if (!IsGuestReadable(memory, kTheBandUI + 0x30, 4)) return "";
+  auto* ui_obj = memory->TranslateVirtual<uint8_t*>(kTheBandUI);
+  uint32_t cur_screen = xe::load_and_swap<uint32_t>(ui_obj + 0x2C);
+  if (!cur_screen || cur_screen >= 0xF0000000) return "";
+  if (!IsGuestReadable(memory, cur_screen + 0x18, 4)) return "";
+  auto* scr = memory->TranslateVirtual<uint8_t*>(cur_screen);
+  uint32_t name_ptr = xe::load_and_swap<uint32_t>(scr + 0x18);
+  if (!name_ptr || name_ptr >= 0xF0000000) return "";
+  std::string result;
+  for (uint32_t i = 0; i < 64; ++i) {
+    if (!IsGuestReadable(memory, name_ptr + i, 1)) return "";
+    char ch =
+        static_cast<char>(*memory->TranslateVirtual<uint8_t*>(name_ptr + i));
+    if (!ch) return result;
+    unsigned char uch = static_cast<unsigned char>(ch);
+    if (!(std::isalnum(uch) || ch == '_')) return "";
+    result.push_back(ch);
   }
   return "";
 }
 
+std::atomic<ScriptedInputTitleAdapter*> s_title_adapter{nullptr};
+
 }  // namespace
+
+void SetScriptedInputTitleAdapter(ScriptedInputTitleAdapter* adapter) {
+  s_title_adapter.store(adapter, std::memory_order_release);
+}
+
 
 // Singleton bridge for NopInjectButtonPress (one nop driver per process in
 // practice; last-created wins, cleared on destruction).
@@ -352,75 +340,15 @@ void NopInputDriver::InjectButtonPress(uint16_t buttons, uint64_t duration_ms,
   injected_events_.push_back(ev);
 }
 
-// RB3 (TU5, title 0x45410914) screen-name read. The RB3 UI singleton is a
-// BandUI at a FIXED address (TheBandUI = 0x82DFD2B0 -- the object itself, not
-// a pointer to it; the frame loop's TheUI pointer global 0x82C721F0 is
-// statically initialized to it), with mCurrentScreen @ +0x2C and the screen's
-// name pointer @ +0x18. This layout is unrelated to DC3's (a pointer global at
-// 0x82F1A8E0, mCurrentScreen @ +0x48, name @ +0x1C/+0x20), so screen-aware
-// scripts need both readers. Returns "" if the layout does not read plausibly,
-// which is how the caller decides which game it is looking at.
-std::string NopInputDriver::ReadRb3ScreenName() const {
-  if (!memory_) return "";
-  constexpr uint32_t kTheBandUI = 0x82DFD2B0;
-  if (!IsGuestReadable(memory_, kTheBandUI + 0x30, 4)) return "";
-  auto* ui_obj = memory_->TranslateVirtual<uint8_t*>(kTheBandUI);
-  uint32_t cur_screen = xe::load_and_swap<uint32_t>(ui_obj + 0x2C);
-  if (!cur_screen || cur_screen >= 0xF0000000) return "";
-  if (!IsGuestReadable(memory_, cur_screen + 0x18, 4)) return "";
-  auto* scr = memory_->TranslateVirtual<uint8_t*>(cur_screen);
-  uint32_t name_ptr = xe::load_and_swap<uint32_t>(scr + 0x18);
-  if (!name_ptr || name_ptr >= 0xF0000000) return "";
-  std::string result;
-  for (uint32_t i = 0; i < 64; ++i) {
-    if (!IsGuestReadable(memory_, name_ptr + i, 1)) return "";
-    char ch = static_cast<char>(*memory_->TranslateVirtual<uint8_t*>(name_ptr + i));
-    if (!ch) return result;
-    unsigned char uch = static_cast<unsigned char>(ch);
-    if (!(std::isalnum(uch) || ch == '_')) return "";
-    result.push_back(ch);
-  }
-  return "";
-}
-
 std::string NopInputDriver::ReadCurrentScreenName() const {
   if (!memory_) return "";
-
-  // RB3 first: its read is strictly validated (fixed object address, name must
-  // be a clean identifier), so a hit is unambiguous and a miss costs two loads.
-  // Record which layout answered: RB3 and DC3 share screen names ("game_screen"
-  // exists in both) but NOT addresses, so the DC3 gameplay poking below must
-  // never fire on an RB3 name.
-  std::string rb3 = ReadRb3ScreenName();
-  if (!rb3.empty()) {
-    screen_name_is_rb3_ = true;
-    return rb3;
+  if (auto* adapter = s_title_adapter.load(std::memory_order_acquire)) {
+    return adapter->ReadCurrentScreenName(memory_);
   }
-  screen_name_is_rb3_ = false;
-
-  constexpr uint32_t kTheUI = 0x82F1A8E0;
-  auto* ui_ptr =
-      IsGuestReadable(memory_, kTheUI, 4)
-          ? memory_->TranslateVirtual<uint8_t*>(kTheUI)
-          : nullptr;
-  if (!ui_ptr) return "";
-
-  uint32_t ui_addr = xe::load_and_swap<uint32_t>(ui_ptr);
-  if (!IsGuestReadable(memory_, ui_addr, 0x50)) return "";
-
-  auto* ui_obj = memory_->TranslateVirtual<uint8_t*>(ui_addr);
-
-  // mCurrentScreen at offset 0x48
-  uint32_t cur_screen = xe::load_and_swap<uint32_t>(ui_obj + 0x48);
-  if (!cur_screen || cur_screen >= 0xF0000000) return "";
-
-  // Original debug XEX screen objects have been observed with mName at +0x1C,
-  // while some earlier experiments assumed +0x20. Try both to keep
-  // screen-aware scripts working across layouts.
-  return ReadGuestScreenName(memory_, cur_screen, false);
+  return ReadLegacyRb3ScreenName(memory_);
 }
 
-void NopInputDriver::UpdateDc3HostBeatDrive() {
+void NopInputDriver::PollTitleAdapter() {
   if (!memory_) {
     return;
   }
@@ -437,306 +365,9 @@ void NopInputDriver::UpdateDc3HostBeatDrive() {
     last_screen_read_time_ = now;
   }
 
-  // RB3 also has a screen literally named "game_screen"; everything below this
-  // point addresses DC3 singletons by absolute guest address and WRITES to
-  // some of them, so it must not run for RB3.
-  if (last_screen_name_ != "game_screen" || screen_name_is_rb3_) {
-    if (dc3_host_beat_drive_active_) {
-      XELOGI("DC3 Script: host beat drive deactivated on '{}'",
-             last_screen_name_);
-      dc3_host_beat_drive_active_ = false;
-    }
-    return;
+  if (auto* adapter = s_title_adapter.load(std::memory_order_acquire)) {
+    adapter->OnPrimaryPadPoll(memory_, last_screen_name_);
   }
-
-  constexpr uint32_t kTheTaskMgr = 0x82F64A58;
-  constexpr uint32_t kTimelineStride = 0x1C;
-  constexpr uint32_t kTimeOff = 0x10;
-  constexpr uint32_t kLastTimeOff = 0x14;
-
-  auto load_u32 = [&](uint32_t guest_addr) -> uint32_t {
-    auto* ptr = IsGuestReadable(memory_, guest_addr, 4)
-                    ? memory_->TranslateVirtual<uint8_t*>(guest_addr)
-                    : nullptr;
-    return ptr ? xe::load_and_swap<uint32_t>(ptr) : 0;
-  };
-  auto load_float = [&](uint32_t guest_addr) -> float {
-    auto* ptr = IsGuestReadable(memory_, guest_addr, 4)
-                    ? memory_->TranslateVirtual<uint8_t*>(guest_addr)
-                    : nullptr;
-    return ptr ? xe::load_and_swap<float>(ptr) : 0.0f;
-  };
-  auto store_float = [&](uint32_t guest_addr, float value) -> bool {
-    if (!IsGuestReadable(memory_, guest_addr, 4)) {
-      return false;
-    }
-    auto* ptr = memory_->TranslateVirtual<uint8_t*>(guest_addr);
-    if (!ptr) {
-      return false;
-    }
-    xe::store_and_swap<float>(ptr, value);
-    return true;
-  };
-
-  // Blocker 2 (gameplay crash): force-advancing the song clock while the Game
-  // is still paused/loading (mPaused==1) drives the gameplay pipeline over a
-  // not-ready audio stream and crashes (the HamAudio resync / Voice path). Only
-  // run the host beat drive once the Game's own load/wait state machine has
-  // started playback (Game::PostWaitStart sets mPaused=0).
-  // TheGamePanel(0x83117410)->mGame(+0x38)->Game.mPaused(+0x5E).
-  {
-    constexpr uint32_t kTheGamePanelGate = 0x83117410;
-    uint32_t gp_gate = load_u32(kTheGamePanelGate);
-    uint32_t game_gate =
-        (gp_gate && IsGuestReadable(memory_, gp_gate + 0x38, 4))
-            ? load_u32(gp_gate + 0x38)
-            : 0;
-    bool paused = true;
-    if (game_gate && IsGuestReadable(memory_, game_gate + 0x5E, 1)) {
-      auto* pp = memory_->TranslateVirtual<uint8_t*>(game_gate + 0x5E);
-      paused = pp ? (*pp != 0) : true;
-    }
-    if (!game_gate || paused) {
-      if (dc3_host_beat_drive_active_) {
-        dc3_host_beat_drive_active_ = false;
-        XELOGI("DC3 Script: beat gate closed (Game paused/not ready)");
-      }
-      // Keep probing so we can watch the load/wait/paused progression.
-      ProbeDc3GameplayState();
-      return;
-    }
-  }
-
-  uint32_t timelines_addr = load_u32(kTheTaskMgr + 0x2C);
-  if (!timelines_addr || !IsGuestReadable(memory_, timelines_addr + 0x54, 4) ||
-      !IsGuestReadable(memory_, kTheTaskMgr + 0x48, 1)) {
-    return;
-  }
-
-  auto* auto_ptr = memory_->TranslateVirtual<uint8_t*>(kTheTaskMgr + 0x48);
-  if (auto_ptr) {
-    *auto_ptr = 0;
-  }
-
-  uint32_t seconds_time_addr = timelines_addr + 0 * kTimelineStride + kTimeOff;
-  uint32_t seconds_last_addr =
-      timelines_addr + 0 * kTimelineStride + kLastTimeOff;
-  uint32_t beats_time_addr = timelines_addr + 1 * kTimelineStride + kTimeOff;
-  uint32_t beats_last_addr =
-      timelines_addr + 1 * kTimelineStride + kLastTimeOff;
-  uint32_t ui_time_addr = timelines_addr + 2 * kTimelineStride + kTimeOff;
-  uint32_t ui_last_addr =
-      timelines_addr + 2 * kTimelineStride + kLastTimeOff;
-
-  float old_seconds = load_float(seconds_time_addr);
-  float old_beats = load_float(beats_time_addr);
-  float old_ui = load_float(ui_time_addr);
-
-  if (!dc3_host_beat_drive_active_) {
-    dc3_host_song_seconds_ = old_seconds;
-    dc3_host_song_beat_ = old_beats;
-    dc3_host_last_update_time_ = now;
-    dc3_host_last_log_time_ = now;
-    dc3_host_beat_drive_active_ = true;
-    XELOGI(
-        "DC3 Script: host beat drive activated taskmgr={:08X} timelines={:08X} "
-        "sec={:.3f} beat={:.3f}",
-        kTheTaskMgr, timelines_addr, dc3_host_song_seconds_,
-        dc3_host_song_beat_);
-    ProbeDc3GameplayState();
-    return;
-  }
-
-  auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                        now - dc3_host_last_update_time_)
-                        .count();
-  if (elapsed_ms <= 0) {
-    return;
-  }
-  if (elapsed_ms > 100) {
-    elapsed_ms = 33;
-  }
-  dc3_host_last_update_time_ = now;
-
-  float delta_seconds = static_cast<float>(elapsed_ms) / 1000.0f;
-  float delta_beats = delta_seconds * (120.0f / 60.0f);
-  dc3_host_song_seconds_ += delta_seconds;
-  dc3_host_song_beat_ += delta_beats;
-
-  store_float(seconds_last_addr, old_seconds);
-  store_float(seconds_time_addr, dc3_host_song_seconds_);
-  store_float(beats_last_addr, old_beats);
-  store_float(beats_time_addr, dc3_host_song_beat_);
-  store_float(ui_last_addr, old_ui);
-  store_float(ui_time_addr, dc3_host_song_seconds_);
-
-  auto since_last_log = std::chrono::duration_cast<std::chrono::milliseconds>(
-                            now - dc3_host_last_log_time_)
-                            .count();
-  if (since_last_log >= 2000) {
-    dc3_host_last_log_time_ = now;
-    XELOGI("DC3 Script: host beat drive sec={:.3f} beat={:.3f}",
-           dc3_host_song_seconds_, dc3_host_song_beat_);
-  }
-
-  ProbeDc3GameplayState();
-}
-
-void NopInputDriver::ProbeDc3GameplayState() {
-  if (!memory_ || last_screen_name_ != "game_screen" || screen_name_is_rb3_) {
-    return;
-  }
-
-  auto now = std::chrono::steady_clock::now();
-  auto load_u32 = [&](uint32_t guest_addr) -> uint32_t {
-    auto* ptr = IsGuestReadable(memory_, guest_addr, 4)
-                    ? memory_->TranslateVirtual<uint8_t*>(guest_addr)
-                    : nullptr;
-    return ptr ? xe::load_and_swap<uint32_t>(ptr) : 0;
-  };
-  auto load_u8 = [&](uint32_t guest_addr) -> uint8_t {
-    auto* ptr = IsGuestReadable(memory_, guest_addr, 1)
-                    ? memory_->TranslateVirtual<uint8_t*>(guest_addr)
-                    : nullptr;
-    return ptr ? *ptr : 0;
-  };
-
-  constexpr uint32_t kTheGamePanel = 0x83117410;
-  uint32_t game_panel_addr = load_u32(kTheGamePanel);
-  uint32_t game_addr = 0;
-  int game_panel_state = -1;
-  int game_load_state = -1;
-  int game_wait_state = -1;
-  bool game_paused = false;
-  bool game_time_paused = false;
-  bool game_real_time = false;
-  bool game_has_intro = false;
-
-  if (game_panel_addr && IsGuestReadable(memory_, game_panel_addr + 0x83, 1)) {
-    game_addr = load_u32(game_panel_addr + 0x38);
-    game_panel_state =
-        static_cast<int>(load_u32(game_panel_addr + 0x80));
-  }
-
-  if (game_addr && IsGuestReadable(memory_, game_addr + 0xA7, 1)) {
-    game_paused = load_u8(game_addr + 0x5E) != 0;
-    game_time_paused = load_u8(game_addr + 0x5F) != 0;
-    game_real_time = load_u8(game_addr + 0x60) != 0;
-    game_has_intro = load_u8(game_addr + 0x62) != 0;
-    game_load_state = static_cast<int>(load_u32(game_addr + 0x90));
-    game_wait_state = static_cast<int>(load_u32(game_addr + 0xA4));
-  }
-
-  // Blocker 2 (unpause deadlock): headless, HamAudio never reaches IsReady, so
-  // Game::PostWaitStart never fires and mPaused stays 1 forever -- the game
-  // cannot self-unpause (the HX_NATIVE audio-fail wall-clock fallback is
-  // compiled out of debug.xex). Once the stable stuck state (load=3 wait=3
-  // paused=1) is observed on game_screen, force the unpause ourselves: the safe
-  // host analogue of the native audio-fail fallback. Verified offsets (DC3
-  // Game.h + binary): game+0xA4 mWaitState, gp+0xF8 unkf8 (Game::Poll
-  // clock-clobber gate), game+0x60 mRealTime, game+0x5E mPaused. ORDER: clear
-  // wait (HandleWait then returns without touching the not-ready audio stream) +
-  // unkf8=0 (stop Poll re-clobbering the host-driven TaskMgr clock) + realTime=1
-  // FIRST, then mPaused=0 LAST so the host beat-drive gate opens only after the
-  // clobbers are disabled. Fires once.
-  static bool s_dc3_unpause_nudged = false;
-  if (!s_dc3_unpause_nudged && game_addr && game_load_state == 3 &&
-      game_wait_state == 3 && game_paused) {
-    auto wr_u32 = [&](uint32_t va, uint32_t v) {
-      if (IsGuestReadable(memory_, va, 4)) {
-        xe::store_and_swap<uint32_t>(memory_->TranslateVirtual<uint8_t*>(va), v);
-      }
-    };
-    auto wr_u8 = [&](uint32_t va, uint8_t v) {
-      if (IsGuestReadable(memory_, va, 1)) {
-        *memory_->TranslateVirtual<uint8_t*>(va) = v;
-      }
-    };
-    wr_u32(game_addr + 0xA4, 0);                            // mWaitState = 0
-    if (game_panel_addr) wr_u8(game_panel_addr + 0xF8, 0);  // unkf8 = 0
-    wr_u8(game_addr + 0x60, 1);                             // mRealTime = 1
-    wr_u8(game_addr + 0x5E, 0);                             // mPaused = 0 (LAST)
-    s_dc3_unpause_nudged = true;
-    XELOGI(
-        "DC3 Script: UNPAUSE NUDGE applied (game={:08X} gp={:08X}): wait=0 "
-        "unkf8=0 realTime=1 paused=0",
-        game_addr, game_panel_addr);
-  }
-
-  // DIAGNOSTIC (Blocker A auto-pause root cause): when the Game flips back to
-  // paused during playing, dump the UIEventMgr dialog-event queue so we can tell
-  // whether the auto-pause came from GamePanel::Poll's HasActiveDialogEvent()
-  // branch (dialog) or from Game::PauseForSkeletonLoss (fake-Kinect "no player
-  // playing"). TheUIEventMgr = *0x83119650; mEventQueue (std::vector<BandEvent*>)
-  // @ +0x2C is {begin,end,cap}; BandEvent.mType @ +0x0 (0=dialog,1=transition),
-  // BandEvent.mDataArray @ +0x4; DataArray.mNodes @ +0x0, node0.value (Symbol
-  // char*) @ +0x0. Read-only.
-  static bool s_dc3_pause_diag_logged = false;
-  if (game_paused && !dc3_last_game_paused_ && !s_dc3_pause_diag_logged) {
-    s_dc3_pause_diag_logged = true;
-    constexpr uint32_t kTheUIEventMgr = 0x83119650;
-    uint32_t mgr = load_u32(kTheUIEventMgr);
-    uint32_t qbegin = mgr ? load_u32(mgr + 0x2C) : 0;
-    uint32_t qend = mgr ? load_u32(mgr + 0x30) : 0;
-    uint32_t qsize = (qbegin && qend >= qbegin) ? (qend - qbegin) / 4 : 0;
-    int front_type = -1;
-    uint32_t front_sym = 0;
-    if (qsize) {
-      uint32_t evt = load_u32(qbegin);
-      if (evt) {
-        front_type = static_cast<int>(load_u32(evt + 0x0));
-        uint32_t arr = load_u32(evt + 0x4);
-        if (arr) {
-          uint32_t nodes = load_u32(arr + 0x0);
-          if (nodes) front_sym = load_u32(nodes + 0x0);
-        }
-      }
-    }
-    const char* sym_str = "";
-    if (front_sym && IsGuestReadable(memory_, front_sym, 1)) {
-      sym_str = reinterpret_cast<const char*>(
-          memory_->TranslateVirtual<uint8_t*>(front_sym));
-    }
-    XELOGI(
-        "DC3 Script: PAUSE-ONSET DIAG eventMgr={:08X} qsize={} frontType={} "
-        "frontSym='{}' (frontType==0 => dialog auto-pause; empty/!=0 => "
-        "skeleton-loss path)",
-        mgr, qsize, front_type, sym_str);
-  }
-
-  bool state_changed = game_panel_addr != dc3_last_game_panel_addr_ ||
-                       game_addr != dc3_last_game_addr_ ||
-                       game_panel_state != dc3_last_game_panel_state_ ||
-                       game_load_state != dc3_last_game_load_state_ ||
-                       game_wait_state != dc3_last_game_wait_state_ ||
-                       game_paused != dc3_last_game_paused_ ||
-                       game_time_paused != dc3_last_game_time_paused_ ||
-                       game_real_time != dc3_last_game_real_time_ ||
-                       game_has_intro != dc3_last_game_has_intro_;
-
-  auto since_last_log =
-      std::chrono::duration_cast<std::chrono::milliseconds>(
-          now - dc3_gameplay_probe_last_log_time_)
-          .count();
-  if (state_changed || since_last_log >= 2000) {
-    dc3_gameplay_probe_last_log_time_ = now;
-    XELOGI(
-        "DC3 Script: gameplay gp={:08X} gpState={} game={:08X} load={} "
-        "wait={} paused={} timePaused={} realTime={} hasIntro={}",
-        game_panel_addr, game_panel_state, game_addr, game_load_state,
-        game_wait_state, game_paused ? 1 : 0, game_time_paused ? 1 : 0,
-        game_real_time ? 1 : 0, game_has_intro ? 1 : 0);
-  }
-
-  dc3_last_game_panel_addr_ = game_panel_addr;
-  dc3_last_game_addr_ = game_addr;
-  dc3_last_game_panel_state_ = game_panel_state;
-  dc3_last_game_load_state_ = game_load_state;
-  dc3_last_game_wait_state_ = game_wait_state;
-  dc3_last_game_paused_ = game_paused;
-  dc3_last_game_time_paused_ = game_time_paused;
-  dc3_last_game_real_time_ = game_real_time;
-  dc3_last_game_has_intro_ = game_has_intro;
 }
 
 uint16_t NopInputDriver::GetScreenAwareButtons() {
@@ -760,169 +391,24 @@ uint16_t NopInputDriver::GetScreenAwareButtons() {
 
   if (dir.type == ScriptDirective::kWaitScreen) {
     static auto s_last_wait_log = std::chrono::steady_clock::time_point{};
-    static uint32_t s_last_stuck_transition = 0;
-    static auto s_stuck_transition_start = std::chrono::steady_clock::time_point{};
-    static auto s_attract_seen_since = std::chrono::steady_clock::time_point{};
-    static auto s_last_attract_press = std::chrono::steady_clock::time_point{};
-    static uint32_t s_title_screen_addr = 0;
+    auto* adapter = s_title_adapter.load(std::memory_order_acquire);
     auto since_last_wait_log =
         std::chrono::duration_cast<std::chrono::milliseconds>(
             now - s_last_wait_log)
             .count();
     if (since_last_wait_log >= 2000) {
-      constexpr uint32_t kTheUI = 0x82F1A8E0;
-      uint32_t ui_addr = 0;
-      uint32_t cur_screen = 0;
-      uint32_t trans_screen = 0;
-      uint32_t trans_state = 0;
-      std::string name_1c;
-      std::string trans_name_1c;
-      if (memory_) {
-        auto* ui_ptr =
-            IsGuestReadable(memory_, kTheUI, 4)
-                ? memory_->TranslateVirtual<uint8_t*>(kTheUI)
-                : nullptr;
-        ui_addr = ui_ptr ? xe::load_and_swap<uint32_t>(ui_ptr) : 0;
-        if (IsGuestReadable(memory_, ui_addr, 0x50)) {
-          auto* ui_obj = memory_->TranslateVirtual<uint8_t*>(ui_addr);
-          if (ui_obj) {
-            trans_state = xe::load_and_swap<uint32_t>(ui_obj + 0x2C);
-            cur_screen = xe::load_and_swap<uint32_t>(ui_obj + 0x48);
-            trans_screen = xe::load_and_swap<uint32_t>(ui_obj + 0x4C);
-            name_1c = ReadGuestScreenName(memory_, cur_screen, false);
-            if (name_1c.empty() && cur_screen) {
-              name_1c = "<unnamed>";
-            }
-            trans_name_1c = ReadGuestScreenName(memory_, trans_screen, false);
-            if (trans_name_1c.empty() && trans_screen) {
-              trans_name_1c = "<unnamed>";
-            }
-
-            // Original-XEX headless can get stuck before the transition target
-            // is promoted from mTransitionScreen into mCurrentScreen. This was
-            // first observed on the initial attract transition, but the same
-            // issue also appears on title -> wait_main_after_saveload_screen
-            // once the guest path is using real GotoScreen().
-            bool should_force_complete =
-                !cur_screen ||
-                (name_1c == "title_screen" &&
-                 trans_name_1c == "wait_main_after_saveload_screen") ||
-                (name_1c == "wait_main_after_saveload_screen" &&
-                 trans_name_1c == "main_screen") ||
-                (name_1c == "main_screen" &&
-                 trans_name_1c == "choose_mode_screen") ||
-                (name_1c == "choose_mode_screen" &&
-                 trans_name_1c == "song_select_screen") ||
-                (name_1c == "song_select_screen" &&
-                 trans_name_1c == "multiuser_screen") ||
-                (name_1c == "multiuser_screen" &&
-                 trans_name_1c == "loading_screen") ||
-                (name_1c == "loading_screen" &&
-                 trans_name_1c == "preloading_screen") ||
-                (name_1c == "preloading_screen" &&
-                 trans_name_1c == "real_loading_screen") ||
-                (name_1c == "real_loading_screen" &&
-                 trans_name_1c == "game_screen");
-            if (should_force_complete && trans_screen && trans_state != 0) {
-              if (s_last_stuck_transition != trans_screen) {
-                s_last_stuck_transition = trans_screen;
-                s_stuck_transition_start = now;
-              } else {
-                auto stuck_ms =
-                    std::chrono::duration_cast<std::chrono::milliseconds>(
-                        now - s_stuck_transition_start)
-                        .count();
-                if (stuck_ms >= 4000) {
-                  XELOGI("DC3 Script: observed stuck UI transition cur={:08X} "
-                         "trans={:08X} state={} name='{}' trans='{}' after {}ms",
-                         cur_screen, trans_screen, trans_state, name_1c,
-                         trans_name_1c, stuck_ms);
-                }
-              }
-            } else {
-              s_last_stuck_transition = 0;
-              s_stuck_transition_start = std::chrono::steady_clock::time_point{};
-            }
-          }
-        }
+      if (adapter) {
+        adapter->LogWaitStatus(memory_, dir.screen_name, last_screen_name_);
+      } else {
+        XELOGI("Script: waiting for '{}' current='{}'", dir.screen_name,
+               last_screen_name_);
       }
-      XELOGI("DC3 Script: waiting for '{}' current='{}' ui={:08X} "
-             "cur={:08X} trans={:08X} transState={} "
-             "name='{}' trans='{}'",
-             dir.screen_name, last_screen_name_, ui_addr, cur_screen,
-             trans_screen, trans_state, name_1c, trans_name_1c);
       s_last_wait_log = now;
     }
     if (!wait_satisfied_) {
-      if (dir.screen_name == "title_screen" &&
-          last_screen_name_ == "attract_screen") {
-        if (s_attract_seen_since == std::chrono::steady_clock::time_point{}) {
-          s_attract_seen_since = now;
-        }
-        auto attract_ms =
-            std::chrono::duration_cast<std::chrono::milliseconds>(
-                now - s_attract_seen_since)
-                .count();
-        auto since_last_press =
-            s_last_attract_press == std::chrono::steady_clock::time_point{}
-                ? INT64_MAX
-                : std::chrono::duration_cast<std::chrono::milliseconds>(
-                      now - s_last_attract_press)
-                      .count();
-        if (attract_ms >= 1500 && since_last_press >= 3000) {
-          active |= X_INPUT_GAMEPAD_A;
-          s_last_attract_press = now;
-          XELOGI("DC3 Script: attract-screen fallback press A while waiting "
-                 "for title_screen");
-        }
-        if (memory_ && attract_ms >= 5000) {
-          constexpr uint32_t kTheUI = 0x82F1A8E0;
-          auto* ui_ptr =
-              IsGuestReadable(memory_, kTheUI, 4)
-                  ? memory_->TranslateVirtual<uint8_t*>(kTheUI)
-                  : nullptr;
-          uint32_t ui_addr = ui_ptr ? xe::load_and_swap<uint32_t>(ui_ptr) : 0;
-          auto* ui_obj = IsGuestReadable(memory_, ui_addr, 0x50)
-                             ? memory_->TranslateVirtual<uint8_t*>(ui_addr)
-                             : nullptr;
-          if (ui_obj) {
-            if (!s_title_screen_addr) {
-              for (int scan_pass = 0; scan_pass < 2 && !s_title_screen_addr;
-                   ++scan_pass) {
-                bool strict_scan_range = scan_pass == 0;
-                if (scan_pass == 1) {
-                  XELOGI("DC3 Script: retrying title screen scan without "
-                         ".rdata fence");
-                }
-                for (uint32_t addr = 0x40C00000; addr < 0x41000000;
-                     addr += 4) {
-                  if (!IsGuestReadable(memory_, addr + 0x20, 4)) {
-                    continue;
-                  }
-                  std::string name =
-                      ReadGuestScreenName(memory_, addr, strict_scan_range);
-                  if (name == "title_screen" || name == "title") {
-                    s_title_screen_addr = addr;
-                    XELOGI("DC3 Script: resolved title screen object {:08X} "
-                           "via name '{}'",
-                           s_title_screen_addr, name);
-                    break;
-                  }
-                }
-              }
-            }
-            if (s_title_screen_addr) {
-              xe::store_and_swap<uint32_t>(ui_obj + 0x48, s_title_screen_addr);
-              xe::store_and_swap<uint32_t>(ui_obj + 0x4C, 0);
-              xe::store_and_swap<uint32_t>(ui_obj + 0x2C, 0);
-              last_screen_name_ = "title_screen";
-              XELOGI("DC3 Script: forced UI jump attract_screen -> title_screen "
-                     "({:08X})", s_title_screen_addr);
-            }
-          }
-        }
-      } else {
-        s_attract_seen_since = std::chrono::steady_clock::time_point{};
+      if (adapter) {
+        active |= adapter->WhileWaitingForScreen(memory_, dir.screen_name,
+                                                 &last_screen_name_);
       }
 
       // Check if current screen matches
@@ -1041,10 +527,10 @@ X_RESULT NopInputDriver::GetCapabilities(uint32_t user_index, uint32_t flags,
 }
 
 uint16_t NopInputDriver::GetCurrentButtons(uint32_t pad) {
-  // DC3 host-beat drive + screen-aware nav + dynamic injection are all global
-  // (single-driver) state; only evaluate them once, on the primary pad.
+  // The title adapter poll + screen-aware nav + dynamic injection are all
+  // global (single-driver) state; only evaluate them once, on the primary pad.
   if (pad == 0) {
-    UpdateDc3HostBeatDrive();
+    PollTitleAdapter();
   }
 
   uint16_t active_buttons = 0;
@@ -1129,19 +615,11 @@ uint16_t NopInputDriver::ButtonToVK(uint16_t button) const {
   }
 }
 
-X_RESULT NopInputDriver::GetState(uint32_t user_index,
-                                  X_INPUT_STATE* out_state) {
-  if (!scripted_mode_ || user_index >= kMaxPads) {
-    return X_ERROR_DEVICE_NOT_CONNECTED;
-  }
-
-  uint16_t active_buttons = GetCurrentButtons(user_index);
-
-  // Generate keystroke events for button transitions
+void NopInputDriver::QueueKeystrokeEdges(uint32_t user_index,
+                                         uint16_t active_buttons) {
+  // Generate keystroke events for button transitions since the last poll.
   uint16_t pressed = active_buttons & ~prev_buttons_[user_index];
   uint16_t released = prev_buttons_[user_index] & ~active_buttons;
-
-  // Check each button bit for transitions
   for (uint16_t bit = 1; bit != 0; bit <<= 1) {
     if (pressed & bit) {
       X_INPUT_KEYSTROKE ks = {};
@@ -1165,6 +643,16 @@ X_RESULT NopInputDriver::GetState(uint32_t user_index,
     }
   }
   prev_buttons_[user_index] = active_buttons;
+}
+
+X_RESULT NopInputDriver::GetState(uint32_t user_index,
+                                  X_INPUT_STATE* out_state) {
+  if (!scripted_mode_ || user_index >= kMaxPads) {
+    return X_ERROR_DEVICE_NOT_CONNECTED;
+  }
+
+  uint16_t active_buttons = GetCurrentButtons(user_index);
+  QueueKeystrokeEdges(user_index, active_buttons);
 
   std::memset(reinterpret_cast<void*>(out_state), 0, sizeof(*out_state));
   out_state->packet_number = packet_number_++;
@@ -1190,29 +678,7 @@ X_RESULT NopInputDriver::GetKeystroke(uint32_t user_index, uint32_t flags,
   // Poll current state to generate any pending keystroke events
   // (in case GetKeystroke is called without GetState)
   uint16_t active_buttons = GetCurrentButtons(user_index);
-  uint16_t pressed = active_buttons & ~prev_buttons_[user_index];
-  uint16_t released = prev_buttons_[user_index] & ~active_buttons;
-  for (uint16_t bit = 1; bit != 0; bit <<= 1) {
-    if (pressed & bit) {
-      X_INPUT_KEYSTROKE ks = {};
-      ks.virtual_key = ButtonToVK(bit);
-      ks.flags = X_INPUT_KEYSTROKE_KEYDOWN;
-      ks.user_index = static_cast<uint8_t>(user_index);
-      if (ks.virtual_key) {
-        keystroke_queue_[user_index].push_back(ks);
-        XELOGI("Keystroke KEYDOWN: VK=0x{:04X} button=0x{:04X} pad={}",
-               (uint16_t)ks.virtual_key, bit, user_index);
-      }
-    }
-    if (released & bit) {
-      X_INPUT_KEYSTROKE ks = {};
-      ks.virtual_key = ButtonToVK(bit);
-      ks.flags = X_INPUT_KEYSTROKE_KEYUP;
-      ks.user_index = static_cast<uint8_t>(user_index);
-      if (ks.virtual_key) keystroke_queue_[user_index].push_back(ks);
-    }
-  }
-  prev_buttons_[user_index] = active_buttons;
+  QueueKeystrokeEdges(user_index, active_buttons);
 
   if (!keystroke_queue_[user_index].empty()) {
     *out_keystroke = keystroke_queue_[user_index].front();

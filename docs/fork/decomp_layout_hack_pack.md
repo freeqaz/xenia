@@ -43,8 +43,9 @@ arguments). The runtime fingerprint is logged at startup:
 DC3: .text fingerprint addr=XXXXXXXX size=0xXXXXXXX fnv1a64=XXXXXXXXXXXXXXXX
 ```
 
-`docs/dc3-boot/dc3_nui_fingerprints.txt` caches known fingerprints (the
-resolver still auto-probes that path, which is why the file has not moved).
+`docs/fork/dc3/dc3_nui_fingerprints.txt` caches known fingerprints. Nothing
+auto-probes it any more (2026-10-02): pass
+`--dc3_nui_layout_fingerprint_cache_path` explicitly, as tools/fork-regress does.
 The fingerprint changes whenever XEX import patching touches `.text`, even if
 the PE's `.text` is identical.
 

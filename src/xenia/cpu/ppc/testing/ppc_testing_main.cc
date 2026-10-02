@@ -7,6 +7,8 @@
  ******************************************************************************
  */
 
+#include "third_party/fmt/include/fmt/format.h"
+#include "xenia/base/clock.h"
 #include "xenia/base/console_app_main.h"
 #include "xenia/base/cvar.h"
 #include "xenia/base/filesystem.h"
@@ -20,6 +22,7 @@
 #include "xenia/cpu/ppc/ppc_frontend.h"
 #include "xenia/cpu/processor.h"
 #include "xenia/cpu/raw_module.h"
+#include "xenia/cpu/thread_state.h"
 
 #if XE_ARCH_AMD64
 #include "xenia/cpu/backend/x64/x64_backend.h"
@@ -420,6 +423,272 @@ void ProtectedRunTest(TestSuite& test_suite, TestRunner& runner,
 #endif  // XE_COMPILER_MSVC
 }
 
+// Built-in check that Processor::RegisterGuestFunctionOverride intercepts
+// INDIRECT calls (bctrl through a function pointer or vtable), not only direct
+// bl calls. It needs a host handler, which a .s suite cannot express.
+namespace guest_override_test {
+constexpr uint32_t kBase = 0x82000000;
+constexpr uint32_t kCallee = kBase + 0x00;           // li r3, 1; blr
+constexpr uint32_t kIndirectCaller = kBase + 0x10;   // via ctr + bctrl
+constexpr uint32_t kDirectCaller = kBase + 0x40;     // via bl
+constexpr uint32_t kFunctionPointer = kBase + 0x60;  // holds kCallee
+const uint32_t kCode[] = {
+    // kCallee
+    0x38600001,  // li r3, 1
+    0x4E800020,  // blr
+    0x60000000,
+    0x60000000,
+    // kIndirectCaller: the target is loaded from memory (r4 points at
+    // kFunctionPointer), so the JIT cannot fold the bctrl into a direct call.
+    0x7D8802A6,  // mflr r12
+    0x81640000,  // lwz r11, 0(r4)
+    0x7D6903A6,  // mtctr r11
+    0x4E800421,  // bctrl
+    0x7D8803A6,  // mtlr r12
+    0x4E800020,  // blr
+    0x60000000,
+    0x60000000,
+    0x60000000,
+    0x60000000,
+    0x60000000,
+    0x60000000,
+    // kDirectCaller
+    0x7D8802A6,  // mflr r12
+    0x4BFFFFBD,  // bl kCallee
+    0x7D8803A6,  // mtlr r12
+    0x4E800020,  // blr
+    0x60000000,
+    0x60000000,
+    0x60000000,
+    0x60000000,
+    // kFunctionPointer
+    kCallee,
+};
+
+void OverrideHandler(ppc::PPCContext* ctx, kernel::KernelState*) {
+  ctx->r[3] = 42;
+}
+
+// Runs `entry` on a fresh processor (optionally with the callee overridden)
+// and returns r3, or ~0 on setup failure.
+uint64_t RunOnce(uint32_t entry, bool override_callee) {
+  auto memory = std::make_unique<Memory>();
+  memory->Initialize();
+  std::unique_ptr<xe::cpu::backend::Backend> backend;
+#if XE_ARCH_AMD64
+  backend.reset(new xe::cpu::backend::x64::X64Backend());
+#endif  // XE_ARCH
+  if (!backend) {
+    return ~0ull;
+  }
+  auto processor = std::make_unique<Processor>(memory.get(), nullptr);
+  processor->Setup(std::move(backend));
+
+  auto bin_path = std::filesystem::temp_directory_path() /
+                  fmt::format("xenia_guest_override_{}.bin",
+                              xe::Clock::QueryHostTickCount());
+  {
+    std::vector<uint8_t> bytes;
+    for (uint32_t word : kCode) {
+      for (int shift = 24; shift >= 0; shift -= 8) {
+        bytes.push_back(uint8_t(word >> shift));
+      }
+    }
+    FILE* f = xe::filesystem::OpenFile(bin_path, "wb");
+    if (!f) {
+      return ~0ull;
+    }
+    fwrite(bytes.data(), 1, bytes.size(), f);
+    fclose(f);
+  }
+  auto module = std::make_unique<xe::cpu::RawModule>(processor.get());
+  bool loaded = module->LoadFile(kBase, bin_path);
+  std::filesystem::remove(bin_path);
+  if (!loaded) {
+    return ~0ull;
+  }
+  processor->AddModule(std::move(module));
+  processor->backend()->CommitExecutableRange(kBase, kBase + 0x10000);
+
+  if (override_callee) {
+    processor->RegisterGuestFunctionOverride(kCallee, &OverrideHandler,
+                                             "override_test_callee");
+  }
+
+  // As in TestRunner: the test code never touches the guest stack.
+  uint32_t stack_size = 64 * 1024;
+  uint32_t stack_address = kBase - stack_size;
+  auto thread_state = std::make_unique<ThreadState>(
+      processor.get(), 0x100, stack_address, stack_address - 0x1000);
+  auto fn = processor->ResolveFunction(entry);
+  if (!fn) {
+    return ~0ull;
+  }
+  auto ctx = thread_state->context();
+  ctx->r[3] = 0;
+  ctx->r[4] = kFunctionPointer;
+  ctx->lr = 0xBCBCBCBC;
+  fn->Call(thread_state.get(), uint32_t(ctx->lr));
+  uint64_t r3 = ctx->r[3];
+  thread_state.reset();
+  processor.reset();
+  return r3;
+}
+
+void Run(int& failed_count, int& passed_count) {
+  struct Case {
+    const char* name;
+    uint32_t entry;
+    bool override_callee;
+    uint64_t expected;
+  };
+  const Case cases[] = {
+      {"control: indirect call runs the guest body", kIndirectCaller, false, 1},
+      {"override intercepts a direct call", kDirectCaller, true, 42},
+      {"override intercepts an indirect call", kIndirectCaller, true, 42},
+  };
+  XELOGI("guest_function_override (built-in):");
+  for (const auto& c : cases) {
+    XELOGI("  - {}", c.name);
+    uint64_t r3 = RunOnce(c.entry, c.override_callee);
+    if (r3 == c.expected) {
+      ++passed_count;
+    } else {
+      XELOGE("    TEST FAILED: r3 = {:X}, expected {:X}", r3, c.expected);
+      ++failed_count;
+    }
+  }
+  XELOGI("");
+}
+}  // namespace guest_override_test
+
+// Built-in check that guest 128-bit vector loads/stores (lvx/stvx) to an
+// MMIO range reach the range's callbacks as four 32-bit register accesses.
+// The XMA HAL kicks contexts with one stvx128 to the Kick registers; before
+// the MMIO handler decoded VEX vector moves, that store could not be emulated.
+namespace mmio_vector_test {
+constexpr uint32_t kCodeBase = 0x82000000;
+constexpr uint32_t kMmioBase = 0x7FEA0000;
+constexpr uint32_t kMmioTarget = kMmioBase + 0x1940;
+const uint32_t kCode[] = {
+    // kCodeBase: store v1 to [r3] (= kMmioTarget), load it back into v2.
+    0x38800000,  // li r4, 0
+    0x7C2321CE,  // stvx v1, r3, r4
+    0x7C4320CE,  // lvx v2, r3, r4
+    0x4E800020,  // blr
+};
+
+struct Recorder {
+  std::vector<std::pair<uint32_t, uint32_t>> writes;
+  std::vector<uint32_t> reads;
+};
+
+uint32_t ReadCallback(void*, void* context, uint32_t addr) {
+  auto* recorder = static_cast<Recorder*>(context);
+  recorder->reads.push_back(addr);
+  return 0xA0000000u | (addr & 0xFFFF);
+}
+void WriteCallback(void*, void* context, uint32_t addr, uint32_t value) {
+  static_cast<Recorder*>(context)->writes.emplace_back(addr, value);
+}
+
+bool RunOnce(Recorder& recorder, vec128_t& v2_out) {
+  auto memory = std::make_unique<Memory>();
+  memory->Initialize();
+  std::unique_ptr<xe::cpu::backend::Backend> backend;
+#if XE_ARCH_AMD64
+  backend.reset(new xe::cpu::backend::x64::X64Backend());
+#endif  // XE_ARCH
+  if (!backend) {
+    return false;
+  }
+  auto processor = std::make_unique<Processor>(memory.get(), nullptr);
+  processor->Setup(std::move(backend));
+  if (!memory->AddVirtualMappedRange(kMmioBase, 0xFFFF0000, 0xFFFF, &recorder,
+                                     &ReadCallback, &WriteCallback)) {
+    return false;
+  }
+  auto bin_path =
+      std::filesystem::temp_directory_path() /
+      fmt::format("xenia_mmio_vector_{}.bin", xe::Clock::QueryHostTickCount());
+  {
+    std::vector<uint8_t> bytes;
+    for (uint32_t word : kCode) {
+      for (int shift = 24; shift >= 0; shift -= 8) {
+        bytes.push_back(uint8_t(word >> shift));
+      }
+    }
+    FILE* f = xe::filesystem::OpenFile(bin_path, "wb");
+    if (!f) {
+      return false;
+    }
+    fwrite(bytes.data(), 1, bytes.size(), f);
+    fclose(f);
+  }
+  auto module = std::make_unique<xe::cpu::RawModule>(processor.get());
+  bool loaded = module->LoadFile(kCodeBase, bin_path);
+  std::filesystem::remove(bin_path);
+  if (!loaded) {
+    return false;
+  }
+  processor->AddModule(std::move(module));
+  processor->backend()->CommitExecutableRange(kCodeBase, kCodeBase + 0x10000);
+  uint32_t stack_address = kCodeBase - 64 * 1024;
+  auto thread_state = std::make_unique<ThreadState>(
+      processor.get(), 0x100, stack_address, stack_address - 0x1000);
+  auto fn = processor->ResolveFunction(kCodeBase);
+  if (!fn) {
+    return false;
+  }
+  auto ctx = thread_state->context();
+  ctx->r[3] = kMmioTarget;
+  ctx->v[1] = vec128i(0x11111111, 0x22222222, 0x33333333, 0x44444444);
+  ctx->lr = 0xBCBCBCBC;
+  fn->Call(thread_state.get(), uint32_t(ctx->lr));
+  v2_out = ctx->v[2];
+  thread_state.reset();
+  processor.reset();
+  return true;
+}
+
+void Run(int& failed_count, int& passed_count) {
+  XELOGI("mmio_vector (built-in):");
+  Recorder recorder;
+  vec128_t v2 = {};
+  bool ran = RunOnce(recorder, v2);
+  const std::vector<std::pair<uint32_t, uint32_t>> want_writes = {
+      {kMmioTarget + 0x0, 0x11111111},
+      {kMmioTarget + 0x4, 0x22222222},
+      {kMmioTarget + 0x8, 0x33333333},
+      {kMmioTarget + 0xC, 0x44444444}};
+  XELOGI("  - stvx to MMIO = four 32-bit register writes, in order");
+  if (ran && recorder.writes == want_writes) {
+    ++passed_count;
+  } else {
+    XELOGE("    TEST FAILED: {} writes recorded", recorder.writes.size());
+    for (auto& w : recorder.writes) {
+      XELOGE("      {:08X} <- {:08X}", w.first, w.second);
+    }
+    ++failed_count;
+  }
+  XELOGI("  - lvx from MMIO = four 32-bit register reads into the vector");
+  bool reads_ok = ran && recorder.reads.size() == 4;
+  for (uint32_t lane = 0; reads_ok && lane < 4; ++lane) {
+    reads_ok =
+        recorder.reads[lane] == kMmioTarget + lane * 4 &&
+        v2.u32[lane] == (0xA0000000u | ((kMmioTarget + lane * 4) & 0xFFFF));
+  }
+  if (reads_ok) {
+    ++passed_count;
+  } else {
+    XELOGE("    TEST FAILED: {} reads; v2 = {:08X} {:08X} {:08X} {:08X}",
+           recorder.reads.size(), v2.u32[0], v2.u32[1], v2.u32[2], v2.u32[3]);
+    ++failed_count;
+  }
+  XELOGI("");
+}
+}  // namespace mmio_vector_test
+
 bool RunTests(const std::string_view test_name) {
   int result_code = 1;
   int failed_count = 0;
@@ -460,6 +729,14 @@ bool RunTests(const std::string_view test_name) {
   }
 
   XELOGI("{} tests loaded.", test_suites.size());
+  // Before TestRunner: Memory is a process-wide singleton, and this test
+  // builds (and tears down) its own.
+  if (test_name.empty() || test_name == "guest_function_override") {
+    guest_override_test::Run(failed_count, passed_count);
+  }
+  if (test_name.empty() || test_name == "mmio_vector") {
+    mmio_vector_test::Run(failed_count, passed_count);
+  }
   TestRunner runner;
   for (auto& test_suite : test_suites) {
     XELOGI("{}.s:", test_suite.name());

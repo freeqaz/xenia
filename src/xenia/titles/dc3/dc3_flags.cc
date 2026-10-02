@@ -28,26 +28,11 @@ DEFINE_bool(dc3_game_screen_real_goto, true,
             "once the song FileMerger merge has completed (gated on merge_busy). "
             "Set false to fall back to the old host force-set (no Game created).",
             "DC3");
-DEFINE_bool(dc3_gameplay_probe, false,
-            "DC3: enable the host-side GATE PROBE / PKPROBE gameplay diagnostics "
-            "(reads HamDirector anim state + walks mSongAnims/mPropKeys from the "
-            "NUI thread). Off by default — it executes guest helper fns each "
-            "game_screen frame, which perturbs timing. Was used to diagnose the "
-            "RndPropAnim::GetKeys wrong-receiver hang; keep for recurrence.",
-            "DC3");
 DEFINE_bool(dc3_null_read_cache_stream, false, "DC3: null read cache", "DC3");
 DEFINE_bool(dc3_crt_skip_nui, true,
             "DC3: auto-nullify NUI/Kinect SDK CRT constructors (indices "
             "75,98-101,210-328). These call unresolved internal NUI "
             "functions that corrupt the heap. Set false to disable.",
-            "DC3");
-DEFINE_bool(dc3_guest_overrides, true,
-            "DC3: use guest extern overrides for eligible simple NUI/XBC "
-            "stub-return functions (default cutover path; skips byte patching "
-            "for registered entries; preserves fake_kinect_data "
-            "NuiSkeletonGetNextFrame path). The legacy NUI/XBC byte-patch "
-            "fallback path has been removed; false logs a warning and is "
-            "ignored for this path.",
             "DC3");
 DEFINE_bool(dc3_debug_read_cache_stream_step_override, false,
             "DC3: enable invasive ReadCacheStream step-by-step guest override "
@@ -88,8 +73,9 @@ DEFINE_string(
 DEFINE_string(
     dc3_nui_symbol_map_path, "",
     "DC3: optional symbol map manifest used by the NUI/XBC resolver "
-    "(symbols.txt-style 'name = .text:0xADDR;'). If unset, a local "
-    "dc3-decomp symbols.txt path is auto-probed.",
+    "(symbols.txt-style 'name = .text:0xADDR;'). Unset: none (no path is "
+    "auto-probed; the original layout resolves from the compiled-in table "
+    "and signatures).",
     "DC3");
 DEFINE_string(dc3_nui_patch_resolver_mode, "hybrid",
               "DC3: NUI/XBC patch target resolver mode "
@@ -110,3 +96,18 @@ DEFINE_bool(dc3_nui_signature_trace, false,
             "DC3: log runtime PPC words for NUI/XBC patch targets "
             "at catalog and resolved addresses (debugging signature resolver).",
             "DC3");
+
+// DC3 NUI cvars. Defined in the GPU layer until the fork cleanup (Lane E
+// moved them to a transitional file in gpu/, Lane B moved them here); names,
+// defaults and help text unchanged so existing configs and scripts still work.
+DEFINE_bool(stub_nui_functions, false,
+            "Stub NUI (Kinect SDK) functions in guest memory for DC3 debug "
+            "builds. Writes PPC return-S_OK stubs at known NUI function "
+            "addresses so the game boots without Kinect hardware.",
+            "Headless");
+
+DEFINE_bool(fake_kinect_data, false,
+            "Provide synthetic Kinect skeleton data (T-pose) for DC3. "
+            "Requires --stub_nui_functions. Enables game to detect a "
+            "player and progress past the Kinect player detection screen.",
+            "Headless");

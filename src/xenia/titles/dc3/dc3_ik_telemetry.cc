@@ -530,8 +530,42 @@ void ApplyDc3IKInstrumentation(const Dc3HackContext& ctx,
   XELOGI("DC3:IK Telemetry slots at guest {:08X} ({} bytes)",
          tel_addr, kIkTelemetrySize);
 
-  // Step 2: Build PPC code caves in the protocol_debug_string area.
-  const uint32_t kCaveBase = kAddr.protocol_debug_string;
+  // Step 2: Build PPC code caves. Decomp layout: in the protocol_debug_string
+  // area (a no-op'd function there; +0..+27 hold the decomp pack's own
+  // caves). Original layout: that address is INSIDE UtilDrawPlane
+  // (symbols.txt), so the caves go into the zero padding after the end of
+  // .text instead, within .text's last page: executable (inside the module),
+  // and referenced by nothing but our branches. Refuse if it is not there.
+  uint32_t cave_base_addr = kAddr.protocol_debug_string;
+  if (!ctx.is_decomp_layout) {
+    cave_base_addr = 0;
+    auto* xex = ctx.module ? ctx.module->xex_module() : nullptr;
+    auto* text = xex ? xex->GetPESection(".text") : nullptr;
+    if (text) {
+      uint32_t start = (text->address + text->size + 15) & ~15u;
+      uint32_t end = (text->address + text->size + 0xFFF) & ~0xFFFu;
+      constexpr uint32_t kNeed = 320 - 28;
+      auto* p = memory->TranslateVirtual<uint8_t*>(start);
+      bool zero = p && end >= start + kNeed;
+      for (uint32_t i = 0; zero && i < kNeed; ++i) {
+        zero = p[i] == 0;
+      }
+      if (zero) {
+        cave_base_addr = start - 28;  // caves use offsets +28..+319
+        XELOGI("DC3:IK original layout: code caves at {:08X}-{:08X} (zero "
+               "padding after .text end {:08X})",
+               start, start + kNeed, text->address + text->size);
+      }
+    }
+    if (!cave_base_addr) {
+      XELOGW("DC3:IK original layout: no zero padding after .text for the "
+             "code caves; IK telemetry NOT applied (it used to overwrite "
+             "UtilDrawPlane)");
+      result.skipped++;
+      return;
+    }
+  }
+  const uint32_t kCaveBase = cave_base_addr;
   constexpr uint32_t kCaveOffAc = 28;    // ApplyConstraints return
   constexpr uint32_t kCaveOffGh = 40;    // GetGroundHeight return
   constexpr uint32_t kCaveOffGt = 52;    // GetType return
@@ -729,39 +763,11 @@ void ApplyDc3IKInstrumentation(const Dc3HackContext& ctx,
     else result.skipped++;
   }
 
-  // Step 4: The IK telemetry slots are now READ by ReadDc3IKTelemetry(), which
-  // is invoked from Dc3NuiSequencerExtern (emulator.cc) every ~30 NUI frames.
-  //
-  // We deliberately do NOT rely on a HolmesClientPoll host override anymore.
-  // RegisterGuestFunctionOverride cannot intercept HolmesClientPoll (guest
-  // 0x82631C58): it's a non-virtual __cdecl free function reached by a direct
-  // guest `bl`, and the kExtern interception only diverts the static direct-bl
-  // JIT path; the compiled body is also written into the indirection table, so
-  // indirect callers bypass the handler. (cpu/function.cc, cpu/processor.cc,
-  // backend/x64/x64_emitter.cc, x64_code_cache.cc.) On top of that
-  // HolmesClientPoll is dormant headless (gHolmesStream==null, gUsingCD==0), so
-  // the old handler body literally never executed -> zero telemetry records.
-  //
-  // The byte-patch code-caves above DO fire (they are guest-memory patches
-  // independent of the broken override) and keep the scratch slots fresh, so
-  // the only thing that was missing was a reader on a hook that actually runs.
-  // Dc3NuiSequencerExtern is that hook. The registration below is left as a
-  // harmless dead hook for documentation; it will never fire.
-  {
-    auto ik_log_handler = [](cpu::ppc::PPCContext* ppc_context,
-                             kernel::KernelState* /*kernel_state*/) {
-      // Dead hook: superseded by ReadDc3IKTelemetry() called from
-      // Dc3NuiSequencerExtern. See note above — this never executes.
-      ppc_context->r[3] = 0;
-    };
-    ctx.processor->RegisterGuestFunctionOverride(
-        kAddr.holmes_client_poll, ik_log_handler,
-        "DC3:HolmesClientPoll(IK telemetry, dead hook)");
-    XELOGI("DC3:IK Telemetry reader now driven by Dc3NuiSequencerExtern; "
-           "HolmesClientPoll override at {:08X} left as dead hook",
-           kAddr.holmes_client_poll);
-    result.applied++;
-  }
+  // Step 4: the slots are READ by ReadDc3IKTelemetry() from the NUI frame
+  // callback (dc3_nui_sequencer.cc). The old HolmesClientPoll override that
+  // was "left as a dead hook" is gone: on the original layout its address
+  // (0x82631C58, a decomp-layout constant) is inside
+  // ObjDirItr<RndMat>::Advance, and it never fired on either layout.
 }
 
 // ============================================================================

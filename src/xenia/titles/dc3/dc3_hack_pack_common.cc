@@ -20,14 +20,14 @@
 #include "xenia/titles/dc3/dc3_addresses.h"
 
 DEFINE_bool(
-    dc3_clean_content_cache, true,
-    "DC3 (0x373307D9) only: on every launch, recursively delete the whole "
-    "<content_root>/373307D9 directory before the title starts. This DESTROYS "
-    "DC3 save games, profiles and downloaded content -- it is not a cache "
-    "scrub, it is remove_all() on the title's entire content tree. It exists "
-    "because the decomp bring-up box wants a clean slate each boot and the "
-    "DC3 boot probe's 627-trap baseline assumes it. Anyone who is not doing "
-    "decomp bring-up should set this to false.",
+    dc3_clean_content_cache, false,
+    "DC3 (0x373307D9) only, default OFF: on every launch, recursively delete "
+    "the whole <content_root>/373307D9 directory before the title starts. "
+    "This DESTROYS DC3 save games, profiles and downloaded content -- it is "
+    "not a cache scrub, it is remove_all() on the title's entire content "
+    "tree. Decomp bring-up runs wanted a clean slate each boot; a private "
+    "--storage_root per run gives the same thing without touching anyone's "
+    "saves (tools/fork-regress does that for every run).",
     "DC3");
 
 namespace xe {

@@ -26,6 +26,35 @@ namespace xe {
 namespace hid {
 namespace nop {
 
+// Title hooks for the scripted-input player (NOT upstream). The player below
+// is title-agnostic: it parses the script, times presses and turns them into
+// XInput state/keystrokes. Everything that knows a title's memory layout (how
+// to read the current UI screen name, per-title harness automation) lives in
+// an adapter the title module installs with SetScriptedInputTitleAdapter().
+class ScriptedInputTitleAdapter {
+ public:
+  virtual ~ScriptedInputTitleAdapter() = default;
+  // The current UI screen name, "" if it cannot be read.
+  virtual std::string ReadCurrentScreenName(Memory* memory) = 0;
+  // Called on every primary-pad poll with the latest screen name.
+  virtual void OnPrimaryPadPoll(Memory* memory, const std::string& screen) {}
+  // Called on every poll while a `wait_screen <wanted>` directive is not yet
+  // satisfied. May return buttons to press, and may replace *screen when it
+  // moved the UI itself.
+  virtual uint16_t WhileWaitingForScreen(Memory* memory,
+                                         const std::string& wanted,
+                                         std::string* screen) {
+    return 0;
+  }
+  // Called every 2 s while a wait_screen directive is pending.
+  virtual void LogWaitStatus(Memory* memory, const std::string& wanted,
+                             const std::string& screen) {}
+};
+
+// Installs the adapter for the running title (nullptr removes it). The
+// adapter must outlive every driver call; title modules use a static one.
+void SetScriptedInputTitleAdapter(ScriptedInputTitleAdapter* adapter);
+
 class NopInputDriver final : public InputDriver {
  public:
   explicit NopInputDriver(xe::ui::Window* window, size_t window_z_order);
@@ -91,21 +120,15 @@ class NopInputDriver final : public InputDriver {
   };
 
   uint16_t GetCurrentButtons(uint32_t pad);
+  // Queues KEYDOWN/KEYUP keystrokes for the edges since the previous poll.
+  void QueueKeystrokeEdges(uint32_t user_index, uint16_t active_buttons);
   uint16_t ButtonToVK(uint16_t button) const;
 
-  // Read the current screen name from guest memory (TheUI->mCurrentScreen->mName)
+  // The current screen name, through the title adapter.
   std::string ReadCurrentScreenName() const;
-  // RB3 (BandUI) variant of the above; "" if this is not an RB3 title.
-  std::string ReadRb3ScreenName() const;
-  // Set by ReadCurrentScreenName: true when the name came from the RB3 BandUI
-  // layout. Guards the DC3-only gameplay pokes, whose hardcoded addresses would
-  // be meaningless (and destructive) in RB3's address space.
-  mutable bool screen_name_is_rb3_ = false;
-
-  // Drive DC3 gameplay timelines from a callback that survives past
-  // the final menu transition.
-  void UpdateDc3HostBeatDrive();
-  void ProbeDc3GameplayState();
+  // Primary-pad poll: refresh the screen name (every 100 ms) and hand it to
+  // the title adapter.
+  void PollTitleAdapter();
 
   // Process screen-aware script state machine
   uint16_t GetScreenAwareButtons();
@@ -125,21 +148,6 @@ class NopInputDriver final : public InputDriver {
   std::chrono::steady_clock::time_point wait_satisfied_time_;  // When wait was satisfied
   std::string last_screen_name_;      // Cache to avoid re-reading every call
   std::chrono::steady_clock::time_point last_screen_read_time_;  // Throttle reads
-  bool dc3_host_beat_drive_active_ = false;
-  float dc3_host_song_seconds_ = 0.0f;
-  float dc3_host_song_beat_ = 0.0f;
-  std::chrono::steady_clock::time_point dc3_host_last_update_time_;
-  std::chrono::steady_clock::time_point dc3_host_last_log_time_;
-  std::chrono::steady_clock::time_point dc3_gameplay_probe_last_log_time_;
-  uint32_t dc3_last_game_panel_addr_ = 0;
-  uint32_t dc3_last_game_addr_ = 0;
-  int dc3_last_game_panel_state_ = -1;
-  int dc3_last_game_load_state_ = -1;
-  int dc3_last_game_wait_state_ = -1;
-  bool dc3_last_game_paused_ = false;
-  bool dc3_last_game_time_paused_ = false;
-  bool dc3_last_game_real_time_ = false;
-  bool dc3_last_game_has_intro_ = false;
 
   // Guest memory access
   Memory* memory_ = nullptr;

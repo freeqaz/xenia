@@ -10,7 +10,7 @@
 # usage: run_dc3_oracle.sh <run-dir> [gpu: null|vulkan] [timeout_s] [extra cvars...]
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
-WT="$(cd "$HERE/../.." && pwd)"
+WT="$(cd "$HERE/../../.." && pwd)"
 DC3="${DC3:-/home/free/code/milohax/dc3-decomp}"
 XENIA="${XENIA:-$WT/build/bin/Linux/Checked/xenia-headless}"
 RUN="${1:?run dir}"; GPU="${2:-null}"; TIMEOUT_S="${3:-240}"; shift 3 || shift $#
@@ -25,6 +25,9 @@ cvars=(
   --dc3_crt_skip_nui=true
   --stub_nui_functions=true
   --fake_kinect_data=true
+  # Headless menu automation (titles/dc3/dc3_autonav.cc) is opt-in since it
+  # moved to the guest main thread; the ymca flow needs it.
+  --dc3_headless_autonav=true
   --scripted_input_file="$DC3/scripts/dc3-input-flows/xenia-ymca.txt"
   --headless_timeout_ms=$(( (TIMEOUT_S - 10) * 1000 ))
 )

@@ -25,9 +25,6 @@ DEFINE_string(dc3_runtime_telemetry_path, "",
               "DC3: append-only JSONL telemetry output path. Ignored unless "
               "--dc3_runtime_telemetry_enable=true.",
               "DC3");
-DEFINE_bool(dc3_runtime_telemetry_include_ppc_words, false,
-            "DC3: reserved for heavier telemetry payloads (currently unused).",
-            "DC3");
 
 namespace xe {
 

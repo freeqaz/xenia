@@ -2388,50 +2388,6 @@ bool Dc3TryParseHexU64(const std::string_view str, uint64_t* out_value) {
   return true;
 }
 
-std::optional<std::filesystem::path> Dc3AutoProbeNuiSymbolMapPath() {
-  const std::filesystem::path candidates[] = {
-      "/home/free/code/milohax/dc3-decomp/config/373307D9/symbols.txt",
-      "../dc3-decomp/config/373307D9/symbols.txt",
-      "dc3-decomp/config/373307D9/symbols.txt",
-  };
-  for (const auto& path : candidates) {
-    std::error_code ec;
-    if (std::filesystem::exists(path, ec)) {
-      return path;
-    }
-  }
-  return std::nullopt;
-}
-
-std::optional<std::filesystem::path> Dc3AutoProbeFingerprintCachePath() {
-  const std::filesystem::path candidates[] = {
-      "/home/free/code/milohax/xenia/docs/dc3-boot/dc3_nui_fingerprints.txt",
-      "docs/dc3-boot/dc3_nui_fingerprints.txt",
-  };
-  for (const auto& path : candidates) {
-    std::error_code ec;
-    if (std::filesystem::exists(path, ec)) {
-      return path;
-    }
-  }
-  return std::nullopt;
-}
-
-std::optional<std::filesystem::path> Dc3AutoProbePatchManifestPath() {
-  const std::filesystem::path candidates[] = {
-      "/home/free/code/milohax/dc3-decomp/build/373307D9/xenia_dc3_patch_manifest.json",
-      "../dc3-decomp/build/373307D9/xenia_dc3_patch_manifest.json",
-      "dc3-decomp/build/373307D9/xenia_dc3_patch_manifest.json",
-  };
-  for (const auto& path : candidates) {
-    std::error_code ec;
-    if (std::filesystem::exists(path, ec)) {
-      return path;
-    }
-  }
-  return std::nullopt;
-}
-
 std::optional<Dc3NuiSymbolManifest> Dc3LoadNuiSymbolManifest(
     const std::filesystem::path& path) {
   std::ifstream file(path);

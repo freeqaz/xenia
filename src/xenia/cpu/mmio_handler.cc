@@ -179,11 +179,57 @@ bool MMIOHandler::TryDecodeLoadStore(const uint8_t* p,
 #if XE_ARCH_AMD64
   uint8_t i = 0;  // Current byte decode index.
   uint8_t rex = 0;
-  if ((p[i] & 0xF0) == 0x40) {
+  if (p[0] == 0xC5 || p[0] == 0xC4) {
+    // 128-bit VEX moves, as the x64 backend emits for lvx/stvx (STORE_V128 /
+    // LOAD_V128: vmovaps after/before a vpshufb byte swap). A guest vector
+    // access to an MMIO range -- e.g. the XMA HAL kicking 128 contexts with
+    // one stvx128 to the Kick registers -- used to be undecodable.
+    //   C5 [R vvvv L pp] op               (2-byte VEX, map 0F)
+    //   C4 [R X B mmmmm] [W vvvv L pp] op (3-byte VEX)
+    uint8_t vex_r, vex_x = 0, vex_b = 0, l, pp;
+    if (p[0] == 0xC5) {
+      vex_r = !(p[1] & 0x80);
+      l = (p[1] >> 2) & 1;
+      pp = p[1] & 3;
+      i = 2;
+    } else {
+      if ((p[1] & 0x1F) != 1) {
+        return false;  // Only map 0F.
+      }
+      vex_r = !(p[1] & 0x80);
+      vex_x = !(p[1] & 0x40);
+      vex_b = !(p[1] & 0x20);
+      l = (p[2] >> 2) & 1;
+      pp = p[2] & 3;
+      i = 3;
+    }
+    if (l != 0) {
+      return false;  // 256-bit: never emitted for guest memory.
+    }
+    uint8_t op = p[i++];
+    if ((op == 0x29 || op == 0x11) && (pp == 0 || pp == 1)) {
+      decoded_out.is_load = false;  // vmovaps/vmovapd/vmovups/vmovupd m, x
+    } else if ((op == 0x28 || op == 0x10) && (pp == 0 || pp == 1)) {
+      decoded_out.is_load = true;  // vmovaps/vmovapd/vmovups/vmovupd x, m
+    } else if (op == 0x7F && (pp == 1 || pp == 2)) {
+      decoded_out.is_load = false;  // vmovdqa/vmovdqu m, x
+    } else if (op == 0x6F && (pp == 1 || pp == 2)) {
+      decoded_out.is_load = true;  // vmovdqa/vmovdqu x, m
+    } else {
+      return false;
+    }
+    decoded_out.is_vector = true;
+    decoded_out.byte_swap = false;
+    // Reuse the ModRM/SIB decode below with an equivalent REX.
+    rex = 0x40 | (vex_r ? 0b0100 : 0) | (vex_x ? 0b0010 : 0) |
+          (vex_b ? 0b0001 : 0);
+  } else if ((p[i] & 0xF0) == 0x40) {
     rex = p[0];
     ++i;
   }
-  if (p[i] == 0x0F && p[i + 1] == 0x38 && p[i + 2] == 0xF1) {
+  if (decoded_out.is_vector) {
+    // Opcode already consumed.
+  } else if (p[i] == 0x0F && p[i + 1] == 0x38 && p[i + 2] == 0xF1) {
     // MOVBE m32, r32 (store)
     // https://web.archive.org/web/20170629091435/https://www.tptp.cc/mirrors/siyobik.info/instruction/MOVBE.html
     // 44 0f 38 f1 a4 02 00     movbe  DWORD PTR [rdx+rax*1+0x0],r12d
@@ -623,7 +669,11 @@ bool MMIOHandler::ExceptionCallback(Exception* ex) {
         }
         if (soft_fault) {
 #if XE_ARCH_AMD64
-          ex->ModifyIntRegister(decoded_load_store.value_reg) = 0;
+          if (decoded_load_store.is_vector) {
+            ex->ModifyXmmRegister(decoded_load_store.value_reg) = vec128_t{};
+          } else {
+            ex->ModifyIntRegister(decoded_load_store.value_reg) = 0;
+          }
 #endif
           ex->set_resume_pc(rip + decoded_load_store.length);
           if (fault_guest_virtual_address >= 0xFFD00000u) {
@@ -673,6 +723,30 @@ bool MMIOHandler::ExceptionCallback(Exception* ex) {
 #endif  // XE_ARCH_ARM64
 
   uint8_t value_reg = decoded_load_store.value_reg;
+#if XE_ARCH_AMD64
+  if (decoded_load_store.is_vector) {
+    // The XMM register holds the 16-byte guest memory image (the backend
+    // byte-swaps before a store and after a load). Each 32-bit lane is one
+    // register in memory order; the callbacks take/return the value the guest
+    // sees, i.e. the lane byte-swapped, exactly like the 32-bit path.
+    uint32_t base = fault_guest_virtual_address & ~uint32_t(0xF);
+    if (decoded_load_store.is_load) {
+      vec128_t& xmm = ex->ModifyXmmRegister(value_reg);
+      for (uint32_t lane = 0; lane < 4; ++lane) {
+        xmm.u32[lane] = xe::byte_swap(
+            range->read(nullptr, range->callback_context, base + lane * 4));
+      }
+    } else {
+      const vec128_t& xmm = thread_context.xmm_registers[value_reg];
+      for (uint32_t lane = 0; lane < 4; ++lane) {
+        range->write(nullptr, range->callback_context, base + lane * 4,
+                     xe::byte_swap(xmm.u32[lane]));
+      }
+    }
+    ex->set_resume_pc(rip + decoded_load_store.length);
+    return true;
+  }
+#endif  // XE_ARCH_AMD64
   if (decoded_load_store.is_load) {
     // Load of a memory value - read from range, swap, and store in the
     // register.

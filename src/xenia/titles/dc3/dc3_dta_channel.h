@@ -40,6 +40,9 @@ class Processor;
 bool Dc3DtaChannelInstall(cpu::Processor* processor, Memory* memory,
                           const std::string& socket_path);
 
+// Stops and joins the socket server thread (title terminate / shutdown).
+void Dc3DtaChannelShutdown();
+
 }  // namespace xe
 
 #endif  // XENIA_DC3_DTA_CHANNEL_H_

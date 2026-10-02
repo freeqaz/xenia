@@ -79,6 +79,13 @@ xr_run() {
   mkdir -p "$rd/storage"
   cp "$cfg" "$rd/config.toml"
   local -a argv=( "--storage_root=$rd/storage" "--config=$rd/config.toml" "${XR_ARGS[@]}" )
+  # run.sh --extra-arg (newline-separated; one argv entry per line).
+  if [ -n "${FR_EXTRA_ARGS:-}" ]; then
+    local -a extra=()
+    mapfile -t extra <<< "$FR_EXTRA_ARGS"
+    local e
+    for e in "${extra[@]}"; do [ -n "$e" ] && argv+=( "$e" ); done
+  fi
   printf '%s\0' "${argv[@]}" > "$rd/argv.bin"
   printf '%q ' "$BIN" "${argv[@]}" > "$rd/cmd.txt"; echo >> "$rd/cmd.txt"
 
@@ -158,6 +165,10 @@ dc3_original_args() {
          --stub_nui_functions=true --fake_kinect_data=true \
          "--scripted_input_file=$I/xenia-ymca.txt" \
          "--headless_timeout_ms=$timeout_ms"
+  # The ymca flow needs the host menu automation; since titles/dc3 moved it to
+  # the guest main thread it is opt-in (dc3_autonav.cc). Older binaries do not
+  # define the cvar and always run the automation (on the NUI worker).
+  xr_opt dc3_headless_autonav true
   xr_opt dc3_nui_symbol_map_path "$I/symbols.dc3-decomp-c362ede1c.txt"
   xr_opt dc3_nui_layout_fingerprint_cache_path "$I/dc3_nui_fingerprints.xenia-a5fc2f1b6.txt"
   # Without this the early manifest load auto-probes

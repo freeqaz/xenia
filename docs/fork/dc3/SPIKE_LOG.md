@@ -42,7 +42,7 @@ Run artefacts (logs, cmd lines, binaries) live under
   without `--storage_root` rewrites the shared toml. With `--config=<file>`
   that exists it reads that file only and does not save.
 - Every run here passes `--storage_root=<run>/storage` and
-  `--config=docs/dc3-oracle/xenia.dc3-oracle.defaults.toml`, which is the
+  `--config=docs/fork/dc3/xenia.dc3-oracle.defaults.toml`, which is the
   file this binary writes into an empty storage root (all compiled-in
   defaults). Command-line values beat config values (`cvar.h:186`).
 - The shared toml vs this binary's defaults (keys that exist on `main`):
