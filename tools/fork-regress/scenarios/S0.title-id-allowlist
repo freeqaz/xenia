@@ -9,5 +9,5 @@
 # fewer lines than allowed is reported as stale: lower it.
 #
 # path<TAB>max lines<TAB>reason
-src/xenia/cpu/ppc/ppc_emit-private.h	1	Comment only: names the two decomp targets that depend on the translator's keep-going behaviour for unimplemented opcodes. No code. (cpu/ is the core lane's; it can drop the IDs from the comment.)
-src/xenia/kernel/xboxkrnl/xboxkrnl_memory.cc	4	rb3dx_force_zero_commit (default off) gates on 0x45410914 (2 code lines + 2 comment lines). Plan section 2.5 bucket 4: the core lane deletes the cvar, and with it these lines. Lower to 0 when it lands.
+src/xenia/cpu/ppc/ppc_emit-private.h	0	Comment only; the core lane dropped the title IDs (core-d2). Kept at 0 so a re-introduction fails S0.
+src/xenia/kernel/xboxkrnl/xboxkrnl_memory.cc	0	rb3dx_force_zero_commit deleted (plan section 2.5 bucket 4, core-d2); the file matches upstream's zeroing again. Kept at 0 so a re-introduction fails S0.
