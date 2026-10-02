@@ -30,6 +30,11 @@ cvars=(
 )
 if [ "$GPU" = vulkan ]; then
   cvars+=( --dump_frames_path="$RUN/frames" --headless_capture_interval=300 )
+  # The capture-path cvars default to upstream behaviour (false) since the
+  # 2026-10 fork cleanup; the oracle's capture flow needs them on. (A binary
+  # older than that rejects --headless_async_pipelines; drop it there.)
+  cvars+=( --headless_skip_submission_wait=true --headless_capture_only_draws=true
+           --headless_async_pipelines=true )
 fi
 cvars+=( "$@" )
 {
