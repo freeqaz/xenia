@@ -88,11 +88,6 @@ class MMIOHandler {
                                  const char* branch, int detail);
   static void SetFaultObserver(FaultObserver observer);
 
-  // DEPRECATED: installs the RB3DX top-of-address-space logger as the fault
-  // observer (--rb3dx_alloc_probe). titles/rb3 should install its own
-  // observer with SetFaultObserver; this shim then goes.
-  static void SetAllocProbeEnabled(bool enabled);
-
  protected:
   MMIOHandler(uint8_t* virtual_membase, uint8_t* physical_membase,
               uint8_t* membase_end, HostToGuestVirtual host_to_guest_virtual,

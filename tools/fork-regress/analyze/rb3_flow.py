@@ -8,8 +8,10 @@ recv=…(n=<r>) chans=…(n=<c>)`, `RB3: app-run-direct installed`,
 
 S4 has two criteria sets. With the mogg key table installed (the content dir
 derived it), gameplay: game_screen at transState=0 AND the song stream (the
-widest StandardStream censused after game_screen) at mState=3 (kPlaying) with
-receivers == channels. Before the §8x fix the song stream sat at mState=0 with
+widest StandardStream censused after game_screen) SEEN at mState=3 (kPlaying)
+with receivers == channels at least once (a song that plays to the end then
+moves on to mState=6, so the latest or highest state is not the test). Before
+the §8x fix the song stream sat at mState=0 with
 an EMPTY receiver vector (InitInfo never ran), so this is the §8x signal. The
 channel count depends on which song the autopilot lands on (s66: 11 on
 tv3_a; the post-s66 seed lands on a 14-channel song via tv3_c), so it is
@@ -20,6 +22,8 @@ import re
 from pathlib import Path
 
 TS_RE = re.compile(r"Thread Status Report \((\d+)ms\).*SIGSEGV=(\d+)")
+# Headless binaries since Lane C also print XMA=<m> NON_XMA=<k> on that line.
+NON_XMA_RE = re.compile(r"Thread Status Report .* NON_XMA=(\d+)")
 UI_RE = re.compile(r"UI PROBE\[(\d+)\]: transState=(\d+) curScreen=\S+'([^']*)' "
                    r"transScreen=\S+'([^']*)'")
 STREAM_RE = re.compile(r"STREAM-CENSUS 0x([0-9A-Fa-f]+) mState=(\d+) .*?\(n=(\d+)\).*?\(n=(\d+)\)")
@@ -48,7 +52,11 @@ def timeout_from_tail(log, tail_bytes=16384):
 
 def parse(log: Path) -> dict:
     now, seen, timeline, last = 0, {}, [], None
-    stream_max = {}  # (stream addr) -> best (mState, recv, chans) after game_screen
+    stream_max = {}  # (stream addr) -> highest (mState, recv, chans) after game_screen
+    # Streams EVER seen playing after game_screen: mState 3 (kPlaying) with
+    # receivers == channels > 2. A song that plays to the end moves on to a
+    # later state (6), so the highest tuple alone is not the criterion.
+    stream_played = set()
     game_t0 = None
     installs = {"app_run_direct": False, "mogg_key_table": False,
                 "mogg_key_table_rejected": False, "no_char_preview": False}
@@ -56,6 +64,7 @@ def parse(log: Path) -> dict:
     autopilot = 0
     timeout_ms = None
     max_segv = 0
+    max_non_xma = None  # None: the binary does not print NON_XMA
     trans_to_game = None
     with open(log, errors="replace") as f:
         for line in f:
@@ -63,6 +72,9 @@ def parse(log: Path) -> dict:
             if m:
                 now = int(m.group(1))
                 max_segv = max(max_segv, int(m.group(2)))
+                nx = NON_XMA_RE.search(line)
+                if nx:
+                    max_non_xma = max(max_non_xma or 0, int(nx.group(1)))
                 continue
             m = UI_RE.search(line)
             if m:
@@ -83,6 +95,8 @@ def parse(log: Path) -> dict:
             m = STREAM_RE.search(line)
             if m and game_t0 is not None:
                 cand = (int(m.group(2)), int(m.group(3)), int(m.group(4)))
+                if cand[0] == 3 and cand[1] == cand[2] > 2:
+                    stream_played.add(m.group(1))
                 prev = stream_max.get(m.group(1))
                 if prev is None or cand > prev:
                     stream_max[m.group(1)] = cand
@@ -104,16 +118,17 @@ def parse(log: Path) -> dict:
                 timeout_ms = int(t.group(1))
     if timeout_ms is None:
         timeout_ms = timeout_from_tail(log)
-    playing = sorted(({"stream": k, "mState": v[0], "recv": v[1], "chans": v[2]}
+    playing = sorted(({"stream": k, "mState": v[0], "recv": v[1], "chans": v[2],
+                       "played": k in stream_played}
                       for k, v in stream_max.items()),
-                     key=lambda d: (-d["mState"], -d["recv"]))
+                     key=lambda d: (-d["played"], -d["mState"], -d["recv"]))
     tv3 = sorted(n for n in seen if re.fullmatch(r"tv3_\w+_screen", n))
     return {"screens_first_seen_s": seen, "timeline": timeline,
             "tv3_screens": tv3, "transition_to_game_screen_s": trans_to_game,
             "game_screen_entered_s": game_t0, "streams_after_game_screen": playing,
             "installs": installs, "livelock_aborts": livelock,
             "autopilot_actions": autopilot, "timeout_reached_ms": timeout_ms,
-            "max_sigsegv": max_segv, "last_report_s": round(now / 1000, 1)}
+            "max_sigsegv": max_segv, "max_non_xma_faults": max_non_xma, "last_report_s": round(now / 1000, 1)}
 
 
 def analyze(run_dir: Path, meta: dict):
@@ -144,14 +159,14 @@ def analyze(run_dir: Path, meta: dict):
                 reasons.append("transition to game_screen never began")
         else:
             crit["game_screen"] = "transState=0"
-            crit["stream"] = ("widest stream after game_screen: mState=3, "
-                              "recv == chans > 2")
+            crit["stream"] = ("widest stream after game_screen: seen at mState=3 "
+                              "with recv == chans > 2")
             streams = m["streams_after_game_screen"]
-            song = max(streams, key=lambda d: (d["chans"], d["mState"]), default=None)
+            song = max(streams, key=lambda d: (d["chans"], d["played"]), default=None)
             m["song_stream"] = song
             if m["game_screen_entered_s"] is None:
                 reasons.append("game_screen never reached transState=0")
-            elif not song or not (song["mState"] == 3 and song["recv"] == song["chans"] > 2):
+            elif not song or not song["played"]:
                 reasons.append(f"song stream not playing after game_screen (saw {streams[:3]})")
     else:
         m["mode"] = "rb3dx"

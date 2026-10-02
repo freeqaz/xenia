@@ -151,6 +151,9 @@ project("xenia-headless")
     "emulator_headless.cc",
     "emulator_headless.h",
     "xenia_headless_main.cc",
+    -- The GDB RSP server: only the headless app serves it.
+    "../debug/gdb_rsp/*.cc",
+    "../debug/gdb_rsp/*.h",
   })
 
   links({

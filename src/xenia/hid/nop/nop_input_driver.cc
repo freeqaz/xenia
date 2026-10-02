@@ -38,55 +38,6 @@ namespace nop {
 
 namespace {
 
-bool IsGuestReadable(Memory* memory, uint32_t guest_addr, uint32_t size) {
-  if (!memory || !guest_addr || guest_addr >= 0xF0000000 || !size) {
-    return false;
-  }
-  uint32_t guest_end = guest_addr + size - 1;
-  if (guest_end < guest_addr) {
-    return false;
-  }
-  auto* heap = memory->LookupHeap(guest_addr);
-  if (!heap) {
-    return false;
-  }
-  return heap->QueryRangeAccess(guest_addr, guest_end) !=
-         xe::memory::PageAccess::kNoAccess;
-}
-
-// RB3 (TU5, title 0x45410914) screen-name read. The RB3 UI singleton is a
-// BandUI at a FIXED address (TheBandUI = 0x82DFD2B0 -- the object itself, not
-// a pointer to it; the frame loop's TheUI pointer global 0x82C721F0 is
-// statically initialized to it), with mCurrentScreen @ +0x2C and the screen's
-// name pointer @ +0x18. Returns "" if the layout does not read plausibly.
-//
-// LEGACY: the reader used when no title adapter is installed. It belongs in
-// an RB3 ScriptedInputTitleAdapter in titles/rb3/ (fork-cleanup Lane C);
-// delete it here once that adapter registers itself.
-std::string ReadLegacyRb3ScreenName(Memory* memory) {
-  if (!memory) return "";
-  constexpr uint32_t kTheBandUI = 0x82DFD2B0;
-  if (!IsGuestReadable(memory, kTheBandUI + 0x30, 4)) return "";
-  auto* ui_obj = memory->TranslateVirtual<uint8_t*>(kTheBandUI);
-  uint32_t cur_screen = xe::load_and_swap<uint32_t>(ui_obj + 0x2C);
-  if (!cur_screen || cur_screen >= 0xF0000000) return "";
-  if (!IsGuestReadable(memory, cur_screen + 0x18, 4)) return "";
-  auto* scr = memory->TranslateVirtual<uint8_t*>(cur_screen);
-  uint32_t name_ptr = xe::load_and_swap<uint32_t>(scr + 0x18);
-  if (!name_ptr || name_ptr >= 0xF0000000) return "";
-  std::string result;
-  for (uint32_t i = 0; i < 64; ++i) {
-    if (!IsGuestReadable(memory, name_ptr + i, 1)) return "";
-    char ch =
-        static_cast<char>(*memory->TranslateVirtual<uint8_t*>(name_ptr + i));
-    if (!ch) return result;
-    unsigned char uch = static_cast<unsigned char>(ch);
-    if (!(std::isalnum(uch) || ch == '_')) return "";
-    result.push_back(ch);
-  }
-  return "";
-}
-
 std::atomic<ScriptedInputTitleAdapter*> s_title_adapter{nullptr};
 
 }  // namespace
@@ -345,7 +296,7 @@ std::string NopInputDriver::ReadCurrentScreenName() const {
   if (auto* adapter = s_title_adapter.load(std::memory_order_acquire)) {
     return adapter->ReadCurrentScreenName(memory_);
   }
-  return ReadLegacyRb3ScreenName(memory_);
+  return "";
 }
 
 void NopInputDriver::PollTitleAdapter() {

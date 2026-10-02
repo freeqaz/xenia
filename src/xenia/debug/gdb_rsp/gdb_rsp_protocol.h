@@ -7,8 +7,8 @@
  ******************************************************************************
  */
 
-#ifndef XENIA_DEBUG_DC3_GDB_RSP_PROTOCOL_H_
-#define XENIA_DEBUG_DC3_GDB_RSP_PROTOCOL_H_
+#ifndef XENIA_DEBUG_GDB_RSP_GDB_RSP_PROTOCOL_H_
+#define XENIA_DEBUG_GDB_RSP_GDB_RSP_PROTOCOL_H_
 
 #include <cstddef>
 #include <cstdint>
@@ -20,7 +20,7 @@
 
 namespace xe {
 namespace debug {
-namespace dc3_gdb_rsp {
+namespace gdb_rsp {
 
 enum class PacketReadKind { kPacket, kInterrupt, kBadChecksum, kEof };
 
@@ -124,8 +124,8 @@ inline bool SendPacketToSocket(int fd, const std::string& payload) {
 }
 #endif  // __linux__
 
-}  // namespace dc3_gdb_rsp
+}  // namespace gdb_rsp
 }  // namespace debug
 }  // namespace xe
 
-#endif  // XENIA_DEBUG_DC3_GDB_RSP_PROTOCOL_H_
+#endif  // XENIA_DEBUG_GDB_RSP_GDB_RSP_PROTOCOL_H_

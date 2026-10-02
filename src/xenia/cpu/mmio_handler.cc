@@ -51,23 +51,6 @@ void MMIOHandler::SetFaultObserver(FaultObserver observer) {
   fault_observer_.store(observer, std::memory_order_relaxed);
 }
 
-// DEPRECATED compatibility shim for titles/rb3 (--rb3dx_alloc_probe), which
-// still calls SetAllocProbeEnabled. It installs the old top-of-address-space
-// logger as a fault observer; the logger belongs in titles/rb3 and this shim
-// goes once that module calls SetFaultObserver itself.
-static std::atomic<int> alloc_probe_logs_{0};
-static void AllocProbeTopHoleObserver(uint32_t guest_ea, bool is_write,
-                                      const char* branch, int detail) {
-  if (guest_ea < 0xFFD00000u) return;
-  if (alloc_probe_logs_.fetch_add(1, std::memory_order_relaxed) >= 8) return;
-  XELOGE("RB3DX TOPHOLE: guest EA {:08X} is_write={} branch={} detail={}",
-         guest_ea, is_write, branch, detail);
-}
-
-void MMIOHandler::SetAllocProbeEnabled(bool enabled) {
-  SetFaultObserver(enabled ? &AllocProbeTopHoleObserver : nullptr);
-}
-
 // Guest virtual range registered by the launch path in which a write fault on
 // a read-only host page re-enables write access and resumes. Empty by default
 // (lo >= hi), so this recovery branch is inert for every title that does not
