@@ -40,6 +40,12 @@ DECLARE_string(dc3_debug_findarray_override_mode);
 DECLARE_bool(fake_kinect_data);
 DECLARE_bool(dc3_ik_telemetry);
 
+DEFINE_string(dc3_decomp_disable_stubs, "",
+              "DC3 decomp layout only: comma-separated decomp-pack stub names "
+              "(as logged, e.g. 'Splash::BeginSplasher') to NOT apply, for "
+              "one-stub-at-a-time A/Bs against the S3 fingerprint.",
+              "DC3");
+
 namespace xe {
 
 namespace kernel {
@@ -737,10 +743,29 @@ bool PatchStub8(Memory* memory, uint32_t address, uint32_t return_value,
   return true;
 }
 
+// --dc3_decomp_disable_stubs: names of decomp-pack stubs NOT to apply, to
+// measure a single stub's effect on the S3 fingerprint.
+bool DecompStubDisabled(const char* name) {
+  const std::string& list = cvars::dc3_decomp_disable_stubs;
+  if (list.empty()) {
+    return false;
+  }
+  std::string want = std::string(",") + name + ",";
+  if ((std::string(",") + list + ",").find(want) == std::string::npos) {
+    return false;
+  }
+  XELOGW("DC3: decomp stub '{}' NOT applied (--dc3_decomp_disable_stubs)",
+         name);
+  return true;
+}
+
 bool PatchStub8Resolved(Memory* memory,
                         const std::unordered_map<std::string, uint32_t>* manifest,
                         uint32_t fallback_address, uint32_t return_value,
                         const char* name) {
+  if (DecompStubDisabled(name)) {
+    return false;
+  }
   uint32_t address = LookupStubAddr(manifest, name, fallback_address);
   if (address != fallback_address) {
     XELOGI("DC3: Resolved hack-pack stub '{}' {:08X} -> {:08X} via manifest",
@@ -3612,6 +3637,9 @@ void ApplyRuntimeStopgaps(const Dc3HackContext& ctx,
         // critical section enter/leave. Stubbing breaks CS ownership.
     };
     for (const auto& bp : blr_patches) {
+      if (DecompStubDisabled(bp.name)) {
+        continue;
+      }
       auto* heap = memory->LookupHeap(bp.addr);
       auto* mem = memory->TranslateVirtual<uint8_t*>(bp.addr);
       if (heap && mem) {
