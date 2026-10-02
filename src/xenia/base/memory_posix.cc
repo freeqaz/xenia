@@ -87,37 +87,28 @@ bool IsWritableExecutableMemorySupported() { return true; }
 
 void* AllocFixed(void* base_address, size_t length,
                  AllocationType allocation_type, PageAccess access) {
-  // Use mprotect to change permissions on already-mapped memory.
+  // Change the protection of the existing mapping with mprotect instead of
+  // mmap(MAP_FIXED | MAP_ANONYMOUS)'ing over it. Memory::Initialize() creates
+  // ONE file mapping and Memory::MapViews() lays several MAP_SHARED views of
+  // it over the guest address space, mapping the same file offsets at more
+  // than one guest address -- that overlap is the virtual/physical aliasing
+  // the guest depends on. An anonymous MAP_FIXED mapping over part of it
+  // replaces the view and silently breaks the alias for that region.
   //
-  // This deviates from upstream, which unconditionally
-  // mmap(MAP_PRIVATE | MAP_FIXED | MAP_ANONYMOUS)s the range. That is not
-  // usable here: Memory::Initialize() creates ONE memfd (see
-  // CreateFileMappingHandle below) and Memory::MapViews() lays several
-  // MAP_SHARED views of it over the guest address space, deliberately mapping
-  // the same file offsets at more than one guest address -- that overlap IS
-  // the virtual/physical aliasing the guest depends on. A MAP_FIXED anonymous
-  // mapping over any part of it replaces the view and silently breaks the
-  // alias for that region, so the mprotect path is load-bearing on this fork's
-  // mapping scheme and is kept.
-  //
-  // Consequence, and the reason this is not a free win: mprotect does not
-  // zero, so a commit here returns whatever the previous tenant left behind,
-  // where upstream's mmap and the console's NtAllocateVirtualMemory both hand
+  // mprotect does not zero, so a commit here returns whatever the previous
+  // tenant left behind, where the console's NtAllocateVirtualMemory hands
   // back zeroed pages. The zero-fill is done one layer up in BaseHeap
   // (src/xenia/memory.cc, --posix_allocfixed_zero_commit), where the page
-  // table says which pages are NEWLY committed. It deliberately is NOT done
-  // here: xe::memory::AllocFixed is also called with kNoAccess by
-  // Memory::AddVirtualMappedRange (memset would fault) and is called
-  // repeatedly by X64CodeCache with a growing length over already-generated
-  // code (memset would wipe live JIT output while other threads execute it).
+  // table says which pages are NEWLY committed. It is not done here:
+  // AllocFixed is also called with kNoAccess by Memory::AddVirtualMappedRange
+  // (memset would fault) and repeatedly by X64CodeCache with a growing length
+  // over already-generated code (memset would wipe live JIT output).
   uint32_t prot = ToPosixProtectFlags(access);
   if (mprotect(base_address, length, prot) == 0) {
     return base_address;
   }
-  // Fallback: if mprotect fails (e.g., no mapping exists), create one.
-  // MAP_PRIVATE per upstream; this path never covers an aliased view (there is
-  // no mapping to preserve if mprotect just failed), and MAP_SHARED bought
-  // nothing since xenia never forks.
+  // Fallback: if mprotect fails (no mapping exists yet), create one. This
+  // path never covers an aliased view: there is no mapping to preserve.
   void* result = mmap(base_address, length, prot,
                       MAP_PRIVATE | MAP_FIXED | MAP_ANONYMOUS, -1, 0);
   if (result == MAP_FAILED) {

@@ -45,8 +45,7 @@ DEFINE_bool(
     "file-backed mapping instead of mmap'ing fresh anonymous pages (it has to "
     "-- see the comment in base/memory_posix.cc) and therefore cannot zero. "
     "Without this, a guest commit returns whatever the previous tenant left "
-    "behind. Turn it off to get the pre-2026-08 fork behavior back if a title "
-    "regresses.",
+    "behind.",
     "Memory");
 
 namespace xe {
