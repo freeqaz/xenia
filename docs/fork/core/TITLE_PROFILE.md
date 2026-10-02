@@ -82,3 +82,38 @@ The two candidates the diagnostic was there to tell apart:
   or a VFS gap.
 - **Any other value:** `Show()` ran on an empty list, which is an
   ordering/threading gap.
+
+## The `RtlEnterCriticalSection` `owning_thread == 0` abort (core-d2)
+
+The abort cited in the table above, about 1 in 7 RB3 runs historically, was
+not a critical-section bug. It was handle aliasing in
+`XObject::GetNativeObject`, which trusted a handle stashed in a guest
+dispatcher header after the object-table slot had been reused.
+
+RB3's `XEnumerateCrossTitle` task calls `ObDereferenceObject()` on the
+`X_KENUMERATOR` that `XamGetPrivateEnumStructureFromHandle` returned. The
+cross-title enumerate tasks of every RB3 S4 run then do two things: they
+release four live thread handles (often the running task thread's own handle,
+whose slot the stale stash happened to name), and they leak all four aggregate
+enumerators.
+When the reused slot belonged to a critical section's event, the CS waited
+on, and set, the wrong event, or none at all.
+
+Fixed by the two `GetNativeObject` commits ("verifies a stashed handle" and
+"limit the owner lookup to the Ob* exports"): a stash is honoured only if it
+names an object that wraps that guest address, and the Ob* exports find the
+owning object first. Measured per RB3 S4 run, main versus fixed:
+
+| | main | fixed |
+|---|---|---|
+| XThread handles removed | 7 | 3 |
+| bogus event wrappers removed | 4 | 0 |
+| aggregate enumerators released | 0 of 4 | 4 of 4 |
+
+The difference is deterministic: it was identical in all 8 runs on each side.
+The abort itself did not reproduce on either side in that A/B (0 of 16 runs
+each), so its rate is not measured here.
+
+Nothing in the title profile depended on this: `autoinit_critical_sections`
+and `rtl_leave_critical_section_force_release` never fired before the fix
+either.
