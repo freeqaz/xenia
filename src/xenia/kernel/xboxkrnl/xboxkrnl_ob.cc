@@ -277,10 +277,20 @@ dword_result_t ObCreateObject_entry(lpvoid_t object_type, dword_t attributes,
 }
 DECLARE_XBOXKRNL_EXPORT1(ObCreateObject, kNone, kStub);
 
-void ObReferenceObject_entry(lpvoid_t object_ptr) {
-  // TODO: real reference counting
+void ObReferenceObject_entry(dword_t native_ptr) {
+  // The counterpart of ObDereferenceObject above: take the reference that
+  // ObDereferenceObject will drop. A no-op here made every Reference/
+  // Dereference pair release a handle reference the guest never took.
+  if (!native_ptr || native_ptr == 0xDEADF00D) {
+    return;
+  }
+  auto object = XObject::GetNativeObject<XObject>(
+      kernel_state(), kernel_memory()->TranslateVirtual(native_ptr));
+  if (object) {
+    object->RetainHandle();
+  }
 }
-DECLARE_XBOXKRNL_EXPORT1(ObReferenceObject, kNone, kStub);
+DECLARE_XBOXKRNL_EXPORT1(ObReferenceObject, kNone, kImplemented);
 
 }  // namespace xboxkrnl
 }  // namespace kernel
