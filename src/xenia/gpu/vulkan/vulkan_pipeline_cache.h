@@ -11,6 +11,7 @@
 #define XENIA_GPU_VULKAN_VULKAN_PIPELINE_STATE_CACHE_H_
 
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstring>
 #include <filesystem>
@@ -94,15 +95,22 @@ class VulkanPipelineCache {
       VkPipeline& pipeline_out,
       const PipelineLayoutProvider*& pipeline_layout_out);
 
+  // Merges the title's persisted VkPipelineCache blob into the session cache
+  // (and persists the previous title's first). Command processor thread.
+  void InitializeShaderStorage(const std::filesystem::path& cache_root,
+                               uint32_t title_id);
+  // Writes the blob back if pipelines were created since the last write, at
+  // most every 30 s. Command processor thread (the only writer).
+  void SavePipelineCacheIfDirty();
+
   // Enable async pipeline compilation for headless mode. When enabled,
   // pipelines that need creation are compiled on background threads instead of
   // blocking the CP thread (which would cause EVENT_WRITE_SHD deadlocks).
   void SetHeadlessMode(bool headless) { headless_mode_ = headless; }
   bool IsHeadlessMode() const { return headless_mode_; }
-  // When warmup_wait is true, ConfigurePipeline will spin-wait for
-  // async pipeline compilation to finish instead of skipping the draw.
+  // While true, ConfigurePipeline creates pipelines synchronously even in
+  // headless mode (used for the frames that are going to be captured).
   void SetWarmupWait(bool wait) { warmup_wait_ = wait; }
-  bool IsWarmupWait() const { return warmup_wait_; }
 
  private:
   enum class PipelineGeometryShader : uint32_t {
@@ -293,8 +301,7 @@ class VulkanPipelineCache {
   bool EnsurePipelineCreated(
       const PipelineCreationArguments& creation_arguments);
 
-  // Save pipeline cache data to disk for cross-run persistence.
-  void SavePipelineCacheToDisk();
+  void SavePipelineCache();
 
   VulkanCommandProcessor& command_processor_;
   const RegisterFile& register_file_;
@@ -339,6 +346,9 @@ class VulkanPipelineCache {
   // Vulkan pipeline cache for cross-run persistence of compiled pipelines.
   VkPipelineCache vk_pipeline_cache_ = VK_NULL_HANDLE;
   std::filesystem::path pipeline_cache_path_;
+  // Set by EnsurePipelineCreated (any thread), cleared by SavePipelineCache.
+  std::atomic<bool> pipeline_cache_dirty_{false};
+  std::chrono::steady_clock::time_point pipeline_cache_last_save_;
 
   std::unordered_map<PipelineDescription, Pipeline, PipelineDescription::Hasher>
       pipelines_;

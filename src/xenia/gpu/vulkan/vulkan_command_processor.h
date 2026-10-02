@@ -11,15 +11,12 @@
 #define XENIA_GPU_VULKAN_VULKAN_COMMAND_PROCESSOR_H_
 
 #include <array>
-#include <atomic>
 #include <climits>
 #include <cstdint>
-#include <chrono>
 #include <deque>
 #include <functional>
 #include <memory>
 #include <string>
-#include <thread>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -264,7 +261,8 @@ class VulkanCommandProcessor : public CommandProcessor {
   void OnGammaRamp256EntryTableValueWritten() override;
   void OnGammaRampPWLValueWritten() override;
 
-  bool HandlesFrameDump() const override { return headless_frame_dump_; }
+  void InitializeShaderStorage(const std::filesystem::path& cache_root,
+                               uint32_t title_id, bool blocking) override;
 
   void IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbuffer_width,
                  uint32_t frontbuffer_height) override;
@@ -761,19 +759,11 @@ class VulkanCommandProcessor : public CommandProcessor {
   // Readback fence for synchronous capture.
   VkFence readback_fence_ = VK_NULL_HANDLE;
 
-  // Per-frame timing counters for draw profiling
-  std::chrono::steady_clock::time_point headless_frame_start_;
-  uint32_t headless_draw_count_ = 0;
-  int64_t headless_shader_ms_ = 0;
-  int64_t headless_submit_ms_ = 0;
-  int64_t headless_pipeline_ms_ = 0;
-  int64_t headless_rt_ms_ = 0;
-  int64_t headless_texture_ms_ = 0;
-
-  // Time-budgeted draw state: allow draws for N ms per frame, skip rest.
-  bool headless_draw_budget_exceeded_ = false;
-  bool headless_draw_timer_started_ = false;
-  std::chrono::steady_clock::time_point headless_draw_start_;
+  // Resolved once in SetupContext from the headless_* cvars (or their
+  // deprecated dc3_* spellings).
+  bool headless_persist_render_state_ = true;
+  bool headless_replay_depth_disable_ = false;
+  bool headless_inline_render_ = false;
 
   // Deferred draw system: in headless mode, non-copy draws are deferred
   // (register state saved, draw skipped) so sync events process immediately.

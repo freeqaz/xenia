@@ -11,7 +11,10 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
+#include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <iterator>
 #include <tuple>
@@ -35,74 +38,75 @@
 #include "xenia/ui/vulkan/vulkan_presenter.h"
 #include "xenia/ui/vulkan/vulkan_util.h"
 
-#include <chrono>
-#include <cmath>
-#include <cstdio>
-
-DECLARE_string(dump_frames_path);
-DECLARE_int32(headless_capture_interval);
-DECLARE_bool(headless_verbose_diagnostics);
-
-DEFINE_bool(headless_skip_submission_wait, true,
+// Headless (no presenter) capture path. Every cvar below is inert when a
+// presenter exists, and all default to upstream behaviour: a headless capture
+// run opts in explicitly (tools/fork-regress/scenarios/S1V.sh).
+DEFINE_bool(headless_skip_submission_wait, false,
             "Headless: when the CP is asked to await a specific submission, "
-            "poll for completion instead of blocking on it. Keeps the CP "
-            "thread responsive to EVENT_WRITE_SHD / WAIT_REG_MEM, which the "
-            "DC3 and RB3DX headless capture flows deadlock without (~frame 12). "
-            "UNSOUND for any other headless workflow — notably --gpu=vulkan "
-            "trace dumps and automated capture of unrelated titles — because "
-            "buffers and descriptor pools can be recycled while the GPU is "
-            "still reading them (device-side use-after-free presenting as "
-            "corruption or a spurious VK_ERROR_DEVICE_LOST). Upstream "
-            "semantics are false. Defaults true only to preserve this fork's "
-            "existing DC3/RB3 behaviour; set false for anything else.",
+            "poll for completion instead of blocking on it, so the CP thread "
+            "stays responsive to EVENT_WRITE_SHD / WAIT_REG_MEM (the DC3 and "
+            "RB3DX capture flows deadlock without it at ~frame 12). UNSOUND "
+            "in general: buffers and descriptor pools can be recycled while "
+            "the GPU still reads them (corruption or VK_ERROR_DEVICE_LOST). "
+            "Upstream behaviour is false.",
             "GPU");
-
-DEFINE_bool(headless_capture_only_draws, true,
+DEFINE_bool(headless_capture_only_draws, false,
             "Headless: execute draws and EDRAM copies only on frames the "
-            "capture logic has marked as render frames, dropping the rest. "
-            "This is a DC3/RB3DX capture-throughput optimisation, not a "
-            "correctness requirement — with it true, every headless Vulkan run "
-            "of every title renders nothing except on capture frames, which "
-            "silently breaks trace-dump and regression-capture workflows. Set "
-            "false to render everything headless (upstream-equivalent output "
-            "at a large throughput cost). --force_all_draws remains a separate "
-            "per-draw escape hatch.",
+            "--dump_frames_path capture logic marks as render frames, dropping "
+            "the rest. A capture-throughput optimisation; false renders "
+            "everything (upstream behaviour). --force_all_draws overrides it.",
             "GPU");
-
+DEFINE_bool(headless_async_pipelines, false,
+            "Headless: compile new graphics pipelines on background threads "
+            "and skip draws whose pipeline is not ready yet, so a slow "
+            "vkCreateGraphicsPipelines does not stall the CP thread. Drops "
+            "geometry until the cache is warm. Upstream behaviour is false.",
+            "GPU");
+DEFINE_bool(headless_persist_render_state, true,
+            "Headless deferred capture: keep EDRAM + host render targets "
+            "across deferred-draw flushes (tear down on the first flush only). "
+            "False tears down on every flush, which wipes tiles the title "
+            "expects to persist (HUD-only / partial 3D resolves).",
+            "GPU");
+DEFINE_bool(headless_replay_depth_disable, false,
+            "Headless deferred capture DIAGNOSTIC: clear "
+            "RB_DEPTHCONTROL.z_enable for every replayed deferred draw. Breaks "
+            "occlusion; experiment only.",
+            "GPU");
+DEFINE_bool(headless_inline_render, false,
+            "Headless capture: execute draws + resolves inline every frame "
+            "instead of deferring them to the swap, so the capture reads the "
+            "frontbuffer the title resolved on its own timeline. Needs a warm "
+            "pipeline cache to avoid the CP stall the deferral exists to "
+            "dodge.",
+            "GPU");
+// Deprecated spellings of the three cvars above (renamed 2026-10: they are
+// not DC3-specific). A non-default value is honoured with a warning when the
+// new name is left at its default. Remove after one release.
 DEFINE_bool(dc3_persist_render_state, true,
-            "DC3 headless capture: keep EDRAM + host render targets persistent "
-            "across deferred-draw flushes (destructive teardown runs only on the "
-            "FIRST flush). Fixes the intermittent/partial 3D-scene resolve where "
-            "the per-flush EDRAM zero-fill + RT-ownership reset wiped source tiles "
-            "the game expected to persist, so resolves copied zeroed/partial EDRAM "
-            "(HUD-only or 50%-plateau captures). Set false to restore the old "
-            "per-flush teardown (menu-transition ghosting prevention).",
-            "GPU");
-
+            "DEPRECATED: use --headless_persist_render_state.", "GPU");
 DEFINE_bool(dc3_replay_depth_disable, false,
-            "DC3 headless capture DIAGNOSTIC: clear RB_DEPTHCONTROL.z_enable for "
-            "every replayed deferred draw, disabling the depth test. If the 3D "
-            "scene then renders on EVERY captured flush (not just bursts), the "
-            "burst gate is geometry depth-failing against stale EDRAM depth at "
-            "replay time. Experiment only — breaks correct occlusion.",
-            "GPU");
-
+            "DEPRECATED: use --headless_replay_depth_disable.", "GPU");
 DEFINE_bool(dc3_inline_render, false,
-            "DC3 headless capture: execute draws + resolves INLINE every frame "
-            "(no deferred-draw recording/replay), so the capture readback reads "
-            "the frontbuffer the game itself resolved on its own timeline — "
-            "sidestepping the deferred-replay-reads-stale-guest-memory burst bug. "
-            "Requires a warm VkPipelineCache (xenia_vulkan_pipeline_cache.bin "
-            "under --vulkan_pipeline_cache_path, default "
-            "<temp_directory_path>/xenia-pipeline-cache) to avoid the CP-stall "
-            "deadlock the deferral was built to dodge. Validation lever "
-            "(architecture review 2026-06-03).",
-            "GPU");
+            "DEPRECATED: use --headless_inline_render.", "GPU");
 
 namespace xe {
 namespace gpu {
 
 namespace vulkan {
+
+namespace {
+// A cvar renamed from a deprecated spelling: the old name is honoured only
+// when it was changed from the shared default and the new one was not.
+bool ResolveRenamedCvar(bool value, bool deprecated_value, bool default_value,
+                        const char* name, const char* deprecated_name) {
+  if (deprecated_value != default_value && value == default_value) {
+    XELOGW("--{} is deprecated, use --{}", deprecated_name, name);
+    return deprecated_value;
+  }
+  return value;
+}
+}  // namespace
 
 // Generated with `xb buildshaders`.
 namespace shaders {
@@ -406,11 +410,17 @@ bool VulkanCommandProcessor::SetupContext() {
     return false;
   }
 
-  // Enable async pipeline compilation and frame capture in headless mode.
-  // With time-budgeted draws + async pipelines: first few frames have missing
-  // geometry (pipelines compiling), but CP stays responsive. After ~10 frames,
-  // pipeline cache is warm and draws produce full content.
+  // Headless capture configuration (inert with a presenter).
   if (!graphics_system_->presenter()) {
+    headless_persist_render_state_ = ResolveRenamedCvar(
+        cvars::headless_persist_render_state, cvars::dc3_persist_render_state,
+        true, "headless_persist_render_state", "dc3_persist_render_state");
+    headless_replay_depth_disable_ = ResolveRenamedCvar(
+        cvars::headless_replay_depth_disable, cvars::dc3_replay_depth_disable,
+        false, "headless_replay_depth_disable", "dc3_replay_depth_disable");
+    headless_inline_render_ = ResolveRenamedCvar(
+        cvars::headless_inline_render, cvars::dc3_inline_render, false,
+        "headless_inline_render", "dc3_inline_render");
     if (cvars::force_all_draws) {
       // force_all_draws with deferred draws: draws are queued during PM4
       // processing (keeping CP responsive for sync events) and replayed
@@ -418,7 +428,9 @@ bool VulkanCommandProcessor::SetupContext() {
       // at frame 12 causing deadlock with the game's sync mechanism.
       deferred_draws_enabled_ = true;
       XELOGI("Force all draws enabled — deferred draw mode");
-    } else {
+    } else if (cvars::headless_async_pipelines) {
+      // Compile new pipelines off the CP thread; draws whose pipeline is
+      // still compiling are skipped (see ConfigurePipeline below).
       pipeline_cache_->SetHeadlessMode(true);
     }
     if (!cvars::dump_frames_path.empty()) {
@@ -1382,10 +1394,18 @@ void VulkanCommandProcessor::OnGammaRampPWLValueWritten() {
   gamma_ramp_pwl_current_frame_ = UINT32_MAX;
 }
 
+void VulkanCommandProcessor::InitializeShaderStorage(
+    const std::filesystem::path& cache_root, uint32_t title_id, bool blocking) {
+  CommandProcessor::InitializeShaderStorage(cache_root, title_id, blocking);
+  pipeline_cache_->InitializeShaderStorage(cache_root, title_id);
+}
+
 void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
                                        uint32_t frontbuffer_width,
                                        uint32_t frontbuffer_height) {
   SCOPE_profile_cpu_f("gpu");
+
+  pipeline_cache_->SavePipelineCacheIfDirty();
 
   ui::Presenter* presenter = graphics_system_->presenter();
   if (!presenter) {
@@ -1407,7 +1427,7 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
     // Inline-render mode keeps headless_render_frame_ true permanently so
     // resolves run every frame (the game's own frontbuffer is produced live).
     if (headless_render_frame_ && !cvars::force_all_draws &&
-        !cvars::dc3_inline_render) {
+        !headless_inline_render_) {
       headless_render_frame_ = false;
       deferred_draws_enabled_ = false;
       pipeline_cache_->SetWarmupWait(false);
@@ -1419,41 +1439,16 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
 
     headless_frame_count_++;
 
-    // Report timing from previous frame
-    if (headless_draw_count_ > 0) {
-      auto frame_end = std::chrono::steady_clock::now();
-      auto frame_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                          frame_end - headless_frame_start_)
-                          .count();
-      if (headless_frame_count_ <= 20 || headless_frame_count_ % 50 == 0) {
-        XELOGI(
-            "Frame {} timing: {}ms total, {} draws ({}ms shader, {}ms submit, "
-            "{}ms pipeline, {}ms render_target, {}ms texture, {}ms other)",
-            headless_frame_count_ - 1, frame_ms, headless_draw_count_,
-            headless_shader_ms_, headless_submit_ms_, headless_pipeline_ms_,
-            headless_rt_ms_, headless_texture_ms_,
-            frame_ms - headless_shader_ms_ - headless_submit_ms_ -
-                headless_pipeline_ms_ - headless_rt_ms_ -
-                headless_texture_ms_);
-      }
-    }
-    headless_draw_count_ = 0;
-    headless_shader_ms_ = 0;
-    headless_submit_ms_ = 0;
-    headless_pipeline_ms_ = 0;
-    headless_rt_ms_ = 0;
-    headless_texture_ms_ = 0;
-    headless_frame_start_ = std::chrono::steady_clock::now();
     bool should_capture =
         headless_capture_interval_ == 0 ||
         (headless_frame_count_ % headless_capture_interval_) == 0;
 
-    if (cvars::force_all_draws || cvars::dc3_inline_render) {
+    if (cvars::force_all_draws || headless_inline_render_) {
       // force_all_draws: all draws execute but still via defer+replay.
-      // dc3_inline_render: execute draws+resolves INLINE every frame (NO defer)
-      //   so the capture reads the game's own live-resolved frontbuffer.
+      // headless_inline_render: execute draws+resolves INLINE every frame (NO
+      //   defer) so the capture reads the game's own live-resolved frontbuffer.
       headless_render_frame_ = true;
-      if (cvars::dc3_inline_render) {
+      if (headless_inline_render_) {
         deferred_draws_enabled_ = false;
       }
       if (headless_frame_count_ <= 5 || headless_frame_count_ % 100 == 0 ||
@@ -1500,8 +1495,6 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
     // ================================================================
     if (frontbuffer_ptr && frontbuffer_width && frontbuffer_height &&
         readback_staging_buffer_ != VK_NULL_HANDLE) {
-      auto p1_start = std::chrono::steady_clock::now();
-
       // Wait for GPU to finish deferred draws + copies.
       if (submission_open_) {
         EndSubmission(true);
@@ -1785,14 +1778,6 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
               }
               std::fclose(f);
             }
-
-            auto p1_end = std::chrono::steady_clock::now();
-            auto p1_ms =
-                std::chrono::duration_cast<std::chrono::milliseconds>(
-                    p1_end - p1_start)
-                    .count();
-            XELOGI("Readback completed in {}ms (frame {})", p1_ms,
-                   headless_frame_count_);
           }
         }
       }
@@ -1801,7 +1786,7 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
     // Schedule the NEXT render frame after capture completes.
     // Without this, only the first capture triggers RENDER+DEFER.
     // Skip in inline-render mode (no deferral; render frame is always on).
-    if (headless_capture_interval_ > 0 && !cvars::dc3_inline_render) {
+    if (headless_capture_interval_ > 0 && !headless_inline_render_) {
       bool next_is_capture =
           ((headless_frame_count_ + 1) % headless_capture_interval_) == 0;
       if (next_is_capture) {
@@ -2715,19 +2700,21 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   SCOPE_profile_cpu_f("gpu");
 #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
 
-  // Diagnostic: count all draws (even skipped ones)
-  static uint32_t total_draw_count = 0;
-  static uint32_t total_swap_at_last_draw = 0;
-  total_draw_count++;
-  if (cvars::headless_verbose_diagnostics &&
-      headless_frame_count_ != total_swap_at_last_draw) {
-    if (total_draw_count <= 200 || total_draw_count % 500 == 0) {
-      XELOGI("IssueDraw #{} at swap_count={} prim={} idx_count={} render_frame={}",
-             total_draw_count, headless_frame_count_,
-             static_cast<int>(prim_type), index_count,
-             headless_render_frame_);
+  if (cvars::headless_verbose_diagnostics) {
+    // Diagnostic: count all draws (even skipped ones).
+    static uint32_t total_draw_count = 0;
+    static uint32_t total_swap_at_last_draw = 0;
+    total_draw_count++;
+    if (headless_frame_count_ != total_swap_at_last_draw) {
+      if (total_draw_count <= 200 || total_draw_count % 500 == 0) {
+        XELOGI(
+            "IssueDraw #{} at swap_count={} prim={} idx_count={} "
+            "render_frame={}",
+            total_draw_count, headless_frame_count_,
+            static_cast<int>(prim_type), index_count, headless_render_frame_);
+      }
+      total_swap_at_last_draw = headless_frame_count_;
     }
-    total_swap_at_last_draw = headless_frame_count_;
   }
 
   const RegisterFile& regs = *register_file_;
@@ -2853,28 +2840,12 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     }
   }
 
-  auto draw_t0 = std::chrono::steady_clock::now();
-  if (cvars::headless_verbose_diagnostics &&
-      headless_render_frame_ && headless_draw_count_ == 0) {
-    auto since_frame_start = std::chrono::duration_cast<std::chrono::milliseconds>(
-        draw_t0 - headless_frame_start_).count();
-    XELOGI("First draw: {}ms after frame start", since_frame_start);
-  }
-  headless_draw_count_++;
-
-  // Microsecond-resolution draw profiling
-  auto us_now = [&draw_t0]() {
-    return std::chrono::duration_cast<std::chrono::microseconds>(
-        std::chrono::steady_clock::now() - draw_t0).count();
-  };
-
   const ui::vulkan::VulkanDevice::Properties& device_properties =
       GetVulkanDevice()->properties();
 
   memexport_ranges_.clear();
 
   // Vertex shader analysis.
-  auto shader_t0 = std::chrono::steady_clock::now();
   auto vertex_shader = static_cast<VulkanShader*>(active_vertex_shader());
   if (!vertex_shader) {
     // Always need a vertex shader.
@@ -2941,16 +2912,10 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // updates done previously must be performed again because the updates done
   // before the awaiting may be referencing objects destroyed by
   // CompletedSubmissionUpdated.
-  auto shader_t1 = std::chrono::steady_clock::now();
-  headless_shader_ms_ += std::chrono::duration_cast<std::chrono::milliseconds>(shader_t1 - shader_t0).count();
-
   for (uint32_t i = 0; i < 2; ++i) {
-    auto submit_t0 = std::chrono::steady_clock::now();
     if (!BeginSubmission(true)) {
       return false;
     }
-    auto submit_t1 = std::chrono::steady_clock::now();
-    headless_submit_ms_ += std::chrono::duration_cast<std::chrono::milliseconds>(submit_t1 - submit_t0).count();
 
     // Process primitives.
     if (!primitive_processor_->Process(primitive_processing_result)) {
@@ -3071,21 +3036,15 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       pixel_shader ? draw_util::GetNormalizedColorMask(
                          regs, pixel_shader->writes_color_targets())
                    : 0;
-  auto rt_t0 = std::chrono::steady_clock::now();
   if (!render_target_cache_->Update(is_rasterization_done,
                                     normalized_depth_control,
                                     normalized_color_mask, *vertex_shader)) {
     return false;
   }
-  auto rt_t1 = std::chrono::steady_clock::now();
-  headless_rt_ms_ += std::chrono::duration_cast<std::chrono::milliseconds>(rt_t1 - rt_t0).count();
-
-
 
   // Create the pipeline (for this, need the render pass from the render target
   // cache), translating the shaders - doing this now to obtain the used
   // textures.
-  auto pipe_t0 = std::chrono::steady_clock::now();
   VkPipeline pipeline;
   const VulkanPipelineCache::PipelineLayoutProvider* pipeline_layout_provider;
   if (!pipeline_cache_->ConfigurePipeline(
@@ -3100,7 +3059,8 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     if (!graphics_system_->presenter() && pipeline_cache_->IsHeadlessMode()) {
       static uint32_t pipe_skip_count = 0;
       pipe_skip_count++;
-      if (pipe_skip_count <= 10 || pipe_skip_count % 100 == 0) {
+      if (cvars::headless_verbose_diagnostics &&
+          (pipe_skip_count <= 10 || pipe_skip_count % 100 == 0)) {
         XELOGI("ASYNC SKIP: pipeline not ready (#{}) — draw skipped",
                pipe_skip_count);
       }
@@ -3109,25 +3069,15 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     return false;
   }
 
-  auto pipe_t1 = std::chrono::steady_clock::now();
-  headless_pipeline_ms_ += std::chrono::duration_cast<std::chrono::milliseconds>(pipe_t1 - pipe_t0).count();
-
-
-
   // Update the textures before most other work in the submission because
   // samplers depend on this (and in case of sampler overflow in a submission,
   // submissions must be split) - may perform dispatches and copying.
-  auto tex_t0 = std::chrono::steady_clock::now();
   uint32_t used_texture_mask =
       vertex_shader->GetUsedTextureMaskAfterTranslation() |
       (pixel_shader != nullptr
            ? pixel_shader->GetUsedTextureMaskAfterTranslation()
            : 0);
   texture_cache_->RequestTextures(used_texture_mask);
-  auto tex_t1 = std::chrono::steady_clock::now();
-  headless_texture_ms_ += std::chrono::duration_cast<std::chrono::milliseconds>(tex_t1 - tex_t0).count();
-
-
 
   // Update the graphics pipeline, and if the new graphics pipeline has a
   // different layout, invalidate incompatible descriptor sets before updating
@@ -3270,8 +3220,6 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                                                   << (vfetch_index & 63);
   }
 
-
-
   // Synchronize the memory pages backing memory scatter export streams, and
   // calculate the range that includes the streams for the buffer barrier.
   uint32_t memexport_extent_start = UINT32_MAX, memexport_extent_end = 0;
@@ -3306,16 +3254,12 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     shared_memory_->Use(VulkanSharedMemory::Usage::kRead);
   }
 
-
-
   // After all commands that may dispatch, copy or insert barriers, submit the
   // barriers (may end the render pass), and (re)enter the render pass before
   // drawing.
   SubmitBarriersAndEnterRenderTargetCacheRenderPass(
       render_target_cache_->last_update_render_pass(),
       render_target_cache_->last_update_framebuffer());
-
-
 
   // Draw.
   if (primitive_processing_result.index_buffer_type ==
@@ -3357,25 +3301,6 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   for (const draw_util::MemExportRange& memexport_range : memexport_ranges_) {
     shared_memory_->RangeWrittenByGpu(memexport_range.base_address_dwords << 2,
                                       memexport_range.size_bytes);
-  }
-
-  if (cvars::headless_verbose_diagnostics && headless_render_frame_) {
-    auto draw_t1 = std::chrono::steady_clock::now();
-    auto draw_us = std::chrono::duration_cast<std::chrono::microseconds>(
-        draw_t1 - draw_t0).count();
-    auto shader_us = std::chrono::duration_cast<std::chrono::microseconds>(
-        shader_t0 - draw_t0).count();
-    auto rt_us = std::chrono::duration_cast<std::chrono::microseconds>(
-        rt_t1 - rt_t0).count();
-    auto pipe_us = std::chrono::duration_cast<std::chrono::microseconds>(
-        pipe_t1 - pipe_t0).count();
-    auto tex_us = std::chrono::duration_cast<std::chrono::microseconds>(
-        tex_t1 - tex_t0).count();
-    if (draw_us > 500 || headless_draw_count_ <= 5) {
-      XELOGI("IssueDraw #{} {}us: rt={}us pipe={}us tex={}us other={}us",
-             headless_draw_count_, draw_us, rt_us, pipe_us, tex_us,
-             draw_us - rt_us - pipe_us - tex_us);
-    }
   }
 
   return true;
@@ -5190,10 +5115,11 @@ void VulkanCommandProcessor::FlushDeferredDraws() {
   // EDRAM/RT content persisting across frames for parts of the scene that are
   // not re-rendered every frame (RB_COPY_DEST_BASE=0x1E830000 resolves run every
   // flush but read zeroed tiles after the wipe -> HUD-only / 50%-plateau frames).
-  // So when dc3_persist_render_state is set, only tear down on the FIRST flush;
-  // afterwards EDRAM + host RTs persist and the resolve sees complete tiles.
+  // So when headless_persist_render_state is set, only tear down on the FIRST
+  // flush; afterwards EDRAM + host RTs persist and the resolve sees complete
+  // tiles.
   if (render_target_cache_ &&
-      (!cvars::dc3_persist_render_state || deferred_flush_count_ == 1)) {
+      (!headless_persist_render_state_ || deferred_flush_count_ == 1)) {
     // Wait for any in-flight GPU work that references render targets.
     if (submission_open_) {
       EndSubmission(true);
@@ -5362,13 +5288,15 @@ void VulkanCommandProcessor::FlushDeferredDraws() {
       }
       ok = IssueCopy();
       copy_count++;
-      XELOGI("RSTAB: REPLAY_COPY flush#{} copy#{} dest_base=0x{:08X} ok={}",
-             deferred_flush_count_, copy_count,
-             register_file_->values[XE_GPU_REG_RB_COPY_DEST_BASE], ok);
+      if (cvars::headless_verbose_diagnostics) {
+        XELOGI("RSTAB: REPLAY_COPY flush#{} copy#{} dest_base=0x{:08X} ok={}",
+               deferred_flush_count_, copy_count,
+               register_file_->values[XE_GPU_REG_RB_COPY_DEST_BASE], ok);
+      }
     } else {
       active_vertex_shader_ = state.vertex_shader;
       active_pixel_shader_ = state.pixel_shader;
-      if (cvars::dc3_replay_depth_disable) {
+      if (headless_replay_depth_disable_) {
         // DIAGNOSTIC: clear z_enable (bit 1) so the depth test always passes.
         register_file_->values[XE_GPU_REG_RB_DEPTHCONTROL] &= ~uint32_t(0x2);
       }
@@ -5377,7 +5305,8 @@ void VulkanCommandProcessor::FlushDeferredDraws() {
       // present on burst flushes and ~absent on HUD-only flushes (rank-2
       // guest-side) vs invariant (rank-1 ownership-at-resolve). Gated to
       // geometry draws + a sample to keep the hot replay loop fast.
-      if (state.index_count >= 64 || (i % 32) == 0) {
+      if (cvars::headless_verbose_diagnostics &&
+          (state.index_count >= 64 || (i % 32) == 0)) {
         auto rstab2_si = register_file_->Get<reg::RB_SURFACE_INFO>();
         XELOGI("RSTAB2: REPLAY_DRAW flush#{} draw#{} color_base_tiles={} "
                "surface_pitch={} prim={} idx={}",
