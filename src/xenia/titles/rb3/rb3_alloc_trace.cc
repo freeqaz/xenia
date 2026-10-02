@@ -18,6 +18,7 @@
 #include "third_party/fmt/include/fmt/format.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/memory.h"
+#include "xenia/cpu/mmio_handler.h"
 #include "xenia/cpu/processor.h"
 #include "xenia/cpu/thread_state.h"
 #include "xenia/kernel/kernel_state.h"
@@ -244,7 +245,34 @@ void InstallExactOverride(const TitleLaunchContext& ctx, uint32_t address,
   XELOGI("RB3DX: {} installed at 0x{:08X}", name, address);
 }
 
+// --rb3dx_alloc_probe, fault side: which recovery branch serviced faults on
+// guest EAs above every heap top (>= 0xFFD00000, e.g. MemHeap::Alloc's
+// post-OOM store to 0xFFFFFFFC). Runs inside the fault handler; logs the
+// first 8.
+std::atomic<int> top_hole_logs{0};
+void TopHoleFaultObserver(uint32_t guest_ea, bool is_write, const char* branch,
+                          int detail) {
+  if (guest_ea < 0xFFD00000u ||
+      top_hole_logs.fetch_add(1, std::memory_order_relaxed) >= 8) {
+    return;
+  }
+  XELOGE("RB3DX TOPHOLE: guest EA {:08X} is_write={} branch={} detail={}",
+         guest_ea, is_write, branch, detail);
+}
+
 }  // namespace
+
+void InstallAllocProbeFaultObserver() {
+  if (cvars::rb3dx_alloc_probe) {
+    cpu::MMIOHandler::SetFaultObserver(&TopHoleFaultObserver);
+  }
+}
+
+void RemoveAllocProbeFaultObserver() {
+  if (cvars::rb3dx_alloc_probe) {
+    cpu::MMIOHandler::SetFaultObserver(nullptr);
+  }
+}
 
 bool AllocTraceActive() { return trace_sink != nullptr; }
 

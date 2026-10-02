@@ -23,7 +23,6 @@
 
 #include "xenia/base/logging.h"
 #include "xenia/base/memory.h"
-#include "xenia/cpu/mmio_handler.h"
 #include "xenia/cpu/processor.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/memory.h"
@@ -323,9 +322,7 @@ void ApplyRb3LaunchHooks(const TitleLaunchContext& ctx) {
   }
   titles::rb3::InstallScriptedInputAdapter();
 
-  // Push --rb3dx_alloc_probe down into the MMIO fault handler (the cpu library
-  // must not depend on a title cvar).
-  cpu::MMIOHandler::SetAllocProbeEnabled(cvars::rb3dx_alloc_probe);
+  titles::rb3::InstallAllocProbeFaultObserver();
 
   titles::rb3::InstallSaveGprLr23Hook(ctx);
 
@@ -373,6 +370,7 @@ void Rb3OnTerminateTitle() {
   // away under them (fork-cleanup-review.md C10).
   titles::JoinProbeThreads();
   titles::rb3::RemoveScriptedInputAdapter();
+  titles::rb3::RemoveAllocProbeFaultObserver();
 }
 
 void Rb3OnShutdown() { titles::JoinProbeThreads(); }

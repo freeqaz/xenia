@@ -30,6 +30,10 @@ void InstallSaveGprLr23Hook(const TitleLaunchContext& ctx);
 // overrides (--rb3dx_alloc_trace_path).
 void InstallAllocTrace(const TitleLaunchContext& ctx);
 bool AllocTraceActive();
+// --rb3dx_alloc_probe: installs the MMIO fault observer that logs faults
+// above every heap top.
+void InstallAllocProbeFaultObserver();
+void RemoveAllocProbeFaultObserver();
 // Called from the __savegprlr_23 override at MemAlloc's entry. `seq` is the
 // MemAlloc ordinal; `size` is r3, `sp` the caller's SP.
 void AllocTraceOnMemAlloc(cpu::ppc::PPCContext* ppc_context, uint32_t seq,
