@@ -66,7 +66,6 @@ constexpr const char* kKnownIds[] = {
     // dc3_hack_pack_skeleton.cc
     "skel.wait_33ms",
     "skel.is_override_nop",
-    "debug.fail_spin",
     "bink.impl_ready",
     "movie.panel_is_loaded",
     "ui.goto_first_screen",

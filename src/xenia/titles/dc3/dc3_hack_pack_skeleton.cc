@@ -139,20 +139,15 @@ Dc3HackApplyResult ApplyDc3SkeletonHackPack(const Dc3HackContext& ctx) {
        "SkeletonUpdateThread: timeout INFINITE -> 33ms"},
       {"skel.is_override_nop", 0x8242E1B0, 0x60000000,
        "SkeletonUpdate::Update: NOP IsOverride branch"},
-      // Debug::Fail (0x825CE1D0) non-main-thread path: the original Xbox build
-      // parks any failing worker thread in an infinite spin
-      //   while (true) { Timer::Sleep(200); PlatformDebugBreak(); }   (@0x825CE2D0)
-      // so a real devkit debugger can attach.  Under headless Xenia nothing
-      // attaches, so the SkeletonUpdate worker (thread start 0x8242E6A8) hits a
-      // benign assert inside Update() after attract->title teardown, parks in
-      // this spin forever, stops calling NuiSkeletonGetNextFrame, and freezes
-      // the whole NUI poll (s_skel_calls stuck -> nav bridge never advances ->
-      // all-black).  Patch the spin's loop-back branch (b -0xC @0x825CE2DC) to
-      // jump to the function epilogue (b +0x90 -> 0x825CE36C) so the worker
-      // returns and continues polling after one assert -- matching the native
-      // port's "FAIL is non-fatal, continue" semantics (Debug.cpp HX_NATIVE).
-      {"debug.fail_spin", 0x825CE2DC, 0x48000090,
-       "Debug::Fail: thread-fail spin -> return (worker survives assert)"},
+      // (REMOVED 2026-10-02) Debug::Fail thread-fail spin -> return
+      // (0x825CE2DC <- b +0x90). It made a failing worker return instead of
+      // parking in the devkit "wait for debugger" spin, but skipped
+      // MemPopHeap and `mFailing = 0`, so mFailing stayed latched and every
+      // later MILO_FAIL was silent (BASELINE). The worker fail it survived
+      // ("BinkMovieImpl::Ready called in the wrong thread (expected 6, cur
+      // 15)") came from host automation calling UI code on the SkeletonUpdate
+      // worker; that now runs on the main thread (dc3_autonav.cc). The spin
+      // is faithful again; dc3_fail_tripwire.cc reports any worker fail.
       // NOTE: tried `blr` at Debug::Fail entry (0x825CE1D0) to make FAIL
       // non-fatal (match native) and limp past the preview.tmov fatal — it
       // REGRESSES (rc=139 early): blr skips the `if(mTry) throw msg` path that
