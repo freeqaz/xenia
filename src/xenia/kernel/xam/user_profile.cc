@@ -28,7 +28,7 @@ UserProfile::UserProfile() {
   // account). This is consistent with signin_state()==1 (SignedInLocally):
   // a signed-in-locally profile has an offline XUID, not an online one. The
   // previous placeholder (0xB13E...) has an invalid top nibble which some
-  // titles (e.g. Rock Band 3) treat as a malformed online profile. The mask
+  // titles treat as a malformed online profile. The mask
   // above stays clear (byte 6 == 0x00).
   xuid_ = 0xE00000000000BABEull;
   name_ = "Player1";
