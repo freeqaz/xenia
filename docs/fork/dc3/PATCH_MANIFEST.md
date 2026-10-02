@@ -46,18 +46,12 @@ tools/fork-regress/compare.py --paired out/cand out/ctrl
 | `saveload.activate` | `SaveLoadManager::Activate` 0x82894A10 | `blr` | O37 | kept (L6, content/XAM) |
 | `ui.hampanel_focus` | `HamPanel::FocusComponent` 0x828EFE90 | branch to `UIPanel::FocusComponent` | O28 | kept, A/B pending |
 | `ui.event_dialog_on_top` | `HamScreen::IsEventDialogOnTop` 0x829626D8 | `return 0` | O29 | kept, A/B pending |
-| `io.cd_read_done` | `CDReadDone` 0x826026E0 | `return 1` | O35: mechanism refuted (`ac0052e5b`) | see results |
 | `content.refresh_done` | `ContentMgr::RefreshDone` 0x825FEB48 | `return 1` | O36: XAM cross-title enumeration | kept (L6) |
-| `splash.prepare_next` / `splash.begin_splasher` / `splash.suspend` / `splash.resume` | 0x82554388 / 0x825554C8 / 0x82553BE0 / 0x82553D68 | `return 0` / `blr` ×3 | O23-O26: lost-resume thread race | see results |
 | `speech.grammar_unload` | `SpeechMgr::Grammar::Unload` 0x82439F38 | `blr` | O7: the NUI S_OK stubs | kept (NUI) |
-| `bink.sys_init` | `BinkMovieSys::Init` 0x82E214A8 | set `isInitalized`, skip `BinkStartAsyncThread` | O19: lost-resume | see results |
 | `calib.player_present_guard`, `calib.choose_player_sides`, `calib.warning_data`, `calib.nav_data`, `calib.wait_recovery`, `calib.exit_controller_mode` | SkeletonChooser / ShellInput (0x8290834C, 0x82909968, 0x82907880, 0x82909340, 0x82904CD0, 0x82902748) | `nop` / `blr` / rewrite | O8-O13: a constant skeleton is not a calibrated player | kept (NUI) |
 | `game.pause_for_skeleton_loss` | `Game::PauseForSkeletonLoss` 0x82866D50 | `blr` | O14 | kept (NUI) |
-| `movie.poll` | `Movie::Poll` 0x82555CB8 | `return 0` | O22 | see results |
-| `audio.xmahal_alloc` | `XMAHALAllocateContexts` 0x82E77250 | `return 0` | O38 | see results |
-| `audio.dummy_driver` | `--nop_audio_driver` | `auto` -> `dummy` for DC3 | O39 | see results |
-| `audio.handle_wait` | `Game::HandleWait`+0x90 0x82867318 | `bne` -> `b` | O41 | see results |
-| `audio.hamaudio_ready` | `HamAudio::IsReady`+0x70 0x8252BA50 | `bctrl` -> `li r3,1` | O40 | see results |
+| `audio.xmahal_alloc` | `XMAHALAllocateContexts` 0x82E77250 | `return 0` | O38 | kept: real contexts livelock the MMIO handler (core apu/mmio bug, BASELINE.md finding 5) |
+| `audio.dummy_driver` | `--nop_audio_driver` | `auto` -> `dummy` for DC3 | O39 | kept with `audio.xmahal_alloc` (the paced driver runs the render callback into the same fault) |
 | `anim.song_anim_expert` | `HamDirector::SongAnim` 0x82475578 | `li r4,2; b SongAnimByDifficulty` | O34 | kept: changes which anim plays |
 
 ## `dc3_hack_pack_skeleton.cc` (with `--fake_kinect_data`)
@@ -66,9 +60,6 @@ tools/fork-regress/compare.py --paired out/cand out/ctrl
 |---|---|---|---|---|
 | `skel.wait_33ms` | `SkeletonUpdateThread`+0xA4 0x8242E74C | INFINITE wait -> 33 ms | O4 | kept (NUI) |
 | `skel.is_override_nop` | `SkeletonUpdate::Update`+0x40 0x8242E1B0 | `nop` | O5 | kept (NUI) |
-| `bink.impl_ready` | `BinkMovieImpl::Ready` 0x82E221C8 | override: `return 1` | O20 | measured INERT before the override-API fix (vtable path); see results |
-| `movie.panel_is_loaded` | `MoviePanel::IsLoaded` 0x82E0EFE8 | override: `return 1` | O21 | measured INERT before the override-API fix (vtable path); see results |
-| `ui.goto_first_screen` | `UIManager::GotoFirstScreen` 0x8277B140 | override: navigates only once `FindObject("attract_screen")` resolves | O27 | see results |
 
 These were removed:
 
@@ -85,9 +76,8 @@ These were removed:
 | `seq.transition_force` | **main thread**, autonav | force-enter/complete transitions stuck for 120 or more ticks | O30 | `--dc3_headless_autonav` only |
 | `seq.nav_bridge` | **main thread**, autonav | `UIManager::GotoScreen` walk to game_screen, held while the song merge is busy | O31, O32 | `--dc3_headless_autonav` only |
 | `seq.loadsong_repair` | **main thread**, autonav | `DataReadFile`, `HamSongMgr::AddSongs`, ymca injection | O33 | `--dc3_headless_autonav` only |
-| `seq.beat_drive` | **main thread**, autonav | 120 BPM TaskMgr timeline drive | O42 | see results |
-| `input.beat_drive` | pad poll | second 120 BPM drive | O43 | see results |
-| `input.unpause_nudge` | pad poll | `Game` wait=0, realTime=1, paused=0 | O44 | see results |
+| `seq.beat_drive` | **main thread**, autonav | 120 BPM TaskMgr timeline drive | O42 | kept: the only song clock while no render callback runs (dummy driver) |
+| `input.beat_drive` | pad poll | second 120 BPM drive | O43 | see BASELINE.md (e2) |
 | `input.attract_press` | pad poll | press A every 3 s at attract | O45 | `--dc3_headless_autonav` only |
 | `input.attract_force` | pad poll | 4 MiB scan + UIManager stomp, attract -> title | O46 | `--dc3_headless_autonav` only |
 
@@ -108,6 +98,24 @@ These were removed:
 | DTA channel | main-thread hook | `--dc3_dta_channel`. Scratch is allocated on the first request |
 | main-thread hook | `HolmesClientPollKeyboard` 0x825F0F78 override | installed only when a task exists (autonav or the DTA channel). It skips the stock body, which does nothing while `gHolmesStream` is 0 (logged; a non-zero value is logged as TAINTED) |
 | IK telemetry | code caves in the zero padding after `.text` | `--dc3_ik_telemetry`. Refuses if there is no padding. It no longer writes inside `UtilDrawPlane` |
+
+## Retired in this lane (2026-10-02)
+
+All of these are measured in `BASELINE.md`, on lane-b-dc3 with the cpu
+override fix merged.
+
+| id | site | why it existed | evidence it is gone for good |
+|---|---|---|---|
+| `bink.sys_init` | `BinkMovieSys::Init` 0x82E214A8 | "BinkStartAsyncThread hangs headless" (lost-resume) | With the stub ON, song_select MILO_FAILs "Could not find preview.tmov" 3/3. Off, the real Init runs and song_select passes. Finding 3 |
+| `bink.impl_ready`, `movie.panel_is_loaded` | 0x82E221C8, 0x82E0EFE8 (overrides) | attract movie / panel never ready | INERT before the override fix (vtable only). With the fix they do not prevent the preview.tmov FAIL (2/2). Not needed once Init is real |
+| `movie.poll` | `Movie::Poll` 0x82555CB8 | Bink chain | not needed: S1 x5 A/B |
+| `splash.prepare_next/begin_splasher/suspend/resume` | 0x82554388, 0x825554C8, 0x82553BE0, 0x82553D68 | lost-resume (CreateThread suspended + ResumeThread) | not needed: S1 x5 A/B |
+| `ui.goto_first_screen` | 0x8277B140 (override) | "boot-ordering race" | not needed: S1 x5 A/B |
+| `io.cd_read_done` | `CDReadDone` 0x826026E0 | the separate-IOSB OVERLAPPED theory, refuted by `ac0052e5b` | not needed: S1 x5 A/B |
+| `audio.hamaudio_ready`, `audio.handle_wait`, `input.unpause_nudge` | 0x8252BA50, 0x82867318, Game +0x5E/+0x60/+0xA4 | "HamAudio never reaches IsReady headless" | They CAUSED "StandardStream::Play() failed. IsReady=0 mState=0" (finding 4). Without them, Game::PostWaitStart unpauses by itself |
+| `skel.ppc_get_next_frame` | 0x829C2790 | pre-override fake frame | shadowed by `nui.get_next_frame` (audit) |
+| `debug.fail_spin` | 0x825CE2DC | survive a worker FAIL | faithful spin restored; the worker FAIL it survived was self-inflicted (finding 2) |
+| `seq.transition_diag`, `--dc3_gameplay_probe` | off-thread Executes | diagnostics | deleted |
 
 ## Status legend
 
