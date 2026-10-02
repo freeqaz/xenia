@@ -87,7 +87,7 @@ class NopInputDriver final : public InputDriver {
   void SetMemory(Memory* memory) { memory_ = memory; }
 
   // Inject a one-shot button press from external code (e.g., NUI handler,
-  // the RB3DX ui-probe autopilot). Thread-safe. The press will be active
+  // the RB3 menu autopilot). Thread-safe. The press will be active
   // for duration_ms on the given pad.
   void InjectButtonPress(uint16_t buttons, uint64_t duration_ms = 200,
                          uint32_t pad = 0);
@@ -158,7 +158,7 @@ class NopInputDriver final : public InputDriver {
 };
 
 // Process-wide bridge to the (single) live NopInputDriver instance so
-// host-side probe threads (e.g. the RB3DX ui-probe autopilot in emulator.cc)
+// host-side threads (e.g. the RB3 menu autopilot, titles/rb3/rb3_autopilot.cc)
 // can inject screen-conditional presses without holding an InputSystem
 // reference. No-op if no nop driver is active.
 void NopInjectButtonPress(uint32_t pad, uint16_t buttons,

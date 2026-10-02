@@ -52,6 +52,11 @@ void StartUiProbe(const TitleLaunchContext& ctx);
 // rb3_autopilot.cc: --rb3dx_autoconfirm_parts (pad-injection thread).
 void StartAutopilot(const TitleLaunchContext& ctx);
 
+// rb3_scripted_input.cc: the RB3 screen reader for --scripted_input_file
+// `wait_screen` directives.
+void InstallScriptedInputAdapter();
+void RemoveScriptedInputAdapter();
+
 }  // namespace rb3
 }  // namespace titles
 }  // namespace xe

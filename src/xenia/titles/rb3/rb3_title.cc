@@ -321,6 +321,8 @@ void ApplyRb3LaunchHooks(const TitleLaunchContext& ctx) {
   if (!ctx.title_id.has_value() || ctx.title_id.value() != titles::kTitleRb3) {
     return;
   }
+  titles::rb3::InstallScriptedInputAdapter();
+
   // Push --rb3dx_alloc_probe down into the MMIO fault handler (the cpu library
   // must not depend on a title cvar).
   cpu::MMIOHandler::SetAllocProbeEnabled(cvars::rb3dx_alloc_probe);
@@ -370,6 +372,7 @@ void Rb3OnTerminateTitle() {
   // Stop and join the probe threads before the title (and later memory_) goes
   // away under them (fork-cleanup-review.md C10).
   titles::JoinProbeThreads();
+  titles::rb3::RemoveScriptedInputAdapter();
 }
 
 void Rb3OnShutdown() { titles::JoinProbeThreads(); }
