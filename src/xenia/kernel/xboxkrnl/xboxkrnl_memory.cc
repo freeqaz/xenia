@@ -441,13 +441,19 @@ DECLARE_XBOXKRNL_EXPORT1(MmAllocatePhysicalMemory, kMemory, kImplemented);
 void MmFreePhysicalMemory_entry(dword_t type, dword_t base_address) {
   // base_address = result of MmAllocatePhysicalMemory.
 
+  // Upstream asserts on a misaligned address and frees anyway; returning
+  // early leaked the allocation. Log, then let BaseHeap::Release validate the
+  // address (it refuses one that is not an allocation base).
   if ((base_address & 0x1F) != 0) {
-    XELOGW("MmFreePhysicalMemory: misaligned base_address {:08X}", base_address);
-    return;
+    XELOGW("MmFreePhysicalMemory: misaligned base_address {:08X}",
+           uint32_t(base_address));
   }
 
   auto heap = kernel_state()->memory()->LookupHeap(base_address);
-  heap->Release(base_address);
+  if (!heap || !heap->Release(base_address)) {
+    XELOGW("MmFreePhysicalMemory: release of {:08X} failed",
+           uint32_t(base_address));
+  }
 }
 DECLARE_XBOXKRNL_EXPORT1(MmFreePhysicalMemory, kMemory, kImplemented);
 
