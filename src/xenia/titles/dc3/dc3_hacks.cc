@@ -248,8 +248,9 @@ void HackLogOverrideAudit(cpu::Processor* processor, bool only_if_changed) {
     // ResolveFunction (entry table READY). A direct `bl` to an override is
     // emitted as CallExtern and never resolves, so a resolved override was
     // reached through the indirection table (bctrl/vtable/function pointer)
-    // or a host Execute: on that path Processor::DemandFunction compiled the
-    // ORIGINAL guest body, which then runs instead of the handler.
+    // or a host Execute. Before the cpu override fix, DemandFunction compiled
+    // the ORIGINAL guest body for that path, so indirect callers bypassed
+    // the handler.
     bool resolved = processor && processor->QueryFunction(r.address);
     if (only_if_changed && hits == r.logged_hits &&
         resolved == r.logged_resolved) {
@@ -257,10 +258,14 @@ void HackLogOverrideAudit(cpu::Processor* processor, bool only_if_changed) {
     }
     r.logged_hits = hits;
     r.logged_resolved = resolved;
-    const char* verdict = hits ? (resolved ? "MIXED (handler + guest body)"
-                                           : "effective")
-                               : (resolved ? "INERT (guest body ran)"
-                                           : "not reached");
+    // Since the core compiles an overridden function as "call the handler;
+    // return" (cpu fix, Lane D), a resolved override with hits is simply
+    // effective on both paths. Resolved with ZERO hits means indirect
+    // callers were served the guest body: the pre-fix hole.
+    const char* verdict =
+        hits ? "effective"
+             : (resolved ? "INERT (resolved, handler never ran: guest body)"
+                         : "not reached");
     XELOGI("DC3 HACK audit: {} {:08X} handler_hits={} resolved_indirect={} "
            "-> {}",
            r.id, r.address, hits, resolved ? 1 : 0, verdict);
