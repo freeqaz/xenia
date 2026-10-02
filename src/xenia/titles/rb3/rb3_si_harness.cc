@@ -72,7 +72,7 @@ uint32_t MakeGuestWritable(Memory* memory, uint32_t lo, uint32_t hi) {
 // the DLL image and within +/-32MB (PPC I-form reach). Stock (no DLL / hooks
 // not installed) = 0x7D8802A6 (mflr r12).
 void SiHookVerifyThread(Memory* memory) {
-  GuestReader reader(memory, /*trust_image_windows=*/cvars::si_load_dll);
+  GuestReader reader(memory);
   const uint32_t kStockPrologue = 0x7D8802A6;  // mflr r12
   auto classify = [&](const char* tag, uint32_t site) {
     if (!reader.Readable(site)) {
@@ -166,8 +166,7 @@ void InstallSiHarness(const TitleLaunchContext& ctx) {
     } else {
       XELOGE(
           "SI LOADDLL: config.AllowSameInstrument @0x{:08X} NOT armed: the "
-          "guest heap does not track that page as committed (see "
-          "GuestReader's trust_image_windows note)",
+          "guest heap refused to make that page writable",
           allow_va);
     }
   }

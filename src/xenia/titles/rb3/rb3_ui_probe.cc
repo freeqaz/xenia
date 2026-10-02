@@ -62,7 +62,7 @@ class UiProbe {
  public:
   UiProbe(Memory* memory, kernel::KernelState* kernel_state,
           cpu::Processor* processor)
-      : reader_(memory, /*trust_image_windows=*/cvars::si_load_dll),
+      : reader_(memory),
         kernel_state_(kernel_state),
         processor_(processor) {}
 

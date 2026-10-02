@@ -29,6 +29,7 @@
 #include "xenia/cpu/backend/x64/x64_backend.h"
 #include "xenia/cpu/backend/x64/x64_code_cache.h"
 #include "xenia/cpu/backend/x64/x64_function.h"
+#include "xenia/cpu/backend/x64/x64_guest_unwind.h"
 #include "xenia/cpu/backend/x64/x64_sequences.h"
 #include "xenia/cpu/backend/x64/x64_stack_layout.h"
 #include "xenia/cpu/cpu_flags.h"
@@ -826,6 +827,24 @@ void X64Emitter::CallIndirect(const hir::Instr* instr,
   if (instr->flags & hir::CALL_POSSIBLE_RETURN) {
     cmp(reg.cvt32(), dword[rsp + StackLayout::GUEST_RET_ADDR]);
     je(epilog_label(), CodeGenerator::T_NEAR);
+    // A return to somewhere other than our caller. If a guest exception
+    // unwind armed a pending host return (x64_guest_unwind.h), this may be a
+    // catch continuation returning out of the catching function: let the
+    // thunk resume that function's original host caller. Gated on a global
+    // count so the common case costs one compare.
+    if (backend_->pending_return_thunk()) {
+      Xbyak::Label no_pending;
+      mov(edx, reg.cvt32());
+      mov(rax, reinterpret_cast<uint64_t>(&g_pending_host_return_count));
+      cmp(dword[rax], 0);
+      je(no_pending, CodeGenerator::T_NEAR);
+      mov(rax, reinterpret_cast<uint64_t>(backend_->pending_return_thunk()));
+      call(rax);
+      L(no_pending);
+      if (reg.getIdx() == Xbyak::Operand::RAX) {
+        mov(eax, edx);
+      }
+    }
   }
 
   // Load the pointer to the indirection table maintained in X64CodeCache.

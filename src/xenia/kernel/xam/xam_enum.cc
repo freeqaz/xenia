@@ -159,7 +159,7 @@ dword_result_t XamGetPrivateEnumStructureFromHandle_entry(
 
   return X_STATUS_SUCCESS;
 }
-DECLARE_XAM_EXPORT1(XamGetPrivateEnumStructureFromHandle, kNone, kStub);
+DECLARE_XAM_EXPORT1(XamGetPrivateEnumStructureFromHandle, kNone, kImplemented);
 
 }  // namespace xam
 }  // namespace kernel

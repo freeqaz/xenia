@@ -28,12 +28,20 @@ class X64Function : public GuestFunction {
 
   void Setup(uint8_t* machine_code, size_t machine_code_length);
 
+  // Bytes the prolog subtracts from rsp: the guest return address the caller
+  // passed sits at [rsp + StackLayout::GUEST_RET_ADDR] and the host return
+  // address at [rsp + stack_size()]. Used to walk JIT frames on the host stack
+  // (guest exception unwinding).
+  size_t stack_size() const { return stack_size_; }
+  void set_stack_size(size_t stack_size) { stack_size_ = stack_size; }
+
  protected:
   bool CallImpl(ThreadState* thread_state, uint32_t return_address) override;
 
  private:
   uint8_t* machine_code_ = nullptr;
   size_t machine_code_length_ = 0;
+  size_t stack_size_ = 0;
 };
 
 }  // namespace x64

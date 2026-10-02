@@ -487,7 +487,31 @@ int XexModule::ReadImage(const void* xex_addr, size_t xex_length,
     return 0;
   }
 
-  memory()->LookupHeap(base_address_)->Reset();
+  // Start the image heap from a clean page table -- but only when no other
+  // loaded module lives in it. Upstream reset unconditionally, which is right
+  // for the first (title) image and wrong for every later one: loading a DLL
+  // into the same 0x80000000 heap (e.g. a title's own XexLoadImage, or a
+  // host-side LoadUserModule) zeroed the page table under the running title,
+  // so its image read as uncommitted and every later Protect/Query on it
+  // failed while the host mapping stayed live.
+  auto* image_heap = memory()->LookupHeap(base_address_);
+  bool heap_in_use = false;
+  for (auto* module : processor_->GetModules()) {
+    auto* xex = dynamic_cast<XexModule*>(module);
+    if (xex && xex != this && xex->loaded() && !xex->is_patch() &&
+        xex->base_address() &&
+        memory()->LookupHeap(xex->base_address()) == image_heap) {
+      heap_in_use = true;
+      XELOGI(
+          "XexModule: not resetting the image heap for {} at 0x{:08X}: {} "
+          "is loaded there (0x{:08X})",
+          name(), base_address_, xex->name(), xex->base_address());
+      break;
+    }
+  }
+  if (!heap_in_use) {
+    image_heap->Reset();
+  }
 
   aes_decrypt_buffer(
       use_dev_key ? xe_xex2_devkit_key : xe_xex2_retail_key,

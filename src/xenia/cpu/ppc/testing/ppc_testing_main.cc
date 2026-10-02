@@ -7,6 +7,9 @@
  ******************************************************************************
  */
 
+#include <map>
+#include <vector>
+
 #include "third_party/fmt/include/fmt/format.h"
 #include "xenia/base/clock.h"
 #include "xenia/base/console_app_main.h"
@@ -20,12 +23,14 @@
 #include "xenia/cpu/cpu_flags.h"
 #include "xenia/cpu/ppc/ppc_context.h"
 #include "xenia/cpu/ppc/ppc_frontend.h"
+#include "xenia/cpu/ppc/ppc_unwind.h"
 #include "xenia/cpu/processor.h"
 #include "xenia/cpu/raw_module.h"
 #include "xenia/cpu/thread_state.h"
 
 #if XE_ARCH_AMD64
 #include "xenia/cpu/backend/x64/x64_backend.h"
+#include "xenia/cpu/backend/x64/x64_guest_unwind.h"
 #endif  // XE_ARCH
 
 #if XE_COMPILER_MSVC
@@ -689,6 +694,361 @@ void Run(int& failed_count, int& passed_count) {
 }
 }  // namespace mmio_vector_test
 
+// Built-in checks of the guest unwinder (cpu/ppc/ppc_unwind.*): .pdata
+// lookup and virtual unwind of the MSVC/Xenon prologue shapes the C++
+// exception dispatcher walks through. Pure functions over a fake memory.
+namespace guest_unwind_test {
+using ppc::GuestMemoryReader;
+using ppc::RuntimeFunction;
+using ppc::UnwindRegisters;
+
+struct FakeMemory {
+  std::map<uint32_t, uint32_t> words;
+  void W32(uint32_t a, uint32_t v) { words[a] = v; }
+  void W64(uint32_t a, uint64_t v) {
+    W32(a, uint32_t(v >> 32));
+    W32(a + 4, uint32_t(v));
+  }
+  GuestMemoryReader Reader() const {
+    GuestMemoryReader r;
+    r.read32 = [this](uint32_t a, uint32_t* out) {
+      auto it = words.find(a);
+      if (it == words.end()) return false;
+      *out = it->second;
+      return true;
+    };
+    r.read64 = [this](uint32_t a, uint64_t* out) {
+      auto hi = words.find(a), lo = words.find(a + 4);
+      if (hi == words.end() || lo == words.end()) return false;
+      *out = (uint64_t(hi->second) << 32) | lo->second;
+      return true;
+    };
+    return r;
+  }
+};
+
+constexpr uint32_t kSaveGprLr = 0x82000000;  // __savegprlr_14 .. _31
+constexpr uint32_t kSaveFpr = 0x82000100;    // __savefpr_14 .. _31
+constexpr uint32_t kFnA = 0x82001000;  // mflr r12; bl __savegprlr_29; stwu
+constexpr uint32_t kFnB = 0x82001100;  // std r31; mflr r31; std r30; stwu
+constexpr uint32_t kFnC = 0x82001200;  // mflr r12; stw r12; std r31; stwu
+constexpr uint32_t kFnD = 0x82001300;  // savegprlr_24 + savefpr_23 via r12
+constexpr uint32_t kFnE = 0x82001400;  // leaf, no prologue
+constexpr uint32_t kPdata = 0x82100000;
+constexpr uint32_t kCallerSp = 0x70010000;
+constexpr uint32_t kReturn = 0x82345678;
+
+uint32_t Bl(uint32_t from, uint32_t to) {
+  return 0x48000001 | ((to - from) & 0x03FFFFFC);
+}
+uint32_t StdR1(uint32_t rs, int32_t d) {
+  return 0xF8000000 | (rs << 21) | (1 << 16) | (uint32_t(d) & 0xFFFC);
+}
+uint32_t StfdR12(uint32_t fs, int32_t d) {
+  return 0xD8000000 | (fs << 21) | (12 << 16) | (uint32_t(d) & 0xFFFF);
+}
+uint32_t Info(uint32_t prolog, uint32_t len, bool exc) {
+  return prolog | (len << 8) | (1u << 30) | (exc ? 0x80000000u : 0);
+}
+
+void Build(FakeMemory& m) {
+  for (uint32_t n = 14; n <= 31; ++n) {
+    m.W32(kSaveGprLr + 4 * (n - 14), StdR1(n, -0x98 + 8 * int32_t(n - 14)));
+    m.W32(kSaveFpr + 4 * (n - 14), StfdR12(n, -0x90 + 8 * int32_t(n - 14)));
+  }
+  m.W32(kSaveGprLr + 4 * 18, 0x9181FFF8);  // stw r12, -8(r1)
+  m.W32(kSaveGprLr + 4 * 19, 0x4E800020);  // blr
+  m.W32(kSaveFpr + 4 * 18, 0x4E800020);    // blr
+  const uint32_t a[] = {0x7D8802A6, Bl(kFnA + 4, kSaveGprLr + 4 * 15),
+                        0x9421FF90, 0x60000000, 0x60000000};
+  const uint32_t b[] = {0xFBE1FFF8, 0x7FE802A6, 0xFBC1FFF0, 0x9421FFA0,
+                        0x60000000, 0x60000000};
+  const uint32_t c[] = {0x7D8802A6, 0x9181FFF8, 0xFBE1FFF0, 0x9421FFA0,
+                        0x60000000, 0x60000000};
+  const uint32_t d[] = {0x7D8802A6, Bl(kFnD + 4, kSaveGprLr + 4 * 10),
+                        0x3981FFB8, Bl(kFnD + 12, kSaveFpr + 4 * 9),
+                        0x9421FF60, 0x60000000};
+  const uint32_t e[] = {0x60000000, 0x4E800020};
+  for (uint32_t i = 0; i < 5; ++i) m.W32(kFnA + 4 * i, a[i]);
+  for (uint32_t i = 0; i < 6; ++i) m.W32(kFnB + 4 * i, b[i]);
+  for (uint32_t i = 0; i < 6; ++i) m.W32(kFnC + 4 * i, c[i]);
+  for (uint32_t i = 0; i < 6; ++i) m.W32(kFnD + 4 * i, d[i]);
+  for (uint32_t i = 0; i < 2; ++i) m.W32(kFnE + 4 * i, e[i]);
+  const uint32_t pdata[][2] = {{kFnA, Info(3, 5, false)},
+                               {kFnB, Info(4, 6, true)},
+                               {kFnC, Info(4, 6, false)},
+                               {kFnD, Info(5, 6, false)},
+                               {kFnE, Info(0, 2, false)}};
+  for (uint32_t i = 0; i < 5; ++i) {
+    m.W32(kPdata + i * 8, pdata[i][0]);
+    m.W32(kPdata + i * 8 + 4, pdata[i][1]);
+  }
+}
+
+uint64_t Saved(uint32_t reg) { return 0x1111000000000000ull | reg; }
+uint64_t Live(uint32_t reg) { return 0xDEAD000000000000ull | reg; }
+
+bool Expect(bool ok, const char* what) {
+  if (!ok) XELOGE("    {}", what);
+  return ok;
+}
+
+// Unwinds `fn` at `pc` and checks r1, LR, the establisher frame and the
+// restored registers.
+bool Check(FakeMemory& m, uint32_t fn, uint32_t pc, uint32_t frame_size,
+           const std::vector<uint32_t>& saved_gprs,
+           const std::vector<uint32_t>& saved_fprs, uint64_t lr_reg_value,
+           uint32_t lr_in_gpr = 0) {
+  RuntimeFunction f;
+  if (!Expect(ppc::LookupFunctionEntry(m.Reader(), kPdata, 5 * 8, pc, &f) &&
+                  f.begin_address == fn,
+              "lookup")) {
+    return false;
+  }
+  uint32_t sp = kCallerSp - frame_size;
+  if (frame_size) m.W32(sp, kCallerSp);  // back chain
+  UnwindRegisters regs;
+  for (uint32_t i = 0; i < 32; ++i) {
+    regs.gpr[i] = Live(i);
+    regs.fpr[i] = Live(i);
+  }
+  regs.gpr[1] = sp;
+  regs.lr = uint32_t(lr_reg_value);
+  if (lr_in_gpr) regs.gpr[lr_in_gpr] = kReturn;
+  uint32_t establisher = 0, ret = 0;
+  bool ok = Expect(ppc::VirtualUnwind(m.Reader(), f, pc, &regs, &establisher,
+                                      &ret),
+                   "VirtualUnwind failed");
+  ok = ok && Expect(regs.gpr[1] == kCallerSp, "r1 != caller sp");
+  ok = ok && Expect(ret == kReturn && regs.lr == kReturn, "return address");
+  ok = ok && Expect(establisher == sp, "establisher frame");
+  for (uint32_t r : saved_gprs) {
+    ok = ok && Expect(regs.gpr[r] == Saved(r), "saved gpr not restored");
+  }
+  for (uint32_t r : saved_fprs) {
+    ok = ok && Expect(regs.fpr[r] == Saved(r + 100), "saved fpr not restored");
+  }
+  return ok;
+}
+
+void Run(int& failed_count, int& passed_count) {
+  XELOGI("guest_unwind (built-in):");
+  auto report = [&](const char* name, bool ok) {
+    XELOGI("  - {}", name);
+    if (ok) {
+      ++passed_count;
+    } else {
+      XELOGE("    TEST FAILED");
+      ++failed_count;
+    }
+  };
+  {
+    FakeMemory m;
+    Build(m);
+    RuntimeFunction f;
+    auto r = m.Reader();
+    bool ok = ppc::LookupFunctionEntry(r, kPdata, 40, kFnB + 8, &f) &&
+              f.begin_address == kFnB && f.prolog_length == 4 &&
+              f.function_length == 6 && f.exception_flag &&
+              f.entry_address == kPdata + 8;
+    ok = ok && !ppc::LookupFunctionEntry(r, kPdata, 40, kFnA - 4, &f);
+    ok = ok && !ppc::LookupFunctionEntry(r, kPdata, 40, kFnE + 8, &f);
+    ok = ok && !ppc::LookupFunctionEntry(r, kPdata, 40, kFnA + 0x20, &f);
+    report(".pdata lookup: hit, flags, before-first, past-end, gap", ok);
+  }
+  {
+    // mflr r12; bl __savegprlr_29; stwu r1,-0x70(r1)
+    FakeMemory m;
+    Build(m);
+    for (uint32_t n = 29; n <= 31; ++n) {
+      m.W64(kCallerSp - 0x98 + 8 * (n - 14), Saved(n));
+    }
+    m.W32(kCallerSp - 8, kReturn);
+    report("mflr r12 / bl __savegprlr_29 / stwu",
+           Check(m, kFnA, kFnA + 12, 0x70, {29, 30, 31}, {}, 0xBAD0BAD0));
+  }
+  {
+    // std r31,-8; mflr r31; std r30,-0x10; stwu r1,-0x60: LR lives in r31
+    FakeMemory m;
+    Build(m);
+    m.W64(kCallerSp - 8, Saved(31));
+    m.W64(kCallerSp - 0x10, Saved(30));
+    report("std r31 / mflr r31 / std r30 / stwu (LR held in r31)",
+           Check(m, kFnB, kFnB + 16, 0x60, {30, 31}, {}, 0xBAD0BAD0, 31));
+  }
+  {
+    // mflr r12; stw r12,-8; std r31,-0x10; stwu
+    FakeMemory m;
+    Build(m);
+    m.W32(kCallerSp - 8, kReturn);
+    m.W64(kCallerSp - 0x10, Saved(31));
+    report("mflr r12 / stw r12,-8 / std r31 / stwu",
+           Check(m, kFnC, kFnC + 20, 0x60, {31}, {}, 0xBAD0BAD0));
+  }
+  {
+    // mflr r12; bl __savegprlr_24; subi r12,r1,0x48; bl __savefpr_23; stwu
+    FakeMemory m;
+    Build(m);
+    for (uint32_t n = 24; n <= 31; ++n) {
+      m.W64(kCallerSp - 0x98 + 8 * (n - 14), Saved(n));
+    }
+    m.W32(kCallerSp - 8, kReturn);
+    for (uint32_t n = 23; n <= 31; ++n) {
+      m.W64(kCallerSp - 0x48 - 0x90 + 8 * (n - 14), Saved(n + 100));
+    }
+    report("savegprlr_24 + subi r12 + savefpr_23 + stwu",
+           Check(m, kFnD, kFnD + 20, 0xA0, {24, 25, 26, 27, 28, 29, 30, 31},
+                 {23, 24, 25, 26, 27, 28, 29, 30, 31}, 0xBAD0BAD0));
+  }
+  {
+    // Inside the prologue: after mflr r12, before the save helper ran.
+    FakeMemory m;
+    Build(m);
+    report("partial prologue (pc after mflr r12): LR from r12, r1 as is",
+           Check(m, kFnA, kFnA + 4, 0, {}, {}, 0xBAD0BAD0, 12));
+  }
+  {
+    // Leaf without a prologue: LR register is the return address.
+    FakeMemory m;
+    Build(m);
+    report("leaf without a prologue",
+           Check(m, kFnE, kFnE + 4, 0, {}, {}, kReturn));
+  }
+  XELOGI("");
+}
+}  // namespace guest_unwind_test
+
+// Built-in check of the x64 pending host return (x64_guest_unwind.h): a
+// guest "throw" in T is caught by F; the catch continuation runs as a fresh
+// JIT entry on top of the throw's host frames, and when F returns to main the
+// JIT must resume main's ORIGINAL host frame. Without that, the continuation
+// nests and main's return into the Execute sentinel cannot resolve.
+namespace pending_host_return_test {
+constexpr uint32_t kBase = 0x82000000;
+constexpr uint32_t kMain = kBase + 0x00;
+constexpr uint32_t kF = kBase + 0x40;
+constexpr uint32_t kFReturn = kBase + 0x58;  // after F's bl T
+constexpr uint32_t kCatch = kBase + 0x60;    // F's catch continuation
+constexpr uint32_t kMainReturn = kBase + 0x10;  // after main's bl F
+constexpr uint32_t kRaise = kBase + 0xC0;    // host override ("kernel")
+constexpr uint32_t kResume = kBase + 0x100;  // {sp, pc} for the "CRT" jump
+constexpr uint32_t kStackBase = 0x82100000;
+const uint32_t kCode[] = {
+    // main: frame, bl F, return
+    0x7D8802A6, 0x9181FFF8, 0x9421FFA0, 0x48000035, 0x38210060, 0x8181FFF8,
+    0x7D8803A6, 0x4E800020, 0x60000000, 0x60000000, 0x60000000, 0x60000000,
+    0x60000000, 0x60000000, 0x60000000, 0x60000000,
+    // F (0x40): save LR + r31, r31 = 7, bl T, normal path r3 = 1,
+    // catch (0x60): r3 = r31 + 35, epilogue
+    0x7D8802A6, 0x9181FFF8, 0xFBE1FFF0, 0x9421FFA0, 0x3BE00007, 0x4800002D,
+    0x38600001, 0x48000008, 0x387F0023, 0x38210060, 0x8181FFF8, 0x7D8803A6,
+    0xEBE1FFF0, 0x4E800020, 0x60000000, 0x60000000,
+    // T (0x80): frame, bl Raise, then what _JumpToContinuation does:
+    // r1 = F's sp, LR = catch, r31 restored, blr
+    0x7D8802A6, 0x9181FFF8, 0x9421FFA0, 0x48000035, 0x3C808200, 0x80240100,
+    0x81840104, 0x3BE00007, 0x7D8803A6, 0x4E800020, 0x60000000, 0x60000000,
+    0x60000000, 0x60000000, 0x60000000, 0x60000000,
+    // Raise (0xC0): overridden
+    0x4E800020, 0x60000000, 0x60000000, 0x60000000, 0x60000000, 0x60000000,
+    0x60000000, 0x60000000, 0x60000000, 0x60000000, 0x60000000, 0x60000000,
+    0x60000000, 0x60000000, 0x60000000, 0x60000000,
+    // kResume (0x100)
+    0, 0,
+};
+
+bool g_arm = true;
+bool g_armed = false;
+Processor* g_processor = nullptr;
+
+void RaiseHandler(ppc::PPCContext* ctx, kernel::KernelState*) {
+  uint32_t t_sp = uint32_t(ctx->r[1]);
+  uint32_t f_sp = t_sp + 0x60;
+  uint32_t main_sp = f_sp + 0x60;
+  const backend::Backend::GuestUnwindFrame frames[] = {
+      {kFReturn, f_sp},     // T returns into F
+      {kMainReturn, main_sp},  // F returns into main
+  };
+  int marker = 0;
+  g_armed = g_arm && g_processor->backend()->ArmGuestUnwindReturn(
+                         reinterpret_cast<uint64_t>(&marker),
+                         uint32_t(ctx->lr) - 4, frames, 2, 1);
+  auto* mem = g_processor->memory();
+  xe::store_and_swap<uint32_t>(mem->TranslateVirtual(kResume), f_sp);
+  xe::store_and_swap<uint32_t>(mem->TranslateVirtual(kResume + 4), kCatch);
+}
+
+void Run(int& failed_count, int& passed_count) {
+  XELOGI("pending_host_return (built-in):");
+  XELOGI("  - catch continuation returns through the caller's original frame");
+  auto memory = std::make_unique<Memory>();
+  memory->Initialize();
+  std::unique_ptr<xe::cpu::backend::Backend> backend;
+#if XE_ARCH_AMD64
+  backend.reset(new xe::cpu::backend::x64::X64Backend());
+#endif  // XE_ARCH
+  bool ok = false;
+  uint64_t r3 = 0;
+  uint32_t taken_before =
+      xe::cpu::backend::x64::g_pending_host_returns_taken.load();
+  if (backend) {
+    auto processor = std::make_unique<Processor>(memory.get(), nullptr);
+    processor->Setup(std::move(backend));
+    g_processor = processor.get();
+    auto bin_path = std::filesystem::temp_directory_path() /
+                    fmt::format("xenia_pending_return_{}.bin",
+                                xe::Clock::QueryHostTickCount());
+    std::vector<uint8_t> bytes;
+    for (uint32_t word : kCode) {
+      for (int shift = 24; shift >= 0; shift -= 8) {
+        bytes.push_back(uint8_t(word >> shift));
+      }
+    }
+    FILE* f = xe::filesystem::OpenFile(bin_path, "wb");
+    if (f) {
+      fwrite(bytes.data(), 1, bytes.size(), f);
+      fclose(f);
+      auto module = std::make_unique<xe::cpu::RawModule>(processor.get());
+      bool loaded = module->LoadFile(kBase, bin_path);
+      std::filesystem::remove(bin_path);
+      auto* heap = memory->LookupHeap(kStackBase);
+      if (loaded && heap &&
+          heap->AllocFixed(kStackBase, 0x10000, 0,
+                           kMemoryAllocationReserve | kMemoryAllocationCommit,
+                           kMemoryProtectRead | kMemoryProtectWrite)) {
+        processor->AddModule(std::move(module));
+        processor->backend()->CommitExecutableRange(kBase, kBase + 0x10000);
+        processor->RegisterGuestFunctionOverride(kRaise, &RaiseHandler,
+                                                 "pending_return_raise");
+        auto thread_state = std::make_unique<ThreadState>(
+            processor.get(), 0x100, kStackBase, kStackBase - 0x1000);
+        auto fn = processor->ResolveFunction(kMain);
+        if (fn) {
+          auto ctx = thread_state->context();
+          ctx->r[1] = kStackBase + 0xF000;
+          ctx->r[3] = 0;
+          ctx->lr = 0xBCBCBCBC;
+          fn->Call(thread_state.get(), uint32_t(ctx->lr));
+          r3 = ctx->r[3];
+          ok = true;
+        }
+        thread_state.reset();
+      }
+    }
+    processor.reset();
+  }
+  uint32_t taken =
+      xe::cpu::backend::x64::g_pending_host_returns_taken.load() - taken_before;
+  if (ok && g_armed && r3 == 42 && taken == 1) {
+    ++passed_count;
+  } else {
+    XELOGE("    TEST FAILED: ran={} armed={} r3={} taken={}", ok, g_armed, r3,
+           taken);
+    ++failed_count;
+  }
+  XELOGI("");
+}
+}  // namespace pending_host_return_test
+
 bool RunTests(const std::string_view test_name) {
   int result_code = 1;
   int failed_count = 0;
@@ -736,6 +1096,12 @@ bool RunTests(const std::string_view test_name) {
   }
   if (test_name.empty() || test_name == "mmio_vector") {
     mmio_vector_test::Run(failed_count, passed_count);
+  }
+  if (test_name.empty() || test_name == "guest_unwind") {
+    guest_unwind_test::Run(failed_count, passed_count);
+  }
+  if (test_name.empty() || test_name == "pending_host_return") {
+    pending_host_return_test::Run(failed_count, passed_count);
   }
   TestRunner runner;
   for (auto& test_suite : test_suites) {

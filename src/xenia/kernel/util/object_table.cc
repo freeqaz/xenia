@@ -223,6 +223,22 @@ X_STATUS ObjectTable::RemoveHandle(X_HANDLE handle) {
     }
 
     XELOGI("Removed handle:{:08X} for {}", handle, typeid(*object).name());
+    if (object->is_native_wrapper()) {
+      // The guest never received this handle (GetNativeObject made it for a
+      // dispatcher header the title initialized inline), so whatever just
+      // dropped it was holding a stale or borrowed handle. Name the culprit.
+      auto* thread = XThread::IsInThread() ? XThread::GetCurrentThread()
+                                           : nullptr;
+      XELOGW(
+          "RemoveHandle: native-wrapper {} handle {:08X} for guest object "
+          "0x{:08X} removed on {} (guest lr 0x{:08X})",
+          typeid(*object).name(), handle, object->guest_object(),
+          thread ? fmt::format("guest thread {:08X}", thread->thread_id())
+                 : std::string("a host thread"),
+          thread ? static_cast<uint32_t>(
+                       thread->thread_state()->context()->lr)
+                 : 0u);
+    }
 
     // Remove object name from mapping to prevent naming collision.
     if (!object->name().empty()) {
@@ -233,6 +249,27 @@ X_STATUS ObjectTable::RemoveHandle(X_HANDLE handle) {
   }
 
   return X_STATUS_SUCCESS;
+}
+
+object_ref<XObject> ObjectTable::LookupObjectByGuestPointer(
+    uint32_t guest_ptr) {
+  if (!guest_ptr) {
+    return nullptr;
+  }
+  auto lock = global_critical_region_.Acquire();
+  for (uint32_t slot = 0; slot < table_capacity_; slot++) {
+    auto& entry = table_[slot];
+    // Only objects that own their guest memory: a native wrapper is just a
+    // view of a guest-initialized header, and once that memory is
+    // re-initialized (a freed and reallocated critical section) the old
+    // wrapper's state is stale -- the next first use must wrap afresh.
+    if (entry.object && !entry.object->is_native_wrapper() &&
+        entry.object->guest_object() == guest_ptr) {
+      entry.object->Retain();
+      return object_ref<XObject>(entry.object);
+    }
+  }
+  return nullptr;
 }
 
 std::vector<object_ref<XObject>> ObjectTable::GetAllObjects() {

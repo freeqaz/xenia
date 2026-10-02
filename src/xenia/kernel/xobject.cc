@@ -9,6 +9,8 @@
 
 #include "xenia/kernel/xobject.h"
 
+#include <atomic>
+#include <typeinfo>
 #include <vector>
 
 #include "xenia/base/byte_stream.h"
@@ -375,7 +377,8 @@ void XObject::SetNativePointer(uint32_t native_ptr, bool uninitialized) {
 
 object_ref<XObject> XObject::GetNativeObject(KernelState* kernel_state,
                                              void* native_ptr,
-                                             int32_t as_type) {
+                                             int32_t as_type,
+                                             bool owner_lookup) {
   assert_not_null(native_ptr);
 
   // Unfortunately the XDK seems to inline some KeInitialize calls, meaning
@@ -395,15 +398,62 @@ object_ref<XObject> XObject::GetNativeObject(KernelState* kernel_state,
     as_type = header->type;
   }
 
+  uint32_t guest_ptr = kernel_state->memory()->HostToGuestVirtual(native_ptr);
+
   if (header->wait_list_flink == kXObjSignature) {
     // Already initialized.
     // TODO: assert if the type of the object != as_type
     uint32_t handle = header->wait_list_blink;
     auto object = kernel_state->object_table()->LookupObject<XObject>(handle);
 
-    // TODO(benvanik): assert nothing has been changed in the struct.
-    return object;
-  } else {
+    // The stashed handle is only a cache: object-table slots are reused as
+    // soon as they are freed, so a handle stashed here can outlive its object
+    // and come back naming a DIFFERENT object (or none). Trusting it aliased
+    // unrelated dispatcher objects: a dead thread's KTHREAD resolving to a
+    // live critical section's event (ObDereferenceObject then releases the
+    // CS event), or a CS waiting on and signalling some other event. Both
+    // ends of a stash agree on the guest address, so check it.
+    if (object && object->guest_object() == guest_ptr) {
+      // TODO(benvanik): assert nothing has been changed in the struct.
+      return object;
+    }
+    static std::atomic<uint32_t> s_stale_logged{0};
+    if (s_stale_logged.fetch_add(1, std::memory_order_relaxed) < 32) {
+      if (object) {
+        XObject* stale = object.get();
+        XELOGW(
+            "GetNativeObject: stale handle {:08X} stashed at guest 0x{:08X} "
+            "now names a {} for guest 0x{:08X}; treating 0x{:08X} as "
+            "uninitialized (type {})",
+            handle, guest_ptr, typeid(*stale).name(),
+            stale->guest_object(),
+            guest_ptr, as_type);
+      } else {
+        XELOGW(
+            "GetNativeObject: stale handle {:08X} stashed at guest 0x{:08X} "
+            "(slot empty); treating it as uninitialized (type {})",
+            handle, guest_ptr, as_type);
+      }
+    }
+    // Fall through: wrap the header afresh, as on first use.
+  }
+  {
+    // Not (validly) stashed. Before wrapping the header as a new dispatcher
+    // object, check whether it already belongs to a live object whose own
+    // data overwrote the stash -- an XEnumerator's X_KENUMERATOR, for one,
+    // reuses the header words for app_id/close_message/user_index. A title
+    // that ObDereferenceObject()s the pointer XamGetPrivateEnumStructureFrom-
+    // Handle gave it lands here; wrapping would mint a bogus event, write the
+    // signature over the enumerator's fields, and leak the enumerator.
+    // Only for the Ob* exports: a typed caller (KeSetEvent, ...) must never
+    // get back an object of another class.
+    if (owner_lookup) {
+      if (auto owner = kernel_state->object_table()->LookupObjectByGuestPointer(
+              guest_ptr)) {
+        return owner;
+      }
+    }
+
     // First use, create new.
     // https://www.nirsoft.net/kernel_struct/vista/KOBJECTS.html
     XObject* object = nullptr;
@@ -450,6 +500,8 @@ object_ref<XObject> XObject::GetNativeObject(KernelState* kernel_state,
     // Stash pointer in struct.
     // FIXME: This assumes the object contains a dispatch header (some don't!)
     StashHandle(header, object->handle());
+    object->guest_object_ptr_ = guest_ptr;
+    object->native_wrapper_ = true;
 
     return object_ref<XObject>(object);
   }

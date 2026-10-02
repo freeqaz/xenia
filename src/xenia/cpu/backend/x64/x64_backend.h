@@ -30,6 +30,7 @@ class X64CodeCache;
 typedef void* (*HostToGuestThunk)(void* target, void* arg0, void* arg1);
 typedef void* (*GuestToHostThunk)(void* target, void* arg0, void* arg1);
 typedef void (*ResolveFunctionThunk)();
+typedef void (*PendingReturnThunk)();
 
 class X64Backend : public Backend {
  public:
@@ -49,6 +50,12 @@ class X64Backend : public Backend {
   ResolveFunctionThunk resolve_function_thunk() const {
     return resolve_function_thunk_;
   }
+  // Mismatched guest return with a pending host return armed (edx = guest
+  // target): either returns normally or resumes an older host frame. See
+  // x64_guest_unwind.h.
+  PendingReturnThunk pending_return_thunk() const {
+    return pending_return_thunk_;
+  }
 
   bool Initialize(Processor* processor) override;
 
@@ -61,6 +68,10 @@ class X64Backend : public Backend {
 
   uint64_t CalculateNextHostInstruction(ThreadDebugInfo* thread_info,
                                         uint64_t current_pc) override;
+
+  bool ArmGuestUnwindReturn(uint64_t host_scan_from, uint32_t first_guest_pc,
+                            const GuestUnwindFrame* frames, size_t frame_count,
+                            size_t target_index) override;
 
   void InstallBreakpoint(Breakpoint* breakpoint) override;
   void InstallBreakpoint(Breakpoint* breakpoint, Function* fn) override;
@@ -78,6 +89,7 @@ class X64Backend : public Backend {
   HostToGuestThunk host_to_guest_thunk_;
   GuestToHostThunk guest_to_host_thunk_;
   ResolveFunctionThunk resolve_function_thunk_;
+  PendingReturnThunk pending_return_thunk_ = nullptr;
 };
 
 }  // namespace x64

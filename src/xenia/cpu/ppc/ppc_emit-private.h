@@ -30,9 +30,9 @@ namespace ppc {
 // Upstream this was `XELOGE(...); assert_always(...)`. This fork keeps
 // translating -- the affected instruction (or, for the partial cases such as
 // `addo`, the affected side effect) simply becomes a no-op -- because the DC3
-// (0x373307D9) and RB3DX (0x45410914) decomp targets depend on that tolerance
-// to boot at all. Restoring the assert would fatally break them under the
-// Checked config they are built with.
+// and RB3DX decomp targets depend on that tolerance to boot at all. Restoring
+// the assert would fatally break them under the Checked config they are built
+// with.
 //
 // What must NOT happen is the fork's previous `do {} while (false)`: a silent
 // no-op meant no title, in any build, could ever be told that it hit an

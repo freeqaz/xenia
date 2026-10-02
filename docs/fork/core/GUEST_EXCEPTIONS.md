@@ -1,10 +1,75 @@
-# Guest SEH / C++ exception dispatch: design
+# Guest SEH / C++ exception dispatch
 
-Status 2026-10-02 (Lane D): **designed, not implemented.** This is gap G13 /
-cluster K10 / lane L9 in `docs/fork/cleanup/DC3_HACK_GAP_ANALYSIS.md`. It is a
-real upstream gap, and once built it is worth upstreaming.
+Status 2026-10-02 (core lane D2): **pieces 1-4 built for the MSVC C++ catch
+path; SEH `__except` and cross-frame RtlUnwind transfers are not.** This is
+gap G13 / cluster K10 / lane L9 in `docs/fork/cleanup/DC3_HACK_GAP_ANALYSIS.md`.
+The design below was written first (Lane D); "What is built" records how the
+implementation follows it and where it deliberately took a simpler route.
 
-## Today
+## What is built (core-d2)
+
+| piece | where | tested by |
+|---|---|---|
+| 1 `.pdata` lookup | `cpu/ppc/ppc_unwind.cc` `LookupFunctionEntry` | `xenia-cpu-ppc-tests` `guest_unwind` |
+| 2 PPC virtual unwind | `cpu/ppc/ppc_unwind.cc` `VirtualUnwind` | same, 6 prologue shapes; sabotage (no register restore) fails 4/7 |
+| 3 dispatch | `kernel/xboxkrnl/xboxkrnl_guest_exceptions.cc` `DispatchGuestException`, called by `RtlRaiseException` | DC3 S2 with `--guest_exception_dispatch_first` (see below) |
+| 4 unwind + transfer | same file `UnwindGuestFrames` (`RtlUnwind`), `cpu/backend/x64/x64_guest_unwind.cc` | not exercised end to end yet (no reachable guest catch) |
+| `RtlCaptureContext` | same file `CaptureGuestContext`: the real 0xA40-byte CONTEXT | via piece 4 |
+
+How it differs from the design:
+
+- **Virtual unwind executes the prologue symbolically** (stores relative to
+  the entry r1, so `subi r12,r1,X; bl __savefpr_N` and `subi r31,r1,X`
+  frame pointers work) and recognises the CRT save helpers by
+  interpreting their straight-line store bodies, so no symbols or
+  `FindSaveRest` lookups are needed. Epilogues are not modelled (never a
+  call site).
+- **RtlUnwind's transfer is a plain return.** MSVC's RISC CRT calls
+  `RtlUnwind(pRN, ReturnPoint, ...)` from `_UnwindNestedFrames` with
+  `TargetIp` = the instruction after that call, and the catching frame's
+  `__CxxFrameHandler`, on `EXCEPTION_TARGET_UNWIND`, copies the CONTEXT it
+  is given (the catching frame's registers) into the CRT's per-thread
+  continuation context and replaces it with the context
+  `_UnwindNestedFrames` captured. So "restore the context at TargetIp" is
+  "return from the export". The walk crosses the `Processor::Execute`
+  boundary of the handler call back into the throw chain, as NT continues
+  through its dispatcher's frame. Any other RtlUnwind (SEH `__except`,
+  `longjmp`, an exit unwind) is logged and returns, as the stub did.
+- **The jump to the catch is guest code.** `_JumpToContinuation` loads the
+  catching frame's registers and `blr`s into it; the JIT runs that as a
+  tail call to a fresh function at the continuation, on top of the throw's
+  host frames. Guest state is all in `PPCContext`, so that is correct.
+  Instead of jumping into the catching function's host frame at the
+  continuation's machine-code address (the design's hard part), the backend
+  folds the stale host frames away **when the catching function returns**:
+  `Backend::ArmGuestUnwindReturn` matches the throw chain's JIT frames to
+  its guest frames one to one (each `[rsp+GUEST_RET_ADDR]` must equal the
+  guest unwinder's return address, frame sizes are now kept per
+  `X64Function`) and records the host slot of the catching frame's original
+  return address. A mismatched guest return then checks a global count (one
+  compare when nothing is armed) and, on an exact match of guest target and
+  guest r1, does `rsp = slot; ret`. Until then the stale frames stay on the
+  host stack, dormant -- the same frames the DTA throw hook longjmps over.
+  A frame that is itself an earlier catch continuation is spliced through
+  its own record, so repeated catches in one function do not accumulate.
+- **Hook order**: the DC3 DTA throw hook still runs first by default.
+  `--guest_exception_dispatch_first` (default false) dispatches first and
+  calls the hook only for exceptions no guest handler took.
+
+Not built / known limits:
+
+- `__C_specific_handler` (SEH `__try/__except`) is still the "continue
+  search" stub, and cross-frame RtlUnwind transfers are not implemented.
+- A throw from inside a catch funclet (`throw;`) is dispatched without the
+  outer throw's frames: the dispatch record is retired when its RtlUnwind
+  arms the host return.
+- The CONTEXT handed to handlers carries the live CR/XER/CTR/VMX, not the
+  unwound frame's (`_JumpToContinuation` restores CR from it; MSVC rarely
+  keeps a value in a non-volatile CR field across a call).
+- Each caught exception leaks the dispatcher's small heap vector (its C++
+  frame is discarded with the throw's host frames).
+
+## Before core-d2 ("Today" as Lane D wrote it)
 
 - `RtlRaiseException` (`kernel/xboxkrnl/xboxkrnl_debug.cc`) handles two codes:
   - `0x406D1388`, SetThreadName;

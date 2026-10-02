@@ -820,20 +820,30 @@ bool Processor::OnUnhandledException(Exception* ex) {
     return false;
   }
 
-  auto global_lock = global_critical_region_.Acquire();
+  {
+    auto global_lock = global_critical_region_.Acquire();
 
-  // Suspend all guest threads (but this one).
-  SuspendAllThreads();
+    // Suspend all guest threads (but this one).
+    SuspendAllThreads();
 
-  UpdateThreadExecutionStates(Thread::GetCurrentThreadId(),
-                              ex->thread_context());
+    UpdateThreadExecutionStates(Thread::GetCurrentThreadId(),
+                                ex->thread_context());
 
-  // Stop and notify the listener.
-  // This will take control.
-  assert_true(execution_state_ == ExecutionState::kRunning);
-  execution_state_ = ExecutionState::kPaused;
+    // Stop and notify the listener.
+    // This will take control.
+    assert_true(execution_state_ == ExecutionState::kRunning);
+    execution_state_ = ExecutionState::kPaused;
+  }
 
-  // Notify debugger that exceution stopped.
+  // Notify the debugger and park this thread with the global lock RELEASED.
+  // Upstream suspended itself inside the lock scope, so the faulting thread
+  // slept holding the global critical region forever: the debugger's own
+  // Continue/QueryThreadDebugInfos, every kernel export that takes the lock,
+  // and the host-side watchdogs (headless status report -> timeout) all
+  // blocked behind a thread that would never run again.
+  // The faulting thread is deliberately not marked `suspended`, so
+  // ResumeAllThreads leaves it parked (same as upstream: resuming it would
+  // only re-execute the faulting instruction).
   // debug_listener_->OnException(info);
   debug_listener_->OnExecutionPaused();
 
