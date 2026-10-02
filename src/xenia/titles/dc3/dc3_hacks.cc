@@ -40,8 +40,6 @@ constexpr const char* kKnownIds[] = {
     "content.wipe",
     "nui.get_next_frame",
     "saveload.activate",
-    "ui.hampanel_focus",
-    "ui.event_dialog_on_top",
     "content.refresh_done",
     "speech.grammar_unload",
     "calib.player_present_guard",
@@ -58,9 +56,7 @@ constexpr const char* kKnownIds[] = {
     // Runtime, NuiSkeletonGetNextFrame sequencer (dc3_nui_sequencer.cc).
     "seq.controller_mode",
     // Runtime, main-thread autonav (dc3_autonav.cc, --dc3_headless_autonav).
-    "seq.transition_force",
     "seq.nav_bridge",
-    "seq.loadsong_repair",
     // Runtime, scripted-input adapter (dc3_scripted_input.cc); only with
     // --dc3_headless_autonav.
     "input.attract_press",

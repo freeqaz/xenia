@@ -36,12 +36,11 @@
 
 DEFINE_bool(dc3_headless_autonav, false,
             "DC3 (original debug.xex): drive the menus headless from the "
-            "guest MAIN thread (HolmesClientPollKeyboard hook): complete "
-            "stuck UI transitions, walk attract -> ... -> game_screen with "
-            "UIManager::GotoScreen, inject the ymca song at loading_screen, "
-            "and drive the 120 BPM song clock on game_screen. Also arms the "
-            "scripted-input attract A-press/force. Off: the game boots to its own "
-            "screens and only the DTA channel / scripted pad drive it.",
+            "guest MAIN thread (HolmesClientPollKeyboard hook): walk "
+            "attract -> ... -> game_screen with UIManager::GotoScreen when a "
+            "screen sits idle. Also arms the scripted-input attract "
+            "A-press/force. Off: the game boots to its own screens and only "
+            "the DTA channel / scripted pad drive it.",
             "DC3");
 
 namespace xe {
@@ -63,24 +62,10 @@ void AutonavStep(cpu::ThreadState* ts) {
   static uint32_t s_scan_name_min = 0;
   static uint32_t s_scan_name_max = 0;
   static std::unordered_map<std::string, uint32_t> s_name_literal_cache;
-  static bool s_loadsong_probe_logged = false;
-  static bool s_loadsong_repair_attempted = false;
-  static bool s_content_refresh_forced = false;
-  static uint32_t s_last_stuck_cur_screen = 0;
-  static uint32_t s_last_stuck_trans_screen = 0;
-  static uint32_t s_last_stuck_trans_state = 0;
-  static int s_stuck_transition_count = 0;
 
-  static const bool kHackTransitionForce = HackGate(
-      "seq.transition_force",
-      "force-enter/complete UIManager transitions stuck >=120 ticks");
   static const bool kHackNavBridge = HackGate(
       "seq.nav_bridge",
       "UIManager::GotoScreen walk attract->...->game_screen (merge_busy hold)");
-  static const bool kHackLoadSong = HackGate(
-      "seq.loadsong_repair",
-      "loading_screen probe + ymca song injection via guest Executes");
-
   s_ticks++;
 
   if (!s_scan_name_max) {
@@ -275,130 +260,12 @@ void AutonavStep(cpu::ThreadState* ts) {
 
       auto* processor = kernel_state->processor();
       auto* thread_state = ts;
-      auto exec_guest_bool = [&](uint32_t fn, uint64_t arg0,
-                                 uint64_t arg1 = 0) -> bool {
-        if (!processor || !thread_state || !fn) {
-          return false;
-        }
-        uint64_t args[2] = {arg0, arg1};
-        return static_cast<uint32_t>(processor->Execute(thread_state, fn, args,
-                                                        arg1 ? 2 : 1)) != 0;
-      };
 
-      if (trans_state_h != 0 && trans_screen_h) {
-        if (cur_screen_h == s_last_stuck_cur_screen &&
-            trans_screen_h == s_last_stuck_trans_screen &&
-            trans_state_h == s_last_stuck_trans_state) {
-          ++s_stuck_transition_count;
-        } else {
-          s_last_stuck_cur_screen = cur_screen_h;
-          s_last_stuck_trans_screen = trans_screen_h;
-          s_last_stuck_trans_state = trans_state_h;
-          s_stuck_transition_count = 1;
-        }
-      } else {
-        s_last_stuck_cur_screen = 0;
-        s_last_stuck_trans_screen = 0;
-        s_last_stuck_trans_state = 0;
-        s_stuck_transition_count = 0;
-      }
-
-      if (kHackTransitionForce &&
-          trans_state_h == 1 && trans_screen_h && processor && thread_state &&
-          s_stuck_transition_count >= 120) {
-        constexpr uint32_t kUIScreenExiting = 0x827A35C0;
-        constexpr uint32_t kUIScreenCheckIsLoaded = 0x827A3A00;
-        constexpr uint32_t kUIScreenEnter = 0x827A51E0;
-        bool trans_loaded = exec_guest_bool(kUIScreenCheckIsLoaded, trans_screen_h);
-        bool cur_exiting =
-            cur_screen_h ? exec_guest_bool(kUIScreenExiting, cur_screen_h) : false;
-        bool allow_force_enter =
-            trans_loaded && (!cur_exiting || s_stuck_transition_count >= 180) &&
-            !(trans_name == "game_screen" && merge_busy);
-        if (allow_force_enter) {
-          HackFired("seq.transition_force");
-          uint32_t old_cur_screen = cur_screen_h;
-          xe::store_and_swap<uint32_t>(ui_obj + 0x2C, 2);
-          xe::store_and_swap<uint32_t>(ui_obj + 0x48, trans_screen_h);
-          xe::store_and_swap<uint32_t>(ui_obj + 0x4C, old_cur_screen);
-          uint64_t enter_args[2] = {trans_screen_h, old_cur_screen};
-          processor->Execute(thread_state, kUIScreenEnter, enter_args, 2);
-          XELOGI(
-              "DC3: Force-entered stuck transition '{}' -> '{}' after {} NUI frames "
-              "(loaded={} curExiting={})",
-              cur_name, trans_name, s_stuck_transition_count,
-              trans_loaded ? 1 : 0, cur_exiting ? 1 : 0);
-          s_last_screen = trans_screen_h;
-          s_screen_stable_count = 0;
-          s_last_stuck_cur_screen = 0;
-          s_last_stuck_trans_screen = 0;
-          s_last_stuck_trans_state = 0;
-          s_stuck_transition_count = 0;
-          cur_screen_h = trans_screen_h;
-          trans_state_h = 2;
-          trans_screen_h = old_cur_screen;
-          raw_name = raw_trans_name;
-          raw_trans_name = read_name_at(old_cur_screen, 0x1C, false);
-          if (raw_trans_name.empty()) {
-            raw_trans_name = read_name_at(old_cur_screen, 0x20, false);
-          }
-          cur_name = trans_name;
-          trans_name = raw_trans_name;
-        } else if (!trans_loaded && s_stuck_transition_count >= 120 &&
-                   (trans_name != "game_screen" ||
-                    (cvars::dc3_ik_telemetry && !merge_busy))) {
-          HackFired("seq.transition_force");
-          xe::store_and_swap<uint32_t>(ui_obj + 0x48, trans_screen_h);
-          xe::store_and_swap<uint32_t>(ui_obj + 0x4C, 0);
-          xe::store_and_swap<uint32_t>(ui_obj + 0x2C, 0);
-          XELOGI(
-              "DC3: Force-completed unloaded menu transition '{}' -> '{}' after {} NUI frames",
-              cur_name, trans_name, s_stuck_transition_count);
-          s_last_screen = trans_screen_h;
-          s_screen_stable_count = 0;
-          s_last_stuck_cur_screen = 0;
-          s_last_stuck_trans_screen = 0;
-          s_last_stuck_trans_state = 0;
-          s_stuck_transition_count = 0;
-          cur_screen_h = trans_screen_h;
-          trans_state_h = 0;
-          trans_screen_h = 0;
-          raw_name = raw_trans_name;
-          raw_trans_name.clear();
-          cur_name = trans_name;
-          trans_name.clear();
-        }
-      }
-
-      if (kHackTransitionForce &&
-          trans_state_h == 2 && cur_screen_h && processor && thread_state &&
-          s_stuck_transition_count >= 120) {
-        constexpr uint32_t kUIScreenEntering = 0x827A34F8;
-        bool cur_entering = exec_guest_bool(kUIScreenEntering, cur_screen_h);
-        if (cur_entering || s_stuck_transition_count >= 240) {
-          HackFired("seq.transition_force");
-          // Force-complete the entering phase.  If curEntering is false but
-          // we've been stuck for 240+ NUI frames, the enter animation
-          // already finished but transState was never cleared (common after
-          // Force-entered transitions).
-          xe::store_and_swap<uint32_t>(ui_obj + 0x2C, 0);
-          xe::store_and_swap<uint32_t>(ui_obj + 0x4C, 0);
-          XELOGI(
-              "DC3: Force-completed stuck enter for '{}' after {} NUI frames"
-              " (curEntering={})",
-              cur_name, s_stuck_transition_count, cur_entering ? 1 : 0);
-          s_last_screen = cur_screen_h;
-          s_screen_stable_count = 0;
-          s_last_stuck_cur_screen = 0;
-          s_last_stuck_trans_screen = 0;
-          s_last_stuck_trans_state = 0;
-          s_stuck_transition_count = 0;
-          trans_state_h = 0;
-          trans_screen_h = 0;
-          raw_trans_name.clear();
-          trans_name.clear();
-        }
-      }
+      // (RETIRED 2026-10-02, lane B2) seq.transition_force: after 120 ticks
+      // in a UIManager transition, the host stored mTransitionState /
+      // mCurrentScreen / mTransitionScreen and Executed UIScreen::Enter. With
+      // the real Bink/Splash/HamAudio paths every transition completes by
+      // itself (S1 5/5 with it off; docs/fork/dc3/BASELINE.md).
 
       // (try_bootstrap_gameplay lambda deleted -- retired experiment;
       // see the NOTE below about GamePanel::CreateGame blocking. fork-cleanup C.)
@@ -619,252 +486,12 @@ void AutonavStep(cpu::ThreadState* ts) {
         }
       }
 
-      if (kHackLoadSong &&
-          !s_loadsong_probe_logged && cur_name == "loading_screen") {
-        HackFired("seq.loadsong_repair");
-        auto* processor = kernel_state->processor();
-        auto* thread_state = ts;
-        if (processor && thread_state) {
-          constexpr uint32_t kTheGameData = 0x82F60034;
-          constexpr uint32_t kTheContentMgr = 0x82F123BC;
-          constexpr uint32_t kTheHamProvider = 0x82F601B4;
-          constexpr uint32_t kTheHamSongMgr = 0x83118C6C;
-          constexpr uint32_t kTheMoveMgr = 0x82F60308;
-          constexpr uint32_t kTheGameMode = 0x83117710;
-          constexpr uint32_t kMetaPerformerCurrent = 0x828CB8A8;
-          constexpr uint32_t kDataReadFile = 0x825C1AD0;
-          constexpr uint32_t kHamSongMgrAddSongs = 0x828C5BC0;
-          constexpr uint32_t kHamSongMgrData = 0x828C5AD8;
-          constexpr uint32_t kHamSongMgrSongAudioData = 0x828C62D0;
-          constexpr uint32_t kHamSongMgrGetShortNameFromSongID = 0x828C7CE8;
-          constexpr uint32_t kHamSongMgrGetSongIDFromShortName = 0x828C7DE0;
-          constexpr uint32_t kHamGameDataSetAssociatedPadNum = 0x82452268;
-          constexpr uint32_t kHamGameDataPlayer = 0x82451CB8;
-          constexpr uint32_t kSymbolCtor = 0x827D37C8;
-
-          auto load_u32 = [&](uint32_t guest_addr) -> uint32_t {
-            auto* ptr = is_guest_readable(guest_addr, 4)
-                            ? memory->TranslateVirtual<uint8_t*>(guest_addr)
-                            : nullptr;
-            return ptr ? xe::load_and_swap<uint32_t>(ptr) : 0;
-          };
-          auto alloc_guest_cstr = [&](const char* text) -> uint32_t {
-            if (!text) {
-              return 0;
-            }
-            size_t len = std::strlen(text) + 1;
-            uint32_t guest_addr =
-                memory->SystemHeapAlloc(static_cast<uint32_t>(len), 4);
-            if (!guest_addr) {
-              return 0;
-            }
-            auto* dst = memory->TranslateVirtual<uint8_t*>(guest_addr);
-            if (!dst) {
-              memory->SystemHeapFree(guest_addr);
-              return 0;
-            }
-            std::memcpy(dst, text, len);
-            return guest_addr;
-          };
-          auto try_direct_song_catalog_load = [&]() -> bool {
-            struct PathCandidate {
-              const char* path;
-              const char* label;
-            };
-            constexpr PathCandidate kCandidates[] = {
-                {"d:\\songs\\songs.dta", "disc_root"},
-                {"devkit:\\songs\\gen\\songs.dtb", "devkit_dtb"},
-                {"devkit:\\songs\\songs.dta", "devkit_dta"},
-            };
-            for (const auto& candidate : kCandidates) {
-              XELOGI(
-                  "DC3: LoadSong repair: probing song catalog '{}' [{}]",
-                  candidate.path, candidate.label);
-              uint32_t path_addr = alloc_guest_cstr(candidate.path);
-              if (!path_addr) {
-                XELOGW("DC3: LoadSong repair: failed to allocate guest path "
-                       "for {}", candidate.label);
-                continue;
-              }
-              uint64_t read_args[2] = {path_addr, 1};
-              uint32_t data_arr = static_cast<uint32_t>(
-                  processor->Execute(thread_state, kDataReadFile, read_args, 2));
-              XELOGI("DC3: LoadSong repair: DataReadFile('{}') [{}] -> {:08X}",
-                     candidate.path, candidate.label, data_arr);
-              memory->SystemHeapFree(path_addr);
-              if (!data_arr) {
-                continue;
-              }
-              uint64_t add_args[2] = {kTheHamSongMgr, data_arr};
-              processor->Execute(thread_state, kHamSongMgrAddSongs, add_args, 2);
-              XELOGI("DC3: LoadSong repair: HamSongMgr::AddSongs({:08X}) "
-                     "completed via {}",
-                     data_arr, candidate.label);
-              return true;
-            }
-            return false;
-          };
-
-          uint32_t gd_addr = load_u32(kTheGameData);
-          uint32_t content_mgr_addr = load_u32(kTheContentMgr);
-          uint32_t hp_addr = load_u32(kTheHamProvider);
-          uint32_t mm_addr = load_u32(kTheMoveMgr);
-          uint32_t gm_addr = load_u32(kTheGameMode);
-
-          uint64_t meta_ret =
-              processor->Execute(thread_state, kMetaPerformerCurrent, nullptr, 0);
-          uint32_t meta_addr = static_cast<uint32_t>(meta_ret);
-
-          uint32_t p0_addr = 0;
-          uint32_t p1_addr = 0;
-          if (gd_addr && gd_addr < 0xF0000000) {
-            uint64_t p0_args[2] = {gd_addr, 0};
-            uint64_t p1_args[2] = {gd_addr, 1};
-            p0_addr = static_cast<uint32_t>(
-                processor->Execute(thread_state, kHamGameDataPlayer, p0_args, 2));
-            p1_addr = static_cast<uint32_t>(
-                processor->Execute(thread_state, kHamGameDataPlayer, p1_args, 2));
-          }
-
-          uint32_t song_sym =
-              (gd_addr && is_guest_readable(gd_addr + 0x30, 4))
-                  ? load_u32(gd_addr + 0x30)
-                  : 0;
-          std::string song_name = read_guest_name(song_sym, false);
-          if ((song_name.empty()) && !s_loadsong_repair_attempted && gd_addr) {
-            s_loadsong_repair_attempted = true;
-            XELOGI(
-                "DC3: LoadSong repair: trying direct song catalog load "
-                "(gd={:08X} content={:08X} ham_song_mgr={:08X})",
-                gd_addr, content_mgr_addr, kTheHamSongMgr);
-            bool direct_song_load_ok = try_direct_song_catalog_load();
-            if (!direct_song_load_ok && !s_content_refresh_forced) {
-              s_content_refresh_forced = true;
-              // NOTE: ContentMgr::RefreshSynchronously blocks forever under
-              // Xenia because content enumeration never completes. Skip it
-              // and let the nav bridge force-advance through the loading
-              // screens instead.
-              XELOGW("DC3: LoadSong repair: direct song catalog load failed; "
-                     "skipping ContentMgr::RefreshSynchronously (blocks forever)");
-            }
-            constexpr uint32_t kYmcaSongId = 7011;
-            uint64_t short_name_args[4] = {gd_addr + 0x30, kTheHamSongMgr,
-                                           kYmcaSongId, 0};
-            processor->Execute(
-                thread_state, kHamSongMgrGetShortNameFromSongID,
-                short_name_args, 4);
-            if (is_guest_readable(gd_addr + 0x30, 4)) {
-              auto* song_slot = memory->TranslateVirtual<uint8_t*>(gd_addr + 0x30);
-              song_sym = xe::load_and_swap<uint32_t>(song_slot);
-              song_name = read_guest_name(song_sym, false);
-              XELOGI(
-                  "DC3: LoadSong repair: canonical song id {} -> {:08X} '{}'",
-                  kYmcaSongId, song_sym, song_name);
-            }
-
-            uint32_t song_name_ptr = 0;
-            if (song_name.empty()) {
-              song_name_ptr = find_name_literal_ptr("ymca");
-            }
-            if (song_name.empty()) {
-              if (song_name_ptr) {
-                XELOGI(
-                    "DC3: LoadSong repair: constructing song symbol from {:08X}",
-                    song_name_ptr);
-                uint64_t ctor_args[2] = {gd_addr + 0x30, song_name_ptr};
-                processor->Execute(thread_state, kSymbolCtor, ctor_args, 2);
-                song_sym = load_u32(gd_addr + 0x30);
-                song_name = read_guest_name(song_sym, false);
-              } else {
-                XELOGW("DC3: LoadSong repair: guest literal 'ymca' not found");
-              }
-            }
-            if (!song_name.empty()) {
-              XELOGI(
-                  "DC3: LoadSong repair: injected song={:08X} '{}'", song_sym,
-                  song_name);
-              uint64_t pad0_args[3] = {gd_addr, 0, 0};
-              uint64_t pad1_args[3] = {gd_addr, 1, 1};
-              processor->Execute(thread_state, kHamGameDataSetAssociatedPadNum,
-                                 pad0_args, 3);
-              processor->Execute(thread_state, kHamGameDataSetAssociatedPadNum,
-                                 pad1_args, 3);
-
-              if (gd_addr && gd_addr < 0xF0000000) {
-                uint64_t p0_args[2] = {gd_addr, 0};
-                uint64_t p1_args[2] = {gd_addr, 1};
-                p0_addr = static_cast<uint32_t>(processor->Execute(
-                    thread_state, kHamGameDataPlayer, p0_args, 2));
-                p1_addr = static_cast<uint32_t>(processor->Execute(
-                    thread_state, kHamGameDataPlayer, p1_args, 2));
-              }
-            }
-          }
-          uint32_t p0_char =
-              (p0_addr && is_guest_readable(p0_addr + 0x44, 4))
-                  ? load_u32(p0_addr + 0x44)
-                  : 0;
-          uint32_t p1_char =
-              (p1_addr && is_guest_readable(p1_addr + 0x44, 4))
-                  ? load_u32(p1_addr + 0x44)
-                  : 0;
-          uint32_t p0_diff =
-              (p0_addr && is_guest_readable(p0_addr + 0x58, 4))
-                  ? load_u32(p0_addr + 0x58)
-                  : 0;
-          uint32_t p1_diff =
-              (p1_addr && is_guest_readable(p1_addr + 0x58, 4))
-                  ? load_u32(p1_addr + 0x58)
-                  : 0;
-          uint32_t p0_pad =
-              (p0_addr && is_guest_readable(p0_addr + 0x7C, 4))
-                  ? load_u32(p0_addr + 0x7C)
-                  : 0;
-          uint32_t p1_pad =
-              (p1_addr && is_guest_readable(p1_addr + 0x7C, 4))
-                  ? load_u32(p1_addr + 0x7C)
-                  : 0;
-          uint32_t song_id = 0;
-          uint32_t song_data = 0;
-          uint32_t song_audio = 0;
-          uint32_t default_outfit = 0;
-          uint32_t default_venue = 0;
-          if (!song_name.empty()) {
-            uint64_t song_id_args[3] = {kTheHamSongMgr, song_sym, 0};
-            song_id = static_cast<uint32_t>(processor->Execute(
-                thread_state, kHamSongMgrGetSongIDFromShortName, song_id_args,
-                3));
-            if (song_id) {
-              uint64_t data_args[2] = {kTheHamSongMgr, song_id};
-              song_data = static_cast<uint32_t>(processor->Execute(
-                  thread_state, kHamSongMgrData, data_args, 2));
-              song_audio = static_cast<uint32_t>(processor->Execute(
-                  thread_state, kHamSongMgrSongAudioData, data_args, 2));
-              if (song_data && is_guest_readable(song_data + 0xC0, 4)) {
-                default_outfit = load_u32(song_data + 0xC0);
-              }
-              if (song_data && is_guest_readable(song_data + 0xD0, 4)) {
-                default_venue = load_u32(song_data + 0xD0);
-              }
-            }
-          }
-
-          XELOGI(
-              "DC3: LoadSong probe gd={:08X} gm={:08X} hp={:08X} mm={:08X} mp={:08X} "
-              "cm={:08X} "
-              "p0={:08X} char={:08X} '{}' diff={} pad={} "
-              "p1={:08X} char={:08X} '{}' diff={} pad={} "
-              "song={:08X} '{}' id={} data={:08X} audio={:08X} "
-              "default_outfit={:08X} '{}' venue={:08X} '{}'",
-              gd_addr, gm_addr, hp_addr, mm_addr, meta_addr, content_mgr_addr,
-              p0_addr, p0_char, read_guest_name(p0_char, false), p0_diff, p0_pad,
-              p1_addr, p1_char, read_guest_name(p1_char, false), p1_diff, p1_pad,
-              song_sym, song_name, song_id, song_data, song_audio,
-              default_outfit, read_guest_name(default_outfit, false), default_venue,
-              read_guest_name(default_venue, false));
-          s_loadsong_probe_logged = true;
-        }
-      }
+      // (RETIRED 2026-10-02, lane B2) seq.loadsong_repair: at loading_screen
+      // the host Executed DataReadFile + HamSongMgr::AddSongs on a guessed
+      // songs.dta path and constructed the 'ymca' Symbol into
+      // HamGameData+0x30. The scripted flow selects the song on song_select,
+      // so it is already set when loading_screen is reached (S1 5/5 with it
+      // off; docs/fork/dc3/BASELINE.md).
 
       // Gameplay bootstrap is disabled — GamePanel::CreateGame blocks
       // because it tries to load song/character resources via async I/O

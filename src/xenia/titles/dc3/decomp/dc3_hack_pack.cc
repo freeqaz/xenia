@@ -42,7 +42,7 @@ DECLARE_bool(dc3_ik_telemetry);
 
 DEFINE_string(dc3_decomp_disable_stubs, "",
               "DC3 decomp layout only: comma-separated decomp-pack stub names "
-              "(as logged, e.g. 'Splash::BeginSplasher') to NOT apply, for "
+              "(as logged, e.g. 'MoveMgr::Init') to NOT apply, for "
               "one-stub-at-a-time A/Bs against the S3 fingerprint.",
               "DC3");
 
@@ -3626,10 +3626,10 @@ void ApplyRuntimeStopgaps(const Dc3HackContext& ctx,
         // in the decomp build, so SynthInit runs normally and initializes
         // the Fader system.  XDK JIT overrides handle any stray XAudio2
         // calls.  No blr patches needed for Synth360::PreInit or SynthInit.
-        // Bink: BinkStartAsyncThread blocks waiting for thread readiness
-        // on nop GPU; PlatformInit may also block on D3D device.
-        {kAddr.bink_start_async_thread, "BinkStartAsyncThread"},
-        {kAddr.bink_platform_init, "BinkMovieSys::PlatformInit"},
+        // (RETIRED 2026-10-02, lane B2) BinkStartAsyncThread and
+        // BinkMovieSys::PlatformInit -> blr ("blocks waiting for thread
+        // readiness"): the POSIX lost-resume race, fixed in core. S3 with both
+        // off: 627 traps, histogram identical (2/2).
         // LoadMgr::PollFrontLoader and PollUntilLoaded — NOT stubbed.
         // With gUsingCD=1, ARK loading creates DataLoaders. PollFrontLoader
         // must run to complete async loads.  Stubbing causes IsLoaded() asserts.
@@ -3744,17 +3744,10 @@ void ApplyRuntimeStopgaps(const Dc3HackContext& ctx,
   // the decomp build's /FORCE:MULTIPLE linking.  The original debug XEX
   // does not have these issues and should boot without them.
   if (ctx.is_decomp_layout) {
-    // Splash screen stubs: DirLoader::LoadObjects blocks waiting for milo
-    // file I/O that never completes in decomp headless mode.
-    // PrepareNext returns bool — 0 = no screens available
-    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x82921430, 0, "Splash::PrepareNext");
-    // BeginSplasher creates a render thread and waits for state; skip it
-    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x82922390, 0, "Splash::BeginSplasher");
-    // Suspend/Resume wait for splash thread state changes, but the thread
-    // was never created (BeginSplasher stubbed).  mThreaded=1 in ctor causes
-    // Suspend to call WaitForState(kSuspended) → deadlock.
-    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x82920AA8, 0, "Splash::Suspend");
-    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x82920C30, 0, "Splash::Resume");
+    // (RETIRED 2026-10-02, lane B2) Splash::PrepareNext / BeginSplasher /
+    // Suspend / Resume -> li r3,0; blr. They covered the lost-resume race
+    // (thread created suspended, ResumeThread lost), fixed in core. S3 with
+    // the four off: 627 traps, histogram identical (2/2).
     // VoiceInputPanel::LoadVoiceContexts reads kinect/speech/voice_contexts
     // config and calls Sym() on each entry.  Without Kinect/speech recognition,
     // this spins forever on "Data is not Symbol" errors during UIManager::Init.
@@ -3792,12 +3785,9 @@ void ApplyRuntimeStopgaps(const Dc3HackContext& ctx,
     // ObjRef::ReplaceList and list<ObjectDir*>::clear — un-stubbed (Session 41).
     // The "corrupt lists from .milo load failures" should be resolved now that
     // factories are registered and SynthInit properly initializes.
-    // UIManager::GotoFirstScreen — re-stubbed: with config include expansion
-    // now working, the game enters a fuller init path that includes .milo loading
-    // via ChunkStream.  ChunkStream's async I/O threads fail to start
-    // (thread creation fails in headless), causing the game to hang forever
-    // waiting for the load to complete.  Stub this until async I/O is fixed.
-    PatchStub8Resolved(memory, ctx.hack_pack_stubs, 0x8284AD00, 0, "UIManager::GotoFirstScreen");
+    // (RETIRED 2026-10-02, lane B2) UIManager::GotoFirstScreen -> 0
+    // ("ChunkStream's async I/O threads fail to start"): the same lost-resume
+    // race. S3 with it off: 627 traps, histogram identical (2/2).
     // DirLoader stubs — un-stubbed (Session 41).
     // ClassAndNameSort and SaveObjects were needed because of corrupt objects
     // from failed .milo loads.  With proper factory registration and SynthInit

@@ -944,30 +944,11 @@ void ApplyDc3LaunchHooks(const titles::TitleLaunchContext& ctx) {
                             kSaveLoadManagerActivate);
                       });
 
-    constexpr uint32_t kHamPanelFocusComponent = 0x828EFE90;
-    constexpr uint32_t kUIPanelFocusComponent = 0x827A6310;
-    with_patch_target("ui.hampanel_focus", "HamPanel::FocusComponent", kHamPanelFocusComponent, 4,
-                      [&](uint8_t* ptr) {
-                        constexpr uint32_t kBranchMask = 0x03FFFFFC;
-                        uint32_t branch =
-                            0x48000000 |
-                            ((kUIPanelFocusComponent - kHamPanelFocusComponent) &
-                             kBranchMask);
-                        xe::store_and_swap<uint32_t>(ptr, branch);
-                        XELOGI("DC3: UI fix: redirected HamPanel::FocusComponent "
-                               "at {:08X} to UIPanel::FocusComponent {:08X}",
-                               kHamPanelFocusComponent, kUIPanelFocusComponent);
-                      });
-
-    constexpr uint32_t kHamScreenIsEventDialogOnTop = 0x829626D8;
-    with_patch_target("ui.event_dialog_on_top", "HamScreen::IsEventDialogOnTop",
-                      kHamScreenIsEventDialogOnTop, 8, [&](uint8_t* ptr) {
-                        xe::store_and_swap<uint32_t>(ptr + 0, 0x38600000);
-                        xe::store_and_swap<uint32_t>(ptr + 4, 0x4E800020);
-                        XELOGI("DC3: UI fix: stubbed HamScreen::IsEventDialogOnTop "
-                               "at {:08X} to return false",
-                               kHamScreenIsEventDialogOnTop);
-                      });
+    // (RETIRED 2026-10-02, lane B2) HamPanel::FocusComponent -> branch to
+    // UIPanel::FocusComponent, and HamScreen::IsEventDialogOnTop -> return 0
+    // (gap analysis O28/O29). With the real bodies the ymca flow reaches
+    // game_screen and song end 5/5 with no mFailing latch
+    // (docs/fork/dc3/BASELINE.md, "B2 retirements").
 
     constexpr uint32_t kContentMgrRefreshDone = 0x825FEB48;
     with_patch_target("content.refresh_done", "ContentMgr::RefreshDone", kContentMgrRefreshDone, 8,
