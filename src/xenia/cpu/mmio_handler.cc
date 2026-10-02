@@ -21,6 +21,7 @@
 #include "xenia/base/logging.h"
 #include "xenia/base/memory.h"
 #include "xenia/base/platform.h"
+#include "xenia/cpu/thread_state.h"
 
 DEFINE_bool(
     soft_fault_unmapped_reads, false,
@@ -628,11 +629,24 @@ bool MMIOHandler::ExceptionCallback(Exception* ex) {
         bool soft_fault = cvars::soft_fault_unmapped_reads;
         if (soft_fault_read_logs.fetch_add(1, std::memory_order_relaxed) <
             kSoftFaultLogLimit) {
+          // Name the guest site: inside JIT code rsi holds this thread's
+          // PPCContext, so lr (the caller's return address) and r1 identify
+          // it. Only trusted when rsi matches the current ThreadState.
+          uint32_t guest_lr = 0, guest_r1 = 0;
+#if XE_ARCH_AMD64
+          auto* thread_state = ThreadState::Get();
+          if (thread_state &&
+              reinterpret_cast<uint64_t>(thread_state->context()) ==
+                  ex->thread_context()->int_registers[6] /* rsi */) {
+            guest_lr = uint32_t(thread_state->context()->lr);
+            guest_r1 = uint32_t(thread_state->context()->r[1]);
+          }
+#endif
           XELOGW(
               "MMIO soft-fault read from unmapped guest {:08X} (host {:016X}, "
-              "host RIP {:016X}, len {}): {}",
+              "host RIP {:016X}, len {}, guest lr {:08X} r1 {:08X}): {}",
               fault_guest_virtual_address, ex->fault_address(), uint64_t(rip),
-              decoded_load_store.length,
+              decoded_load_store.length, guest_lr, guest_r1,
               soft_fault ? "zeroing destination register and resuming"
                          : "not handled (--soft_fault_unmapped_reads=false)");
         }
