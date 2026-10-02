@@ -76,9 +76,11 @@ std::string ReadCString(Memory* memory, uint32_t addr, size_t max) {
 // StackString msgStr, Debug::Modal's modalMsg). Read-only: scan the guest
 // main thread's stack above its SP for long printable runs and log the first
 // few, so a main-thread fail says what failed, not just when.
-void LogMainThreadStackStrings(Memory* memory, kernel::KernelState* ks) {
+std::string LogMainThreadStackStrings(Memory* memory,
+                                      kernel::KernelState* ks) {
+  std::string first;
   if (!ks) {
-    return;
+    return first;
   }
   for (auto& thread :
        ks->object_table()->GetObjectsByType<kernel::XThread>()) {
@@ -98,6 +100,9 @@ void LogMainThreadStackStrings(Memory* memory, kernel::KernelState* ks) {
         continue;
       }
       if (run.size() >= 24) {
+        if (first.empty()) {
+          first = run.substr(0, 240);
+        }
         XELOGE("DC3 TRIPWIRE: main thread {:08X} stack string @{:08X}: '{}'",
                thread->thread_id(), a - static_cast<uint32_t>(run.size()),
                run.substr(0, 240));
@@ -111,6 +116,7 @@ void LogMainThreadStackStrings(Memory* memory, kernel::KernelState* ks) {
              thread->thread_id(), sp);
     }
   }
+  return first;
 }
 
 void TripwireThread(Memory* memory, cpu::Processor* processor,
@@ -181,8 +187,13 @@ void TripwireThread(Memory* memory, cpu::Processor* processor,
       latched_reported = true;
       if (main_scan_pending && !msg) {
         // No mFailThreadMsg: a MAIN-thread Fail, stuck in Debug::Modal
-        // (kModalFail ends in Exit()).
-        LogMainThreadStackStrings(memory, kernel_state);
+        // (kModalFail ends in Exit()). The first string is the message;
+        // logged in the harness's mFailThreadMsg='...' shape so
+        // fork-regress records it with the worker fails.
+        std::string text = LogMainThreadStackStrings(memory, kernel_state);
+        XELOGE("DC3 TRIPWIRE: TAINTED: main-thread Debug::Fail "
+               "mFailThreadMsg={:08X} '{}'",
+               0, text);
       }
       main_scan_pending = false;
       XELOGE("DC3 TRIPWIRE: TAINTED at {}ms: Debug::mFailing LATCHED (set "
