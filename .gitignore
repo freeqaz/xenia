@@ -101,5 +101,3 @@ node_modules/.bin/
 /third_party/binutils/binutils*
 /third_party/vasm/
 /tools/shader-playground/*.dll
-/stdout
-/xenia_dc3_patch_manifest.json

@@ -23,12 +23,9 @@
 #include "xenia/base/threading.h"
 #include "xenia/gpu/command_processor.h"
 #include "xenia/gpu/gpu_flags.h"
-
-#ifndef XE_HEADLESS_BUILD
 #include "xenia/ui/graphics_provider.h"
 #include "xenia/ui/window.h"
 #include "xenia/ui/windowed_app_context.h"
-#endif
 
 DEFINE_bool(
     store_shaders, true,
@@ -64,7 +61,6 @@ X_STATUS GraphicsSystem::Setup(cpu::Processor* processor,
   kernel_state_ = kernel_state;
   app_context_ = app_context;
 
-#ifndef XE_HEADLESS_BUILD
   if (with_presentation && provider_) {
     // Safe if either the UI thread call or the presenter creation fails.
     if (app_context_) {
@@ -83,9 +79,6 @@ X_STATUS GraphicsSystem::Setup(cpu::Processor* processor,
           });
     }
   }
-#else
-  (void)with_presentation;  // Suppress unused parameter warning
-#endif
 
   // Create command processor. This will spin up a thread to process all
   // incoming ringbuffer packets.
@@ -144,7 +137,6 @@ void GraphicsSystem::Shutdown() {
     vsync_worker_thread_.reset();
   }
 
-#ifndef XE_HEADLESS_BUILD
   if (presenter_) {
     if (app_context_) {
       app_context_->CallInUIThreadSynchronous([this]() { presenter_.reset(); });
@@ -156,7 +148,6 @@ void GraphicsSystem::Shutdown() {
   }
 
   provider_.reset();
-#endif
 }
 
 void GraphicsSystem::OnHostGpuLossFromAnyThread(
@@ -254,11 +245,10 @@ void GraphicsSystem::DispatchInterruptCallback(uint32_t source, uint32_t cpu) {
 
   auto thread = kernel::XThread::GetCurrentThread();
   if (!thread) {
-    // Upstream asserts here (assert_not_null(thread)). Demoted to a return so
-    // a Checked build does not abort, but it must not be silent: the guest's
-    // GPU interrupt callback is being DROPPED, and a title that waits on that
-    // callback will hang in a way that looks like a GPU stall rather than a
-    // missing dispatch.
+    // Upstream asserts here. Demoted to a return so a Checked build does not
+    // abort, but it must not be silent: the guest's GPU interrupt callback is
+    // being DROPPED, and a title that waits on it will hang in a way that
+    // looks like a GPU stall rather than a missing dispatch.
     XELOGW(
         "DispatchInterruptCallback: no current XThread, dropping the GPU "
         "interrupt callback at {:08X} (source {}, cpu {})",
@@ -271,6 +261,9 @@ void GraphicsSystem::DispatchInterruptCallback(uint32_t source, uint32_t cpu) {
     cpu = 2;
   }
   thread->SetActiveCpu(cpu);
+
+  // XELOGGPU("Dispatching GPU interrupt at {:08X} w/ mode {} on cpu {}",
+  //          interrupt_callback_, source, cpu);
 
   uint64_t args[] = {source, interrupt_callback_data_};
   processor_->ExecuteInterrupt(thread->thread_state(), interrupt_callback_,

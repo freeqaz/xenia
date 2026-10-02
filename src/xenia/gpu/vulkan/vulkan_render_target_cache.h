@@ -120,12 +120,6 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
                         (draw_resolution_scale_x() * draw_resolution_scale_y()));
   }
 
-  // Transitions the EDRAM buffer for transfer writes. Called before
-  // vkCmdFillBuffer to clear EDRAM state for headless capture.
-  void PrepareEdramBufferForClear() {
-    UseEdramBuffer(EdramBufferUsage::kTransferWrite);
-  }
-
   // Performs the resolve to a shared memory area according to the current
   // register values, and also clears the render targets if needed. Must be in a
   // frame for calling.
