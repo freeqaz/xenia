@@ -144,34 +144,45 @@ void Dc3NuiSequencerExtern(
     xe::store_and_swap<float>(frame + offset, value);
   };
 
+  // NUI_SKELETON_FRAME, 0xAB0 bytes (docs/fork/nui/NUI_HLE_DESIGN.md 2.3):
+  // 0x30 header + NUI_SKELETON_DATA[6] at stride 0x1C0. One standing body in
+  // slot 0, TRACKED with every joint TRACKED (w = 1), so the game's
+  // SkeletonQualityFilter sees a confident skeleton. liTimeStamp is in ms
+  // (SkeletonUpdate takes (int)delta as elapsed ms): 30 Hz frames.
   uint32_t frame_number = ++s_fake_frame_number;
-  constexpr uint32_t kFrameSize = 0x30 + 6 * 0x1B4;
+  constexpr uint32_t kSkeletonStride = 0x1C0;
+  constexpr uint32_t kFrameSize = 0x30 + 6 * kSkeletonStride;
+  static_assert(kFrameSize == 0xAB0, "NUI_SKELETON_FRAME is 0xAB0 bytes");
   std::memset(frame, 0, kFrameSize);
 
-  write_u64(0x00, static_cast<uint64_t>(frame_number) * 33333);
+  write_u64(0x00, (static_cast<uint64_t>(frame_number) * 100) / 3);
   write_u32(0x08, frame_number);
+  // vFloorClipPlane (0,1,0,0): the floor is y = 0, where the feet are.
   write_float(0x10, 0.0f);
   write_float(0x14, 1.0f);
   write_float(0x18, 0.0f);
   write_float(0x1C, 0.0f);
+  // vNormalToGravity: straight up.
   write_float(0x20, 0.0f);
   write_float(0x24, 1.0f);
   write_float(0x28, 0.0f);
   write_float(0x2C, 0.0f);
 
   constexpr uint32_t kSkel0 = 0x30;
-  write_u32(kSkel0 + 0x00, 2);
-  write_u32(kSkel0 + 0x04, 1);
-  write_float(kSkel0 + 0x10, 0.0f);
+  write_u32(kSkel0 + 0x00, 2);  // eTrackingState = TRACKED
+  write_u32(kSkel0 + 0x04, 1);  // dwTrackingID (the game requires > 0)
+  write_float(kSkel0 + 0x10, 0.0f);  // Position (hip centre)
   write_float(kSkel0 + 0x14, 0.9f);
   write_float(kSkel0 + 0x18, 2.0f);
-  write_float(kSkel0 + 0x1C, 0.0f);
+  write_float(kSkel0 + 0x1C, 1.0f);
 
   struct JointPos {
     float x;
     float y;
     float z;
   };
+  // NUI joint order (HIP_CENTER, SPINE, SHOULDER_CENTER, HEAD, left arm x4,
+  // right arm x4, left leg x4, right leg x4).
   static constexpr JointPos kJoints[20] = {
       {0.00f, 0.90f, 2.0f},  {0.00f, 1.10f, 2.0f},  {0.00f, 1.40f, 2.0f},
       {0.00f, 1.60f, 2.0f},  {-0.20f, 1.40f, 2.0f}, {-0.30f, 1.10f, 2.0f},
@@ -182,13 +193,16 @@ void Dc3NuiSequencerExtern(
       {0.10f, 0.10f, 2.0f},  {0.10f, 0.00f, 2.0f},
   };
   constexpr uint32_t kJointsOff = kSkel0 + 0x20;
+  constexpr uint32_t kJointStatesOff = kSkel0 + 0x160;
   for (int j = 0; j < 20; ++j) {
     uint32_t off = kJointsOff + j * 16;
     write_float(off + 0, kJoints[j].x);
     write_float(off + 4, kJoints[j].y);
     write_float(off + 8, kJoints[j].z);
-    write_float(off + 12, 0.0f);
+    write_float(off + 12, 1.0f);
+    write_u32(kJointStatesOff + j * 4, 2);  // NUI_SKELETON_POSITION_TRACKED
   }
+  write_u32(kSkel0 + 0x1B0, 0);  // dwQualityFlags: nothing clipped
 
   s_skel_calls++;
   ppc_context->r[3] = 0;
