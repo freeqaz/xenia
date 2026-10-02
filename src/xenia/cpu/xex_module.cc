@@ -1062,35 +1062,86 @@ bool XexModule::LoadContinue() {
   // the XEX entry point will jump to the wrong code and crash.
   if (!cvars::pe_override.empty()) {
     XELOGI("PE Override: loading {}", cvars::pe_override);
+    // Every offset below comes from the override file, so each one is
+    // checked against the file size and the image before it is used
+    // (fork-cleanup C18: the original had no fread/ftell/bounds checks).
+    std::vector<uint8_t> pe_data;
+    bool pe_read_ok = false;
     FILE* pe_file = fopen(cvars::pe_override.c_str(), "rb");
+    const bool pe_opened = pe_file != nullptr;
     if (pe_file) {
-      fseek(pe_file, 0, SEEK_END);
-      size_t pe_size = ftell(pe_file);
-      fseek(pe_file, 0, SEEK_SET);
-      std::vector<uint8_t> pe_data(pe_size);
-      fread(pe_data.data(), 1, pe_size, pe_file);
+      long pe_size_l = -1;
+      if (fseek(pe_file, 0, SEEK_END) == 0) {
+        pe_size_l = ftell(pe_file);
+      }
+      if (pe_size_l > 0 && fseek(pe_file, 0, SEEK_SET) == 0) {
+        pe_data.resize(static_cast<size_t>(pe_size_l));
+        pe_read_ok =
+            fread(pe_data.data(), 1, pe_data.size(), pe_file) == pe_data.size();
+      }
       fclose(pe_file);
-
-      auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(pe_data.data());
-      if (dos->e_magic == IMAGE_DOS_SIGNATURE) {
-        auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS32*>(
-            pe_data.data() + dos->e_lfanew);
-        if (nt->Signature == IMAGE_NT_SIGNATURE) {
+      if (!pe_read_ok) {
+        XELOGE("PE Override: failed to read {}", cvars::pe_override);
+      }
+    }
+    const size_t pe_size = pe_data.size();
+    const uint32_t override_image_size = image_size();
+    auto pe_range_ok = [&](size_t offset, size_t length) {
+      return offset <= pe_size && length <= pe_size - offset;
+    };
+    const IMAGE_DOS_HEADER* dos =
+        pe_read_ok && pe_range_ok(0, sizeof(IMAGE_DOS_HEADER))
+            ? reinterpret_cast<const IMAGE_DOS_HEADER*>(pe_data.data())
+            : nullptr;
+    const IMAGE_NT_HEADERS32* nt =
+        dos && dos->e_magic == IMAGE_DOS_SIGNATURE && dos->e_lfanew >= 0 &&
+                pe_range_ok(static_cast<size_t>(dos->e_lfanew),
+                            sizeof(IMAGE_NT_HEADERS32))
+            ? reinterpret_cast<const IMAGE_NT_HEADERS32*>(pe_data.data() +
+                                                          dos->e_lfanew)
+            : nullptr;
+    const size_t section_table_offset =
+        nt ? static_cast<size_t>(dos->e_lfanew) +
+                 offsetof(IMAGE_NT_HEADERS32, OptionalHeader) +
+                 nt->FileHeader.SizeOfOptionalHeader
+           : 0;
+    if (pe_opened && pe_read_ok) {
+      if (!dos || dos->e_magic != IMAGE_DOS_SIGNATURE) {
+        XELOGE("PE Override: invalid DOS signature");
+      } else if (!nt) {
+        XELOGE("PE Override: NT headers lie outside the file");
+      } else if (nt->Signature != IMAGE_NT_SIGNATURE) {
+        XELOGE("PE Override: invalid NT signature");
+      } else if (!pe_range_ok(section_table_offset,
+                              size_t(nt->FileHeader.NumberOfSections) *
+                                  sizeof(IMAGE_SECTION_HEADER))) {
+        XELOGE("PE Override: section table lies outside the file");
+      } else {
+        {
           uint8_t* dest = memory()->TranslateVirtual(base_address_);
           auto* sec = reinterpret_cast<const IMAGE_SECTION_HEADER*>(
-              reinterpret_cast<const uint8_t*>(&nt->OptionalHeader) +
-              nt->FileHeader.SizeOfOptionalHeader);
+              pe_data.data() + section_table_offset);
           uint32_t copied = 0;
           for (int i = 0; i < nt->FileHeader.NumberOfSections; i++, sec++) {
             if (sec->SizeOfRawData > 0 && sec->PointerToRawData < pe_size) {
               size_t copy_size = std::min(
                   static_cast<size_t>(sec->SizeOfRawData),
                   pe_size - sec->PointerToRawData);
+              if (sec->VirtualAddress > override_image_size ||
+                  copy_size > override_image_size - sec->VirtualAddress) {
+                XELOGE(
+                    "PE Override: section {} (VA +0x{:08X}, {} bytes) does "
+                    "not fit the {}-byte image; skipped",
+                    i, uint32_t(sec->VirtualAddress), copy_size,
+                    override_image_size);
+                continue;
+              }
+              char sec_name[IMAGE_SIZEOF_SHORT_NAME + 1] = {};
+              std::memcpy(sec_name, sec->Name, IMAGE_SIZEOF_SHORT_NAME);
               std::memcpy(dest + sec->VirtualAddress,
                           pe_data.data() + sec->PointerToRawData, copy_size);
               XELOGI("PE Override: section {} -> VA 0x{:08X} ({} bytes)",
-                     reinterpret_cast<const char*>(sec->Name),
-                     base_address_ + sec->VirtualAddress, copy_size);
+                     sec_name, base_address_ + sec->VirtualAddress, copy_size);
               ++copied;
             }
           }
@@ -1147,13 +1198,9 @@ bool XexModule::LoadContinue() {
           }
           XELOGI("PE Override: re-patched {} thunks, {} variables",
                  repatched_thunks, repatched_vars);
-        } else {
-          XELOGE("PE Override: invalid NT signature");
         }
-      } else {
-        XELOGE("PE Override: invalid DOS signature");
       }
-    } else {
+    } else if (!pe_opened) {
       XELOGE("PE Override: failed to open {}", cvars::pe_override);
     }
   }

@@ -708,8 +708,8 @@ size_t XmaContext::GetNextFrame(uint8_t* block, size_t size,
   if ((len - 15) > stream.BitsRemaining()) {
     // Frame header claims more bits than remain in the block (split frame /
     // malformed tail). Release builds skip the frame; keep that behavior in
-    // Checked instead of aborting on real-world streams (RB3 song audio hits
-    // this within seconds of the mixer running). Log once per process.
+    // Checked instead of aborting on real-world streams, which hit this
+    // within seconds of the mixer running. Log once per process.
     static std::atomic<bool> s_logged_overrun{false};
     if (!s_logged_overrun.exchange(true)) {
       XELOGW(

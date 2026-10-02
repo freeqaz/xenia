@@ -34,7 +34,7 @@ DEFINE_bool(crt_critical_section_diagnostics, false,
             "Kernel");
 
 DEFINE_bool(
-    autoinit_critical_sections, true,
+    autoinit_critical_sections, false,
     "RtlEnterCriticalSection silently initializes a critical section whose "
     "dispatch header type != 1 instead of operating on it as-is. This is "
     "decomp-support: the DC3 decomp /FORCE-links unresolved extern lock "
@@ -43,12 +43,13 @@ DEFINE_bool(
     "loaded with call_entry=false so its .bss critical sections are never "
     "constructed. For a retail title a type != 1 header more likely means the "
     "lock's memory was misread or corrupted, and re-initializing it drops a "
-    "lock that is genuinely held. Disable to leave such a CS alone (upstream "
-    "behaviour).",
+    "lock that is genuinely held. Off by default (upstream behaviour); the "
+    "per-title profile opts titles in.",
     "Kernel");
+UPDATE_from_bool(autoinit_critical_sections, 2026, 10, 2, 12, true);
 
 DEFINE_bool(
-    rtl_leave_critical_section_force_release, true,
+    rtl_leave_critical_section_force_release, false,
     "RtlLeaveCriticalSection repairs guest lock state when the caller is not "
     "the recorded owner (rewrites owning_thread) or when recursion_count is "
     "already <= 0 (clamps to 1), then releases. Both are demotions of "
@@ -56,10 +57,12 @@ DEFINE_bool(
     "state, so a detectable double-unlock becomes a corrupted lock. Both our "
     "titles reach these paths (DC3 boot logs record one ownership mismatch -- "
     "docs/dc3-boot/STATUS.md; RB3Enhanced.dll's unconstructed .bss critical "
-    "sections hit the same family, see b77f0fa27), so it defaults on. Disable "
-    "to log and return without touching the lock, which is what upstream's "
-    "Release build effectively did before the repair was added.",
+    "sections hit the same family, see b77f0fa27). Off by default: log and "
+    "return without touching the lock, which is what upstream's Release "
+    "build effectively did. The per-title profile opts titles in.",
     "Kernel");
+UPDATE_from_bool(rtl_leave_critical_section_force_release, 2026, 10, 2, 13,
+                 true);
 
 namespace xe {
 namespace kernel {
@@ -558,13 +561,16 @@ void RtlEnterCriticalSection_entry(pointer_t<X_RTL_CRITICAL_SECTION> cs) {
           lock_corrupted ? "**LOCK_CORRUPTED**" : "");
     }
 
+    // Diagnostics only: this used to re-initialize the CS here, so turning
+    // the diagnostics on changed guest lock state (and did so even with
+    // --autoinit_critical_sections off). The autoinit block below is the one
+    // place that may repair a CS.
     if (looks_uninit || needs_lock_fix || lock_corrupted) {
       XELOGW(
-          "RtlEnterCriticalSection: CS at 0x{:08X} needs re-init "
-          "(type={}, lock_count={}, raw_lock={}, expected type=1 "
-          "raw_lock=-1). Caller LR=0x{:08X}. Auto-initializing.",
+          "RtlEnterCriticalSection: CS at 0x{:08X} looks uninitialized or "
+          "corrupt (type={}, lock_count={}, raw_lock={}, expected type=1 "
+          "raw_lock=-1). Caller LR=0x{:08X}.",
           cs_addr, cs_type, lock_count, raw_lock, caller_lr);
-      xeRtlInitializeCriticalSection(cs, cs_addr);
     }
   }
 
@@ -604,22 +610,7 @@ void RtlEnterCriticalSection_entry(pointer_t<X_RTL_CRITICAL_SECTION> cs) {
     return;
   }
 
-  // Always try the fast CAS path at least once before falling through
-  // to the slow waiter path. On real hardware, RtlEnterCriticalSection
-  // always attempts the lock before queuing. Without this, a CS with
-  // spin_count=0 would skip the CAS entirely and deadlock on first entry.
-  //
-  // NOTE(fork-cleanup 2026-08-25): this is an all-title behaviour change that
-  // is not DC3/RB3-specific and looks correct on its own merits -- it is a
-  // standalone upstreamable fix and should be split into its own commit with
-  // that framing before any rebase onto upstream/master.
-  if (xe::atomic_cas(-1, 0, &cs->lock_count)) {
-    cs->owning_thread = cur_thread;
-    cs->recursion_count = 1;
-    return;
-  }
-
-  // Spin loop for additional attempts
+  // Spin loop
   while (spin_count--) {
     if (xe::atomic_cas(-1, 0, &cs->lock_count)) {
       // Acquired.

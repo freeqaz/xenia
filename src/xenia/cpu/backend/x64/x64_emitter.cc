@@ -12,6 +12,7 @@
 #include <stddef.h>
 
 #include <atomic>
+#include <cstdio>
 #include <climits>
 #include <cstring>
 
@@ -48,18 +49,16 @@ DEFINE_bool(emit_source_annotations, false,
             "Add extra movs and nops to make disassembly easier to read.",
             "CPU");
 DEFINE_bool(
-    tolerate_null_guest_calls, true,
+    tolerate_null_guest_calls, false,
     "Treat a call through a null or unresolvable guest function pointer as a "
-    "no-op that returns an undefined value, instead of asserting. This is a "
-    "decomp-support flag: the DC3 (0x373307D9) and RB3DX (0x45410914) decomp "
-    "targets are /FORCE-linked with unresolved externs and null vtable slots "
-    "and cannot boot without it. UPSTREAM SEMANTICS ARE false -- for a retail "
-    "title a null vtable slot means the object graph is already corrupt and "
-    "the emulator should say so rather than silently continue. Turning this "
-    "off restores upstream's assert_not_zero/assert_not_null and lets the "
-    "null call reach the host. Diagnostics (the rate-limited ResolveFunction "
-    "XELOGE) are emitted either way.",
+    "no-op that returns an undefined value, instead of asserting. Off by "
+    "default (upstream): for a retail title a null vtable slot means the "
+    "object graph is already corrupt and the emulator should say so. Titles "
+    "that need it get it from the per-title profile "
+    "(titles/title_profile.cc). Diagnostics (the rate-limited "
+    "ResolveFunction XELOGE) are emitted either way.",
     "CPU");
+UPDATE_from_bool(tolerate_null_guest_calls, 2026, 10, 2, 12, true);
 
 namespace xe {
 namespace cpu {
@@ -127,15 +126,17 @@ const char* ClassifyNonTextExecutableTarget(Processor* processor,
   return nullptr;
 }
 
-// Gate for the above. The classification has exactly two consumers -- the
-// unresolved-call observer (the DC3 telemetry sink) and a rate-limited XELOGW
-// -- so it is only worth running while at least one of them can still use the
-// answer. Once the warning budget for a site is spent and telemetry is not
-// recording, the global-critical-region walk stops happening entirely.
+// Gate for the above: classify only while an unresolved-call observer (the
+// DC3 telemetry sink) is recording. The old gate also stayed open "until the
+// warning budget is spent" -- but the budget counter only advanced when a
+// non-.text target was FOUND, so for a clean title it never closed and every
+// ResolveFunction paid the GetModules() global-lock walk. The rate-limited
+// warning below is therefore only emitted under telemetry.
 static bool ShouldClassifyNonTextTarget(const std::atomic<int>& seen_count,
                                         int log_limit) {
-  return seen_count.load(std::memory_order_relaxed) <= log_limit ||
-         cpu::UnresolvedCallObserverIsActive();
+  (void)seen_count;
+  (void)log_limit;
+  return cpu::UnresolvedCallObserverIsActive();
 }
 
 const uint32_t X64Emitter::gpr_reg_map_[X64Emitter::GPR_COUNT] = {
@@ -199,6 +200,7 @@ bool X64Emitter::Emit(GuestFunction* function, HIRBuilder* builder,
   // capture hook needs no FunctionTraceData.
   milo_trace_func_va_ = function->address();
   source_map_arena_.Reset();
+  current_guest_address_ = 0;
 
   // Fill the generator with code.
   EmitFunctionInfo func_info = {};
@@ -409,6 +411,7 @@ bool X64Emitter::Emit(HIRBuilder* builder, EmitFunctionInfo& func_info) {
 void X64Emitter::MarkSourceOffset(const Instr* i) {
   auto entry = source_map_arena_.Alloc<SourceMapEntry>();
   entry->guest_address = static_cast<uint32_t>(i->src1.offset);
+  current_guest_address_ = entry->guest_address;
   entry->hir_offset = uint32_t(i->block->ordinal << 16) | i->ordinal;
   entry->code_offset = static_cast<uint32_t>(getSize());
 
@@ -576,7 +579,9 @@ void X64Emitter::Trap(uint16_t trap_type) {
     case 22:
       // Always trap?
       // TODO(benvanik): post software interrupt to debugger.
-      CallNative(TrapDebugBreak, 0);
+      // Pass the guest address of the trap (the last source offset marked),
+      // so the 'forced trap hit' log names the trapping instruction.
+      CallNative(TrapDebugBreak, current_guest_address_);
       break;
     case 25:
       // ?
@@ -632,16 +637,24 @@ uint64_t ResolveFunction(void* raw_context, uint64_t target_address) {
     static std::atomic<int> null_count{0};
     int n = null_count.fetch_add(1, std::memory_order_relaxed);
     if (n < 5 || (n < 100 && (n % 10) == 0) || (n % 1000) == 0) {
-      XELOGE("ResolveFunction(00000000): null target — using no-op stub "
-             "(count={})",
-             n + 1);
+      XELOGE("ResolveFunction(00000000) from {:08X}: null target (count={})",
+             callsite_pc, n + 1);
     }
     cpu::NotifyUnresolvedCallStubHit("null_target", 0, callsite_pc);
     if (!cvars::tolerate_null_guest_calls) {
       // Upstream: assert_not_zero(target_address), then fall through to a
       // resolve that cannot succeed. Returning 0 hands the null target back to
       // the resolve thunk's `jmp rax`, which faults at PC 0 -- diagnosable,
-      // and the same outcome upstream produced.
+      // and the same outcome upstream produced. The log is asynchronous and
+      // a Checked assert aborts before it drains, so name the call site on
+      // stderr too.
+      // r3 is flushed to the context at a call site: for a C++ virtual call
+      // it is the object the vtable was read from.
+      std::fprintf(stderr,
+                   "ResolveFunction: call through a null pointer from guest "
+                   "%08X, r3=%08X (--tolerate_null_guest_calls=false)\n",
+                   callsite_pc,
+                   ppc_context ? uint32_t(ppc_context->r[3]) : 0u);
       assert_not_zero(target_address);
       return 0;
     }
@@ -689,6 +702,10 @@ uint64_t ResolveFunction(void* raw_context, uint64_t target_address) {
         "resolve_failed", static_cast<uint32_t>(target_address), callsite_pc);
     if (!cvars::tolerate_null_guest_calls) {
       // Upstream: assert_not_null(fn), then dereference it anyway.
+      std::fprintf(stderr,
+                   "ResolveFunction: no function at %08X, called from guest "
+                   "%08X (--tolerate_null_guest_calls=false)\n",
+                   static_cast<uint32_t>(target_address), callsite_pc);
       assert_not_null(fn);
       return 0;
     }
@@ -913,12 +930,12 @@ void X64Emitter::CallIndirect(const hir::Instr* instr,
 
 uint64_t UndefinedCallExtern(void* raw_context, uint64_t function_ptr) {
   auto function = reinterpret_cast<Function*>(function_ptr);
-  const auto& name = function->name();
   if (!cvars::ignore_undefined_externs) {
     xe::FatalError(fmt::format("undefined extern call to {:08X} {}",
-                               function->address(), name.c_str()));
+                               function->address(), function->name().c_str()));
   } else {
-    XELOGE("undefined extern call to {:08X} {}", function->address(), name);
+    XELOGE("undefined extern call to {:08X} {}", function->address(),
+           function->name());
   }
   return 0;
 }

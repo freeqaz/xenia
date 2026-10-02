@@ -21,6 +21,8 @@
 #if XE_PLATFORM_LINUX && XE_ARCH_AMD64
 #define XE_POSIX_STACK_WALKER 1
 #include <execinfo.h>
+#include <sys/uio.h>
+#include <unistd.h>
 #endif
 
 namespace xe {
@@ -33,9 +35,12 @@ namespace cpu {
 // Xenia's debugger (breakpoints / pause / single-step) only requires two
 // things from the stack walker:
 //   1. CaptureStackTrace(): produce a list of host return-address PCs for a
-//      (suspended) guest thread, starting from a known host context. The
-//      x86-64 backend emits standard rbp frame-pointer prologues for guest
-//      functions, so we can chase the saved-rbp back-chain to recover frames.
+//      (suspended) guest thread, starting from a known host context. Frames
+//      are recovered by chasing the saved-rbp back-chain. That chain only
+//      exists through frames that keep a frame pointer: JIT'd guest
+//      functions do NOT (they address their fixed-size frame off rsp and
+//      leave rbp alone), so a walk that starts inside JIT code yields the
+//      exact frame 0 and then the nearest enclosing host frames that do.
 //   2. ResolveStack(): map each host PC to a guest function + guest PC via the
 //      JIT code cache (identical logic to the Win32 implementation).
 //
@@ -174,16 +179,19 @@ class PosixStackWalker : public StackWalker {
   }
 
  private:
-  // Reads 8 bytes of host memory, guarding against obviously-bad pointers.
-  // We can't cheaply probe page protections here, so we reject null/low and
-  // misaligned addresses; the monotonic-rbp guard in the walk loop keeps us on
-  // well-formed JIT frames in practice.
+  // Reads 8 bytes of host memory without faulting: the walk follows saved
+  // rbp values that may be garbage, and it can run in a fault-handling path.
+  // process_vm_readv on our own pid returns EFAULT for an unmapped or
+  // unreadable address instead of raising SIGSEGV, and is a plain syscall
+  // (async-signal-safe).
   static bool SafeReadU64(uint64_t addr, uint64_t* out) {
     if (addr < 0x10000 || (addr & 0x7) != 0) {
       return false;
     }
-    *out = *reinterpret_cast<const uint64_t*>(addr);
-    return true;
+    struct iovec local = {out, sizeof(*out)};
+    struct iovec remote = {reinterpret_cast<void*>(addr), sizeof(*out)};
+    return process_vm_readv(getpid(), &local, 1, &remote, 1, 0) ==
+           static_cast<ssize_t>(sizeof(*out));
   }
 
   backend::CodeCache* code_cache_ = nullptr;

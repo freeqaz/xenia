@@ -63,6 +63,7 @@ class CommandVar : virtual public ICommandVar {
   void LoadFromLaunchOptions(cxxopts::ParseResult* result) override;
   void SetCommandLineValue(T val);
   T* current_value() { return current_value_; }
+  bool has_commandline_value() const { return commandline_value_ != nullptr; }
 
  protected:
   std::string name_;
@@ -91,6 +92,7 @@ class ConfigVar : public CommandVar<T>, virtual public IConfigVar {
   void LoadGameConfigValue(std::shared_ptr<cpptoml::base> result) override;
   void SetConfigValue(T val);
   void SetGameConfigValue(T val);
+  bool has_game_config_value() const { return game_config_value_ != nullptr; }
   // Changes the actual value used to the one specified, and also makes it the
   // one that will be stored when the global config is written next time. After
   // overriding, however, the next game config loaded may still change it.
@@ -488,7 +490,7 @@ class IConfigVarUpdate {
   // If you're reviewing a pull request with a change here, check if 1) has been
   // done by the submitter before merging.
   static constexpr uint32_t kLastCommittedUpdateDate =
-      MakeConfigVarUpdateDate(2020, 12, 31, 13);
+      MakeConfigVarUpdateDate(2026, 10, 2, 13);
 
   virtual ~IConfigVarUpdate() = default;
 

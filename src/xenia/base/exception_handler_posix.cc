@@ -23,20 +23,19 @@
 #include "xenia/base/math.h"
 #include "xenia/base/platform.h"
 
-// Livelock circuit-breaker: when a recovered host fault re-executes the SAME
-// guest/host instruction at the SAME faulting address this many times in a row
-// with no forward progress, treat it as a fatal wedge (log once + abort) rather
-// than spinning forever. A legitimate soft-fault (stack-guard read, GPU write
-// watch, DC3 stub-keepalive) always advances rip or changes the address, so it
-// resets the counter and never trips. 0 disables. (RB3 Deluxe title-screen heap
-// OOM falls into MemHeap::Alloc's post-assert dead code and stores to guest
-// 0xFFFFFFFC forever; this surfaces it as a diagnosable crash. DC3-inert.)
-DEFINE_uint64(fault_spin_limit, 4096,
+// Livelock circuit-breaker (see CheckFaultLivelock): a handled fault that
+// keeps resuming at the same host instruction and address with no progress
+// is reported and its thread parked instead of spinning forever. 0 disables.
+// (RB3 Deluxe's title-screen heap OOM falls into MemHeap::Alloc's
+// post-assert dead code and stores to guest 0xFFFFFFFC forever.)
+DEFINE_uint64(fault_spin_limit, 0,
               "After this many consecutive handled faults that resume at the "
               "same host instruction and address without advancing (no "
               "progress), park the faulting thread and flag a livelock; "
-              "xenia-headless then exits. 0 = disabled.",
+              "xenia-headless then exits. 0 = disabled (default; upstream has "
+              "no such limit).",
               "CPU");
+UPDATE_from_uint64(fault_spin_limit, 2026, 10, 2, 12, 4096);
 
 namespace xe {
 

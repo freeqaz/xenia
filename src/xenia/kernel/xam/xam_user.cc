@@ -37,6 +37,11 @@ DEFINE_int32(local_user_count, 1,
              "controller) sees a valid signed-in profile.",
              "Kernel");
 
+DEFINE_bool(xam_user_grant_privileges, false,
+            "XamUserCheckPrivilege reports every privilege as granted for a "
+            "signed-in user. Off by default (upstream denies all).",
+            "Kernel");
+
 namespace xe {
 namespace kernel {
 namespace xam {
@@ -97,9 +102,13 @@ X_HRESULT_result_t XamUserGetXUID_entry(dword_t user_index, dword_t type_mask,
   }
   if (user_index < 4) {
     if (IsLocalUserSignedIn(user_index)) {
-      // Local profiles are offline; honor the offline bit (1) of the mask.
-      // (A local user has no online/live XUID, so masks 2/4 alone fail.)
-      if (type_mask & 1) {
+      // Upstream semantics: user 0 is the kernel's UserProfile, whose type()
+      // answers offline (1) and online (2) masks alike. The synthesized local
+      // users 1-3 only have an offline XUID.
+      uint32_t type =
+          (user_index == 0 ? kernel_state()->user_profile()->type() : 1u) &
+          type_mask;
+      if (type & (1 | 2 | 4)) {
         xuid = LocalUserXuid(user_index);
         result = X_E_SUCCESS;
       }
@@ -500,15 +509,21 @@ dword_result_t XamUserCheckPrivilege_entry(dword_t user_index, dword_t mask,
     }
   }
 
-  // Grant the privilege for a signed-in local profile. A local (offline)
-  // account is unrestricted, so titles gating local features (e.g. local
-  // multiplayer / same-instrument join) on a privilege see it as available.
+  // Upstream denies every privilege ("if we deny everything, games should
+  // hopefully not try to do stuff"). xam_user_grant_privileges grants them
+  // instead; the per-title profile sets it for the titles measured with it.
   if (out_value) {
-    *out_value = 1;
+    *out_value = cvars::xam_user_grant_privileges ? 1 : 0;
+  }
+  static std::atomic<uint32_t> s_logged{0};
+  if (s_logged.fetch_add(1, std::memory_order_relaxed) < 8) {
+    XELOGI("XamUserCheckPrivilege(user={:X}, privilege={}) -> {}",
+           uint32_t(user_index), uint32_t(mask),
+           cvars::xam_user_grant_privileges ? "granted" : "denied");
   }
   return X_ERROR_SUCCESS;
 }
-DECLARE_XAM_EXPORT1(XamUserCheckPrivilege, kUserProfiles, kImplemented);
+DECLARE_XAM_EXPORT1(XamUserCheckPrivilege, kUserProfiles, kStub);
 
 dword_result_t XamUserContentRestrictionGetFlags_entry(dword_t user_index,
                                                        lpdword_t out_flags) {

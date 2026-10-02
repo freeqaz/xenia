@@ -21,39 +21,51 @@
 #include "xenia/base/logging.h"
 #include "xenia/base/memory.h"
 #include "xenia/base/platform.h"
+#include "xenia/cpu/thread_state.h"
 
 DEFINE_bool(
-    soft_fault_unmapped_reads, true,
-    "Decomp/stub-guest support, ON by default in this fork: a read access "
-    "violation on unmapped guest memory zeroes the destination register and "
-    "resumes at the next instruction instead of crashing. Upstream semantics "
-    "are OFF -- the fault propagates and the emulator reports it with a PC. "
-    "The first occurrences are logged at warning level either way. Turn this "
-    "off to find real uninitialised-pointer and stack-overrun bugs; leave it "
-    "on for the DC3 (0x373307D9) and RB3DX (0x45410914) decomp targets, which "
-    "rely on it.",
+    soft_fault_unmapped_reads, false,
+    "A read access violation on unmapped guest memory zeroes the destination "
+    "register and resumes at the next instruction instead of crashing. Off "
+    "by default (upstream): the fault propagates and the emulator reports it "
+    "with a PC. The first occurrences are logged at warning level either way. "
+    "Titles that need it get it from the per-title profile "
+    "(titles/title_profile.cc).",
     "CPU");
+UPDATE_from_bool(soft_fault_unmapped_reads, 2026, 10, 2, 12, true);
 
 namespace xe {
 namespace cpu {
 
-// RB3DX OOM investigation (--rb3dx_alloc_probe): one-shot attribution of
-// which recovery branch services faults on guest EAs above every heap top
-// (>= 0xFFD00000, e.g. the MemHeap::Alloc post-OOM store to 0xFFFFFFFC).
-// The cvar is DEFINEd in emulator.cc; src/xenia/cpu must not read it, so the
-// launch path pushes its value in via MMIOHandler::SetAllocProbeEnabled().
-static std::atomic<bool> rb3dx_alloc_probe_enabled{false};
-static std::atomic<int> rb3dx_tophole_logs{0};
-static void Rb3dxTopHoleLog(uint32_t guest_ea, bool is_write,
-                            const char* branch, int detail) {
-  if (!rb3dx_alloc_probe_enabled.load(std::memory_order_relaxed)) return;
-  if (rb3dx_tophole_logs.fetch_add(1, std::memory_order_relaxed) >= 8) return;
+// Diagnostic fault observer (title hooks install one; see SetFaultObserver).
+static std::atomic<MMIOHandler::FaultObserver> fault_observer_{nullptr};
+
+static void NotifyFaultObserver(uint32_t guest_ea, bool is_write,
+                                const char* branch, int detail) {
+  if (auto observer = fault_observer_.load(std::memory_order_relaxed)) {
+    observer(guest_ea, is_write, branch, detail);
+  }
+}
+
+void MMIOHandler::SetFaultObserver(FaultObserver observer) {
+  fault_observer_.store(observer, std::memory_order_relaxed);
+}
+
+// DEPRECATED compatibility shim for titles/rb3 (--rb3dx_alloc_probe), which
+// still calls SetAllocProbeEnabled. It installs the old top-of-address-space
+// logger as a fault observer; the logger belongs in titles/rb3 and this shim
+// goes once that module calls SetFaultObserver itself.
+static std::atomic<int> alloc_probe_logs_{0};
+static void AllocProbeTopHoleObserver(uint32_t guest_ea, bool is_write,
+                                      const char* branch, int detail) {
+  if (guest_ea < 0xFFD00000u) return;
+  if (alloc_probe_logs_.fetch_add(1, std::memory_order_relaxed) >= 8) return;
   XELOGE("RB3DX TOPHOLE: guest EA {:08X} is_write={} branch={} detail={}",
          guest_ea, is_write, branch, detail);
 }
 
 void MMIOHandler::SetAllocProbeEnabled(bool enabled) {
-  rb3dx_alloc_probe_enabled.store(enabled, std::memory_order_relaxed);
+  SetFaultObserver(enabled ? &AllocProbeTopHoleObserver : nullptr);
 }
 
 // Guest virtual range registered by the launch path in which a write fault on
@@ -548,16 +560,13 @@ bool MMIOHandler::ExceptionCallback(Exception* ex) {
         cur_access != memory::PageAccess::kNoAccess &&
         (!is_write || cur_access != memory::PageAccess::kReadOnly)) {
       // Another thread has cleared this watch. Abort.
-      if (fault_guest_virtual_address >= 0xFFD00000u) {
-        Rb3dxTopHoleLog(fault_guest_virtual_address, is_write,
-                        "watch-cleared-abort", int(cur_access));
-      }
+      NotifyFaultObserver(fault_guest_virtual_address, is_write,
+                          "watch-cleared-abort", int(cur_access));
       return true;
     }
-    if (fault_guest_virtual_address >= 0xFFD00000u) {
-      Rb3dxTopHoleLog(fault_guest_virtual_address, is_write,
-                      "past-protect-check", protect_ok ? int(cur_access) : -1);
-    }
+    NotifyFaultObserver(fault_guest_virtual_address, is_write,
+                        "past-protect-check",
+                        protect_ok ? int(cur_access) : -1);
     // The address is not found within any range, so either a write watch or an
     // actual access violation.
     if (access_violation_callback_) {
@@ -603,45 +612,6 @@ bool MMIOHandler::ExceptionCallback(Exception* ex) {
         return true;
       }
     }
-    // Soft fault: skip cache hint instructions (clflush, prefetch) that
-    // fault on unmapped guest memory — they're no-ops by definition.
-#if XE_ARCH_AMD64
-    {
-      auto rip = ex->pc();
-      auto p = reinterpret_cast<const uint8_t*>(rip);
-      uint8_t off = 0;
-      // Skip optional REX prefix
-      if ((p[off] & 0xF0) == 0x40) {
-        ++off;
-      }
-      bool is_cache_hint = false;
-      if (p[off] == 0x0F) {
-        if (p[off + 1] == 0xAE) {
-          // clflush: 0F AE /7
-          uint8_t reg = (p[off + 2] >> 3) & 7;
-          if (reg == 7) is_cache_hint = true;
-        } else if (p[off + 1] == 0x18) {
-          // prefetch: 0F 18 /0-3
-          uint8_t reg = (p[off + 2] >> 3) & 7;
-          if (reg <= 3) is_cache_hint = true;
-        }
-      }
-      if (is_cache_hint) {
-        off += 2;  // Skip 0F AE or 0F 18
-        uint8_t modrm = p[off++];
-        uint8_t mod = (modrm >> 6) & 3;
-        uint8_t rm = modrm & 7;
-        if (mod != 3) {
-          if (rm == 4) ++off;  // SIB byte
-          if (mod == 1) off += 1;  // 8-bit displacement
-          else if (mod == 2) off += 4;  // 32-bit displacement
-          else if (mod == 0 && rm == 5) off += 4;  // RIP-relative
-        }
-        ex->set_resume_pc(rip + off);
-        return true;
-      }
-    }
-#endif
     // Soft fault: for reads from unmapped guest memory (e.g. stack guard
     // pages), zero the destination register and skip the faulting instruction
     // instead of crashing.  This keeps decomp/stub guests alive.
@@ -659,11 +629,24 @@ bool MMIOHandler::ExceptionCallback(Exception* ex) {
         bool soft_fault = cvars::soft_fault_unmapped_reads;
         if (soft_fault_read_logs.fetch_add(1, std::memory_order_relaxed) <
             kSoftFaultLogLimit) {
+          // Name the guest site: inside JIT code rsi holds this thread's
+          // PPCContext, so lr (the caller's return address) and r1 identify
+          // it. Only trusted when rsi matches the current ThreadState.
+          uint32_t guest_lr = 0, guest_r1 = 0;
+#if XE_ARCH_AMD64
+          auto* thread_state = ThreadState::Get();
+          if (thread_state &&
+              reinterpret_cast<uint64_t>(thread_state->context()) ==
+                  ex->thread_context()->int_registers[6] /* rsi */) {
+            guest_lr = uint32_t(thread_state->context()->lr);
+            guest_r1 = uint32_t(thread_state->context()->r[1]);
+          }
+#endif
           XELOGW(
               "MMIO soft-fault read from unmapped guest {:08X} (host {:016X}, "
-              "host RIP {:016X}, len {}): {}",
+              "host RIP {:016X}, len {}, guest lr {:08X} r1 {:08X}): {}",
               fault_guest_virtual_address, ex->fault_address(), uint64_t(rip),
-              decoded_load_store.length,
+              decoded_load_store.length, guest_lr, guest_r1,
               soft_fault ? "zeroing destination register and resuming"
                          : "not handled (--soft_fault_unmapped_reads=false)");
         }
@@ -676,18 +659,15 @@ bool MMIOHandler::ExceptionCallback(Exception* ex) {
           }
 #endif
           ex->set_resume_pc(rip + decoded_load_store.length);
-          if (fault_guest_virtual_address >= 0xFFD00000u) {
-            Rb3dxTopHoleLog(fault_guest_virtual_address, is_write,
-                            "read-soft-fault", int(decoded_load_store.length));
-          }
+          NotifyFaultObserver(fault_guest_virtual_address, is_write,
+                              "read-soft-fault",
+                              int(decoded_load_store.length));
           return true;
         }
       }
     }
-    if (fault_guest_virtual_address >= 0xFFD00000u) {
-      Rb3dxTopHoleLog(fault_guest_virtual_address, is_write,
-                      "unhandled-return-false", 0);
-    }
+    NotifyFaultObserver(fault_guest_virtual_address, is_write,
+                        "unhandled-return-false", 0);
     return false;
   }
 

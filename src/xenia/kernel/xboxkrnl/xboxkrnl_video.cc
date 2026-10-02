@@ -9,6 +9,8 @@
 
 #include "xenia/kernel/xboxkrnl/xboxkrnl_video.h"
 
+#include <atomic>
+
 #include "xenia/base/logging.h"
 #include "xenia/emulator.h"
 #include "xenia/gpu/graphics_system.h"
@@ -363,12 +365,15 @@ void VdSwap_entry(
     lpdword_t texture_format_ptr, lpdword_t color_space_ptr, lpdword_t width,
     lpdword_t height) {
   {
-    static uint32_t swap_count = 0;
-    swap_count++;
-    auto* thread = XThread::GetCurrentThread();
-    uint32_t tid = thread ? thread->thread_id() : 0;
+    // Atomic: titles can swap from more than one thread. Debug level: this
+    // runs every frame for every title.
+    static std::atomic<uint32_t> swap_counter{0};
+    uint32_t swap_count =
+        swap_counter.fetch_add(1, std::memory_order_relaxed) + 1;
     if (swap_count <= 20 || (swap_count % 200) == 0) {
-      XELOGI("VdSwap #{} tid={} {}x{}", swap_count, tid,
+      auto* thread = XThread::GetCurrentThread();
+      uint32_t tid = thread ? thread->thread_id() : 0;
+      XELOGD("VdSwap #{} tid={} {}x{}", swap_count, tid,
              width ? (uint32_t)*width : 0, height ? (uint32_t)*height : 0);
     }
   }

@@ -297,6 +297,8 @@ class X64Emitter : public Xbyak::CodeGenerator {
   Arena source_map_arena_;
 
   size_t stack_size_ = 0;
+  // Guest address of the most recent OPCODE_SOURCE_OFFSET emitted.
+  uint32_t current_guest_address_ = 0;
 
   static const uint32_t gpr_reg_map_[GPR_COUNT];
   static const uint32_t xmm_reg_map_[XMM_COUNT];

@@ -7,6 +7,9 @@
  ******************************************************************************
  */
 
+#include <atomic>
+
+#include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/string_util.h"
 #include "xenia/kernel/kernel_state.h"
@@ -21,6 +24,16 @@
 #endif
 
 #include "third_party/fmt/include/fmt/format.h"
+
+DEFINE_bool(xam_enum_overlapped_nomorefiles_success, false,
+            "Overlapped XamEnumerate: complete an exhausted enumerator with "
+            "SUCCESS and 0 items instead of ERROR_NO_MORE_FILES (0x12). Not "
+            "upstream behaviour and not confirmed on hardware; the fork "
+            "carries it for Dance Central 3. The synchronous path always "
+            "returns 0x12.",
+            "Kernel");
+UPDATE_from_bool(xam_enum_overlapped_nomorefiles_success, 2026, 10, 2, 12,
+                 true);
 
 namespace xe {
 namespace kernel {
@@ -73,21 +86,25 @@ uint32_t xeXamEnumerate(uint32_t handle, uint32_t flags, lpvoid_t buffer_ptr,
     return result;
   } else if (overlapped_ptr) {
     assert_true(!items_returned);
-    // Overlapped path: on real Xbox 360 the overlapped completes with SUCCESS
-    // and count=0 rather than propagating ERROR_NO_MORE_FILES (0x12) through
-    // XGetOverlappedResult. Games like Dance Central 3 only handle result
-    // codes 0 and 0x65B. Keep that conversion HERE ONLY (overlapped path).
-    //
-    // This is DELIBERATE ALL-TITLE BEHAVIOUR, not a DC3 hack, and is
-    // intentionally left ungated (fork-cleanup C-section review 2026-08-25,
-    // option b): it matches what the real console's overlapped completion
-    // does, and the synchronous path above -- the one that actually regressed
-    // a title -- is explicitly excluded. A cvar here would only add a way to
-    // reintroduce the DC3 failure.
+    // Overlapped path: with xam_enum_overlapped_nomorefiles_success the
+    // exhausted enumerator completes with SUCCESS and count=0 instead of
+    // ERROR_NO_MORE_FILES (0x12). The fork added this for Dance Central 3,
+    // on the claim that it only handles result codes 0 and 0x65B and that
+    // the console behaves this way. Neither is confirmed: ContentMgr::
+    // PollRefresh handles 0x12 explicitly (DC3_HACK_GAP_ANALYSIS.md G2).
+    // Upstream propagates 0x12. The synchronous path above is never
+    // converted (RB3's MemcardXbox::FindValidUnit loops on it).
     auto run_overlapped = [run](uint32_t& extended_error,
                                 uint32_t& length) -> X_RESULT {
       X_RESULT result = run(extended_error, length);
-      if (result == X_ERROR_NO_MORE_FILES) {
+      if (result == X_ERROR_NO_MORE_FILES &&
+          cvars::xam_enum_overlapped_nomorefiles_success) {
+        static std::atomic<uint32_t> converted{0};
+        if (converted.fetch_add(1, std::memory_order_relaxed) < 4) {
+          XELOGW(
+              "XamEnumerate: overlapped NO_MORE_FILES completed as "
+              "SUCCESS/0 (--xam_enum_overlapped_nomorefiles_success)");
+        }
         extended_error = 0;
         length = 0;
         return X_ERROR_SUCCESS;

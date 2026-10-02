@@ -23,7 +23,6 @@
 #include <sys/time.h>
 #include <sys/types.h>
 #include <unistd.h>
-#include <ucontext.h>
 #include <array>
 #include <atomic>
 #include <cstddef>
@@ -133,13 +132,6 @@ void install_signal_handler(SignalType type) {
     signal_handler_installed[static_cast<size_t>(type)] = true;
 }
 
-// Captured RIP from last thread suspension (for guest PC diagnosis).
-static std::atomic<uint64_t> last_suspend_host_rip_{0};
-
-uint64_t GetLastSuspendHostRip() {
-  return last_suspend_host_rip_.load(std::memory_order_relaxed);
-}
-
 // TODO(dougvj)
 void EnableAffinityConfiguration() {}
 
@@ -199,10 +191,31 @@ static bool DrainCurrentThreadAPCs();
 // Defined after current_thread_ is in scope.
 static void ClearCurrentThreadPointer();
 
+// Closes this thread's alertable eventfd when the thread exits (it used to be
+// leaked: one fd per thread that ever entered an alertable wait). The fd stays
+// a plain thread_local int because the signal handler reads it, and touching a
+// thread_local with a destructor is not async-signal-safe; this separate guard
+// is only ever touched from EnsureAlertableEventfd. The handler runs on this
+// same thread, so publishing -1 before close() means it can never write to a
+// closed (or reused) descriptor.
+struct AlertableEventfdCloser {
+  bool armed = false;
+  ~AlertableEventfdCloser() {
+    int fd = alertable_eventfd_;
+    alertable_eventfd_ = -1;
+    if (fd >= 0) {
+      close(fd);
+    }
+  }
+};
+thread_local AlertableEventfdCloser alertable_eventfd_closer_;
+
 // Lazily create this thread's alertable eventfd. Called only on the normal
 // (non-signal) alertable path.
 static void EnsureAlertableEventfd() {
   if (alertable_eventfd_ < 0) {
+    // Touch the closer so its thread_local destructor is registered.
+    alertable_eventfd_closer_.armed = true;
     alertable_eventfd_ = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
     // If creation fails we fall back to timeout-only behavior; the predicate
     // re-check still guarantees correctness, just without early ppoll wakeup.
@@ -1414,13 +1427,14 @@ void* PosixCondition<Thread>::ThreadStartRoutine(void* parameter) {
   {
     std::unique_lock<std::mutex> lock(thread->handle_.state_mutex_);
     // suspend_count_ must be set in the SAME critical section that publishes
-    // kSuspended. Upstream dropped the lock between the two: a Resume() that
-    // ran in that window (WaitStarted() returns as soon as state_ leaves
-    // kUninitialized) decremented a count of 0, and the thread then set it to
-    // 1 and waited for a 0 that never came -- the resume was lost and the
-    // thread never ran its start routine. DC3 hit it on the Main XThread and
-    // on App::App's KinectGuideThread (created suspended, then resumed), so
-    // the title never launched or main() waited forever on that thread.
+    // kSuspended. If the lock is dropped between the two, a Resume() that
+    // runs in that window (WaitStarted() returns as soon as state_ leaves
+    // kUninitialized) decrements a count of 0, and the thread then sets it
+    // to 1 and waits for a 0 that never comes -- the resume is lost and the
+    // thread never runs its start routine. Titles hit this on threads created
+    // suspended and resumed right away (e.g. the main XThread, or a worker
+    // created suspended, given a processor, then resumed): the title never
+    // launches, or waits forever on that thread.
     if (create_suspended) {
       thread->handle_.suspend_count_ = 1;
     }
@@ -1505,13 +1519,6 @@ void set_name(const std::string_view name) {
 static void signal_handler(int signal, siginfo_t* info, void* context) {
   switch (GetSystemSignalType(signal)) {
     case SignalType::kThreadSuspend: {
-      // Capture x64 RIP from signal context for guest PC diagnosis.
-      if (context) {
-        auto* uc = static_cast<ucontext_t*>(context);
-        last_suspend_host_rip_.store(
-            static_cast<uint64_t>(uc->uc_mcontext.gregs[REG_RIP]),
-            std::memory_order_relaxed);
-      }
       assert_not_null(current_thread_);
       current_thread_->WaitSuspended();
     } break;

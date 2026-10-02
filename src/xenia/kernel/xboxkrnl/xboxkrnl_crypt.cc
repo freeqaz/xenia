@@ -696,8 +696,8 @@ DECLARE_XBOXKRNL_EXPORT1(XeKeysHmacShaUsingKey, kNone, kImplemented);
 // STATUS_UNSUCCESSFUL *without writing its output buffer* -- so a caller that
 // ignored the status (most do) silently consumed uninitialized memory as
 // "plaintext". Retail Rock Band 3 hits this decrypting the AES layer of its
-// .mogg song audio, which left its Vorbis reader unable to parse a single
-// header and its audio stream parked in kInit forever.
+// song audio: its Vorbis reader cannot parse a single header and the stream
+// never leaves its init state.
 //
 // CAVEAT: on real hardware SetKey applies a deobfuscation transform keyed on a
 // console key we do not have, so a title that supplies an *obscured* key still

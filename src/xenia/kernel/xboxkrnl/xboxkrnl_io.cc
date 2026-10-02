@@ -28,37 +28,33 @@
 #include "xenia/xbox.h"
 
 DEFINE_bool(
-    io_force_synchronous_completion, true,
-    "NtReadFile/NtReadFileScatter/NtWriteFile always complete the transfer "
-    "before returning; with this enabled they also suppress the "
-    "STATUS_PENDING return upstream produced for files opened for "
-    "asynchronous IO. Required by the XAPILIB ReadFile wrapper, which sets "
-    "OVERLAPPED.Internal = STATUS_PENDING before the syscall and passes a "
-    "separate stack IO_STATUS_BLOCK -- if we return PENDING, its "
-    "GetOverlappedResult never observes completion and spins forever (this "
-    "is what stalled the DC3 decomp in AsyncFile::Read -> "
-    "AsyncFileWin::_ReadDone). Disable to restore the upstream STATUS_PENDING "
-    "return for non-synchronous files; the transfer still completes eagerly "
-    "and the caller's IO_STATUS_BLOCK still receives the final status.",
+    io_force_synchronous_completion, false,
+    "NtReadFile/NtReadFileScatter/NtWriteFile: suppress the STATUS_PENDING "
+    "return for files opened for asynchronous IO. The transfer completes "
+    "eagerly and the IO_STATUS_BLOCK receives the final status either way. "
+    "Off by default (upstream). The fork's original rationale (XAPILIB "
+    "passing a separate IO_STATUS_BLOCK) was refuted by ac0052e5b: the IOSB "
+    "is the OVERLAPPED.",
     "Kernel");
-
-DEFINE_bool(
-    rb3_overlapped_writeback, false,
-    "On synchronous NtReadFile/NtReadFileScatter completion, also mirror the "
-    "final status/byte-count into the guest OVERLAPPED reached via ApcContext "
-    "(kernel32/XAPILIB async-ReadFile convention: ApcContext = lpOverlapped). "
-    "RB3/DC3's AsyncFileWin::_ReadDone polls OVERLAPPED.Internal directly "
-    "(hEvent=0, no GetOverlappedResult wait) and spins while it reads "
-    "STATUS_PENDING (0x103). When the title's XAPILIB hands NtReadFile a "
-    "SEPARATE IO_STATUS_BLOCK, writing io_status_block never clears the guest "
-    "OVERLAPPED, so the loader freezes forever. This clears it. Only fires "
-    "when there is no real APC routine (pure overlapped-async path). Off by "
-    "default; DC3 boot bar is measured with it off.",
-    "Kernel");
+UPDATE_from_bool(io_force_synchronous_completion, 2026, 10, 2, 12, true);
 
 namespace xe {
 namespace kernel {
 namespace xboxkrnl {
+
+// Records that --io_force_synchronous_completion changed a result (an async
+// file whose read/write would otherwise have returned STATUS_PENDING), so a
+// run shows whether a title actually depends on it.
+static void NoteForcedSynchronousCompletion(const char* op) {
+  static std::atomic<uint32_t> count{0};
+  uint32_t n = count.fetch_add(1, std::memory_order_relaxed);
+  if (n < 4) {
+    XELOGW(
+        "{}: --io_force_synchronous_completion suppressed STATUS_PENDING "
+        "for an asynchronous file (hit {})",
+        op, n + 1);
+  }
+}
 
 struct CreateOptions {
   // https://processhacker.sourceforge.io/doc/ntioapi_8h.html
@@ -241,26 +237,6 @@ dword_result_t NtReadFile_entry(dword_t file_handle, dword_t event_handle,
   }
   X_STATUS result = X_STATUS_SUCCESS;
 
-  // --rb3_overlapped_writeback ABI probe: dump the first reads' io_status_block
-  // / apc_context / apc_routine / event so we can see, from a live run, whether
-  // the guest OVERLAPPED IS the io_status_block (standard kernel32 variant:
-  // its Internal reads 0x103 on entry) or a separate object handed via
-  // ApcContext. Error-level so it survives the default log threshold.
-  if (cvars::rb3_overlapped_writeback) {
-    static std::atomic<uint32_t> probed{0};
-    if (probed.fetch_add(1, std::memory_order_relaxed) < 30) {
-      uint32_t iosb_a = io_status_block ? io_status_block.guest_address() : 0u;
-      uint32_t iosb_internal_before =
-          io_status_block ? (uint32_t)io_status_block->status : 0xFFFFFFFFu;
-      XELOGE(
-          "NtReadFile ABI: handle=0x{:X} iosb=0x{:08X} iosb.Internal_in=0x{:08X} "
-          "apc_ctx=0x{:08X} apc_routine=0x{:08X} event=0x{:X} len={}",
-          (uint32_t)file_handle, iosb_a, iosb_internal_before,
-          (uint32_t)apc_context, (uint32_t)apc_routine_ptr,
-          (uint32_t)event_handle, (uint32_t)buffer_length);
-    }
-  }
-
   bool signal_event = false;
   auto ev = kernel_state()->object_table()->LookupObject<XEvent>(event_handle);
   if (event_handle && !ev) {
@@ -298,40 +274,6 @@ dword_result_t NtReadFile_entry(dword_t file_handle, dword_t event_handle,
         io_status_block->information = bytes_read;
       }
 
-      // --rb3_overlapped_writeback: mirror the completion into the guest
-      // OVERLAPPED reached via ApcContext. The XAPILIB async-ReadFile wrapper
-      // sets OVERLAPPED.Internal = STATUS_PENDING (0x103), passes lpOverlapped
-      // as ApcContext, and -- in this title's variant -- a SEPARATE stack
-      // IO_STATUS_BLOCK as io_status_block, so the write above never clears the
-      // guest OVERLAPPED. AsyncFileWin::_ReadDone polls mOverlapped.Internal
-      // (hEvent=0) and spins forever. Write the final status/bytes back into
-      // OVERLAPPED (its first 8 bytes ARE an IO_STATUS_BLOCK) so it observes
-      // completion. Only when there is no real APC routine (pure overlapped
-      // path), and only if the target is a writable guest page.
-      if (cvars::rb3_overlapped_writeback && apc_context &&
-          !((uint32_t)apc_routine_ptr & ~1u)) {
-        uint32_t ov = static_cast<uint32_t>(apc_context);
-        auto* heap = kernel_memory()->LookupHeap(ov);
-        uint32_t prot = 0;
-        if (heap && heap->QueryProtect(ov, &prot) &&
-            (prot & kMemoryProtectWrite)) {
-          auto* ovb =
-              kernel_memory()->TranslateVirtual<X_IO_STATUS_BLOCK*>(ov);
-          ovb->status = result;
-          ovb->information = bytes_read;
-          static std::atomic<uint32_t> logged{0};
-          if (logged.fetch_add(1, std::memory_order_relaxed) < 40) {
-            XELOGE(
-                "NtReadFile overlapped-writeback: iosb=0x{:08X} "
-                "OVERLAPPED(apc_ctx)=0x{:08X} same={} status=0x{:08X} bytes={}",
-                io_status_block ? io_status_block.guest_address() : 0u, ov,
-                (io_status_block && io_status_block.guest_address() == ov) ? 1
-                                                                           : 0,
-                (uint32_t)result, bytes_read);
-          }
-        }
-      }
-
       // Queue the APC callback. It must be delivered via the APC mechanism even
       // though were are completing immediately.
       // Low bit probably means do not queue to IO ports.
@@ -353,8 +295,12 @@ dword_result_t NtReadFile_entry(dword_t file_handle, dword_t event_handle,
       // Either way io_status_block above already holds the FINAL status and
       // byte count, so a caller that polls the status block (rather than the
       // return value) observes a completed request in both modes.
-      if (!cvars::io_force_synchronous_completion && !file->is_synchronous()) {
-        result = X_STATUS_PENDING;
+      if (!file->is_synchronous()) {
+        if (cvars::io_force_synchronous_completion) {
+          NoteForcedSynchronousCompletion("NtReadFile");
+        } else {
+          result = X_STATUS_PENDING;
+        }
       }
 
       // Mark that we should signal the event now. We do this after
@@ -406,22 +352,6 @@ dword_result_t NtReadFileScatter_entry(
         io_status_block->information = bytes_read;
       }
 
-      // See NtReadFile: mirror completion into the guest OVERLAPPED via
-      // ApcContext so AsyncFileWin::_ReadDone stops polling STATUS_PENDING.
-      if (cvars::rb3_overlapped_writeback && apc_context &&
-          !((uint32_t)apc_routine_ptr & ~1u)) {
-        uint32_t ov = static_cast<uint32_t>(apc_context);
-        auto* heap = kernel_memory()->LookupHeap(ov);
-        uint32_t prot = 0;
-        if (heap && heap->QueryProtect(ov, &prot) &&
-            (prot & kMemoryProtectWrite)) {
-          auto* ovb =
-              kernel_memory()->TranslateVirtual<X_IO_STATUS_BLOCK*>(ov);
-          ovb->status = result;
-          ovb->information = bytes_read;
-        }
-      }
-
       // Queue the APC callback. It must be delivered via the APC mechanism even
       // though were are completing immediately.
       // Low bit probably means do not queue to IO ports.
@@ -436,8 +366,12 @@ dword_result_t NtReadFileScatter_entry(
       // Note: We always complete synchronously (even for async files),
       // so by default we do NOT return STATUS_PENDING. io_status_block still
       // carries the final status either way. See NtReadFile for details.
-      if (!cvars::io_force_synchronous_completion && !file->is_synchronous()) {
-        result = X_STATUS_PENDING;
+      if (!file->is_synchronous()) {
+        if (cvars::io_force_synchronous_completion) {
+          NoteForcedSynchronousCompletion("NtReadFileScatter");
+        } else {
+          result = X_STATUS_PENDING;
+        }
       }
 
       // Mark that we should signal the event now. We do this after
@@ -509,8 +443,12 @@ dword_result_t NtWriteFile_entry(dword_t file_handle, dword_t event_handle,
       // Note: We always complete synchronously (even for async files),
       // so by default we do NOT return STATUS_PENDING. io_status_block still
       // carries the final status either way. See NtReadFile for details.
-      if (!cvars::io_force_synchronous_completion && !file->is_synchronous()) {
-        result = X_STATUS_PENDING;
+      if (!file->is_synchronous()) {
+        if (cvars::io_force_synchronous_completion) {
+          NoteForcedSynchronousCompletion("NtWriteFile");
+        } else {
+          result = X_STATUS_PENDING;
+        }
       }
 
       // Mark that we should signal the event now. We do this after

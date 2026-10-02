@@ -180,6 +180,16 @@ bool PPCHIRBuilder::Emit(GuestFunction* function, uint32_t flags) {
       if (heap->QueryBaseAndSize(&base, &size) && size > 0) {
         uint32_t max_addr = heap->heap_base() + base + size;
         if (max_addr >= 4 && end_address > max_addr - 4) {
+          // Not silent: the tail of the function is dropped from the
+          // translation, exactly like the size cap above.
+          static std::atomic<uint32_t> clamped_count{0};
+          if (clamped_count.fetch_add(1, std::memory_order_relaxed) <
+              kFunctionSizeCapLogLimit) {
+            XELOGW(
+                "Function {:08X}-{:08X} runs past the end of its mapped "
+                "region; translating only up to {:08X}",
+                start_address, end_address, max_addr - 4);
+          }
           end_address = max_addr - 4;
         }
       }

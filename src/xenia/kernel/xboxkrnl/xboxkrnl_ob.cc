@@ -88,20 +88,14 @@ DECLARE_XBOXKRNL_EXPORT1(ObLookupThreadByThreadId, kNone, kImplemented);
 dword_result_t ObReferenceObjectByHandle_entry(dword_t handle,
                                                dword_t object_type_ptr,
                                                lpdword_t out_object_ptr) {
-  // A title identifies the expected object type in one of two ways, and we
-  // accept BOTH (fork-cleanup C14):
-  //
+  // A title identifies the expected object type in one of two ways; accept
+  // both:
   //  (a) the legacy Xenia sentinel D###BEEF, where ### is the ordinal of the
-  //      Ex*ObjectType data export. That is what upstream compared against and
-  //      what a title sees if it dereferences the (previously unmapped) export
-  //      variable and gets Xenia's uninitialized-data-export placeholder.
+  //      Ex*ObjectType data export: what a title sees if it dereferences the
+  //      export when it is not mapped;
   //  (b) the guest ADDRESS of the Ex*ObjectType export variable itself, which
-  //      is what a title that passes `&ExEventObjectType` actually supplies,
-  //      and what this fork switched to exclusively.
-  //
-  // Accepting only (b) silently broke every title that had been matching on
-  // (a). Log (once per type per form) which one the title used so the legacy
-  // path can eventually be retired with evidence.
+  //      is what a title passing `&ExEventObjectType` actually supplies.
+  // Log (once per type per form) which one a title used.
   auto* resolver = kernel_state()->processor()->export_resolver();
   struct ObjectTypeInfo {
     const char* module;
@@ -135,7 +129,9 @@ dword_result_t ObReferenceObjectByHandle_entry(dword_t handle,
       bool matched_var_addr =
           expected_var_addr && object_type_ptr == expected_var_addr;
       bool matched_sentinel = object_type_ptr == legacy_sentinel;
-      if (!matched_var_addr && !matched_sentinel && expected_var_addr) {
+      // Fail closed: if the export variable could not be resolved, only the
+      // legacy sentinel matches (this used to accept ANY type pointer).
+      if (!matched_var_addr && !matched_sentinel) {
         return X_STATUS_OBJECT_TYPE_MISMATCH;
       }
       // One line per (type, form) pair, not per call.
@@ -277,10 +273,20 @@ dword_result_t ObCreateObject_entry(lpvoid_t object_type, dword_t attributes,
 }
 DECLARE_XBOXKRNL_EXPORT1(ObCreateObject, kNone, kStub);
 
-void ObReferenceObject_entry(lpvoid_t object_ptr) {
-  // TODO: real reference counting
+void ObReferenceObject_entry(dword_t native_ptr) {
+  // The counterpart of ObDereferenceObject above: take the reference that
+  // ObDereferenceObject will drop. A no-op here made every Reference/
+  // Dereference pair release a handle reference the guest never took.
+  if (!native_ptr || native_ptr == 0xDEADF00D) {
+    return;
+  }
+  auto object = XObject::GetNativeObject<XObject>(
+      kernel_state(), kernel_memory()->TranslateVirtual(native_ptr));
+  if (object) {
+    object->RetainHandle();
+  }
 }
-DECLARE_XBOXKRNL_EXPORT1(ObReferenceObject, kNone, kStub);
+DECLARE_XBOXKRNL_EXPORT1(ObReferenceObject, kNone, kImplemented);
 
 }  // namespace xboxkrnl
 }  // namespace kernel
