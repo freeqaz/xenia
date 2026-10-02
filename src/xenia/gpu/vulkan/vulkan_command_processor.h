@@ -788,6 +788,18 @@ class VulkanCommandProcessor : public CommandProcessor {
   std::vector<DeferredDrawState> deferred_draws_;
   uint32_t deferred_flush_count_ = 0;  // Track how many flushes have occurred.
 
+  // Headless frame capture, vulkan_command_processor_headless.cc.
+  void SetupHeadlessCapture();
+  void ShutdownHeadlessCapture();
+  void IssueSwapHeadless(uint32_t frontbuffer_ptr, uint32_t frontbuffer_width,
+                         uint32_t frontbuffer_height);
+  // Returns true if the draw (or copy) was consumed -- dropped or deferred --
+  // with `result` as IssueDraw's return value; false to issue it normally.
+  bool InterceptHeadlessDraw(xenos::EdramMode edram_mode,
+                             xenos::PrimitiveType prim_type,
+                             uint32_t index_count,
+                             IndexBufferInfo* index_buffer_info,
+                             bool major_mode_explicit, bool& result);
   // Execute all deferred draws (called from IssueSwap).
   void FlushDeferredDraws();
 };
