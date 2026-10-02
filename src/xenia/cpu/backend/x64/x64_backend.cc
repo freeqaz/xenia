@@ -418,9 +418,11 @@ X64ThunkEmitter::X64ThunkEmitter(X64Backend* backend, XbyakAllocator* allocator)
 X64ThunkEmitter::~X64ThunkEmitter() {}
 
 HostToGuestThunk X64ThunkEmitter::EmitHostToGuestThunk() {
-  // rcx = target
-  // rdx = arg0 (context)
-  // r8 = arg1 (guest return address)
+#if XE_PLATFORM_LINUX
+  // System V AMD64 ABI: rdi = target, rsi = context, rdx = guest return address
+#else
+  // Win64 ABI: rcx = target, rdx = context, r8 = guest return address
+#endif
 
   struct _code_offsets {
     size_t prolog;
@@ -435,9 +437,15 @@ HostToGuestThunk X64ThunkEmitter::EmitHostToGuestThunk() {
   code_offsets.prolog = getSize();
 
   // rsp + 0 = return address
+#if XE_PLATFORM_LINUX
+  mov(qword[rsp + 8 * 3], rdx);
+  mov(qword[rsp + 8 * 2], rsi);
+  mov(qword[rsp + 8 * 1], rdi);
+#else
   mov(qword[rsp + 8 * 3], r8);
   mov(qword[rsp + 8 * 2], rdx);
   mov(qword[rsp + 8 * 1], rcx);
+#endif
   sub(rsp, stack_size);
 
   code_offsets.prolog_stack_alloc = getSize();
@@ -446,9 +454,15 @@ HostToGuestThunk X64ThunkEmitter::EmitHostToGuestThunk() {
   // Save nonvolatile registers.
   EmitSaveNonvolatileRegs();
 
+#if XE_PLATFORM_LINUX
+  mov(rax, rdi);   // target
+  // rsi already = context (SysV 2nd arg matches JIT context reg)
+  mov(rcx, rdx);   // guest return address
+#else
   mov(rax, rcx);
   mov(rsi, rdx);  // context
   mov(rcx, r8);   // return address
+#endif
   call(rax);
 
   EmitLoadNonvolatileRegs();
@@ -456,9 +470,15 @@ HostToGuestThunk X64ThunkEmitter::EmitHostToGuestThunk() {
   code_offsets.epilog = getSize();
 
   add(rsp, stack_size);
+#if XE_PLATFORM_LINUX
+  mov(rdi, qword[rsp + 8 * 1]);
+  mov(rsi, qword[rsp + 8 * 2]);
+  mov(rdx, qword[rsp + 8 * 3]);
+#else
   mov(rcx, qword[rsp + 8 * 1]);
   mov(rdx, qword[rsp + 8 * 2]);
   mov(r8, qword[rsp + 8 * 3]);
+#endif
   ret();
 
   code_offsets.tail = getSize();
@@ -479,6 +499,7 @@ HostToGuestThunk X64ThunkEmitter::EmitHostToGuestThunk() {
 }
 
 GuestToHostThunk X64ThunkEmitter::EmitGuestToHostThunk() {
+  // JIT-internal convention (not C ABI):
   // rcx = target function
   // rdx = arg0
   // r8  = arg1
@@ -505,8 +526,18 @@ GuestToHostThunk X64ThunkEmitter::EmitGuestToHostThunk() {
   // Save off volatile registers.
   EmitSaveVolatileRegs();
 
-  mov(rax, rcx);              // function
+  mov(rax, rcx);              // function (from JIT's rcx)
+#if XE_PLATFORM_LINUX
+  // Remap from JIT convention (rdx=arg0, r8=arg1, r9=arg2) to
+  // SysV ABI (rdi=context, rsi=arg0, rdx=arg1, rcx=arg2).
+  // Order matters: read rsi before overwriting, read rdx before overwriting.
+  mov(rdi, GetContextReg());  // rdi = context (from rsi)
+  mov(rsi, rdx);              // rsi = arg0
+  mov(rdx, r8);               // rdx = arg1
+  mov(rcx, r9);               // rcx = arg2
+#else
   mov(rcx, GetContextReg());  // context
+#endif
   call(rax);
 
   EmitLoadVolatileRegs();
@@ -561,8 +592,14 @@ ResolveFunctionThunk X64ThunkEmitter::EmitResolveFunctionThunk() {
   // Save volatile registers
   EmitSaveVolatileRegs();
 
+#if XE_PLATFORM_LINUX
+  // SysV ABI: rdi = context, rsi = target_address
+  mov(rdi, rsi);  // rdi = context (read rsi before overwriting)
+  mov(esi, ebx);  // rsi = target PPC address
+#else
   mov(rcx, rsi);  // context
   mov(rdx, rbx);
+#endif
   mov(rax, reinterpret_cast<uint64_t>(&ResolveFunction));
   call(rax);
 
