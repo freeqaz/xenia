@@ -12,6 +12,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <functional>
 #include <memory>
@@ -21,10 +22,10 @@
 #include "xenia/emulator.h"
 #include "xenia/xbox.h"
 
+#include "xenia/debug/gdb_rsp/gdb_rsp_server.h"
+
 namespace xe {
 namespace app {
-
-class Dc3GdbRspHeadlessListener;
 
 // Headless emulator wrapper - runs Xenia without any UI dependencies.
 // Uses null/nop backends for GPU/APU/HID.
@@ -60,12 +61,11 @@ class EmulatorHeadless {
   // Set up callbacks for boot status reporting to console
   void SetupBootReporting();
 
-  // Report crash info to console
-  static void ReportCrash(Emulator* emulator, uint32_t pc,
-                          cpu::ThreadState* thread_state);
-
  private:
   void EmulatorThread(std::filesystem::path launch_path);
+  void ReportFaultLivelock();
+  void ReportThreadStatus(int64_t elapsed_ms);
+  void WalkGuestStack(uint32_t thread_id, uint32_t sp, uint32_t lr);
 
   Emulator* emulator_;
 
@@ -73,11 +73,11 @@ class EmulatorHeadless {
   std::unique_ptr<xe::threading::Event> emulator_thread_event_;
   std::thread emulator_thread_;
 
-  int exit_code_ = EXIT_SUCCESS;
+  // EXIT_FAILURE when the title could not be launched.
+  std::atomic<int> exit_code_{EXIT_SUCCESS};
 
-  bool boot_reporting_enabled_ = false;
-  bool module_reporting_enabled_ = false;
-  std::unique_ptr<Dc3GdbRspHeadlessListener> dc3_gdb_rsp_listener_;
+  // The GDB RSP server, when --gdb_rsp_stub is set.
+  debug::gdb_rsp::GdbRspServerPtr gdb_rsp_server_;
 };
 
 }  // namespace app

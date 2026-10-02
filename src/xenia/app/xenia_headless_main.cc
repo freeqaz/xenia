@@ -19,6 +19,7 @@
 #include "xenia/base/logging.h"
 #include "xenia/base/threading.h"
 #include "xenia/config.h"
+#include "xenia/debug/gdb_rsp/gdb_rsp_server.h"
 #include "xenia/emulator.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/titles/dc3/dc3_title.h"
@@ -85,15 +86,10 @@ DEFINE_string(scripted_input_file, "",
               "  wait_screen <name>  -- wait for UIManager.mCurrentScreen\n"
               "  +<frames> <button>  -- press button N frames after wait\n"
               "  # comment           -- ignored\n"
-              "Reads the current screen name from guest memory (TheUI at "
-              "0x82F1A8E0). Requires --fake_kinect_data=true.",
+              "The current screen name is read from guest memory by the "
+              "running title's screen reader (DC3 and RB3 have one).",
               "HID");
 DECLARE_string(scripted_pad_subtypes);
-DEFINE_int32(
-    dc3_gdb_rsp_prelaunch_sleep_ms, 0,
-    "DC3: optional sleep before starting the emulator thread (after headless "
-    "init / RSP stub startup) to allow debugger attach setup.",
-    "DC3");
 
 namespace xe {
 namespace app {
@@ -124,10 +120,11 @@ static std::vector<std::unique_ptr<hid::InputDriver>> CreateHeadlessInputDrivers
     driver->SetScriptedInput(cvars::scripted_input);
   } else if (!cvars::scripted_pad_subtypes.empty()) {
     // Controllers only report connected in scripted mode. A run driven
-    // entirely by the state-driven autopilot (emulator.cc NopInjectButtonPress
-    // -- no timed script) still needs pad presence, or every injection lands
-    // on a disconnected pad: si31/si32 sat at the RB3DX splash for a full
-    // 300s probe with the autopilot "pressing" A into the void.
+    // entirely by injected presses (e.g. the RB3 autopilot,
+    // titles/rb3/rb3_autopilot.cc -- no timed script) still needs pad
+    // presence, or every injection lands on a disconnected pad: si31/si32 sat
+    // at the RB3DX splash for 300 s "pressing" A into the void. The press at
+    // 999999 s never fires; it only switches the driver into scripted mode.
     driver->SetScriptedInput("999999s:A");
   }
   // If a script file is specified, enable scripted mode (controller presence)
@@ -301,11 +298,9 @@ static int HeadlessMain(const std::vector<std::string>& args) {
   }
 
   // Start the emulator thread (this will call LaunchPath internally)
-  if (cvars::dc3_gdb_rsp_prelaunch_sleep_ms > 0) {
-    XELOGI("DC3: prelaunch sleep {}ms (RSP attach window)",
-           cvars::dc3_gdb_rsp_prelaunch_sleep_ms);
-    std::this_thread::sleep_for(
-        std::chrono::milliseconds(cvars::dc3_gdb_rsp_prelaunch_sleep_ms));
+  if (int32_t sleep_ms = debug::gdb_rsp::PrelaunchSleepMs(); sleep_ms > 0) {
+    XELOGI("gdb_rsp: prelaunch sleep {}ms (debugger attach window)", sleep_ms);
+    std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
   }
   app->StartEmulatorThread(abs_path);
 
