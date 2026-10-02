@@ -101,8 +101,12 @@ uint32_t NuiDevice::Initialize(uint32_t flags) {
   }
   const std::string spec =
       cvars::nui_pose_source.empty() ? "empty" : cvars::nui_pose_source;
-  source_ = connected_ ? CreatePoseSource(spec) : nullptr;
-  if (source_ && !source_->Open()) {
+  source_ = CreatePoseSource(spec);
+  if (!source_) {
+    // An unknown or not-yet-built source (tape:/socket: are phase 4): the
+    // sensor still runs, with nobody in view.
+    source_ = CreateEmptyPoseSource();
+  } else if (!source_->Open()) {
     XELOGE("NUI HLE: pose source '{}' failed to open; nobody in view", spec);
     source_ = CreateEmptyPoseSource();
     source_->Open();
