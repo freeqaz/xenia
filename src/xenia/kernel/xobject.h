@@ -203,9 +203,13 @@ class XObject {
                                uint32_t processor_mode, uint32_t alertable,
                                uint64_t* opt_timeout);
 
+  // owner_lookup: if the header carries no valid stash, first look for a live
+  // object that owns this guest memory before wrapping it as a dispatcher
+  // object (for the Ob* exports, which take any object pointer).
   static object_ref<XObject> GetNativeObject(KernelState* kernel_state,
                                              void* native_ptr,
-                                             int32_t as_type = -1);
+                                             int32_t as_type = -1,
+                                             bool owner_lookup = false);
   template <typename T>
   static object_ref<T> GetNativeObject(KernelState* kernel_state,
                                        void* native_ptr, int32_t as_type = -1);

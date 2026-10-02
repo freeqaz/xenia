@@ -377,7 +377,8 @@ void XObject::SetNativePointer(uint32_t native_ptr, bool uninitialized) {
 
 object_ref<XObject> XObject::GetNativeObject(KernelState* kernel_state,
                                              void* native_ptr,
-                                             int32_t as_type) {
+                                             int32_t as_type,
+                                             bool owner_lookup) {
   assert_not_null(native_ptr);
 
   // Unfortunately the XDK seems to inline some KeInitialize calls, meaning
@@ -444,9 +445,13 @@ object_ref<XObject> XObject::GetNativeObject(KernelState* kernel_state,
     // that ObDereferenceObject()s the pointer XamGetPrivateEnumStructureFrom-
     // Handle gave it lands here; wrapping would mint a bogus event, write the
     // signature over the enumerator's fields, and leak the enumerator.
-    if (auto owner =
-            kernel_state->object_table()->LookupObjectByGuestPointer(guest_ptr)) {
-      return owner;
+    // Only for the Ob* exports: a typed caller (KeSetEvent, ...) must never
+    // get back an object of another class.
+    if (owner_lookup) {
+      if (auto owner = kernel_state->object_table()->LookupObjectByGuestPointer(
+              guest_ptr)) {
+        return owner;
+      }
     }
 
     // First use, create new.

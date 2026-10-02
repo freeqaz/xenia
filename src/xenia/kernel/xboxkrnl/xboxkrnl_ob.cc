@@ -194,8 +194,9 @@ dword_result_t ObDereferenceObject_entry(dword_t native_ptr) {
     return 0;
   }
 
-  auto object = XObject::GetNativeObject<XObject>(
-      kernel_state(), kernel_memory()->TranslateVirtual(native_ptr));
+  auto object = XObject::GetNativeObject(
+      kernel_state(), kernel_memory()->TranslateVirtual(native_ptr), -1,
+      /*owner_lookup=*/true);
   if (object) {
     object->ReleaseHandle();
   }
@@ -280,8 +281,9 @@ void ObReferenceObject_entry(dword_t native_ptr) {
   if (!native_ptr || native_ptr == 0xDEADF00D) {
     return;
   }
-  auto object = XObject::GetNativeObject<XObject>(
-      kernel_state(), kernel_memory()->TranslateVirtual(native_ptr));
+  auto object = XObject::GetNativeObject(
+      kernel_state(), kernel_memory()->TranslateVirtual(native_ptr), -1,
+      /*owner_lookup=*/true);
   if (object) {
     object->RetainHandle();
   }
