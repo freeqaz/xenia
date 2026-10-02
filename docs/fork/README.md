@@ -68,6 +68,12 @@ A by-hand run must pass a private `--storage_root`, or Xenia rewrites the shared
 | [core/TITLE_PROFILE.md](core/TITLE_PROFILE.md) | The per-title cvar profile (`titles/title_profile.cc`): when it applies, precedence, and the evidence for each DC3/RB3 mitigation it sets. |
 | [core/GUEST_EXCEPTIONS.md](core/GUEST_EXCEPTIONS.md) | Guest SEH / C++ exception dispatch: today's `RtlRaiseException`/`RtlUnwind` behaviour and the design for real dispatch (gap G13). Designed, not implemented. |
 
+### Kinect / NUI (`nui/`)
+
+| Doc | |
+|---|---|
+| [nui/NUI_HLE_DESIGN.md](nui/NUI_HLE_DESIGN.md) | A title-agnostic Kinect (NUI) HLE device: where the console boundary sits under DC3's statically linked NUI/ST stack, and the design for a device that replaces the DC3 NUI hacks. Design only, not built. |
+
 ### DC3 (`dc3/`)
 
 | Doc | |
