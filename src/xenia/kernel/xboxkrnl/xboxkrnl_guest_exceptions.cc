@@ -293,6 +293,7 @@ bool DispatchGuestException(uint32_t record_ptr) {
 
   auto regs = dispatch.throw_regs;
   uint32_t control_pc = dispatch.throw_lr - 4;
+  uint32_t handlers_called = 0;
   for (int depth = 0; depth < kMaxFrames; ++depth) {
     cpu::ppc::RuntimeFunction fn;
     if (!LookupFunction(control_pc, &fn)) {
@@ -318,6 +319,7 @@ bool DispatchGuestException(uint32_t record_ptr) {
                    ctx);
       WriteDispatcherContext(scratch, control_pc, fn, establisher, handler,
                              handler_data);
+      ++handlers_called;
       uint32_t disposition =
           CallHandler(thread_state, handler, record_ptr, establisher,
                       scratch.context_ptr, scratch.dc_ptr, scratch.handler_sp);
@@ -338,8 +340,10 @@ bool DispatchGuestException(uint32_t record_ptr) {
     regs = caller;
     control_pc = ret - 4;
   }
-  XELOGW("GuestEH: exception {:08X} raised at {:08X}: no handler took it",
-         code, dispatch.throw_lr);
+  XELOGW(
+      "GuestEH: exception {:08X} raised at {:08X}: no handler took it ({} "
+      "frames walked, {} language handlers called)",
+      code, dispatch.throw_lr, dispatch.frames.size(), handlers_called);
   return false;
 }
 
