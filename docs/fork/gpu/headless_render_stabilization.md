@@ -17,6 +17,9 @@
 > silhouettes correct). These artifacts belong to the deferred replay, not to the upstream
 > `95a5c3ee2` texture-cache change. The pre-upstream GPU tree never reached gameplay on Vulkan
 > (0/4 runs, MILO_FAIL at song_select), so a deferred-path before/after comparison was not possible.
+> With `--dc3_inline_render=true` it did reach gameplay (1 of 2 runs), and its gameplay frames show the
+> same clean move cards and stage as the post-upstream inline frames: direct before/after evidence
+> that `95a5c3ee2` did not introduce the artifacts.
 
 **Status:** OPEN. The DC3 song-playing scene (dancers + venue) renders, but **intermittently**:
 roughly every *other* captured frame resolves the 3D scene to the visible/captured buffer; the
