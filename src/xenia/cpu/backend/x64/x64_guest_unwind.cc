@@ -22,6 +22,7 @@ namespace backend {
 namespace x64 {
 
 std::atomic<uint32_t> g_pending_host_return_count{0};
+std::atomic<uint32_t> g_pending_host_returns_taken{0};
 
 namespace {
 
@@ -80,6 +81,7 @@ uint64_t TakePendingHostReturn(ppc::PPCContext_s* context, uint32_t target,
       uint64_t slot = r.slot;
       // Everything newer lives in the frames being discarded.
       t_records.Erase(i, records.size());
+      g_pending_host_returns_taken.fetch_add(1);
       return slot;
     }
   }

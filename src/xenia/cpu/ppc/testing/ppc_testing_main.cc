@@ -30,6 +30,7 @@
 
 #if XE_ARCH_AMD64
 #include "xenia/cpu/backend/x64/x64_backend.h"
+#include "xenia/cpu/backend/x64/x64_guest_unwind.h"
 #endif  // XE_ARCH
 
 #if XE_COMPILER_MSVC
@@ -917,6 +918,137 @@ void Run(int& failed_count, int& passed_count) {
 }
 }  // namespace guest_unwind_test
 
+// Built-in check of the x64 pending host return (x64_guest_unwind.h): a
+// guest "throw" in T is caught by F; the catch continuation runs as a fresh
+// JIT entry on top of the throw's host frames, and when F returns to main the
+// JIT must resume main's ORIGINAL host frame. Without that, the continuation
+// nests and main's return into the Execute sentinel cannot resolve.
+namespace pending_host_return_test {
+constexpr uint32_t kBase = 0x82000000;
+constexpr uint32_t kMain = kBase + 0x00;
+constexpr uint32_t kF = kBase + 0x40;
+constexpr uint32_t kFReturn = kBase + 0x58;  // after F's bl T
+constexpr uint32_t kCatch = kBase + 0x60;    // F's catch continuation
+constexpr uint32_t kMainReturn = kBase + 0x10;  // after main's bl F
+constexpr uint32_t kRaise = kBase + 0xC0;    // host override ("kernel")
+constexpr uint32_t kResume = kBase + 0x100;  // {sp, pc} for the "CRT" jump
+constexpr uint32_t kStackBase = 0x82100000;
+const uint32_t kCode[] = {
+    // main: frame, bl F, return
+    0x7D8802A6, 0x9181FFF8, 0x9421FFA0, 0x48000035, 0x38210060, 0x8181FFF8,
+    0x7D8803A6, 0x4E800020, 0x60000000, 0x60000000, 0x60000000, 0x60000000,
+    0x60000000, 0x60000000, 0x60000000, 0x60000000,
+    // F (0x40): save LR + r31, r31 = 7, bl T, normal path r3 = 1,
+    // catch (0x60): r3 = r31 + 35, epilogue
+    0x7D8802A6, 0x9181FFF8, 0xFBE1FFF0, 0x9421FFA0, 0x3BE00007, 0x4800002D,
+    0x38600001, 0x48000008, 0x387F0023, 0x38210060, 0x8181FFF8, 0x7D8803A6,
+    0xEBE1FFF0, 0x4E800020, 0x60000000, 0x60000000,
+    // T (0x80): frame, bl Raise, then what _JumpToContinuation does:
+    // r1 = F's sp, LR = catch, r31 restored, blr
+    0x7D8802A6, 0x9181FFF8, 0x9421FFA0, 0x48000035, 0x3C808200, 0x80240100,
+    0x81840104, 0x3BE00007, 0x7D8803A6, 0x4E800020, 0x60000000, 0x60000000,
+    0x60000000, 0x60000000, 0x60000000, 0x60000000,
+    // Raise (0xC0): overridden
+    0x4E800020, 0x60000000, 0x60000000, 0x60000000, 0x60000000, 0x60000000,
+    0x60000000, 0x60000000, 0x60000000, 0x60000000, 0x60000000, 0x60000000,
+    0x60000000, 0x60000000, 0x60000000, 0x60000000,
+    // kResume (0x100)
+    0, 0,
+};
+
+bool g_arm = true;
+bool g_armed = false;
+Processor* g_processor = nullptr;
+
+void RaiseHandler(ppc::PPCContext* ctx, kernel::KernelState*) {
+  uint32_t t_sp = uint32_t(ctx->r[1]);
+  uint32_t f_sp = t_sp + 0x60;
+  uint32_t main_sp = f_sp + 0x60;
+  const backend::Backend::GuestUnwindFrame frames[] = {
+      {kFReturn, f_sp},     // T returns into F
+      {kMainReturn, main_sp},  // F returns into main
+  };
+  int marker = 0;
+  g_armed = g_arm && g_processor->backend()->ArmGuestUnwindReturn(
+                         reinterpret_cast<uint64_t>(&marker),
+                         uint32_t(ctx->lr) - 4, frames, 2, 1);
+  auto* mem = g_processor->memory();
+  xe::store_and_swap<uint32_t>(mem->TranslateVirtual(kResume), f_sp);
+  xe::store_and_swap<uint32_t>(mem->TranslateVirtual(kResume + 4), kCatch);
+}
+
+void Run(int& failed_count, int& passed_count) {
+  XELOGI("pending_host_return (built-in):");
+  XELOGI("  - catch continuation returns through the caller's original frame");
+  auto memory = std::make_unique<Memory>();
+  memory->Initialize();
+  std::unique_ptr<xe::cpu::backend::Backend> backend;
+#if XE_ARCH_AMD64
+  backend.reset(new xe::cpu::backend::x64::X64Backend());
+#endif  // XE_ARCH
+  bool ok = false;
+  uint64_t r3 = 0;
+  uint32_t taken_before =
+      xe::cpu::backend::x64::g_pending_host_returns_taken.load();
+  if (backend) {
+    auto processor = std::make_unique<Processor>(memory.get(), nullptr);
+    processor->Setup(std::move(backend));
+    g_processor = processor.get();
+    auto bin_path = std::filesystem::temp_directory_path() /
+                    fmt::format("xenia_pending_return_{}.bin",
+                                xe::Clock::QueryHostTickCount());
+    std::vector<uint8_t> bytes;
+    for (uint32_t word : kCode) {
+      for (int shift = 24; shift >= 0; shift -= 8) {
+        bytes.push_back(uint8_t(word >> shift));
+      }
+    }
+    FILE* f = xe::filesystem::OpenFile(bin_path, "wb");
+    if (f) {
+      fwrite(bytes.data(), 1, bytes.size(), f);
+      fclose(f);
+      auto module = std::make_unique<xe::cpu::RawModule>(processor.get());
+      bool loaded = module->LoadFile(kBase, bin_path);
+      std::filesystem::remove(bin_path);
+      auto* heap = memory->LookupHeap(kStackBase);
+      if (loaded && heap &&
+          heap->AllocFixed(kStackBase, 0x10000, 0,
+                           kMemoryAllocationReserve | kMemoryAllocationCommit,
+                           kMemoryProtectRead | kMemoryProtectWrite)) {
+        processor->AddModule(std::move(module));
+        processor->backend()->CommitExecutableRange(kBase, kBase + 0x10000);
+        processor->RegisterGuestFunctionOverride(kRaise, &RaiseHandler,
+                                                 "pending_return_raise");
+        auto thread_state = std::make_unique<ThreadState>(
+            processor.get(), 0x100, kStackBase, kStackBase - 0x1000);
+        auto fn = processor->ResolveFunction(kMain);
+        if (fn) {
+          auto ctx = thread_state->context();
+          ctx->r[1] = kStackBase + 0xF000;
+          ctx->r[3] = 0;
+          ctx->lr = 0xBCBCBCBC;
+          fn->Call(thread_state.get(), uint32_t(ctx->lr));
+          r3 = ctx->r[3];
+          ok = true;
+        }
+        thread_state.reset();
+      }
+    }
+    processor.reset();
+  }
+  uint32_t taken =
+      xe::cpu::backend::x64::g_pending_host_returns_taken.load() - taken_before;
+  if (ok && g_armed && r3 == 42 && taken == 1) {
+    ++passed_count;
+  } else {
+    XELOGE("    TEST FAILED: ran={} armed={} r3={} taken={}", ok, g_armed, r3,
+           taken);
+    ++failed_count;
+  }
+  XELOGI("");
+}
+}  // namespace pending_host_return_test
+
 bool RunTests(const std::string_view test_name) {
   int result_code = 1;
   int failed_count = 0;
@@ -967,6 +1099,9 @@ bool RunTests(const std::string_view test_name) {
   }
   if (test_name.empty() || test_name == "guest_unwind") {
     guest_unwind_test::Run(failed_count, passed_count);
+  }
+  if (test_name.empty() || test_name == "pending_host_return") {
+    pending_host_return_test::Run(failed_count, passed_count);
   }
   TestRunner runner;
   for (auto& test_suite : test_suites) {

@@ -45,6 +45,8 @@ class X64CodeCache;
 // Number of armed records across all threads; the JIT only calls into the
 // slow path while it is non-zero.
 extern std::atomic<uint32_t> g_pending_host_return_count;
+// How many pending host returns were taken (for tests and diagnostics).
+extern std::atomic<uint32_t> g_pending_host_returns_taken;
 
 // Called by the pending-return thunk from a mismatched guest return.
 // Returns the host slot to `ret` from, or 0 to continue normally.
