@@ -31,20 +31,16 @@ bool GuestReader::Readable(uint32_t address) const {
        (address >= 0x84000000u && address < 0x84860000u))) {
     return true;
   }
+  // Readable means the guest heap grants read access. "Committed" is not
+  // enough: thread stacks are bracketed by committed kMemoryProtectNoAccess
+  // guard pages (XThread::AllocateStack), and a thread that has not run yet
+  // has r1 == stack_base, the first guard byte -- a back-chain walk from it
+  // used to fault the host (soft-faulted reads with guest lr = r1 = 0, found
+  // by Lane D).
   auto* heap = memory_->LookupHeap(address);
-  if (!heap) {
-    return false;
-  }
   uint32_t protect = 0;
-  if (heap->QueryProtect(address, &protect) &&
-      (protect & kMemoryProtectRead)) {
-    return true;
-  }
-  HeapAllocationInfo info = {};
-  if (!heap->QueryRegionInfo(address, &info)) {
-    return false;
-  }
-  return (info.state & kMemoryAllocationCommit) != 0;
+  return heap && heap->QueryProtect(address, &protect) &&
+         (protect & kMemoryProtectRead) != 0;
 }
 
 uint32_t GuestReader::R32(uint32_t address) const {

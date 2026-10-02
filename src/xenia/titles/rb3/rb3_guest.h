@@ -35,8 +35,8 @@ constexpr uint32_t kUiTransitionScreen = 0x30;
 constexpr uint32_t kScreenName = 0x18;
 
 // Host-side reads of guest memory from a host thread. Every read is gated on
-// the page being readable (or committed), so a stale pointer never faults the
-// host; an unreadable word reads as 0.
+// the guest heap granting read access to the page, so a stale pointer never
+// faults the host; an unreadable word reads as 0.
 class GuestReader {
  public:
   // trust_image_windows: treat the title image [0x82000000,0x83000000) and the
