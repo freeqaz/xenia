@@ -79,6 +79,13 @@ xr_run() {
   mkdir -p "$rd/storage"
   cp "$cfg" "$rd/config.toml"
   local -a argv=( "--storage_root=$rd/storage" "--config=$rd/config.toml" "${XR_ARGS[@]}" )
+  # run.sh --extra-arg (newline-separated; one argv entry per line).
+  if [ -n "${FR_EXTRA_ARGS:-}" ]; then
+    local -a extra=()
+    mapfile -t extra <<< "$FR_EXTRA_ARGS"
+    local e
+    for e in "${extra[@]}"; do [ -n "$e" ] && argv+=( "$e" ); done
+  fi
   printf '%s\0' "${argv[@]}" > "$rd/argv.bin"
   printf '%q ' "$BIN" "${argv[@]}" > "$rd/cmd.txt"; echo >> "$rd/cmd.txt"
 

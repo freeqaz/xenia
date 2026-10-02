@@ -66,6 +66,7 @@
 #include "xenia/vfs/virtual_file_system.h"
 #include "xenia/titles/dc3/dc3_flags.h"
 #include "xenia/titles/dc3/dc3_hack_pack.h"
+#include "xenia/titles/dc3/dc3_hacks.h"
 #include "xenia/titles/dc3/dc3_nui_patch_resolver.h"
 #include "xenia/titles/dc3/dc3_runtime_telemetry.h"
 
@@ -101,7 +102,26 @@ void Dc3NuiSequencerExtern(
   if (ppc_context && ppc_context->scratch) {
     Dc3RuntimeTelemetryRecordNuiOverrideHit(
         static_cast<uint32_t>(ppc_context->scratch));
+    dc3::HackCountOverrideHit(static_cast<uint32_t>(ppc_context->scratch));
   }
+  // Runtime hacks driven from this callback (dc3_hacks.h). Decided once, on
+  // the first NUI frame.
+  static const bool kHackControllerMode = dc3::HackGate(
+      "seq.controller_mode", "GestureMgr mInControllerMode := 1 per NUI frame");
+  static const bool kHackTransitionDiag = dc3::HackGate(
+      "seq.transition_diag",
+      "Executes UIScreen::CheckIsLoaded/Exiting/Entering on stuck transitions");
+  static const bool kHackTransitionForce = dc3::HackGate(
+      "seq.transition_force",
+      "force-enter/complete UIManager transitions stuck >=120 NUI frames");
+  static const bool kHackNavBridge = dc3::HackGate(
+      "seq.nav_bridge",
+      "UIManager::GotoScreen walk attract->...->game_screen (merge_busy hold)");
+  static const bool kHackLoadSong = dc3::HackGate(
+      "seq.loadsong_repair",
+      "loading_screen probe + ymca song injection via guest Executes");
+  static const bool kHackBeatDrive = dc3::HackGate(
+      "seq.beat_drive", "120 BPM TaskMgr timeline drive on game_screen");
 
   if (!frame_guest_addr) {
     ppc_context->r[3] = 0x80004003u;
@@ -204,7 +224,7 @@ void Dc3NuiSequencerExtern(
 
   // Force GestureMgr.mInControllerMode=true so the game processes
   // XInput button presses for menu navigation (DC3 normally uses Kinect).
-  {
+  if (kHackControllerMode) {
     constexpr uint32_t kTheGestureMgr = 0x82F5F7B4;
     constexpr uint32_t kInControllerModeOff = 0x426D;
     auto* gm_slot = memory->TranslateVirtual<uint8_t*>(kTheGestureMgr);
@@ -214,6 +234,7 @@ void Dc3NuiSequencerExtern(
         auto* gm = memory->TranslateVirtual<uint8_t*>(gm_addr);
         if (gm) {
           gm[kInControllerModeOff] = 1;
+          dc3::HackFired("seq.controller_mode");
         }
       }
     }
@@ -417,7 +438,8 @@ void Dc3NuiSequencerExtern(
         s_stuck_transition_count = 0;
       }
 
-      if (trans_state_h != 0 && trans_screen_h && processor && thread_state &&
+      if (kHackTransitionDiag &&
+          trans_state_h != 0 && trans_screen_h && processor && thread_state &&
           (s_stuck_transition_count == 1 ||
            (s_stuck_transition_count % 60) == 0)) {
         constexpr uint32_t kUIScreenEntering = 0x827A34F8;
@@ -448,7 +470,8 @@ void Dc3NuiSequencerExtern(
             trans_loaded, cur_exiting, cur_entering);
       }
 
-      if (trans_state_h == 1 && trans_screen_h && processor && thread_state &&
+      if (kHackTransitionForce &&
+          trans_state_h == 1 && trans_screen_h && processor && thread_state &&
           s_stuck_transition_count >= 120) {
         constexpr uint32_t kUIScreenExiting = 0x827A35C0;
         constexpr uint32_t kUIScreenCheckIsLoaded = 0x827A3A00;
@@ -460,6 +483,7 @@ void Dc3NuiSequencerExtern(
             trans_loaded && (!cur_exiting || s_stuck_transition_count >= 180) &&
             !(trans_name == "game_screen" && merge_busy);
         if (allow_force_enter) {
+          dc3::HackFired("seq.transition_force");
           uint32_t old_cur_screen = cur_screen_h;
           xe::store_and_swap<uint32_t>(ui_obj + 0x2C, 2);
           xe::store_and_swap<uint32_t>(ui_obj + 0x48, trans_screen_h);
@@ -490,6 +514,7 @@ void Dc3NuiSequencerExtern(
         } else if (!trans_loaded && s_stuck_transition_count >= 120 &&
                    (trans_name != "game_screen" ||
                     (cvars::dc3_ik_telemetry && !merge_busy))) {
+          dc3::HackFired("seq.transition_force");
           xe::store_and_swap<uint32_t>(ui_obj + 0x48, trans_screen_h);
           xe::store_and_swap<uint32_t>(ui_obj + 0x4C, 0);
           xe::store_and_swap<uint32_t>(ui_obj + 0x2C, 0);
@@ -512,11 +537,13 @@ void Dc3NuiSequencerExtern(
         }
       }
 
-      if (trans_state_h == 2 && cur_screen_h && processor && thread_state &&
+      if (kHackTransitionForce &&
+          trans_state_h == 2 && cur_screen_h && processor && thread_state &&
           s_stuck_transition_count >= 120) {
         constexpr uint32_t kUIScreenEntering = 0x827A34F8;
         bool cur_entering = exec_guest_bool(kUIScreenEntering, cur_screen_h);
         if (cur_entering || s_stuck_transition_count >= 240) {
+          dc3::HackFired("seq.transition_force");
           // Force-complete the entering phase.  If curEntering is false but
           // we've been stuck for 240+ NUI frames, the enter animation
           // already finished but transState was never cleared (common after
@@ -846,7 +873,8 @@ void Dc3NuiSequencerExtern(
         nav_stable_threshold = 120;
       }
 
-      if (s_screen_stable_count >= nav_stable_threshold && trans_state_h == 0) {
+      if (kHackNavBridge &&
+          s_screen_stable_count >= nav_stable_threshold && trans_state_h == 0) {
         std::string target_name;
         if (cur_screen_h && cur_name == "attract_screen") {
           target_name = "title_screen";
@@ -921,6 +949,9 @@ void Dc3NuiSequencerExtern(
               XELOGI("DC3: Nav literal: {} -> {} (name={:08X})", cur_name,
                      target_name, found_name_ptr);
             }
+          }
+          if (found_screen || found_name_ptr) {
+            dc3::HackFired("seq.nav_bridge");
           }
           if (found_screen && found_name_ptr) {
             if (processor && thread_state) {
@@ -1010,7 +1041,9 @@ void Dc3NuiSequencerExtern(
         }
       }
 
-      if (!s_loadsong_probe_logged && cur_name == "loading_screen") {
+      if (kHackLoadSong &&
+          !s_loadsong_probe_logged && cur_name == "loading_screen") {
+        dc3::HackFired("seq.loadsong_repair");
         auto* processor = kernel_state->processor();
         auto* thread_state = ppc_context->thread_state;
         if (processor && thread_state) {
@@ -1312,7 +1345,7 @@ void Dc3NuiSequencerExtern(
           s_host_beat_drive_active = false;
         }
         uint32_t timelines_addr = load_u32(kTheTaskMgr + 0x2C);
-        if (beat_gate_ok && timelines_addr &&
+        if (kHackBeatDrive && beat_gate_ok && timelines_addr &&
             is_guest_readable(timelines_addr + 0x54, 4) &&
             is_guest_readable(kTheTaskMgr + 0x48, 1)) {
           auto* auto_ptr =
@@ -1347,6 +1380,7 @@ void Dc3NuiSequencerExtern(
           float old_beats = load_float(beats_time_addr);
           float old_ui = load_float(ui_time_addr);
           if (!s_host_beat_drive_active) {
+            dc3::HackFired("seq.beat_drive");
             s_host_song_seconds = old_seconds;
             s_host_song_beat = old_beats;
             XELOGI(

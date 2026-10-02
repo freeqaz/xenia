@@ -8,6 +8,7 @@
 #include "xenia/cpu/processor.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/memory.h"
+#include "xenia/titles/dc3/dc3_hacks.h"
 
 DECLARE_bool(fake_kinect_data);
 
@@ -36,8 +37,28 @@ constexpr uint32_t kSMainDirPtr = 0x82F63B28;
 constexpr uint32_t kObjectDirFindObject = 0x82595960;
 constexpr uint32_t kUIManagerGotoScreenByName = 0x8277B378;
 
+constexpr uint32_t kBinkMovieImplReady = 0x82E221C8;
+constexpr uint32_t kMoviePanelIsLoaded = 0x82E0EFE8;
+constexpr uint32_t kUIManagerGotoFirstScreen = 0x8277B140;
+
+void Dc3BinkMovieImplReadyExtern(cpu::ppc::PPCContext* ppc_context,
+                                 kernel::KernelState* kernel_state) {
+  dc3::HackCountOverrideHit(kBinkMovieImplReady);
+  dc3::HackFired("bink.impl_ready");
+  ppc_context->r[3] = 1;  // BinkMovieImpl::Ready() -> true
+}
+
+void Dc3MoviePanelIsLoadedExtern(cpu::ppc::PPCContext* ppc_context,
+                                 kernel::KernelState* kernel_state) {
+  dc3::HackCountOverrideHit(kMoviePanelIsLoaded);
+  dc3::HackFired("movie.panel_is_loaded");
+  ppc_context->r[3] = 1;  // MoviePanel::IsLoaded() -> true
+}
+
 void Dc3GotoFirstScreenExtern(cpu::ppc::PPCContext* ppc_context,
                               kernel::KernelState* kernel_state) {
+  dc3::HackCountOverrideHit(kUIManagerGotoFirstScreen);
+  dc3::HackFired("ui.goto_first_screen");
   if (!g_attract_name_buf || !kernel_state) {
     return;
   }
@@ -151,8 +172,12 @@ Dc3HackApplyResult ApplyDc3SkeletonHackPack(const Dc3HackContext& ctx) {
       0x38600000,                                // li r3, 0 (S_OK)
       0x4E800020,                                // blr
   };
-  for (size_t i = 0; i < sizeof(ppc_stub) / sizeof(ppc_stub[0]); i++) {
-    xe::store_and_swap<uint32_t>(stub_mem + i * 4, ppc_stub[i]);
+  if (dc3::HackGate("skel.ppc_get_next_frame",
+                    "PPC constant-frame stub over NuiSkeletonGetNextFrame "
+                    "(shadowed by the nui.get_next_frame override)")) {
+    for (size_t i = 0; i < sizeof(ppc_stub) / sizeof(ppc_stub[0]); i++) {
+      xe::store_and_swap<uint32_t>(stub_mem + i * 4, ppc_stub[i]);
+    }
   }
 
   xe::store_and_swap<uint32_t>(counter_mem, 0);
@@ -204,14 +229,16 @@ Dc3HackApplyResult ApplyDc3SkeletonHackPack(const Dc3HackContext& ctx) {
   }
 
   struct BinaryPatch {
+    const char* id;
     uint32_t address;
     uint32_t value;
     const char* name;
   };
   BinaryPatch skel_patches[] = {
-      {0x8242E74C, 0x3B800021,
+      {"skel.wait_33ms", 0x8242E74C, 0x3B800021,
        "SkeletonUpdateThread: timeout INFINITE -> 33ms"},
-      {0x8242E1B0, 0x60000000, "SkeletonUpdate::Update: NOP IsOverride branch"},
+      {"skel.is_override_nop", 0x8242E1B0, 0x60000000,
+       "SkeletonUpdate::Update: NOP IsOverride branch"},
       // Debug::Fail (0x825CE1D0) non-main-thread path: the original Xbox build
       // parks any failing worker thread in an infinite spin
       //   while (true) { Timer::Sleep(200); PlatformDebugBreak(); }   (@0x825CE2D0)
@@ -224,7 +251,7 @@ Dc3HackApplyResult ApplyDc3SkeletonHackPack(const Dc3HackContext& ctx) {
       // jump to the function epilogue (b +0x90 -> 0x825CE36C) so the worker
       // returns and continues polling after one assert -- matching the native
       // port's "FAIL is non-fatal, continue" semantics (Debug.cpp HX_NATIVE).
-      {0x825CE2DC, 0x48000090,
+      {"debug.fail_spin", 0x825CE2DC, 0x48000090,
        "Debug::Fail: thread-fail spin -> return (worker survives assert)"},
       // NOTE: tried `blr` at Debug::Fail entry (0x825CE1D0) to make FAIL
       // non-fatal (match native) and limp past the preview.tmov fatal — it
@@ -248,6 +275,10 @@ Dc3HackApplyResult ApplyDc3SkeletonHackPack(const Dc3HackContext& ctx) {
       // on the healthy map -> a REAL expert anim with clip keyframes (animating).
   };
   for (const auto& p : skel_patches) {
+    if (!dc3::HackGate(p.id, p.name)) {
+      result.skipped++;
+      continue;
+    }
     auto* h = memory->LookupHeap(p.address);
     if (!h) {
       result.failed++;
@@ -277,18 +308,16 @@ Dc3HackApplyResult ApplyDc3SkeletonHackPack(const Dc3HackContext& ctx) {
   // Force Ready()=true so the load-gate clears and the proper UIScreen::Enter
   // path runs (game-driven UIManager::Update, and emulator.cc's force-ENTER
   // fallback which is gated on CheckIsLoaded==true).
-  if (ctx.processor) {
-    const uint32_t kBinkMovieImplReady = 0x82E221C8;
-    ctx.processor->RegisterGuestFunctionOverride(
-        kBinkMovieImplReady,
-        [](cpu::ppc::PPCContext* ppc_context,
-           kernel::KernelState* kernel_state) {
-          ppc_context->r[3] = 1;  // BinkMovieImpl::Ready() -> true
-        },
-        "DC3:BinkMovieImpl::Ready");
+  if (ctx.processor &&
+      dc3::HackGate("bink.impl_ready", "BinkMovieImpl::Ready -> 1")) {
+    dc3::HackRegisterOverride(ctx.processor, kBinkMovieImplReady,
+                              Dc3BinkMovieImplReadyExtern, "bink.impl_ready",
+                              "DC3:BinkMovieImpl::Ready");
     XELOGI("DC3: Registered BinkMovieImpl::Ready=true override at {:08X}",
            kBinkMovieImplReady);
     result.applied++;
+  }
+  if (ctx.processor) {
 
     // Blocker 1 (boot non-determinism): the attract Bink movie's framebuffer
     // setup (BinkRegisterFrameBuffers/BinkGetFrameBuffersInfo @0x82EE8C30 /
@@ -302,17 +331,15 @@ Dc3HackApplyResult ApplyDc3SkeletonHackPack(const Dc3HackContext& ctx) {
     // instantiates deterministically regardless of the Bink decode race.
     //   ?IsLoaded@MoviePanel@@UBA_NXZ  guest VA 0x82E0EFE8 (verified in
     //   ham_xbox_r.map -> meta:MoviePanel.obj)
-    const uint32_t kMoviePanelIsLoaded = 0x82E0EFE8;
-    ctx.processor->RegisterGuestFunctionOverride(
-        kMoviePanelIsLoaded,
-        [](cpu::ppc::PPCContext* ppc_context,
-           kernel::KernelState* kernel_state) {
-          ppc_context->r[3] = 1;  // MoviePanel::IsLoaded() -> true
-        },
-        "DC3:MoviePanel::IsLoaded");
-    XELOGI("DC3: Registered MoviePanel::IsLoaded=true override at {:08X}",
-           kMoviePanelIsLoaded);
-    result.applied++;
+    if (dc3::HackGate("movie.panel_is_loaded", "MoviePanel::IsLoaded -> 1")) {
+      dc3::HackRegisterOverride(ctx.processor, kMoviePanelIsLoaded,
+                                Dc3MoviePanelIsLoadedExtern,
+                                "movie.panel_is_loaded",
+                                "DC3:MoviePanel::IsLoaded");
+      XELOGI("DC3: Registered MoviePanel::IsLoaded=true override at {:08X}",
+             kMoviePanelIsLoaded);
+      result.applied++;
+    }
 
     // Blocker 1 (true root cause): the App boot sequence calls
     // UIManager::GotoFirstScreen() (?GotoFirstScreen@UIManager@@QAAXXZ, guest
@@ -338,6 +365,8 @@ Dc3HackApplyResult ApplyDc3SkeletonHackPack(const Dc3HackContext& ctx) {
     // navigation afterwards.  The host NUI-poll nav bridge re-invokes this
     // override while cur_screen is NULL, so the first post-load invocation
     // navigates with no race.
+    if (dc3::HackGate("ui.goto_first_screen",
+                      "UIManager::GotoFirstScreen -> host-gated GotoScreen")) {
     g_attract_name_buf = memory->SystemHeapAlloc(0x20, 0x10);
     if (g_attract_name_buf) {
       auto* nm = memory->TranslateVirtual<char*>(g_attract_name_buf);
@@ -345,15 +374,16 @@ Dc3HackApplyResult ApplyDc3SkeletonHackPack(const Dc3HackContext& ctx) {
         std::strcpy(nm, "attract_screen");
       }
     }
-    const uint32_t kUIManagerGotoFirstScreen = 0x8277B140;
-    ctx.processor->RegisterGuestFunctionOverride(
-        kUIManagerGotoFirstScreen, Dc3GotoFirstScreenExtern,
+    dc3::HackRegisterOverride(
+        ctx.processor, kUIManagerGotoFirstScreen, Dc3GotoFirstScreenExtern,
+        "ui.goto_first_screen",
         "DC3:UIManager::GotoFirstScreen(gated host-driven)");
     XELOGI("DC3: Registered GotoFirstScreen gated override at {:08X} "
            "(navigates to attract_screen once FindObject resolves; "
            "name_buf={:08X})",
            kUIManagerGotoFirstScreen, g_attract_name_buf);
     result.applied++;
+    }
   } else {
     result.skipped++;
   }

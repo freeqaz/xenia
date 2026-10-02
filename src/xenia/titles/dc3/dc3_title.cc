@@ -66,13 +66,19 @@
 #include "xenia/memory.h"
 #include "xenia/vfs/virtual_file_system.h"
 #include "xenia/titles/dc3/dc3_dta_channel.h"
+#include "xenia/titles/dc3/dc3_fail_tripwire.h"
 #include "xenia/titles/dc3/dc3_flags.h"
+#include "xenia/titles/dc3/dc3_hacks.h"
 #include "xenia/titles/dc3/dc3_hack_pack.h"
 #include "xenia/titles/dc3/dc3_nui_patch_resolver.h"
 #include "xenia/titles/dc3/dc3_nui_sequencer.h"
 #include "xenia/titles/dc3/dc3_runtime_telemetry.h"
+#include "xenia/titles/dc3/dc3_scripted_input.h"
 #include "xenia/titles/dc3/decomp/dc3_decomp_launch.h"
+#include "xenia/titles/probe_threads.h"
 #include "xenia/titles/title_hooks.h"
+
+DECLARE_bool(dc3_clean_content_cache);
 
 #if XE_PLATFORM_LINUX
 DECLARE_string(dc3_dta_channel);
@@ -91,6 +97,7 @@ void Dc3NuiReturnOkExtern(cpu::ppc::PPCContext* ppc_context,
   if (ppc_context && ppc_context->scratch) {
     Dc3RuntimeTelemetryRecordNuiOverrideHit(
         static_cast<uint32_t>(ppc_context->scratch));
+    dc3::HackCountOverrideHit(static_cast<uint32_t>(ppc_context->scratch));
   }
   ppc_context->r[3] = 0;
 }
@@ -101,6 +108,7 @@ void Dc3NuiReturnNeg1Extern(cpu::ppc::PPCContext* ppc_context,
   if (ppc_context && ppc_context->scratch) {
     Dc3RuntimeTelemetryRecordNuiOverrideHit(
         static_cast<uint32_t>(ppc_context->scratch));
+    dc3::HackCountOverrideHit(static_cast<uint32_t>(ppc_context->scratch));
   }
   ppc_context->r[3] = UINT64_C(0xFFFFFFFFFFFFFFFF);
 }
@@ -111,6 +119,7 @@ void Dc3NuiReturn1Extern(cpu::ppc::PPCContext* ppc_context,
   if (ppc_context && ppc_context->scratch) {
     Dc3RuntimeTelemetryRecordNuiOverrideHit(
         static_cast<uint32_t>(ppc_context->scratch));
+    dc3::HackCountOverrideHit(static_cast<uint32_t>(ppc_context->scratch));
   }
   ppc_context->r[3] = 1;
 }
@@ -138,7 +147,16 @@ void ApplyDc3LaunchHooks(const titles::TitleLaunchContext& ctx) {
   // the manifest for an original-layout image is harmless: every consumer
   // (hack pack, kAddr populate) is separately gated on the detected layout.
   if (title_id.has_value() && title_id.value() == 0x373307D9) {
-    Dc3MaybeCleanStaleContentCache(content_root);
+    // The DC3 half of the scripted-input player (screen reader, gameplay
+    // probe, input.* automation). Only DC3 gets it: the player used to run
+    // these DC3 address reads/writes for every title.
+    dc3::InstallScriptedInputAdapter();
+
+    if (cvars::dc3_clean_content_cache &&
+        dc3::HackGate("content.wipe",
+                      "remove_all(<content>/373307D9) before launch")) {
+      Dc3MaybeCleanStaleContentCache(content_root);
+    }
 
     // Opt this title in to the MMIO write soft-fault (64KB-vs-4KB protect
     // granularity conflict in the XEX image data region). These two constants
@@ -148,7 +166,10 @@ void ApplyDc3LaunchHooks(const titles::TitleLaunchContext& ctx) {
     // behavior is unchanged. Log the module's .data bounds next to them so
     // drift is visible after a relink (the range deliberately spans more than
     // .data alone, so it is not derived from the section table).
-    cpu::MMIOHandler::SetSoftFaultWritableRange(0x83320000, 0x836C0000);
+    if (dc3::HackGate("mmio.soft_fault_range",
+                      "MMIO write soft-fault range 83320000-836C0000")) {
+      cpu::MMIOHandler::SetSoftFaultWritableRange(0x83320000, 0x836C0000);
+    }
     if (auto* xex = module->xex_module()) {
       if (auto* data = xex->GetPESection(".data")) {
         XELOGI("DC3: module .data is [{:08X}, {:08X}) (soft-fault writable "
@@ -734,7 +755,8 @@ void ApplyDc3LaunchHooks(const titles::TitleLaunchContext& ctx) {
       }
       // Preserve the original-layout fake skeleton path when enabled.
       if (cvars::fake_kinect_data && !is_decomp_layout &&
-          std::string_view(patch.name) == "NuiSkeletonGetNextFrame") {
+          std::string_view(patch.name) == "NuiSkeletonGetNextFrame" &&
+          dc3::HackEnabled("nui.get_next_frame")) {
         return Dc3NuiSequencerExtern;
       }
       if (patch.insn1 != kBlr) {
@@ -774,8 +796,23 @@ void ApplyDc3LaunchHooks(const titles::TitleLaunchContext& ctx) {
       const uint32_t patch_addr = resolved_patch.resolved_address;
             if (std::string_view(patch.name) == "NuiSkeletonGetNextFrame") {
         auto* h = guest_extern_handler_for_patch(patch);
+        if (h && !is_decomp_layout &&
+            !dc3::HackGate(h == Dc3NuiSequencerExtern
+                               ? "nui.get_next_frame"
+                               : "nui.NuiSkeletonGetNextFrame",
+                           h == Dc3NuiSequencerExtern
+                               ? "NuiSkeletonGetNextFrame -> fake-skeleton "
+                                 "sequencer (also the host automation tick)"
+                               : "NuiSkeletonGetNextFrame -> -1")) {
+          h = nullptr;
+          override_register_failed++;
+          continue;
+        }
         if (h) {
           processor->RegisterGuestFunctionOverride(patch_addr, h, patch.name);
+          dc3::HackNoteOverride(patch_addr, h == Dc3NuiSequencerExtern
+                                                ? "nui.get_next_frame"
+                                                : "nui.NuiSkeletonGetNextFrame");
           XELOGI("DC3: ULTRA FORCED registration of NUI sequencer at {:08X}", patch_addr);
           override_registered++;
           continue;
@@ -820,8 +857,21 @@ void ApplyDc3LaunchHooks(const titles::TitleLaunchContext& ctx) {
         override_register_failed++;
         continue;
       }
+      if (!is_decomp_layout &&
+          !dc3::HackGate(std::string("nui.") + patch.name,
+                         handler == Dc3NuiReturnOkExtern
+                             ? "NUI SDK override -> 0"
+                             : (handler == Dc3NuiReturnNeg1Extern
+                                    ? "NUI SDK override -> -1"
+                                    : "NUI SDK override"))) {
+        override_register_failed++;
+        continue;
+      }
       processor->RegisterGuestFunctionOverride(patch_addr, handler,
                                                 std::string(patch.name));
+      if (!is_decomp_layout) {
+        dc3::HackNoteOverride(patch_addr, std::string("nui.") + patch.name);
+      }
       XELOGI("DC3: Registered guest extern override {:08X}: {} (resolver={})",
              patch_addr, patch.name,
              Dc3PatchResolveMethodName(resolved_patch.resolve_method));
@@ -898,7 +948,11 @@ void ApplyDc3LaunchHooks(const titles::TitleLaunchContext& ctx) {
            "(fake_kinect_data={} decomp_layout={})",
            cvars::fake_kinect_data, dc3_is_decomp_layout);
     auto with_patch_target =
-        [&](const char* label, uint32_t addr, size_t size, auto&& apply) {
+        [&](const char* id, const char* label, uint32_t addr, size_t size,
+            auto&& apply) {
+          if (!dc3::HackGate(id, label)) {
+            return false;
+          }
           auto* ptr = memory->TranslateVirtual<uint8_t*>(addr);
           if (!ptr) {
             XELOGW("DC3: Patch lookup failed: {} at {:08X} "
@@ -919,7 +973,7 @@ void ApplyDc3LaunchHooks(const titles::TitleLaunchContext& ctx) {
         };
 
     constexpr uint32_t kSaveLoadManagerActivate = 0x82894A10;
-    with_patch_target("SaveLoadManager::Activate", kSaveLoadManagerActivate, 4,
+    with_patch_target("saveload.activate", "SaveLoadManager::Activate", kSaveLoadManagerActivate, 4,
                       [&](uint8_t* sla_ptr) {
                         xe::store_and_swap<uint32_t>(sla_ptr, 0x4E800020);
                         XELOGI(
@@ -929,7 +983,7 @@ void ApplyDc3LaunchHooks(const titles::TitleLaunchContext& ctx) {
 
     constexpr uint32_t kHamPanelFocusComponent = 0x828EFE90;
     constexpr uint32_t kUIPanelFocusComponent = 0x827A6310;
-    with_patch_target("HamPanel::FocusComponent", kHamPanelFocusComponent, 4,
+    with_patch_target("ui.hampanel_focus", "HamPanel::FocusComponent", kHamPanelFocusComponent, 4,
                       [&](uint8_t* ptr) {
                         constexpr uint32_t kBranchMask = 0x03FFFFFC;
                         uint32_t branch =
@@ -943,7 +997,7 @@ void ApplyDc3LaunchHooks(const titles::TitleLaunchContext& ctx) {
                       });
 
     constexpr uint32_t kHamScreenIsEventDialogOnTop = 0x829626D8;
-    with_patch_target("HamScreen::IsEventDialogOnTop",
+    with_patch_target("ui.event_dialog_on_top", "HamScreen::IsEventDialogOnTop",
                       kHamScreenIsEventDialogOnTop, 8, [&](uint8_t* ptr) {
                         xe::store_and_swap<uint32_t>(ptr + 0, 0x38600000);
                         xe::store_and_swap<uint32_t>(ptr + 4, 0x4E800020);
@@ -953,7 +1007,7 @@ void ApplyDc3LaunchHooks(const titles::TitleLaunchContext& ctx) {
                       });
 
     constexpr uint32_t kCDReadDone = 0x826026E0;
-    with_patch_target("CDReadDone", kCDReadDone, 8, [&](uint8_t* cdr_ptr) {
+    with_patch_target("io.cd_read_done", "CDReadDone", kCDReadDone, 8, [&](uint8_t* cdr_ptr) {
       xe::store_and_swap<uint32_t>(cdr_ptr + 0, 0x38600001);
       xe::store_and_swap<uint32_t>(cdr_ptr + 4, 0x4E800020);
       XELOGI("DC3: Stubbed CDReadDone at {:08X} to return true",
@@ -961,7 +1015,7 @@ void ApplyDc3LaunchHooks(const titles::TitleLaunchContext& ctx) {
     });
 
     constexpr uint32_t kContentMgrRefreshDone = 0x825FEB48;
-    with_patch_target("ContentMgr::RefreshDone", kContentMgrRefreshDone, 8,
+    with_patch_target("content.refresh_done", "ContentMgr::RefreshDone", kContentMgrRefreshDone, 8,
                       [&](uint8_t* crd_ptr) {
                         xe::store_and_swap<uint32_t>(crd_ptr + 0, 0x38600001);
                         xe::store_and_swap<uint32_t>(crd_ptr + 4, 0x4E800020);
@@ -971,7 +1025,7 @@ void ApplyDc3LaunchHooks(const titles::TitleLaunchContext& ctx) {
                       });
 
     constexpr uint32_t kSplashPrepareNext = 0x82554388;
-    with_patch_target("Splash::PrepareNext", kSplashPrepareNext, 8,
+    with_patch_target("splash.prepare_next", "Splash::PrepareNext", kSplashPrepareNext, 8,
                       [&](uint8_t* ptr) {
                         xe::store_and_swap<uint32_t>(ptr + 0, 0x38600000);
                         xe::store_and_swap<uint32_t>(ptr + 4, 0x4E800020);
@@ -981,7 +1035,7 @@ void ApplyDc3LaunchHooks(const titles::TitleLaunchContext& ctx) {
                       });
 
     constexpr uint32_t kSplashBeginSplasher = 0x825554C8;
-    with_patch_target("Splash::BeginSplasher", kSplashBeginSplasher, 4,
+    with_patch_target("splash.begin_splasher", "Splash::BeginSplasher", kSplashBeginSplasher, 4,
                       [&](uint8_t* ptr) {
                         xe::store_and_swap<uint32_t>(ptr, 0x4E800020);
                         XELOGI("DC3: Splash bypass: stubbed Splash::BeginSplasher "
@@ -990,7 +1044,7 @@ void ApplyDc3LaunchHooks(const titles::TitleLaunchContext& ctx) {
                       });
 
     constexpr uint32_t kSplashSuspend = 0x82553BE0;
-    with_patch_target("Splash::Suspend", kSplashSuspend, 4,
+    with_patch_target("splash.suspend", "Splash::Suspend", kSplashSuspend, 4,
                       [&](uint8_t* ptr) {
                         xe::store_and_swap<uint32_t>(ptr, 0x4E800020);
                         XELOGI("DC3: Splash bypass: stubbed Splash::Suspend "
@@ -999,7 +1053,7 @@ void ApplyDc3LaunchHooks(const titles::TitleLaunchContext& ctx) {
                       });
 
     constexpr uint32_t kSplashResume = 0x82553D68;
-    with_patch_target("Splash::Resume", kSplashResume, 4,
+    with_patch_target("splash.resume", "Splash::Resume", kSplashResume, 4,
                       [&](uint8_t* ptr) {
                         xe::store_and_swap<uint32_t>(ptr, 0x4E800020);
                         XELOGI("DC3: Splash bypass: stubbed Splash::Resume "
@@ -1008,7 +1062,7 @@ void ApplyDc3LaunchHooks(const titles::TitleLaunchContext& ctx) {
                       });
 
     constexpr uint32_t kSpeechGrammarUnload = 0x82439F38;
-    with_patch_target("SpeechMgr::Grammar::Unload", kSpeechGrammarUnload, 4,
+    with_patch_target("speech.grammar_unload", "SpeechMgr::Grammar::Unload", kSpeechGrammarUnload, 4,
                       [&](uint8_t* ptr) {
                         xe::store_and_swap<uint32_t>(ptr, 0x4E800020);
                         XELOGI("DC3: Speech fix: stubbed "
@@ -1037,7 +1091,7 @@ void ApplyDc3LaunchHooks(const titles::TitleLaunchContext& ctx) {
     // MovieSys layout: vptr @0, isInitalized(bool) @4; r3 == this (BinkMovieSys
     // base coincides with the MovieSys base). We still skip BinkStartAsyncThread
     // (the part that hangs headless and the reason Init was stubbed at all).
-    with_patch_target("BinkMovieSys::Init", kBinkMovieSysInit, 12,
+    with_patch_target("bink.sys_init", "BinkMovieSys::Init", kBinkMovieSysInit, 12,
                       [&](uint8_t* ptr) {
                         xe::store_and_swap<uint32_t>(ptr + 0, 0x38000001);  // li  r0, 1
                         xe::store_and_swap<uint32_t>(ptr + 4, 0x98030004);  // stb r0, 4(r3)
@@ -1053,7 +1107,11 @@ void ApplyDc3LaunchHooks(const titles::TitleLaunchContext& ctx) {
       constexpr uint32_t kSetPlayerPresentGuard = 0x8290834C;
       constexpr uint32_t kExpectedInsn = 0x4800001D;
       auto* guard_ptr =
-          memory->TranslateVirtual<uint8_t*>(kSetPlayerPresentGuard);
+          dc3::HackGate("calib.player_present_guard",
+                        "NOP IsTrackingAllSkeletons guard in "
+                        "SkeletonChooser::SetPlayerPresent")
+              ? memory->TranslateVirtual<uint8_t*>(kSetPlayerPresentGuard)
+              : nullptr;
       if (guard_ptr) {
         uint32_t actual = xe::load_and_swap<uint32_t>(guard_ptr);
         if (actual == kExpectedInsn) {
@@ -1074,7 +1132,7 @@ void ApplyDc3LaunchHooks(const titles::TitleLaunchContext& ctx) {
       }
 
       constexpr uint32_t kChoosePlayerSides = 0x82909968;
-      with_patch_target("ChoosePlayerSides", kChoosePlayerSides, 4,
+      with_patch_target("calib.choose_player_sides", "ChoosePlayerSides", kChoosePlayerSides, 4,
                         [&](uint8_t* cps_ptr) {
                           xe::store_and_swap<uint32_t>(cps_ptr, 0x4E800020);
                           XELOGI("DC3: Calibration bypass: stubbed "
@@ -1083,7 +1141,7 @@ void ApplyDc3LaunchHooks(const titles::TitleLaunchContext& ctx) {
                         });
 
       constexpr uint32_t kSetPlayerSkeletonWarningData = 0x82907880;
-      with_patch_target("SetPlayerSkeletonWarningData",
+      with_patch_target("calib.warning_data", "SetPlayerSkeletonWarningData",
                         kSetPlayerSkeletonWarningData, 4,
                         [&](uint8_t* spw_ptr) {
                           xe::store_and_swap<uint32_t>(spw_ptr, 0x4E800020);
@@ -1095,7 +1153,10 @@ void ApplyDc3LaunchHooks(const titles::TitleLaunchContext& ctx) {
       constexpr uint32_t kSetPlayerSkeletonNavData = 0x82909340;
       constexpr uint32_t kSetPlayerPresent = 0x82908320;
       auto* nav_ptr =
-          memory->TranslateVirtual<uint8_t*>(kSetPlayerSkeletonNavData);
+          dc3::HackGate("calib.nav_data",
+                        "SetPlayerSkeletonNavData -> 2x SetPlayerPresent")
+              ? memory->TranslateVirtual<uint8_t*>(kSetPlayerSkeletonNavData)
+              : nullptr;
       if (nav_ptr) {
         auto* heap = memory->LookupHeap(kSetPlayerSkeletonNavData);
         if (heap) {
@@ -1125,7 +1186,7 @@ void ApplyDc3LaunchHooks(const titles::TitleLaunchContext& ctx) {
       }
 
       constexpr uint32_t kShouldWaitForRecovery = 0x82904CD0;
-      with_patch_target("ShouldWaitForRecovery", kShouldWaitForRecovery, 8,
+      with_patch_target("calib.wait_recovery", "ShouldWaitForRecovery", kShouldWaitForRecovery, 8,
                         [&](uint8_t* swr_ptr) {
                           xe::store_and_swap<uint32_t>(swr_ptr + 0, 0x38600000);
                           xe::store_and_swap<uint32_t>(swr_ptr + 4, 0x4E800020);
@@ -1135,7 +1196,7 @@ void ApplyDc3LaunchHooks(const titles::TitleLaunchContext& ctx) {
                         });
 
       constexpr uint32_t kExitControllerMode = 0x82902748;
-      with_patch_target("ExitControllerMode", kExitControllerMode, 4,
+      with_patch_target("calib.exit_controller_mode", "ExitControllerMode", kExitControllerMode, 4,
                         [&](uint8_t* ecm_ptr) {
                           xe::store_and_swap<uint32_t>(ecm_ptr, 0x4E800020);
                           XELOGI("DC3: Controller bypass: stubbed "
@@ -1158,7 +1219,7 @@ void ApplyDc3LaunchHooks(const titles::TitleLaunchContext& ctx) {
       // produces the false skeleton loss. The player-count computation in
       // CheckForSkeletonLoss is left intact; only the pause action is removed.
       constexpr uint32_t kPauseForSkeletonLoss = 0x82866D50;
-      with_patch_target("Game::PauseForSkeletonLoss", kPauseForSkeletonLoss, 4,
+      with_patch_target("game.pause_for_skeleton_loss", "Game::PauseForSkeletonLoss", kPauseForSkeletonLoss, 4,
                         [&](uint8_t* pfsl_ptr) {
                           xe::store_and_swap<uint32_t>(pfsl_ptr, 0x4E800020);
                           XELOGI("DC3: Gameplay fix: stubbed "
@@ -1169,7 +1230,7 @@ void ApplyDc3LaunchHooks(const titles::TitleLaunchContext& ctx) {
                         });
 
       constexpr uint32_t kMoviePoll = 0x82555CB8;
-      with_patch_target("Movie::Poll", kMoviePoll, 8,
+      with_patch_target("movie.poll", "Movie::Poll", kMoviePoll, 8,
                         [&](uint8_t* mp_ptr) {
                           xe::store_and_swap<uint32_t>(mp_ptr + 0, 0x38600000);
                           xe::store_and_swap<uint32_t>(mp_ptr + 4, 0x4E800020);
@@ -1193,7 +1254,7 @@ void ApplyDc3LaunchHooks(const titles::TitleLaunchContext& ctx) {
       };
 
       constexpr uint32_t kXMAHALAlloc = 0x82E77250;
-      with_patch_target("XMAHALAllocateContexts", kXMAHALAlloc, 8,
+      with_patch_target("audio.xmahal_alloc", "XMAHALAllocateContexts", kXMAHALAlloc, 8,
                         [&](uint8_t* p) {
                           xe::store_and_swap<uint32_t>(p + 0, 0x38600000);
                           xe::store_and_swap<uint32_t>(p + 4, 0x4E800020);
@@ -1211,19 +1272,27 @@ void ApplyDc3LaunchHooks(const titles::TitleLaunchContext& ctx) {
       // through the forced-transition fallbacks, game_screen never loads).
       // Keep this title on the dummy driver unless explicitly asked for
       // --nop_audio_driver=paced.
-      if (cvars::nop_audio_driver == "auto") {
+      if (cvars::nop_audio_driver == "auto" &&
+          dc3::HackGate("audio.dummy_driver",
+                        "--nop_audio_driver auto -> dummy")) {
         cvars::nop_audio_driver = "dummy";
         XELOGI("DC3: Audio fix: --nop_audio_driver auto -> dummy (XMA HAL "
                "contexts are stubbed; the render callback must not run)");
       }
 
-      patch4(0x82867288 + 0x90, 0x48000024,
-             "HandleWait+0x90: bne 40820024 -> b 48000024");
-      patch4(0x8252B9E0 + 0x70, 0x38600001,
-             "HamAudio::IsReady+0x70: bctrl -> li r3,1");
+      if (dc3::HackGate("audio.handle_wait",
+                        "Game::HandleWait+0x90 bne -> b")) {
+        patch4(0x82867288 + 0x90, 0x48000024,
+               "HandleWait+0x90: bne 40820024 -> b 48000024");
+      }
+      if (dc3::HackGate("audio.hamaudio_ready",
+                        "HamAudio::IsReady+0x70 bctrl -> li r3,1")) {
+        patch4(0x8252B9E0 + 0x70, 0x38600001,
+               "HamAudio::IsReady+0x70: bctrl -> li r3,1");
+      }
 
       constexpr uint32_t kHamDirectorSongAnim = 0x82475578;
-      with_patch_target("HamDirector::SongAnim", kHamDirectorSongAnim, 8,
+      with_patch_target("anim.song_anim_expert", "HamDirector::SongAnim", kHamDirectorSongAnim, 8,
                         [&](uint8_t* p) {
                           // SongAnim(playerIndex): force the pre-authored EXPERT
                           // song.anim (which has baked clip keyframes) instead of
@@ -1261,6 +1330,8 @@ void ApplyDc3LaunchHooks(const titles::TitleLaunchContext& ctx) {
              ik_result.applied, ik_result.skipped, ik_result.failed);
     }
 
+    dc3::StartFailTripwire(memory, processor, ctx.kernel_state);
+
 #if XE_PLATFORM_LINUX
     // dc3-oracle: DTA evaluation channel (default off => no override, no
     // behaviour change). See src/xenia/titles/dc3/dc3_dta_channel.h.
@@ -1269,6 +1340,7 @@ void ApplyDc3LaunchHooks(const titles::TitleLaunchContext& ctx) {
                            cvars::dc3_dta_channel);
     }
 #endif  // XE_PLATFORM_LINUX
+    dc3::HackValidateDisableList();
   }
 }
 
@@ -1278,7 +1350,12 @@ void Dc3OnLaunchPath() { Dc3RuntimeTelemetryEndSession("launch_path_reset"); }
 
 void Dc3OnTerminateTitle() {
   Dc3RuntimeTelemetryEndSession("terminate_title");
+  // The tripwire thread reads guest memory; join it before the title goes.
+  titles::JoinProbeThreads();
+  hid::nop::SetScriptedInputTitleAdapter(nullptr);
 }
+
+void Dc3OnShutdown() { titles::JoinProbeThreads(); }
 
 }  // namespace
 
@@ -1288,6 +1365,7 @@ void RegisterDc3TitleHooks() {
   hooks.apply_launch_hooks = ApplyDc3LaunchHooks;
   hooks.on_launch_path = Dc3OnLaunchPath;
   hooks.on_terminate_title = Dc3OnTerminateTitle;
+  hooks.on_shutdown = Dc3OnShutdown;
   titles::RegisterTitleHooks(hooks);
 }
 
