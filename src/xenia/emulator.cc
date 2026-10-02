@@ -43,6 +43,7 @@
 #include "xenia/kernel/xbdm/xbdm_module.h"
 #include "xenia/kernel/xboxkrnl/xboxkrnl_module.h"
 #include "xenia/memory.h"
+#include "xenia/kernel/nui/nui_sdk_facade.h"
 #include "xenia/titles/title_hooks.h"
 #include "xenia/ui/imgui_dialog.h"
 #include "xenia/ui/imgui_drawer.h"
@@ -114,6 +115,7 @@ Emulator::~Emulator() {
   // Note that we delete things in the reverse order they were initialized.
 
   titles::OnShutdown();
+  kernel::nui::ShutdownNuiHle();
 
   // Give the systems time to shutdown before we delete them.
   if (graphics_system_) {
@@ -272,6 +274,7 @@ X_STATUS Emulator::TerminateTitle() {
   }
 
   titles::OnTerminateTitle();
+  kernel::nui::ShutdownNuiHle();
 
   if (processor_) {
     processor_->ClearGuestFunctionOverrides();
@@ -901,6 +904,12 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
   graphics_system_->InitializeShaderStorage(cache_root_, title_id_.value(),
                                             true);
   on_shader_storage_initialization(false);
+
+  // Kinect (NUI) HLE: title-agnostic, keyed on the XEX static-library
+  // header. Before the title hooks, so a title module's own override of the
+  // same address (none on the original DC3 layout) still wins.
+  kernel::nui::InstallNuiHle(kernel_state_.get(), processor_.get(),
+                             module.get());
 
   {
     titles::TitleLaunchContext title_ctx;
