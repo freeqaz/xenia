@@ -135,7 +135,9 @@ dword_result_t ObReferenceObjectByHandle_entry(dword_t handle,
       bool matched_var_addr =
           expected_var_addr && object_type_ptr == expected_var_addr;
       bool matched_sentinel = object_type_ptr == legacy_sentinel;
-      if (!matched_var_addr && !matched_sentinel && expected_var_addr) {
+      // Fail closed: if the export variable could not be resolved, only the
+      // legacy sentinel matches (this used to accept ANY type pointer).
+      if (!matched_var_addr && !matched_sentinel) {
         return X_STATUS_OBJECT_TYPE_MISMATCH;
       }
       // One line per (type, form) pair, not per call.
