@@ -22,6 +22,7 @@
 #include "xenia/emulator.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/titles/dc3/dc3_title.h"
+#include "xenia/titles/rb3/rb3_title.h"
 #include "xenia/vfs/devices/host_path_device.h"
 
 // Headless backends
@@ -186,7 +187,9 @@ static int HeadlessMain(const std::vector<std::string>& args) {
   XELOGI("Cache root: {}", xe::path_to_utf8(cache_root));
 
   // Per-title hooks (src/xenia/titles/). Only this binary registers them;
-  // the windowed xenia-app runs every title without them.
+  // the windowed xenia-app runs every title without them. RB3 first: it is the
+  // order the blocks ran in when they were inline in emulator.cc.
+  RegisterRb3TitleHooks();
   RegisterDc3TitleHooks();
 
   // Create emulator instance
