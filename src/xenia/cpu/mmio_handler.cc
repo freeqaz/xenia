@@ -36,23 +36,35 @@ UPDATE_from_bool(soft_fault_unmapped_reads, 2026, 10, 2, 12, true);
 namespace xe {
 namespace cpu {
 
-// RB3DX OOM investigation (--rb3dx_alloc_probe): one-shot attribution of
-// which recovery branch services faults on guest EAs above every heap top
-// (>= 0xFFD00000, e.g. the MemHeap::Alloc post-OOM store to 0xFFFFFFFC).
-// The cvar is DEFINEd in emulator.cc; src/xenia/cpu must not read it, so the
-// launch path pushes its value in via MMIOHandler::SetAllocProbeEnabled().
-static std::atomic<bool> rb3dx_alloc_probe_enabled{false};
-static std::atomic<int> rb3dx_tophole_logs{0};
-static void Rb3dxTopHoleLog(uint32_t guest_ea, bool is_write,
-                            const char* branch, int detail) {
-  if (!rb3dx_alloc_probe_enabled.load(std::memory_order_relaxed)) return;
-  if (rb3dx_tophole_logs.fetch_add(1, std::memory_order_relaxed) >= 8) return;
+// Diagnostic fault observer (title hooks install one; see SetFaultObserver).
+static std::atomic<MMIOHandler::FaultObserver> fault_observer_{nullptr};
+
+static void NotifyFaultObserver(uint32_t guest_ea, bool is_write,
+                                const char* branch, int detail) {
+  if (auto observer = fault_observer_.load(std::memory_order_relaxed)) {
+    observer(guest_ea, is_write, branch, detail);
+  }
+}
+
+void MMIOHandler::SetFaultObserver(FaultObserver observer) {
+  fault_observer_.store(observer, std::memory_order_relaxed);
+}
+
+// DEPRECATED compatibility shim for titles/rb3 (--rb3dx_alloc_probe), which
+// still calls SetAllocProbeEnabled. It installs the old top-of-address-space
+// logger as a fault observer; the logger belongs in titles/rb3 and this shim
+// goes once that module calls SetFaultObserver itself.
+static std::atomic<int> alloc_probe_logs_{0};
+static void AllocProbeTopHoleObserver(uint32_t guest_ea, bool is_write,
+                                      const char* branch, int detail) {
+  if (guest_ea < 0xFFD00000u) return;
+  if (alloc_probe_logs_.fetch_add(1, std::memory_order_relaxed) >= 8) return;
   XELOGE("RB3DX TOPHOLE: guest EA {:08X} is_write={} branch={} detail={}",
          guest_ea, is_write, branch, detail);
 }
 
 void MMIOHandler::SetAllocProbeEnabled(bool enabled) {
-  rb3dx_alloc_probe_enabled.store(enabled, std::memory_order_relaxed);
+  SetFaultObserver(enabled ? &AllocProbeTopHoleObserver : nullptr);
 }
 
 // Guest virtual range registered by the launch path in which a write fault on
@@ -547,16 +559,13 @@ bool MMIOHandler::ExceptionCallback(Exception* ex) {
         cur_access != memory::PageAccess::kNoAccess &&
         (!is_write || cur_access != memory::PageAccess::kReadOnly)) {
       // Another thread has cleared this watch. Abort.
-      if (fault_guest_virtual_address >= 0xFFD00000u) {
-        Rb3dxTopHoleLog(fault_guest_virtual_address, is_write,
-                        "watch-cleared-abort", int(cur_access));
-      }
+      NotifyFaultObserver(fault_guest_virtual_address, is_write,
+                          "watch-cleared-abort", int(cur_access));
       return true;
     }
-    if (fault_guest_virtual_address >= 0xFFD00000u) {
-      Rb3dxTopHoleLog(fault_guest_virtual_address, is_write,
-                      "past-protect-check", protect_ok ? int(cur_access) : -1);
-    }
+    NotifyFaultObserver(fault_guest_virtual_address, is_write,
+                        "past-protect-check",
+                        protect_ok ? int(cur_access) : -1);
     // The address is not found within any range, so either a write watch or an
     // actual access violation.
     if (access_violation_callback_) {
@@ -675,18 +684,15 @@ bool MMIOHandler::ExceptionCallback(Exception* ex) {
           }
 #endif
           ex->set_resume_pc(rip + decoded_load_store.length);
-          if (fault_guest_virtual_address >= 0xFFD00000u) {
-            Rb3dxTopHoleLog(fault_guest_virtual_address, is_write,
-                            "read-soft-fault", int(decoded_load_store.length));
-          }
+          NotifyFaultObserver(fault_guest_virtual_address, is_write,
+                              "read-soft-fault",
+                              int(decoded_load_store.length));
           return true;
         }
       }
     }
-    if (fault_guest_virtual_address >= 0xFFD00000u) {
-      Rb3dxTopHoleLog(fault_guest_virtual_address, is_write,
-                      "unhandled-return-false", 0);
-    }
+    NotifyFaultObserver(fault_guest_virtual_address, is_write,
+                        "unhandled-return-false", 0);
     return false;
   }
 

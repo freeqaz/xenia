@@ -80,10 +80,17 @@ class MMIOHandler {
   // Emulator::CompleteLaunch). Pass an empty range (lo >= hi) to clear.
   static void SetSoftFaultWritableRange(uint32_t guest_lo, uint32_t guest_hi);
 
-  // Arms/disarms the RB3DX top-of-address-space fault attribution logging.
-  // Set from the launch path where the rest of the --rb3dx_alloc_probe
-  // machinery is armed; the cvar itself lives in emulator.cc and must not be
-  // read from src/xenia/cpu.
+  // Diagnostic observer called with the guest address and the recovery
+  // branch taken for guest-memory faults that reach the watch/soft-fault
+  // paths. nullptr (the default) disables it. Must be async-signal tolerant:
+  // it runs inside the fault handler.
+  using FaultObserver = void (*)(uint32_t guest_ea, bool is_write,
+                                 const char* branch, int detail);
+  static void SetFaultObserver(FaultObserver observer);
+
+  // DEPRECATED: installs the RB3DX top-of-address-space logger as the fault
+  // observer (--rb3dx_alloc_probe). titles/rb3 should install its own
+  // observer with SetFaultObserver; this shim then goes.
   static void SetAllocProbeEnabled(bool enabled);
 
  protected:
