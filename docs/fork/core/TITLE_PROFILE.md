@@ -26,15 +26,15 @@ without it?" (the **without** column).
 
 Scenarios are tools/fork-regress S1 (DC3 original), S3 (DC3 decomp layout),
 S4 (RB3 clean TU5) and S5 (RB3DX). "census" means the tip with the profile on.
-The S1 flow currently stalls at song_select on any build carrying the
-override-API fix (see below), so DC3 S1 evidence covers boot up to
-song_select only.
+DC3 S1 was re-measured on main abed23403 (Lane B's merge, where the original
+DC3 plays a whole song): with the trimmed profile, S1 PASSes 3/3, with
+gpState=3 at about 198 s.
 
 | cvar | upstream | fires (census) | without it | in profile |
 |---|---|---|---|---|
 | `soft_fault_unmapped_reads` | false | DC3: never. RB3 S4/S5: yes, but **from host code**: guest lr = r1 = 0, reads at a fresh thread's exact `stack_base`. That is `Rb3dxUiProbeThread`'s back-chain walk (titles/rb3, ~L1249). | RB3 all-off: early crash. DC3 S3: 627 without it. | **RB3 only**, for the fork's probe. Drop it once Lane C bounds the probe's reads. |
-| `tolerate_null_guest_calls` | false | silent when on (the fast path skips the call) | DC3 S3: assert in the decomp image's boot. RB3 S4: null `Splash::Show` dir (r3 = 0x188). RB3 S5 and DC3 S1 to song_select: no null call. | **DC3** (decomp image, K11) and **RB3** (TU5 content; see below) |
-| `io_force_synchronous_completion` | false | yes, on async reads (DC3 S1, RB3 S4/S5) | RB3 S4 and S5: PASS. DC3 S3: 627. DC3 S1: unmeasured past song_select. | **DC3 only**, pending a stable S1 A/B |
+| `tolerate_null_guest_calls` | false | silent when on (the fast path skips the call) | DC3 S3: assert in the decomp image's boot. RB3 S4: null `Splash::Show` dir (r3 = 0x188). DC3 S1: PASS without it (whole song). RB3 S5: PASS without it. | **DC3** (decomp image only, K11) and **RB3** (TU5 content; see below) |
+| `io_force_synchronous_completion` | false | yes, on async reads (DC3 S1, RB3 S4/S5) | DC3 S1 2/2 PASS (whole song, gpState=3 at 198 s); DC3 S3 627; RB3 S4/S5 PASS | dropped |
 | `xam_enum_overlapped_nomorefiles_success` | false | RB3 S5: 2 conversions; nothing elsewhere | RB3 S4/S5 PASS; DC3 S3 627 | dropped |
 | `xam_user_grant_privileges` | false | RB3 asks for privilege 252; DC3 never asks | RB3 S4/S5 PASS denied | dropped |
 | `scanner_stop_on_invalid_run` | false | no truncation (S1, S4, S5) | S3 627; S4/S5 PASS | dropped |

@@ -60,12 +60,10 @@ void ProfileSet(uint32_t title_id, const char* name, T value) {
 // runs at the upstream default.
 
 void ApplyDc3Profile(uint32_t title_id) {
-  // The decomp-layout image (S3) makes null calls during boot: a defect of
-  // the rebuilt image (unresolved /FORCE externs), not an emulator gap.
+  // Only the decomp-layout image (S3) needs it: it makes null calls during
+  // boot, a defect of the rebuilt image (unresolved /FORCE externs), not an
+  // emulator gap. The original layout plays a whole song without it.
   ProfileSet<bool>(title_id, "tolerate_null_guest_calls", true);
-  // Fires on the original layout (async reads); not yet A/B'd past
-  // song_select. Its original rationale was refuted by ac0052e5b.
-  ProfileSet<bool>(title_id, "io_force_synchronous_completion", true);
   // 4 MiB floor for the SkeletonUpdate worker, which the fork's automation
   // runs UI code on (was a hardcoded title-ID check in ExCreateThread).
   ProfileSet<uint32_t>(title_id, "min_guest_thread_stack_size",
