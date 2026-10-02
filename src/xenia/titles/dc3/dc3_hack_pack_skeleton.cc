@@ -25,27 +25,21 @@ Dc3HackApplyResult ApplyDc3SkeletonHackPack(const Dc3HackContext& ctx) {
     return result;
   }
 
-  Memory* memory = ctx.memory;
-
-  // (The PPC constant-frame stub that used to be written over
-  // NuiSkeletonGetNextFrame 0x829C2790 here, and the nui.get_next_frame
-  // override that shadowed it, are gone: the Kinect HLE serves the frames.)
-
-  struct BinaryPatch {
-    const char* id;
-    uint32_t address;
-    uint32_t value;
-    const char* name;
-  };
-  BinaryPatch skel_patches[] = {
+  // Nothing is patched any more; the history stays here.
+  {
       // (RETIRED 2026-10-02, lane nui-hle) skel.wait_33ms:
       // SkeletonUpdateThread+0xA4 0x8242E74C, the INFINITE wait on
       // sNewSkeletonEvent -> 33 ms. It existed because the stubbed
       // NuiSkeletonTrackingEnable never stored the title's event, so nothing
       // ever set it. The Kinect HLE stores it and sets it once per depth
       // frame at 30 Hz, as the SDK does (docs/fork/nui/NUI_DEVICE_SPEC.md).
-      {"skel.is_override_nop", 0x8242E1B0, 0x60000000,
-       "SkeletonUpdate::Update: NOP IsOverride branch"},
+      // (RETIRED 2026-10-02, lane nui-hle) skel.is_override_nop:
+      // SkeletonUpdate::Update+0x40 0x8242E1B0, `bne` on mIsCameraOverride
+      // -> nop, so SkeletonFrame::Create always ran. mIsCameraOverride is
+      // CameraInput::IsOverride() of the camera input, and LiveCameraInput's
+      // is `return false` (LiveCameraInput.h): the branch is never taken on
+      // a title with a live camera, so the nop changed nothing once
+      // GetNextFrame serves frames.
       // (REMOVED 2026-10-02) Debug::Fail thread-fail spin -> return
       // (0x825CE2DC <- b +0x90). It made a failing worker return instead of
       // parking in the devkit "wait for debugger" spin, but skipped
@@ -75,28 +69,8 @@ Dc3HackApplyResult ApplyDc3SkeletonHackPack(const Dc3HackContext& ctx) {
       // freeze). Fix = remove this stub + branch the SongAnim redirect to the real
       // entry 0x82473e58. SongAnimByDifficulty now runs `return mSongAnims[diff]`
       // on the healthy map -> a REAL expert anim with clip keyframes (animating).
-  };
-  for (const auto& p : skel_patches) {
-    if (!dc3::HackGate(p.id, p.name)) {
-      result.skipped++;
-      continue;
-    }
-    auto* h = memory->LookupHeap(p.address);
-    if (!h) {
-      result.failed++;
-      continue;
-    }
-    h->Protect(p.address, 4, kMemoryProtectRead | kMemoryProtectWrite);
-    auto* m = memory->TranslateVirtual<uint8_t*>(p.address);
-    if (!m) {
-      result.failed++;
-      continue;
-    }
-    xe::store_and_swap<uint32_t>(m, p.value);
-    XELOGI("  Patched {:08X}: {}", p.address, p.name);
-    result.applied++;
   }
-
+  result.skipped++;
 
   // (RETIRED 2026-10-02) BinkMovieImpl::Ready -> 1, MoviePanel::IsLoaded -> 1
   // and the host-gated UIManager::GotoFirstScreen override. The two virtual

@@ -47,8 +47,6 @@ constexpr const char* kKnownIds[] = {
     "calib.wait_recovery",
     "calib.exit_controller_mode",
     "game.pause_for_skeleton_loss",
-    // dc3_hack_pack_skeleton.cc
-    "skel.is_override_nop",
     // Runtime, the probe thread (dc3_fail_tripwire.cc).
     "seq.controller_mode",
     // Runtime, scripted-input adapter (dc3_scripted_input.cc); only with

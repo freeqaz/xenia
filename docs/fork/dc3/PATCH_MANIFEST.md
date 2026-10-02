@@ -40,8 +40,7 @@ tools/fork-regress/compare.py --paired out/cand out/ctrl
 
 | id | guest site | change | masks | status |
 |---|---|---|---|---|
-| `nui.<Function>` (56 functions + `CXbcImpl::Initialize/DoWork/SendJSON`) | NUI SDK / XBC, statically linked (table in `dc3_title.cc`) | override: return 0 (44) or -1 (12) | O1, O15-O17: no Kinect device; SmartGlass init | kept (title requirement until a NUI HLE exists) |
-| `nui.get_next_frame` | `NuiSkeletonGetNextFrame` 0x829C2790 | override: the constant-pose fake skeleton frame (`dc3_nui_sequencer.cc`), and `mInControllerMode` | O2, O6 | kept |
+| `xbc.CXbcImpl::Initialize`, `xbc.CXbcImpl::DoWork`, `xbc.CXbcImpl::SendJSON` | XBC (SmartGlass), statically linked, 0x82606078 / 0x82605960 / 0x82605DF8 | override: return 0 | O15-O17: SmartGlass init (not Kinect; were `nui.CXbcImpl::*`) | kept (XAM LRC lane) |
 | `mmio.soft_fault_range` | 0x83320000-0x836C0000 | MMIO write soft-fault range | O48: decomp `.data`, **outside the original image** | kept: inert on the original, decomp-only |
 | `content.wipe` | host FS | `remove_all(<content>/373307D9)` | O47 | **default off** (`--dc3_clean_content_cache=false`) |
 | `saveload.activate` | `SaveLoadManager::Activate` 0x82894A10 | `blr` | O37 | kept (L6, content/XAM) |
@@ -51,12 +50,13 @@ tools/fork-regress/compare.py --paired out/cand out/ctrl
 
 ## `dc3_hack_pack_skeleton.cc` (with `--fake_kinect_data`)
 
-| id | guest site | change | masks | status |
-|---|---|---|---|---|
-| `skel.wait_33ms` | `SkeletonUpdateThread`+0xA4 0x8242E74C | INFINITE wait -> 33 ms | O4 | kept (NUI) |
-| `skel.is_override_nop` | `SkeletonUpdate::Update`+0x40 0x8242E1B0 | `nop` | O5 | kept (NUI) |
+The Kinect itself is no longer a DC3 hack: the title-agnostic NUI HLE
+(`src/xenia/kernel/nui/`, `docs/fork/nui/`) emulates the statically linked
+SDK. `--fake_kinect_data` now only selects its constant pose source.
+This file applies nothing any more (`skel.wait_33ms` and
+`skel.is_override_nop` are in "Retired in lane NUI-HLE").
 
-These were removed:
+These were removed earlier:
 
 | what | id | removed |
 |---|---|---|
@@ -67,7 +67,7 @@ These were removed:
 
 | id | where | what | masks | status |
 |---|---|---|---|---|
-| `seq.controller_mode` | NUI callback (worker) | `TheGestureMgr`+0x426D := 1 each frame | O6 | kept (NUI) |
+| `seq.controller_mode` | probe thread, every 100 ms (was the NUI sequencer callback) | `TheGestureMgr`+0x426D := 1 | O6 | kept (NUI, phase 2) |
 | `input.attract_press` | pad poll | press A every 3 s while attract blocks `wait_screen title_screen` | O45: the attract movie plays for real (Bink is real since lane B), and the shared flow has no attract step because the native port's movie fails to open | `--dc3_headless_autonav` only; the one host input left. It takes attract -> autosave_warning -> title through the game's own handlers |
 
 These were removed:
@@ -134,6 +134,9 @@ known-id table.
 
 | id | site | why it existed | evidence it is gone for good |
 |---|---|---|---|
+| `nui.<Function>` (55), `nui.get_next_frame` | the NUI SDK table in `dc3_title.cc` (`li r3,0\|-1; blr` by DC3 address) and `dc3_nui_sequencer.cc` | O1, O2: no Kinect device | the kernel NUI HLE resolves the same 56 entries by SDK version (`NUI HLE: NUI 2.0.21173 resolved 56/56`, symbol map 56/56 agree) and serves 0xAB0 frames from a 30 Hz frame clock. S1 x5 against main (BASELINE.md, "Lane NUI-HLE") |
+| `skel.wait_33ms` | `SkeletonUpdateThread`+0xA4 0x8242E74C, INFINITE -> 33 ms | O4: the stubbed `NuiSkeletonTrackingEnable` never stored the title's event | the HLE stores the event and sets it per depth frame; the frame clock log shows events ~= frames served. Same S1 x5 |
+| `skel.is_override_nop` | `SkeletonUpdate::Update`+0x40 0x8242E1B0, `bne` on `mIsCameraOverride` -> `nop` | O5 | inert by construction: `mIsCameraOverride = mCameraInput->IsOverride()` and `LiveCameraInput::IsOverride()` is `return false`. S1 x5 against main with the code deleted (BASELINE.md) |
 | `content.refresh_done` | `ContentMgr::RefreshDone` 0x825FEB48 -> `li r3,1; blr` | O36: "content discovery never completes" (XAM cross-title enumeration) | core-d2 `d056ec7c8`: S1 PASS with `--dc3_disable_hacks=content.refresh_done` on main `1f309687c` and on core-d2 (whole song, gpState=3 at 198-204 s). The chain is implemented: `XContentCreateCrossTitleEnumerator` -> `XamGetPrivateEnumStructureFromHandle` -> `XamTaskSchedule` -> `XMsgInProcessCall(0xFE, 0x2000E)` -> `XMsgCompleteIORequest`. This lane: S1 x5 with the code deleted, interleaved with main `3cf2e27c3` (BASELINE.md) |
 
 ## Status legend
