@@ -24,6 +24,7 @@
 #include "xenia/memory.h"
 #include "xenia/titles/dc3/dc3_autonav.h"
 #include "xenia/titles/dc3/dc3_hacks.h"
+#include "xenia/titles/dc3/dc3_main_thread.h"
 
 namespace xe {
 namespace dc3 {
@@ -108,8 +109,16 @@ class Dc3ScriptedInputAdapter final
                                  std::string* screen) override;
   void LogWaitStatus(Memory* memory, const std::string& wanted,
                      const std::string& screen) override;
+  bool InTransition(Memory* memory) override;
+  bool HasFrameClock() override { return frame_clock_; }
+  int64_t FrameNumber() override {
+    return static_cast<int64_t>(MainThreadFrame());
+  }
+
+  bool frame_clock_ = false;
 
  private:
+  std::string last_logged_screen_;
   void ProbeGameplayState(Memory* memory, const std::string& screen);
 
   // Read-only gameplay probe.
@@ -156,8 +165,25 @@ std::string Dc3ScriptedInputAdapter::ReadCurrentScreenName(Memory* memory) {
   return ReadGuestScreenName(memory, cur_screen, false);
 }
 
+bool Dc3ScriptedInputAdapter::InTransition(Memory* memory) {
+  // UIManager::InTransition(): mTransitionState (+0x2C) != kTransitionNone.
+  if (!IsGuestReadable(memory, kTheUI, 4)) return false;
+  uint32_t ui_addr =
+      xe::load_and_swap<uint32_t>(memory->TranslateVirtual<uint8_t*>(kTheUI));
+  if (!IsGuestReadable(memory, ui_addr, 0x50)) return false;
+  return xe::load_and_swap<uint32_t>(
+             memory->TranslateVirtual<uint8_t*>(ui_addr) + 0x2C) != 0;
+}
+
 void Dc3ScriptedInputAdapter::OnPrimaryPadPoll(Memory* memory,
                                                const std::string& screen) {
+  if (memory && !screen.empty() && screen != last_logged_screen_) {
+    // One line per screen change (harness contract: the S1 milestones of a
+    // flow that has no wait_screen for that screen).
+    last_logged_screen_ = screen;
+    XELOGI("DC3 Script: screen -> '{}' (frame {})", screen,
+           frame_clock_ ? static_cast<int64_t>(MainThreadFrame()) : -1);
+  }
   if (!memory || screen != "game_screen") {
     return;
   }
@@ -476,6 +502,22 @@ Dc3ScriptedInputAdapter g_adapter;
 
 void InstallScriptedInputAdapter() {
   hid::nop::SetScriptedInputTitleAdapter(&g_adapter);
+}
+
+namespace {
+void FrameClockTask(cpu::ThreadState*, uint64_t) {}
+}  // namespace
+
+void InstallScriptedInputFrameClock(cpu::Processor* processor,
+                                    Memory* memory) {
+  if (!hid::nop::ScreenAwareScriptLoaded()) {
+    return;
+  }
+  // The task does nothing: the hook's poll counter is the clock.
+  if (AddMainThreadTask(processor, memory, "input_frame_clock",
+                        &FrameClockTask)) {
+    g_adapter.frame_clock_ = true;
+  }
 }
 
 }  // namespace dc3

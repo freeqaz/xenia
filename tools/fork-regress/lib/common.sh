@@ -157,13 +157,16 @@ dc3_original_args() {
   local gpu="$1" timeout_ms="$2"
   local I="$CONTENT/dc3-inputs"
   xr_input xex "$CONTENT/dc3-original/debug.xex"
-  xr_input ymca "$I/xenia-ymca.txt"
+  # FR_DC3_FLOW: a different flow file (exploration only; S1's pinned flow
+  # is the default).
+  local flow="${FR_DC3_FLOW:-$I/xenia-ymca.txt}"
+  xr_input ymca "$flow"
   xr_input symbols "$I/symbols.dc3-decomp-c362ede1c.txt"
   xr_input fingerprints "$I/dc3_nui_fingerprints.xenia-a5fc2f1b6.txt"
   xr_arg "--target=$CONTENT/dc3-original/debug.xex" "--gpu=$gpu" \
          --dc3_nui_patch_layout=original --dc3_crt_skip_nui=true \
          --stub_nui_functions=true --fake_kinect_data=true \
-         "--scripted_input_file=$I/xenia-ymca.txt" \
+         "--scripted_input_file=$flow" \
          "--headless_timeout_ms=$timeout_ms"
   # The ymca flow needs the host menu automation; since titles/dc3 moved it to
   # the guest main thread it is opt-in (dc3_autonav.cc). Older binaries do not

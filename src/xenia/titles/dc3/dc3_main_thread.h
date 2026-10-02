@@ -46,6 +46,15 @@ bool AddMainThreadTask(cpu::Processor* processor, Memory* memory,
 // The guest thread id of the first poll (0 before it).
 uint32_t MainThreadId();
 
+// True once the override is installed.
+bool MainThreadHookInstalled();
+
+// Main-loop passes seen so far: the poll count before the current frame's
+// KeyboardPoll. SystemPoll runs JoypadPoll before KeyboardPoll, so during
+// frame F's JoypadPoll this reads F (0 on the first frame), which is the
+// native port's per-JoypadPoll frame counter (Joypad_Native.cpp).
+uint64_t MainThreadFrame();
+
 }  // namespace dc3
 }  // namespace xe
 

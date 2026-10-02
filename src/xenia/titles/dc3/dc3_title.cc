@@ -1166,6 +1166,9 @@ void ApplyDc3LaunchHooks(const titles::TitleLaunchContext& ctx) {
     // Headless menu automation, on the guest main thread
     // (--dc3_headless_autonav, default off).
     dc3::InstallAutonav(processor, memory, ctx.kernel_state);
+    // The scripted-input player's guest frame clock (flow files use the
+    // native port's frame semantics).
+    dc3::InstallScriptedInputFrameClock(processor, memory);
 
 #if XE_PLATFORM_LINUX
     // dc3-oracle: DTA evaluation channel (default off => no override, no

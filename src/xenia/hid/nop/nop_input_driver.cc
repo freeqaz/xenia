@@ -39,8 +39,29 @@ namespace nop {
 namespace {
 
 std::atomic<ScriptedInputTitleAdapter*> s_title_adapter{nullptr};
+std::atomic<bool> s_script_loaded{false};
+
+// The native player's wait_screen timeout (Joypad_Native.cpp
+// kWaitTimeoutFrames: 30 s at 60 fps).
+constexpr int64_t kWaitTimeoutFrames = 30 * 60;
+
+// Script trigger pseudo-buttons (XInput triggers are analog, not bits).
+constexpr uint8_t kScriptLeftTrigger = 1;
+constexpr uint8_t kScriptRightTrigger = 2;
+
+uint8_t ParseTriggerName(const std::string& name) {
+  std::string upper = name;
+  for (auto& c : upper) c = static_cast<char>(toupper(c));
+  if (upper == "L2" || upper == "LT") return kScriptLeftTrigger;
+  if (upper == "R2" || upper == "RT") return kScriptRightTrigger;
+  return 0;
+}
 
 }  // namespace
+
+bool ScreenAwareScriptLoaded() {
+  return s_script_loaded.load(std::memory_order_acquire);
+}
 
 void SetScriptedInputTitleAdapter(ScriptedInputTitleAdapter* adapter) {
   s_title_adapter.store(adapter, std::memory_order_release);
@@ -76,20 +97,23 @@ static uint16_t ParseButtonName(const std::string& name) {
   for (auto& c : upper) c = static_cast<char>(toupper(c));
 
   if (upper == "NONE" || upper == "NOOP" || upper == "IDLE") return 0;
+  // The native port's names (Joypad_Native.cpp ParseButtonName), mapped to
+  // the Xbox pad: confirm = A, cancel = B, option/back/select = BACK.
   if (upper == "A" || upper == "CONFIRM") return X_INPUT_GAMEPAD_A;
-  if (upper == "B") return X_INPUT_GAMEPAD_B;
+  if (upper == "B" || upper == "CANCEL") return X_INPUT_GAMEPAD_B;
   if (upper == "X") return X_INPUT_GAMEPAD_X;
   if (upper == "Y") return X_INPUT_GAMEPAD_Y;
   if (upper == "START") return X_INPUT_GAMEPAD_START;
-  if (upper == "BACK") return X_INPUT_GAMEPAD_BACK;
+  if (upper == "BACK" || upper == "OPTION" || upper == "SELECT")
+    return X_INPUT_GAMEPAD_BACK;
   if (upper == "UP") return X_INPUT_GAMEPAD_DPAD_UP;
   if (upper == "DOWN") return X_INPUT_GAMEPAD_DPAD_DOWN;
   if (upper == "LEFT") return X_INPUT_GAMEPAD_DPAD_LEFT;
   if (upper == "RIGHT") return X_INPUT_GAMEPAD_DPAD_RIGHT;
-  if (upper == "LB") return X_INPUT_GAMEPAD_LEFT_SHOULDER;
-  if (upper == "RB") return X_INPUT_GAMEPAD_RIGHT_SHOULDER;
-  if (upper == "LS") return X_INPUT_GAMEPAD_LEFT_THUMB;
-  if (upper == "RS") return X_INPUT_GAMEPAD_RIGHT_THUMB;
+  if (upper == "LB" || upper == "L1") return X_INPUT_GAMEPAD_LEFT_SHOULDER;
+  if (upper == "RB" || upper == "R1") return X_INPUT_GAMEPAD_RIGHT_SHOULDER;
+  if (upper == "LS" || upper == "L3") return X_INPUT_GAMEPAD_LEFT_THUMB;
+  if (upper == "RS" || upper == "R3") return X_INPUT_GAMEPAD_RIGHT_THUMB;
   if (upper == "GUIDE") return X_INPUT_GAMEPAD_GUIDE;
   return 0;
 }
@@ -226,46 +250,50 @@ void NopInputDriver::LoadScriptFile(const std::string& path) {
       continue;
     }
 
-    // Parse "+<N> <button>" where N is treated as a delay value.
-    // The +N values from native scripts are frame counts at 60fps.
-    // Convert to milliseconds: N frames * 16.67ms/frame.
-    // For Xenia which runs slower, we use a larger multiplier.
-    if (line[0] == '+') {
-      size_t space = line.find(' ');
-      if (space == std::string::npos) continue;
+    // Parse "+<N> <button>" (N frames after the last satisfied wait_screen)
+    // or "<N> <button>" (absolute frame N), the native port's format. A
+    // trailing "# comment" is dropped, as in the native parser.
+    {
+      std::string body = line.substr(0, line.find('#'));
+      bool relative = !body.empty() && body[0] == '+';
+      size_t num_start = relative ? 1 : 0;
+      size_t space = body.find_first_of(" \t", num_start);
+      if (space != std::string::npos && space > num_start &&
+          std::all_of(body.begin() + num_start, body.begin() + space,
+                      [](char c) { return std::isdigit(uint8_t(c)) != 0; })) {
+        int value = std::stoi(body.substr(num_start, space - num_start));
+        std::string button_name = body.substr(space + 1);
+        size_t bstart = button_name.find_first_not_of(" \t");
+        size_t bend = button_name.find_last_not_of(" \t\r\n");
+        button_name = bstart == std::string::npos
+                          ? std::string()
+                          : button_name.substr(bstart, bend - bstart + 1);
+        std::string upper_button_name = button_name;
+        for (auto& c : upper_button_name) c = static_cast<char>(toupper(c));
 
-      int value = std::stoi(line.substr(1, space - 1));
-      std::string button_name = line.substr(space + 1);
-      // Trim
-      size_t end = button_name.find_last_not_of(" \t\r\n");
-      if (end != std::string::npos) button_name = button_name.substr(0, end + 1);
-      std::string upper_button_name = button_name;
-      for (auto& c : upper_button_name) c = static_cast<char>(toupper(c));
-
-      // Convert frame-count-style values to milliseconds.
-      // Native port at 60fps: +30 = 500ms. Xenia runs slower, so
-      // use a generous multiplier: N * 50ms (allows for ~20fps effective).
-      int delay_ms = value * 50;
-
-      uint16_t buttons = ParseButtonName(button_name);
-      bool is_idle_hold = upper_button_name == "NONE" ||
-                          upper_button_name == "NOOP" ||
-                          upper_button_name == "IDLE";
-      if (buttons || is_idle_hold) {
-        ScriptDirective dir;
-        dir.type = ScriptDirective::kDelayedPress;
-        dir.delay_ms = delay_ms;
-        dir.buttons = buttons;
-        script_directives_.push_back(dir);
-        if (buttons) {
-          XELOGI("Script[{}]: +{}ms {} (0x{:04X})", line_num, delay_ms,
-                 button_name, buttons);
+        uint16_t buttons = ParseButtonName(button_name);
+        uint8_t triggers = ParseTriggerName(button_name);
+        bool is_idle_hold = upper_button_name == "NONE" ||
+                            upper_button_name == "NOOP" ||
+                            upper_button_name == "IDLE";
+        if (buttons || triggers || is_idle_hold) {
+          ScriptDirective dir;
+          dir.type = ScriptDirective::kDelayedPress;
+          // Legacy (no frame clock) timing: N x 50 ms after the wait.
+          dir.delay_ms = value * 50;
+          dir.buttons = buttons;
+          dir.frame = value;
+          dir.relative = relative;
+          dir.triggers = triggers;
+          script_directives_.push_back(dir);
+          XELOGI("Script[{}]: {}{} {} (0x{:04X}{})", line_num,
+                 relative ? "+" : "@", value, button_name, buttons,
+                 is_idle_hold ? ", no press" : "");
         } else {
-          XELOGI("Script[{}]: +{}ms {} (idle hold)", line_num, delay_ms,
-                 button_name);
+          XELOGW("Script[{}]: unknown button '{}'", line_num, button_name);
         }
+        continue;
       }
-      continue;
     }
 
     XELOGW("Script[{}]: unrecognized directive: {}", line_num, line);
@@ -273,6 +301,14 @@ void NopInputDriver::LoadScriptFile(const std::string& path) {
 
   screen_aware_mode_ = !script_directives_.empty();
   scripted_mode_ = true;  // Enable controller presence
+  frame_mode_ = -1;
+  frame_waiting_ = false;
+  frame_wait_start_ = -1;
+  frame_wait_satisfied_ = -1;
+  frame_last_eval_ = -1;
+  frame_buttons_ = 0;
+  frame_triggers_ = 0;
+  s_script_loaded.store(screen_aware_mode_, std::memory_order_release);
   XELOGI("Screen-aware script loaded: {} directives from {}",
          script_directives_.size(), path);
 }
@@ -323,7 +359,18 @@ void NopInputDriver::PollTitleAdapter() {
 
 uint16_t NopInputDriver::GetScreenAwareButtons() {
   if (!screen_aware_mode_ || script_index_ >= script_directives_.size()) {
+    frame_triggers_ = 0;
     return 0;
+  }
+  auto* frame_adapter = s_title_adapter.load(std::memory_order_acquire);
+  if (frame_mode_ < 0 && frame_adapter) {
+    frame_mode_ = frame_adapter->HasFrameClock() ? 1 : 0;
+    XELOGI("Script: {} timing", frame_mode_
+                                    ? "guest frame clock (native port semantics)"
+                                    : "legacy wall-clock (+N = N x 50 ms)");
+  }
+  if (frame_mode_ == 1 && frame_adapter) {
+    return GetFrameScriptButtons(frame_adapter);
   }
 
   auto now = std::chrono::steady_clock::now();
@@ -437,6 +484,116 @@ uint16_t NopInputDriver::GetScreenAwareButtons() {
   }
 
   return active;
+}
+
+uint16_t NopInputDriver::GetFrameScriptButtons(
+    ScriptedInputTitleAdapter* adapter) {
+  int64_t frame = adapter->FrameNumber();
+  if (frame < 0) {
+    return 0;  // The clock has not ticked yet.
+  }
+  if (frame != frame_last_eval_) {
+    // Evaluate every frame since the last evaluation, as the native player
+    // does once per JoypadPoll. Frames the guest did not poll the pad in are
+    // still stepped (waits and timeouts advance); their presses are delivered
+    // on this frame instead of being lost.
+    int64_t from = frame_last_eval_ < 0 ? frame : frame_last_eval_ + 1;
+    if (frame < from) {
+      from = frame;
+    }
+    uint16_t buttons = 0;
+    uint8_t triggers = 0;
+    for (int64_t f = from; f <= frame; ++f) {
+      buttons |= StepFrameScript(adapter, f, &triggers);
+    }
+    frame_buttons_ = buttons;
+    frame_triggers_ = triggers;
+    frame_last_eval_ = frame;
+  }
+  uint16_t active = frame_buttons_;
+  if (frame_waiting_ && script_index_ < script_directives_.size()) {
+    auto& dir = script_directives_[script_index_];
+    // Title automation while a wait is pending (e.g. DC3's attract press,
+    // only with --dc3_headless_autonav).
+    active |= adapter->WhileWaitingForScreen(memory_, dir.screen_name,
+                                             &last_screen_name_);
+    auto now = std::chrono::steady_clock::now();
+    if (now - frame_last_log_ >= std::chrono::seconds(2)) {
+      frame_last_log_ = now;
+      adapter->LogWaitStatus(memory_, dir.screen_name, last_screen_name_);
+    }
+  }
+  if (script_index_ >= script_directives_.size()) {
+    XELOGI("DC3 Script: ALL DIRECTIVES COMPLETE (frame {})", frame);
+    screen_aware_mode_ = false;
+  }
+  return active;
+}
+
+uint16_t NopInputDriver::StepFrameScript(ScriptedInputTitleAdapter* adapter,
+                                         int64_t frame, uint8_t* triggers) {
+  // Joypad_Native.cpp GetScriptedButtons(currentFrame), line for line.
+  uint16_t buttons = 0;
+  while (script_index_ < script_directives_.size()) {
+    auto& d = script_directives_[script_index_];
+    if (d.type == ScriptDirective::kWaitScreen) {
+      if (!frame_waiting_) {
+        frame_waiting_ = true;
+        frame_wait_start_ = frame;
+      }
+      std::string screen = ReadCurrentScreenName();
+      if (!screen.empty()) {
+        last_screen_name_ = screen;
+      }
+      bool satisfied = !screen.empty() && !adapter->InTransition(memory_) &&
+                       screen == d.screen_name;
+      if (satisfied) {
+        frame_wait_satisfied_ = frame;
+        frame_waiting_ = false;
+        wait_satisfied_ = true;
+        XELOGI("DC3 Script: wait_screen '{}' SATISFIED (current: '{}', "
+               "frame {})",
+               d.screen_name, screen, frame);
+        ++script_index_;
+        continue;
+      }
+      if (frame - frame_wait_start_ > kWaitTimeoutFrames) {
+        XELOGW("DC3 Script: wait_screen '{}' TIMEOUT (current: '{}', {} "
+               "frames)",
+               d.screen_name, screen, frame - frame_wait_start_);
+        frame_waiting_ = false;
+        frame_wait_satisfied_ = frame;
+        ++script_index_;
+        continue;
+      }
+      break;  // Still waiting.
+    }
+    // kDelayedPress
+    int64_t target = d.relative ? (frame_wait_satisfied_ >= 0
+                                       ? frame_wait_satisfied_ + d.frame
+                                       : d.frame)
+                                : d.frame;
+    if (frame == target) {
+      buttons |= d.buttons;
+      *triggers |= d.triggers;
+      if (d.buttons || d.triggers) {
+        XELOGI("DC3 Script: pressing 0x{:04X} at frame {} (+{}, screen "
+               "'{}', directive {})",
+               d.buttons, frame, frame - frame_wait_satisfied_,
+               last_screen_name_, script_index_);
+      }
+      ++script_index_;
+      continue;
+    } else if (frame > target) {
+      XELOGW("DC3 Script: directive {} (frame {}) already passed at frame {}; "
+             "skipped",
+             script_index_, target, frame);
+      ++script_index_;
+      continue;
+    }
+    break;  // A future press.
+  }
+  return buttons;
 }
 
 X_RESULT NopInputDriver::GetCapabilities(uint32_t user_index, uint32_t flags,
@@ -608,6 +765,12 @@ X_RESULT NopInputDriver::GetState(uint32_t user_index,
   std::memset(reinterpret_cast<void*>(out_state), 0, sizeof(*out_state));
   out_state->packet_number = packet_number_++;
   out_state->gamepad.buttons = active_buttons;
+  if (user_index == 0 && frame_mode_ == 1) {
+    out_state->gamepad.left_trigger =
+        (frame_triggers_ & kScriptLeftTrigger) ? 0xFF : 0;
+    out_state->gamepad.right_trigger =
+        (frame_triggers_ & kScriptRightTrigger) ? 0xFF : 0;
+  }
 
   return X_ERROR_SUCCESS;
 }

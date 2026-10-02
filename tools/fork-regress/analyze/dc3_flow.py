@@ -7,7 +7,8 @@ Harness contracts read here (cleanup must keep them or update this file in the
 same commit): `Thread Status Report (<ms>ms)… SIGSEGV=<n>`
 (emulator_headless.cc), `DC3 FAULTS (<ms>ms): SIGSEGV=<n> XMA=<m>
 NON_XMA=<k>` (titles/dc3/dc3_fail_tripwire.cc), `DC3 Script: wait_screen '<x>'
-SATISFIED` and `gpState=` (titles/dc3/dc3_scripted_input.cc), `TIMEOUT: <ms>ms
+SATISFIED`, `DC3 Script: screen -> '<x>'` and `gpState=`
+(titles/dc3/dc3_scripted_input.cc), `TIMEOUT: <ms>ms
 reached` (headless main).
 
 Fault gate: every guest store to the XMA register aperture [0x7FEA0000,
@@ -20,12 +21,18 @@ max SIGSEGV == 0.
 import re
 from pathlib import Path
 
+def _screen(name):
+    # A flow's wait_screen, or (for a screen the flow does not wait on, e.g.
+    # game_screen in dc3-decomp's ymca.txt) the adapter's screen-change line.
+    return re.compile(rf"wait_screen '{name}' SATISFIED|DC3 Script: screen -> '{name}'")
+
+
 MILESTONES = [
-    ("title_screen", re.compile(r"wait_screen 'title_screen' SATISFIED")),
-    ("main_screen", re.compile(r"wait_screen 'main_screen' SATISFIED")),
-    ("choose_mode_screen", re.compile(r"wait_screen 'choose_mode_screen' SATISFIED")),
-    ("song_select_screen", re.compile(r"wait_screen 'song_select_screen' SATISFIED")),
-    ("game_screen", re.compile(r"wait_screen 'game_screen' SATISFIED")),
+    ("title_screen", _screen("title_screen")),
+    ("main_screen", _screen("main_screen")),
+    ("choose_mode_screen", _screen("choose_mode_screen")),
+    ("song_select_screen", _screen("song_select_screen")),
+    ("game_screen", _screen("game_screen")),
     ("first_gpstate2_playing", re.compile(r"gpState=2 .*paused=0")),
     ("first_gpstate3", re.compile(r"gpState=3")),
 ]

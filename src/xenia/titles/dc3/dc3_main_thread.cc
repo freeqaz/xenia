@@ -9,6 +9,7 @@
 #include "xenia/titles/dc3/dc3_main_thread.h"
 
 #include <atomic>
+#include <chrono>
 #include <mutex>
 #include <vector>
 
@@ -89,6 +90,17 @@ void PollExtern(cpu::ppc::PPCContext* ctx, kernel::KernelState*) {
              "connection (TAINTED)");
     }
   }
+  if (n % 1800 == 0) {
+    // The frame rate the `+N` flow offsets are measured in.
+    static auto s_last = std::chrono::steady_clock::now();
+    static uint64_t s_last_n = 0;
+    auto now = std::chrono::steady_clock::now();
+    double secs = std::chrono::duration<double>(now - s_last).count();
+    XELOGI("DC3 main-thread hook: frame {} ({:.1f} frames/s over the last {})",
+           n, secs > 0 ? (n - s_last_n) / secs : 0.0, n - s_last_n);
+    s_last = now;
+    s_last_n = n;
+  }
   if (tid != g_main_tid) {
     static std::atomic<int> warned{0};
     if (warned++ < 5) {
@@ -145,6 +157,13 @@ bool AddMainThreadTask(cpu::Processor* processor, Memory* memory,
 }
 
 uint32_t MainThreadId() { return g_main_tid.load(); }
+
+bool MainThreadHookInstalled() {
+  std::lock_guard<std::mutex> lock(g_mutex);
+  return g_installed;
+}
+
+uint64_t MainThreadFrame() { return g_polls.load(); }
 
 }  // namespace dc3
 }  // namespace xe
