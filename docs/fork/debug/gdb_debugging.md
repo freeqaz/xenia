@@ -1,5 +1,9 @@
 # DC3 Guest (PowerPC) Debugging with the Headless GDB-RSP Stub
 
+> **Note (2026-10-02).** The fork cleanup (Lane C) moves the RSP server to `src/xenia/debug/gdb_rsp/`
+> and renames `--dc3_gdb_rsp_*` to `--gdb_rsp_*`, keeping the old names as deprecated aliases for a
+> release. Nothing in the server is DC3-specific; `dc3.gdbinit` is.
+
 This documents real interactive debugging of Dance Central 3's guest PowerPC
 code running under `xenia-headless` on Linux: breakpoints, pause, single-step,
 register and memory reads — over the GDB Remote Serial Protocol (RSP).

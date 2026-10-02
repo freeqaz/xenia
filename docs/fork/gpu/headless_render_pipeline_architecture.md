@@ -1,5 +1,15 @@
 # DC3 Render Pipeline Architecture — and Where to Capture a Frame
 
+> **Renamed cvars (2026-10-02, fork cleanup Lane E).** `dc3_persist_render_state`,
+> `dc3_replay_depth_disable` and `dc3_inline_render` are now `headless_persist_render_state`,
+> `headless_replay_depth_disable` and `headless_inline_render` (old names still accepted, with a
+> deprecation warning). `headless_capture_only_draws`, `headless_skip_submission_wait` and the new
+> `headless_async_pipelines` default to **false** (upstream behaviour); a capture run must pass
+> them `=true` to get the pipeline this doc describes. The `RSTAB`/`RSTAB2` replay lines need
+> `--headless_verbose_diagnostics`; `RSTAB: LOAD` and `RSTAB2: RESOLVE_DUMP` were deleted.
+> The pipeline cache now lives at `<cache_root>/shaders/vulkan/<title>.vkpipelinecache`
+> unless `--vulkan_pipeline_cache_path` is given. Branch names below are historical.
+
 Audience: an engineer who needs a clean per-frame screenshot of DC3 (`debug.xex`) running
 **headless** under Xenia/Vulkan on Linux (branch `headless-vulkan-linux`), to use as visual
 ground truth alongside CPU-side IK/skeleton telemetry.

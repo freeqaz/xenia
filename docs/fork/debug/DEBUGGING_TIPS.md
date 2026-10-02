@@ -1,5 +1,10 @@
 # DC3 Boot Debugging Tips & Strategies
 
+> **Partly historical (2026-10-02).** Written during the Feb-2026 DC3 *decomp-layout* boot campaign
+> ([archive](../archive/dc3-boot-2026-02/)). The general techniques (log triage, guest disassembly,
+> RSP debugging, fault decoding) still apply; addresses, file names (`src/xenia/dc3_hack_pack.cc` is now
+> `src/xenia/titles/dc3/decomp/dc3_hack_pack.cc`) and cvar defaults are as of then.
+
 *Compiled from sessions 10-13 (2026-02-22 to 2026-02-23)*
 
 This document captures hard-won debugging knowledge from bringing up the Dance Central 3
