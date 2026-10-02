@@ -55,19 +55,40 @@ void ProfileSet(uint32_t title_id, const char* name, T value) {
   XELOGI("TITLE-PROFILE {:08X}: {}={}", title_id, name, *var->current_value());
 }
 
-// The fork's all-title mitigations (FORK_CLEANUP_PLAN.md section 3.4), at the
-// values DC3 and RB3 were measured under. Each entry is a title requirement
-// until an A/B shows otherwise; see docs/fork/core/TITLE_PROFILE.md.
-void ApplyMitigationProfile(uint32_t title_id) {
-  ProfileSet<bool>(title_id, "soft_fault_unmapped_reads", true);
+// Only the mitigations each title was measured to need (FORK_CLEANUP_PLAN.md
+// section 3.4; evidence in docs/fork/core/TITLE_PROFILE.md). Everything else
+// runs at the upstream default.
+
+void ApplyDc3Profile(uint32_t title_id) {
+  // The decomp-layout image (S3) makes null calls during boot: a defect of
+  // the rebuilt image (unresolved /FORCE externs), not an emulator gap.
   ProfileSet<bool>(title_id, "tolerate_null_guest_calls", true);
-  ProfileSet<bool>(title_id, "scanner_stop_on_invalid_run", true);
+  // Fires on the original layout (async reads); not yet A/B'd past
+  // song_select. Its original rationale was refuted by ac0052e5b.
   ProfileSet<bool>(title_id, "io_force_synchronous_completion", true);
+  // 4 MiB floor for the SkeletonUpdate worker, which the fork's automation
+  // runs UI code on (was a hardcoded title-ID check in ExCreateThread).
+  ProfileSet<uint32_t>(title_id, "min_guest_thread_stack_size",
+                       4u * 1024u * 1024u);
+  // Kinect title: report the sensor connected.
+  ProfileSet<bool>(title_id, "nui_device_present", true);
+}
+
+void ApplyRb3Profile(uint32_t title_id) {
+  // Needed by the fork's own RB3DX UI probe, which walks guest back chains
+  // from host code and reads a fresh thread's stack_base (titles/rb3), not by
+  // the game.
+  ProfileSet<bool>(title_id, "soft_fault_unmapped_reads", true);
+  // Retail TU5 Splash::Show calls Enter() on a null RndDir: a splash milo is
+  // missing from the harness content (no TU5 update patch ark), not an
+  // emulator gap.
+  ProfileSet<bool>(title_id, "tolerate_null_guest_calls", true);
+  // RB3Enhanced.dll is loaded without running its CRT, so its .bss critical
+  // sections are never constructed. Not covered by any harness scenario.
   ProfileSet<bool>(title_id, "autoinit_critical_sections", true);
   ProfileSet<bool>(title_id, "rtl_leave_critical_section_force_release", true);
+  // Turns RB3DX's post-OOM store loop into a diagnosable exit.
   ProfileSet<uint64_t>(title_id, "fault_spin_limit", 4096);
-  ProfileSet<bool>(title_id, "xam_enum_overlapped_nomorefiles_success", true);
-  ProfileSet<bool>(title_id, "xam_user_grant_privileges", true);
 }
 
 }  // namespace
@@ -79,17 +100,10 @@ void ApplyTitleProfile(const TitleLaunchContext& ctx) {
   const uint32_t title_id = ctx.title_id.value();
   switch (title_id) {
     case kTitleDc3:
-      ApplyMitigationProfile(title_id);
-      // 4 MiB floor for the SkeletonUpdate worker (was a hardcoded title-ID
-      // check in ExCreateThread).
-      ProfileSet<uint32_t>(title_id, "min_guest_thread_stack_size",
-                           4u * 1024u * 1024u);
-      // Kinect title: report the sensor connected (the fork has done this for
-      // every title since the DC3 bring-up).
-      ProfileSet<bool>(title_id, "nui_device_present", true);
+      ApplyDc3Profile(title_id);
       break;
     case kTitleRb3:
-      ApplyMitigationProfile(title_id);
+      ApplyRb3Profile(title_id);
       break;
     default:
       break;
