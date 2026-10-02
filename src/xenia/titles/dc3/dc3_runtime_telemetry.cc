@@ -1,4 +1,4 @@
-#include "xenia/dc3_runtime_telemetry.h"
+#include "xenia/titles/dc3/dc3_runtime_telemetry.h"
 
 #include <algorithm>
 #include <atomic>

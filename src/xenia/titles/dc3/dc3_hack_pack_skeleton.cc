@@ -1,4 +1,4 @@
-#include "xenia/dc3_hack_pack.h"
+#include "xenia/titles/dc3/dc3_hack_pack.h"
 
 #include <cstring>
 

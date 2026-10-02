@@ -1,4 +1,4 @@
-#include "xenia/dc3_hack_pack.h"
+#include "xenia/titles/dc3/dc3_hack_pack.h"
 
 #include <algorithm>
 #include <cmath>
@@ -9,7 +9,7 @@
 #include <set>
 #include <string>
 
-#include "config.h"
+#include "xenia/config.h"
 
 #if defined(__linux__)
 #include <cerrno>

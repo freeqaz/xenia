@@ -43,7 +43,7 @@
 #include "xenia/cpu/milo_trace.h"
 #include "xenia/cpu/processor.h"
 #include "xenia/cpu/ppc/ppc_context.h"
-#include "xenia/dc3_runtime_telemetry.h"
+#include "xenia/titles/dc3/dc3_runtime_telemetry.h"
 #include "xenia/debug/dc3_gdb_rsp_protocol.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/xboxkrnl/xboxkrnl_rtl.h"

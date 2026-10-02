@@ -48,4 +48,4 @@ project("xenia-core-headless")
     "titles/title_profile.cc",
   })
 
-include("testing")
+include("titles")
