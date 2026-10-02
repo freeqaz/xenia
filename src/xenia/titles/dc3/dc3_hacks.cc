@@ -49,7 +49,6 @@ constexpr const char* kKnownIds[] = {
     "calib.wait_recovery",
     "calib.exit_controller_mode",
     "game.pause_for_skeleton_loss",
-    "anim.song_anim_expert",
     // dc3_hack_pack_skeleton.cc
     "skel.wait_33ms",
     "skel.is_override_nop",

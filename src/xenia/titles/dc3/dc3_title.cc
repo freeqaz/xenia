@@ -1123,31 +1123,15 @@ void ApplyDc3LaunchHooks(const titles::TitleLaunchContext& ctx) {
       // them Game::HandleWait waits for HamAudio::IsReady by itself and
       // PostWaitStart unpauses the game (docs/fork/dc3/BASELINE.md).
 
-      constexpr uint32_t kHamDirectorSongAnim = 0x82475578;
-      with_patch_target("anim.song_anim_expert", "HamDirector::SongAnim", kHamDirectorSongAnim, 8,
-                        [&](uint8_t* p) {
-                          // SongAnim(playerIndex): force the pre-authored EXPERT
-                          // song.anim (which has baked clip keyframes) instead of
-                          // the routine-builder anim (empty headless — the
-                          // remixer never runs). Mirrors the #ifdef HX_NATIVE
-                          // fallback compiled out of debug.xex.
-                          //   li r4,2 (kDifficultyExpert)
-                          //   b  0x82473E58  (HamDirector::SongAnimByDifficulty)
-                          // NOTE: branch MUST target the function ENTRY 0x82473E58
-                          // (0x4BFFE8DC), NOT 0x82473E5C/+4 (0x4BFFE8E0). The +4
-                          // target landed on the SongAnimByDifficulty survival
-                          // patch's `blr`, skipping `li r3,0`, so SongAnim returned
-                          // r3 unchanged == TheHamDirector -> ClipPlayer::Init then
-                          // called GetKeys with this==HamDirector -> infinite hang.
-                          // (Survival patch now removed; SongAnimByDifficulty runs
-                          // its real `return mSongAnims[diff]` on the healthy map.)
-                          xe::store_and_swap<uint32_t>(p + 0, 0x38800002);
-                          xe::store_and_swap<uint32_t>(p + 4, 0x4BFFE8DC);
-                          XELOGI("DC3: Anim fix: patched HamDirector::SongAnim "
-                                 "at {:08X} to tail-call SongAnimByDifficulty"
-                                 "(expert)",
-                                 kHamDirectorSongAnim);
-                        });
+      // (RETIRED 2026-10-02, lane B2) anim.song_anim_expert: HamDirector::
+      // SongAnim -> li r4,2; b SongAnimByDifficulty, "the routine-builder
+      // anim is empty headless (the remixer never runs)". The remixer does
+      // run (perform.dta start_reset -> OriginalChoreoRemixer::Reset ->
+      // SelectMove -> MoveMgr::InsertMoveInSong), but InsertMoveInSong writes
+      // into TheHamDirector->SongAnim(player): with the patch on, that was the
+      // authored EXPERT song.anim, which the remix overwrote, while the
+      // routine-builder anim stayed empty. The patch sustained the symptom it
+      // was written for (docs/fork/dc3/BASELINE.md, "SongAnim").
     }
 
     // Apply IK telemetry instrumentation to the original XEX if requested.
