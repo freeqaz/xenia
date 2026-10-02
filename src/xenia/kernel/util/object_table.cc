@@ -251,6 +251,27 @@ X_STATUS ObjectTable::RemoveHandle(X_HANDLE handle) {
   return X_STATUS_SUCCESS;
 }
 
+object_ref<XObject> ObjectTable::LookupObjectByGuestPointer(
+    uint32_t guest_ptr) {
+  if (!guest_ptr) {
+    return nullptr;
+  }
+  auto lock = global_critical_region_.Acquire();
+  for (uint32_t slot = 0; slot < table_capacity_; slot++) {
+    auto& entry = table_[slot];
+    // Only objects that own their guest memory: a native wrapper is just a
+    // view of a guest-initialized header, and once that memory is
+    // re-initialized (a freed and reallocated critical section) the old
+    // wrapper's state is stale -- the next first use must wrap afresh.
+    if (entry.object && !entry.object->is_native_wrapper() &&
+        entry.object->guest_object() == guest_ptr) {
+      entry.object->Retain();
+      return object_ref<XObject>(entry.object);
+    }
+  }
+  return nullptr;
+}
+
 std::vector<object_ref<XObject>> ObjectTable::GetAllObjects() {
   auto lock = global_critical_region_.Acquire();
   std::vector<object_ref<XObject>> results;

@@ -78,6 +78,11 @@ class ObjectTable {
   }
 
   std::vector<object_ref<XObject>> GetAllObjects();
+
+  // The live object (not a native wrapper) whose guest_object() is
+  // `guest_ptr`, if any. A linear scan: for the rare first-use path of
+  // XObject::GetNativeObject, not for hot paths.
+  object_ref<XObject> LookupObjectByGuestPointer(uint32_t guest_ptr);
   void PurgeAllObjects();  // Purges the object table of all guest objects
 
  private:
