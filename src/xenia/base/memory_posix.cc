@@ -14,9 +14,9 @@
 #include <sys/mman.h>
 #include <sys/syscall.h>
 #include <unistd.h>
-#include <cinttypes>
+#include <cerrno>
 #include <cstddef>
-#include <cstdio>
+#include <cstring>
 
 #include "xenia/base/math.h"
 #include "xenia/base/platform.h"
@@ -140,43 +140,111 @@ bool Protect(void* base_address, size_t length, PageAccess access,
   return mprotect(base_address, length, prot) == 0;
 }
 
-bool QueryProtect(void* base_address, size_t& length, PageAccess& access_out) {
-  // Parse /proc/self/maps to find the mapping containing base_address.
-  FILE* fp = fopen("/proc/self/maps", "r");
-  if (!fp) {
+namespace {
+// Minimal /proc/self/maps reader for QueryProtect. QueryProtect runs inside
+// the SIGSEGV handler (MMIOHandler::ExceptionCallback), so it sticks to
+// open/read/close, which are async-signal-safe -- no stdio, no sscanf, no
+// allocation.
+bool ParseHex(const char*& p, const char* end, uintptr_t& out) {
+  uintptr_t value = 0;
+  const char* start = p;
+  for (; p < end; ++p) {
+    char c = *p;
+    uint32_t digit;
+    if (c >= '0' && c <= '9') {
+      digit = uint32_t(c - '0');
+    } else if (c >= 'a' && c <= 'f') {
+      digit = uint32_t(c - 'a' + 10);
+    } else if (c >= 'A' && c <= 'F') {
+      digit = uint32_t(c - 'A' + 10);
+    } else {
+      break;
+    }
+    value = (value << 4) | digit;
+  }
+  out = value;
+  return p != start;
+}
+
+// Parses one "start-end perms ..." line. Returns false if malformed.
+bool ParseMapsLine(const char* p, const char* end, uintptr_t& start_out,
+                   uintptr_t& end_out, PageAccess& access_out) {
+  if (!ParseHex(p, end, start_out) || p >= end || *p++ != '-' ||
+      !ParseHex(p, end, end_out) || p >= end || *p++ != ' ' || end - p < 3) {
     return false;
   }
+  bool readable = p[0] == 'r';
+  bool writable = p[1] == 'w';
+  bool executable = p[2] == 'x';
+  if (executable && writable) {
+    access_out = PageAccess::kExecuteReadWrite;
+  } else if (executable && readable) {
+    access_out = PageAccess::kExecuteReadOnly;
+  } else if (writable) {
+    access_out = PageAccess::kReadWrite;
+  } else if (readable) {
+    access_out = PageAccess::kReadOnly;
+  } else {
+    access_out = PageAccess::kNoAccess;
+  }
+  return true;
+}
+}  // namespace
 
-  uintptr_t addr = reinterpret_cast<uintptr_t>(base_address);
-  char line[512];
-  while (fgets(line, sizeof(line), fp)) {
-    uintptr_t start, end;
-    char perms[5];
-    if (sscanf(line, "%" PRIxPTR "-%" PRIxPTR " %4s", &start, &end, perms) ==
-        3) {
-      if (addr >= start && addr < end) {
-        fclose(fp);
-        length = end - start;
-        bool readable = (perms[0] == 'r');
-        bool writable = (perms[1] == 'w');
-        bool executable = (perms[2] == 'x');
-        if (executable && writable) {
-          access_out = PageAccess::kExecuteReadWrite;
-        } else if (executable && readable) {
-          access_out = PageAccess::kExecuteReadOnly;
-        } else if (writable) {
-          access_out = PageAccess::kReadWrite;
-        } else if (readable) {
-          access_out = PageAccess::kReadOnly;
-        } else {
-          access_out = PageAccess::kNoAccess;
+bool QueryProtect(void* base_address, size_t& length, PageAccess& access_out) {
+  int fd = open("/proc/self/maps", O_RDONLY | O_CLOEXEC);
+  if (fd < 0) {
+    return false;
+  }
+  const uintptr_t addr = reinterpret_cast<uintptr_t>(base_address);
+  // Lines are short (well under 512 bytes up to the permissions field, which
+  // is all that is parsed); a longer line is consumed and its tail skipped.
+  char buffer[4096];
+  size_t filled = 0;
+  bool found = false;
+  bool eof = false;
+  while (!found) {
+    if (!eof && filled < sizeof(buffer)) {
+      ssize_t n = read(fd, buffer + filled, sizeof(buffer) - filled);
+      if (n < 0) {
+        if (errno == EINTR) {
+          continue;
         }
-        return true;
+        break;
+      }
+      if (n == 0) {
+        eof = true;
+      }
+      filled += size_t(n);
+    }
+    char* line_end = static_cast<char*>(std::memchr(buffer, '\n', filled));
+    if (!line_end) {
+      if (eof || filled == sizeof(buffer)) {
+        // Last line without a newline, or an over-long line: parse what we
+        // have, then stop (EOF) or drop it and continue.
+        line_end = buffer + filled;
+      } else {
+        continue;
       }
     }
+    uintptr_t start, end;
+    PageAccess access;
+    if (ParseMapsLine(buffer, line_end, start, end, access) && addr >= start &&
+        addr < end) {
+      length = end - start;
+      access_out = access;
+      found = true;
+      break;
+    }
+    size_t consumed = size_t(line_end - buffer) + (line_end < buffer + filled);
+    std::memmove(buffer, buffer + consumed, filled - consumed);
+    filled -= consumed;
+    if (eof && filled == 0) {
+      break;
+    }
   }
-  fclose(fp);
-  return false;
+  close(fd);
+  return found;
 }
 
 FileMappingHandle CreateFileMappingHandle(const std::filesystem::path& path,
@@ -208,8 +276,8 @@ FileMappingHandle CreateFileMappingHandle(const std::filesystem::path& path,
   // Use memfd_create for anonymous file-backed memory. This avoids /dev/shm
   // which can fail with SIGBUS on some systems (e.g., tmpfs with usrquota on
   // Linux 6.18+). Fall back to shm_open if memfd_create is not available.
-  int ret = static_cast<int>(
-      syscall(SYS_memfd_create, path.c_str(), 0));
+  int ret =
+      static_cast<int>(syscall(SYS_memfd_create, path.c_str(), MFD_CLOEXEC));
   if (ret >= 0) {
     if (ftruncate64(ret, length) != 0) {
       close(ret);
@@ -264,9 +332,18 @@ void CloseFileMappingHandle(FileMappingHandle handle,
 void* MapFileView(FileMappingHandle handle, void* base_address, size_t length,
                   PageAccess access, size_t file_offset) {
   uint32_t prot = ToPosixProtectFlags(access);
-  void* result = mmap64(base_address, length, prot, MAP_SHARED | MAP_FIXED,
-                        handle, file_offset);
+  // MAP_FIXED_NOREPLACE, not MAP_FIXED: callers probe candidate bases
+  // (Memory::MapViews tries 1 << 32, 1 << 33, ...) and must get a failure
+  // when the range is already in use, not silently replace whatever the host
+  // process had mapped there. Kernels before 4.17 treat the flag as a hint
+  // and may return another address; that is a failure here too.
+  int flags = MAP_SHARED | (base_address ? MAP_FIXED_NOREPLACE : 0);
+  void* result = mmap64(base_address, length, prot, flags, handle, file_offset);
   if (result == MAP_FAILED) {
+    return nullptr;
+  }
+  if (base_address && result != base_address) {
+    munmap(result, length);
     return nullptr;
   }
   return result;

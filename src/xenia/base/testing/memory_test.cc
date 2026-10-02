@@ -16,6 +16,10 @@
 
 #include <array>
 
+#if XE_PLATFORM_LINUX
+#include <sys/mman.h>
+#endif
+
 namespace xe {
 namespace base {
 namespace test {
@@ -530,6 +534,55 @@ TEST_CASE("map_view", "[virtual_memory_mapping]") {
   xe::memory::UnmapFileView(memory, reinterpret_cast<void*>(address), length);
   xe::memory::CloseFileMappingHandle(memory, path);
 }
+
+#if XE_PLATFORM_LINUX
+TEST_CASE("QueryProtect reports the host protection", "[virtual_memory]") {
+  const size_t page = xe::memory::page_size();
+  void* p = mmap(nullptr, page * 2, PROT_READ | PROT_WRITE,
+                 MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  REQUIRE(p != MAP_FAILED);
+  size_t length = 0;
+  auto access = xe::memory::PageAccess::kNoAccess;
+  REQUIRE(xe::memory::QueryProtect(p, length, access));
+  REQUIRE(access == xe::memory::PageAccess::kReadWrite);
+  REQUIRE(length >= page);
+
+  auto* second = reinterpret_cast<uint8_t*>(p) + page;
+  REQUIRE(xe::memory::Protect(second, page, xe::memory::PageAccess::kReadOnly,
+                              nullptr));
+  REQUIRE(xe::memory::QueryProtect(second, length, access));
+  REQUIRE(access == xe::memory::PageAccess::kReadOnly);
+  REQUIRE(xe::memory::Protect(second, page, xe::memory::PageAccess::kNoAccess,
+                              nullptr));
+  REQUIRE(xe::memory::QueryProtect(second, length, access));
+  REQUIRE(access == xe::memory::PageAccess::kNoAccess);
+
+  // An address nothing maps (the zero page) is not found.
+  REQUIRE_FALSE(xe::memory::QueryProtect(nullptr, length, access));
+
+  munmap(p, page * 2);
+}
+
+TEST_CASE("MapFileView refuses an occupied range", "[virtual_memory_mapping]") {
+  const size_t length = 0x10000;
+  auto path = fmt::format("xenia_test_{}", Clock::QueryHostTickCount());
+  auto mapping = xe::memory::CreateFileMappingHandle(
+      path, length, xe::memory::PageAccess::kReadWrite, true);
+  REQUIRE(mapping != xe::memory::kFileMappingHandleInvalid);
+  // Something already lives here; mapping a view on top must fail rather
+  // than replace it.
+  void* occupied = mmap(nullptr, length, PROT_READ | PROT_WRITE,
+                        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  REQUIRE(occupied != MAP_FAILED);
+  *reinterpret_cast<volatile uint32_t*>(occupied) = 0x12345678;
+  void* view = xe::memory::MapFileView(mapping, occupied, length,
+                                       xe::memory::PageAccess::kReadWrite, 0);
+  REQUIRE(view == nullptr);
+  REQUIRE(*reinterpret_cast<volatile uint32_t*>(occupied) == 0x12345678);
+  munmap(occupied, length);
+  xe::memory::CloseFileMappingHandle(mapping, path);
+}
+#endif  // XE_PLATFORM_LINUX
 
 TEST_CASE("read_write_view", "[virtual_memory_mapping]") {
   const size_t length = 0x100;
