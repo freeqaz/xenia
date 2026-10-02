@@ -648,10 +648,13 @@ uint64_t ResolveFunction(void* raw_context, uint64_t target_address) {
       // and the same outcome upstream produced. The log is asynchronous and
       // a Checked assert aborts before it drains, so name the call site on
       // stderr too.
+      // r3 is flushed to the context at a call site: for a C++ virtual call
+      // it is the object the vtable was read from.
       std::fprintf(stderr,
                    "ResolveFunction: call through a null pointer from guest "
-                   "%08X (--tolerate_null_guest_calls=false)\n",
-                   callsite_pc);
+                   "%08X, r3=%08X (--tolerate_null_guest_calls=false)\n",
+                   callsite_pc,
+                   ppc_context ? uint32_t(ppc_context->r[3]) : 0u);
       assert_not_zero(target_address);
       return 0;
     }
