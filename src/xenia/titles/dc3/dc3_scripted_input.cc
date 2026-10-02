@@ -22,6 +22,7 @@
 #include "xenia/hid/input.h"
 #include "xenia/hid/nop/nop_input_driver.h"
 #include "xenia/memory.h"
+#include "xenia/titles/dc3/dc3_autonav.h"
 #include "xenia/titles/dc3/dc3_hacks.h"
 
 namespace xe {
@@ -242,9 +243,11 @@ void Dc3ScriptedInputAdapter::OnPrimaryPadPoll(Memory* memory,
     return;
   }
 
-  static const bool kBeatDrive = HackGate(
-      "input.beat_drive",
-      "second 120 BPM TaskMgr timeline drive from the pad poll (wall clock)");
+  static const bool kBeatDrive =
+      AutonavEnabled() &&
+      HackGate("input.beat_drive",
+               "second 120 BPM TaskMgr timeline drive from the pad poll "
+               "(wall clock)");
   if (!kBeatDrive) {
     ProbeGameplayState(memory, screen);
     return;
@@ -376,7 +379,7 @@ void Dc3ScriptedInputAdapter::ProbeGameplayState(Memory* memory,
   // FIRST, then mPaused=0 LAST so the host beat-drive gate opens only after the
   // clobbers are disabled. Fires once.
   if (!unpause_nudged_ && game_addr && game_load_state == 3 &&
-      game_wait_state == 3 && game_paused &&
+      game_wait_state == 3 && game_paused && AutonavEnabled() &&
       HackGate("input.unpause_nudge",
                "Game wait=0 unkf8=0 realTime=1 paused=0 once stuck at "
                "load=3 wait=3")) {
@@ -568,6 +571,9 @@ uint16_t Dc3ScriptedInputAdapter::WhileWaitingForScreen(
     Memory* memory, const std::string& wanted, std::string* screen) {
   uint16_t active = 0;
   auto now = std::chrono::steady_clock::now();
+  if (!AutonavEnabled()) {
+    return 0;
+  }
   if (wanted == "title_screen" && *screen == "attract_screen") {
     if (attract_seen_since_ == std::chrono::steady_clock::time_point{}) {
       attract_seen_since_ = now;

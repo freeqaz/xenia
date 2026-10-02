@@ -30,7 +30,7 @@ case "$V" in
   3)
     rb3dx_args 170000
     for c in fake_kinect_data stub_nui_functions dc3_crt_skip_nui dc3_ik_telemetry \
-             dc3_gameplay_probe dc3_runtime_telemetry_enable; do
+             dc3_gameplay_probe dc3_runtime_telemetry_enable dc3_headless_autonav; do
       xr_opt "$c" true
     done
     xr_opt dc3_nui_patch_layout original

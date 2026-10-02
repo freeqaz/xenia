@@ -73,12 +73,13 @@ constexpr const char* kKnownIds[] = {
     "ui.goto_first_screen",
     // Runtime, NuiSkeletonGetNextFrame sequencer (dc3_nui_sequencer.cc).
     "seq.controller_mode",
-    "seq.transition_diag",
+    // Runtime, main-thread autonav (dc3_autonav.cc, --dc3_headless_autonav).
     "seq.transition_force",
     "seq.nav_bridge",
     "seq.loadsong_repair",
     "seq.beat_drive",
-    // Runtime, scripted-input adapter (dc3_scripted_input.cc).
+    // Runtime, scripted-input adapter (dc3_scripted_input.cc); only with
+    // --dc3_headless_autonav.
     "input.beat_drive",
     "input.unpause_nudge",
     "input.attract_press",

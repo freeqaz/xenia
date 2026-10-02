@@ -66,6 +66,7 @@
 #include "xenia/memory.h"
 #include "xenia/vfs/virtual_file_system.h"
 #include "xenia/titles/dc3/dc3_dta_channel.h"
+#include "xenia/titles/dc3/dc3_autonav.h"
 #include "xenia/titles/dc3/dc3_fail_tripwire.h"
 #include "xenia/titles/dc3/dc3_flags.h"
 #include "xenia/titles/dc3/dc3_hacks.h"
@@ -1331,6 +1332,9 @@ void ApplyDc3LaunchHooks(const titles::TitleLaunchContext& ctx) {
     }
 
     dc3::StartFailTripwire(memory, processor, ctx.kernel_state);
+    // Headless menu automation, on the guest main thread
+    // (--dc3_headless_autonav, default off).
+    dc3::InstallAutonav(processor, memory, ctx.kernel_state);
 
 #if XE_PLATFORM_LINUX
     // dc3-oracle: DTA evaluation channel (default off => no override, no

@@ -18,7 +18,6 @@ DECLARE_int32(dc3_crt_bisect_max);
 DECLARE_string(dc3_crt_skip_indices);
 DECLARE_bool(dc3_ik_telemetry);
 DECLARE_bool(dc3_game_screen_real_goto);
-DECLARE_bool(dc3_gameplay_probe);
 DECLARE_bool(dc3_null_read_cache_stream);
 DECLARE_bool(dc3_crt_skip_nui);
 DECLARE_bool(dc3_guest_overrides);

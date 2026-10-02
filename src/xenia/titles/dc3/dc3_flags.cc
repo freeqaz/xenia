@@ -28,13 +28,6 @@ DEFINE_bool(dc3_game_screen_real_goto, true,
             "once the song FileMerger merge has completed (gated on merge_busy). "
             "Set false to fall back to the old host force-set (no Game created).",
             "DC3");
-DEFINE_bool(dc3_gameplay_probe, false,
-            "DC3: enable the host-side GATE PROBE / PKPROBE gameplay diagnostics "
-            "(reads HamDirector anim state + walks mSongAnims/mPropKeys from the "
-            "NUI thread). Off by default — it executes guest helper fns each "
-            "game_screen frame, which perturbs timing. Was used to diagnose the "
-            "RndPropAnim::GetKeys wrong-receiver hang; keep for recurrence.",
-            "DC3");
 DEFINE_bool(dc3_null_read_cache_stream, false, "DC3: null read cache", "DC3");
 DEFINE_bool(dc3_crt_skip_nui, true,
             "DC3: auto-nullify NUI/Kinect SDK CRT constructors (indices "
