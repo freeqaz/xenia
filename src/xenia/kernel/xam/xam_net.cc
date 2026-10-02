@@ -374,7 +374,12 @@ dword_result_t NetDll_WSAWaitForMultipleEvents_entry(dword_t num_events,
     result = xboxkrnl::xeNtWaitForMultipleObjectsEx(
         num_events, events, wait_all, 1, alertable,
         timeout != -1 ? &timeout_wait : nullptr);
-  } while (result == X_STATUS_ALERTED);
+    // Re-issue the wait when it was interrupted by a user-mode APC. The host
+    // alertable path now delivers APCs (threading::kUserCallback ->
+    // X_STATUS_USER_APC); NT semantics are to re-enter the wait afterward.
+    // Without this, USER_APC (0xC0) is XSUCCEEDED and would fall through as a
+    // false WSA_WAIT_EVENT_0 success.
+  } while (result == X_STATUS_ALERTED || result == X_STATUS_USER_APC);
 
   if (XFAILED(result)) {
     uint32_t error = xboxkrnl::xeRtlNtStatusToDosError(result);

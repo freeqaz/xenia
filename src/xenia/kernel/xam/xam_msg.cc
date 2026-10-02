@@ -93,7 +93,11 @@ dword_result_t XMsgCancelIORequest_entry(
     auto ev =
         kernel_state()->object_table()->LookupObject<XEvent>(event_handle);
     if (ev) {
-      ev->Wait(0, 0, true, nullptr);
+      // Non-alertable: this must block until the cancel-completion event is
+      // signaled. The host alertable path now returns X_STATUS_USER_APC on a
+      // pending APC without consuming the event, so an alertable wait here
+      // could return before the cancel completes (the result is discarded).
+      ev->Wait(0, 0, false, nullptr);
     }
   }
 
