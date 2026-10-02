@@ -1,3 +1,6 @@
+> **ARCHIVED 2026-10-02 (fork cleanup).** Historical record, not current guidance: superseded by [the RB3 workstream](../../rb3/jit-fault-wiki/WORKSTREAM-rb3-on-xenia-bringup.md).
+> Paths, line numbers and cvar defaults in it are as of when it was written.
+
 # RB3 "Same Instrument" patch — headless Xenia runtime verification
 
 Date: 2026-07-07. Author: verification engineer (Opus).

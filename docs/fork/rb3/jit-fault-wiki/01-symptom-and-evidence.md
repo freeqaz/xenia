@@ -1,5 +1,12 @@
 # 01 — Symptom and Evidence
 
+> **STALE (2026-10-02 audit).** Two identifications in the table below are wrong:
+> the xex called "true retail RB3" is the RB3DX (Rock Band 3 Deluxe) build, and the
+> "same-instrument (SI) bypass" applied to `clean_tu5_nodd.xex` is the dirty-disc
+> bypass (`tools/rb3/patch/apply_dirtydisc_bypass.py`). `rb3-verify/logs/` no longer
+> exists (frame dumps and logs were purged from history). See
+> [`FORK_CLEANUP_PLAN.md` §2.7](../../cleanup/FORK_CLEANUP_PLAN.md).
+
 Raw boot-log evidence for the `0x100000000` fault family across all three
 titles. See [02-address-translation.md](02-address-translation.md) for why
 `last_fault=0x100000000` decodes to guest NULL, and
@@ -130,7 +137,7 @@ C++ `std::terminate` during shutdown/teardown — **no `crash_guest`, no
 `last_fault` (stays `0x0`)**. There is therefore **no new guest fault site to
 disassemble** (task step 4 N/A); this is a host-side teardown abort reached
 after the timeout, in the same title-teardown territory as Session 3's
-now-fixed assert chain (see [../rb3-bringup-notes.md](../rb3-bringup-notes.md)
+now-fixed assert chain (see [../rb3-bringup-notes.md](../../archive/rb3/rb3-bringup-notes.md)
 §Session 3), not a relocated instance of the NULL-deref fault.
 
 **Interpretation:** E1 **confirms** the [03](03-guest-code-analysis.md) item

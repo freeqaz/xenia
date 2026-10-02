@@ -1,3 +1,9 @@
+> **Superseded as a worklist (2026-10-02).** This is the 2026-08-25 review of
+> `frag-alloc-trace`. Its findings were re-audited and folded into
+> [`FORK_CLEANUP_PLAN.md`](FORK_CLEANUP_PLAN.md), which is the current plan; source
+> comments still cite finding IDs (C1, C4, C16, ...) from this file, so it stays.
+> Line numbers are against `ffd4828bc`.
+
 # Fork cleanup review
 
 **Date:** 2026-08-25

@@ -17,7 +17,7 @@ fixes (`fb864e3e` zero-page, `b803faab1` circuit-breaker, `e248d624c` GetInfo,
 **Cross-links:** [BRIEF-main-hub-load-stall.md](BRIEF-main-hub-load-stall.md)
 (§"Fable investigation #3" = the evidence this plan executes on) ·
 [WORKSTREAM-rb3-on-xenia-bringup.md](WORKSTREAM-rb3-on-xenia-bringup.md) ·
-[09-rb3dx-title-to-menu.md](09-rb3dx-title-to-menu.md) ·
+[09-rb3dx-title-to-menu.md](../../archive/rb3/09-rb3dx-title-to-menu.md) ·
 [CRASH-REPORT-main-hub-oom.md](CRASH-REPORT-main-hub-oom.md) · [INDEX.md](INDEX.md)
 
 ---
@@ -229,7 +229,7 @@ watch-items, cheapest evidence first:
   boot). Capture frames (`--dump_frames_path --headless_capture_interval=40`).
   **Milestone:** instrument-select screen reached headless = the acceptance
   test for this whole plan. (Same-instrument A/B is the NEXT phase, staged in
-  [09](09-rb3dx-title-to-menu.md) §L4.)
+  [09](../../archive/rb3/09-rb3dx-title-to-menu.md) §L4.)
 - [x] **T5 — DC3 non-regression (MANDATORY).** PASS — DC3-SAFE. Boot retail DC3
   (`dc3-decomp/orig/373307D9/default.xex`) headless twice (fix ON = the only
   build; compare vs pre-fix binary or `git stash`-free A/B via a second build
@@ -237,12 +237,12 @@ watch-items, cheapest evidence first:
   --dc3_runtime_telemetry_enable=true`. **Expect:** identical milestone
   sequence (session_begin → nui_patch_apply_complete →
   headless_timeout_reached), `SIGSEGV=0`, VdSwap count within jitter — same
-  matrix as the `b803faab1` verification ([09](09-rb3dx-title-to-menu.md)
+  matrix as the `b803faab1` verification ([09](../../archive/rb3/09-rb3dx-title-to-menu.md)
   §L5). DC3's enumerate consumers use the OVERLAPPED path (preserved
   bit-for-bit), so no divergence is expected; prove it anyway.
 - [x] **T6 — clean-TU5 spot check (cheap, optional).** PASS — unchanged. The sync-path
   restoration is title-global; a clean-TU5 boot
-  ([08](08-boot-to-menu.md)) should be unchanged (it self-exits on the LOLZ
+  ([08](../../archive/rb3/08-boot-to-menu.md)) should be unchanged (it self-exits on the LOLZ
   ark regardless).
 - [x] **T7 — docs + commit.** DONE (this pass). Update
   [BRIEF-main-hub-load-stall.md](BRIEF-main-hub-load-stall.md) (#3 section →
@@ -307,7 +307,7 @@ verbatim.
 | **T3** splash advance | **PASS** | UI probe `sample[22]=splash_screen → sample[23]=first_time_calibration`; the splash `Confirm→StartOvershell` gate fired on scripted `START@0`; scripted input confirmed delivered (6 events, `0x0010`=START / `0x1000`=A). |
 | **T4** main_hub + instrument-select | **PARTIAL** | Reached `splash → first_time_calibration → cal_welcome_screen → cal_audio_screen` (`sample[35]`), then STALLED ~74 s to timeout. `main_hub_screen`/`instrument_screen` appear ONLY in the maindir screen-registry dump, NEVER as `curScreen`. Input IS delivered+consumed on `cal_audio_screen` (`XamInputGetState` user=0 `0x1000` registered repeatedly during the stall) — so input is live; the interactive `cal_audio_panel` latency-calibration logic is the gate. 386 real 1280×720 P6 frames captured. |
 | **T5** DC3 non-regression | **PASS — DC3-SAFE** | Retail DC3 booted headless twice (`--fault_spin_limit` 4096 and 0). Identical milestone sequence (`session_begin → dc3_nui_patch_block_begin → dc3_nui_patch_apply_complete → headless_timeout_reached`, ~19.74 s) vs the `b803faab1` baseline. SIGSEGV plateaus at **4** in both with an IDENTICAL fault signature to baseline (pre-existing benign recovered fault, byte-identical in the `b803faab1` log — NOT a regression). FAULT LIVELOCK=0. DC3's enumerate consumers only exercise the overlapped path (import-table registration only; no sync-exhaustion signature) → fix empirically inert for DC3. |
-| **T6** clean-TU5 spot check | **PASS** | RB3 clean-TU5 nodd boot self-exits ~18015 ms via its own `App::Shutdown()` exactly as documented in [08](08-boot-to-menu.md); SIGSEGV=0; fix inert for this lane. |
+| **T6** clean-TU5 spot check | **PASS** | RB3 clean-TU5 nodd boot self-exits ~18015 ms via its own `App::Shutdown()` exactly as documented in [08](../../archive/rb3/08-boot-to-menu.md); SIGSEGV=0; fix inert for this lane. |
 
 **The new downstream gate (watch-item for the next pass):** first-boot
 `first_time_calibration → cal_audio_screen`. `cal_audio_panel` is an interactive

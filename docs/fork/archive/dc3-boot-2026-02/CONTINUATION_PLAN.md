@@ -1,3 +1,6 @@
+> **ARCHIVED 2026-10-02 (fork cleanup).** Historical record, not current guidance: the Feb-2026 DC3 decomp-layout boot campaign; current DC3 state is in [docs/fork/README.md](../../README.md).
+> Paths, line numbers and cvar defaults in it are as of when it was written.
+
 # DC3/Xenia Continuation Plan (Post-Session 37)
 
 *Last updated: 2026-02-25 (Session 37 — CRT blocker resolved)*

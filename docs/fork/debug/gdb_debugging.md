@@ -23,7 +23,7 @@ cd build && make xenia-headless config=checked_linux -j$(nproc)
 
 # 3b. Host gdb 17.2: ALWAYS set the architecture/endianness FIRST, or gdb
 #     core-dumps on connect (Xbox 360 = 64-bit big-endian PowerPC):
-gdb -ix /path/to/xenia/docs/dc3.gdbinit
+gdb -ix /path/to/xenia/docs/fork/debug/dc3.gdbinit
 #  (.gdbinit content is below)
 ```
 
@@ -93,7 +93,7 @@ file loaded (a host-gdb bug in the prologue analyzer, not a stub bug). The
 robust, fully-validated client is the Python RSP helper below. If you use gdb,
 prefer attaching to a *running* target and letting a breakpoint stop it.
 
-### docs/dc3.gdbinit
+### docs/fork/debug/dc3.gdbinit
 
 ```gdb
 set pagination off
@@ -107,7 +107,7 @@ target remote 127.0.0.1:9001
 
 ## Python RSP client (recommended)
 
-A minimal, robust client lives at `docs/dc3_rsp_client.py` (copy below). It
+A minimal, robust client lives at `docs/fork/debug/dc3_rsp_client.py` (copy below). It
 speaks RSP directly and is immune to the gdb-client crash.
 
 ```python

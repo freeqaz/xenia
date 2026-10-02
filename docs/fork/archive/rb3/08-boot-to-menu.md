@@ -1,11 +1,14 @@
+> **ARCHIVED 2026-10-02 (fork cleanup).** Historical record, not current guidance: superseded by [WORKSTREAM §8c/§8v-§8x](../../rb3/jit-fault-wiki/WORKSTREAM-rb3-on-xenia-bringup.md).
+> Paths, line numbers and cvar defaults in it are as of when it was written.
+
 # 08 — Boot to Main Menu (RB3 TU5, headless Xenia)
 
 Phase goal: get clean TU5 RB3 to a rendered, navigable `main_hub` headless, then
 drive two controllers to the same instrument and reach gameplay.
 
-Cross-links: [01 symptom & evidence](01-symptom-and-evidence.md) ·
-[03 guest-code analysis](03-guest-code-analysis.md) ·
-[06 root cause](06-root-cause.md) · [07 fix & verification](07-fix-and-verification.md)
+Cross-links: [01 symptom & evidence](../../rb3/jit-fault-wiki/01-symptom-and-evidence.md) ·
+[03 guest-code analysis](../../rb3/jit-fault-wiki/03-guest-code-analysis.md) ·
+[06 root cause](../../rb3/jit-fault-wiki/06-root-cause.md) · [07 fix & verification](../../rb3/jit-fault-wiki/07-fix-and-verification.md)
 
 ---
 

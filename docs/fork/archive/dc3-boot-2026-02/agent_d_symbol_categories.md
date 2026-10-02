@@ -1,3 +1,6 @@
+> **ARCHIVED 2026-10-02 (fork cleanup).** Historical record, not current guidance: the Feb-2026 DC3 decomp-layout boot campaign; current DC3 state is in [docs/fork/README.md](../../README.md).
+> Paths, line numbers and cvar defaults in it are as of when it was written.
+
 # Agent D: Unresolved Symbol Categorization
 
 *Generated: 2026-02-22, from `/tmp/link_full.txt` linker output*

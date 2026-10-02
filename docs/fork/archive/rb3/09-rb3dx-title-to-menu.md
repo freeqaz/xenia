@@ -1,3 +1,6 @@
+> **ARCHIVED 2026-10-02 (fork cleanup).** Historical record, not current guidance: superseded by [WORKSTREAM §8c/§8v-§8x](../../rb3/jit-fault-wiki/WORKSTREAM-rb3-on-xenia-bringup.md).
+> Paths, line numbers and cvar defaults in it are as of when it was written.
+
 # 09 — RB3 Deluxe: Title Screen to Main Hub (headless Xenia)
 
 Phase goal: RB3DX now boots on the fixed fork (`--protect_zero=false`), renders the
@@ -6,8 +9,8 @@ in a hot recovered-fault loop before `main_hub`. Get it past the title to a
 navigable menu, then drive two controllers to instrument-select.
 
 Cross-links: [08 boot-to-menu (clean TU5)](08-boot-to-menu.md) ·
-[07 fix & verification (zero-page)](07-fix-and-verification.md) ·
-[02 address translation](02-address-translation.md)
+[07 fix & verification (zero-page)](../../rb3/jit-fault-wiki/07-fix-and-verification.md) ·
+[02 address translation](../../rb3/jit-fault-wiki/02-address-translation.md)
 
 **STATUS: BLOCKED at an emulation-induced OOM race. Best screen reached = animated
 Deluxe title (post-splash); `main_hub` NOT reliably reached; instrument-select NOT

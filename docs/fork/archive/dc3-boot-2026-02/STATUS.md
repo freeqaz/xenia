@@ -1,3 +1,6 @@
+> **ARCHIVED 2026-10-02 (fork cleanup).** Historical record, not current guidance: the Feb-2026 DC3 decomp-layout boot campaign; current DC3 state is in [docs/fork/README.md](../../README.md).
+> Paths, line numbers and cvar defaults in it are as of when it was written.
+
 # Status: OODA Loop Iteration 8
 
 *Last updated: 2026-02-27 (Session 44 — main loop 175fps, 3 critical stubs identified for investigation)*

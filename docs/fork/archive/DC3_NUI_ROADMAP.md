@@ -1,3 +1,6 @@
+> **ARCHIVED 2026-10-02 (fork cleanup).** Historical record, not current guidance: current state is indexed in [docs/fork/README.md](../README.md).
+> Paths, line numbers and cvar defaults in it are as of when it was written.
+
 # DC3 (Dance Central 3) NUI Boot Roadmap
 
 ## Status: Initial Stubs Implemented

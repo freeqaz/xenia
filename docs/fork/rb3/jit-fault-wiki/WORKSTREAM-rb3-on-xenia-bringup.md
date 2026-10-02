@@ -171,7 +171,7 @@ Xenia decrypts/decompresses the compressed retail XEX natively at load (its old
 `rbdxcache` crash *was* the `0x100000000` fault, now fixed). Boot dir
 `/tmp/rb3dxboot` = RB3DX `default.xex` + symlinks to `/srv` for
 `gen`/`charnames.zbm`/`AvatarAwards`/`nxeart`. Detail in
-[08](08-boot-to-menu.md) (clean-TU5 phase) and [09](09-rb3dx-title-to-menu.md).
+[08](../../archive/rb3/08-boot-to-menu.md) (clean-TU5 phase) and [09](../../archive/rb3/09-rb3dx-title-to-menu.md).
 
 ### 4.C The title-screen OOM — host-side uninitialized memory (the deep one)
 
@@ -1371,7 +1371,7 @@ completion path, e.g. a `BlockMgr`/`AsyncTask` event or APC); or (2) DC3-style, 
 
 A direct per-tid state census settles the whole §8 saga. §8j–§8o (loader head-of-line
 stall / async-completion / EndSplasher deadlock) are **all wrong**; the behaviour is the
-**"App::Run flow-quit"** that [08-boot-to-menu.md](08-boot-to-menu.md) (§4.B) had already
+**"App::Run flow-quit"** that [08-boot-to-menu.md](../../archive/rb3/08-boot-to-menu.md) (§4.B) had already
 narrowed to — sessions 57–60 lost that conclusion and re-chased downstream symptoms.
 
 **Why the earlier sessions kept mis-reading it.** The plural `QueryThreadDebugInfos()` sweep
@@ -1815,8 +1815,8 @@ Inside this wiki (`docs/jit-fault-wiki/`):
 - [INDEX.md](INDEX.md) — wiki overview + per-phase status banners
 - [00-source-map.md](00-source-map.md) … [05-fork-divergence.md](05-fork-divergence.md) — the `0x100000000` investigation (source map, symptoms, address translation, guest disassembly, upstream/canary, fork divergence)
 - [06-root-cause.md](06-root-cause.md) / [07-fix-and-verification.md](07-fix-and-verification.md) — the guest-SEH gap root cause + the shipped zero-page fix (§4.A)
-- [08-boot-to-menu.md](08-boot-to-menu.md) — the clean-TU5 boot-to-menu phase (App::Run flow-quit; §4.B context)
-- [09-rb3dx-title-to-menu.md](09-rb3dx-title-to-menu.md) — the RB3DX title wedge / OOM (§4.C)
+- [08-boot-to-menu.md](../../archive/rb3/08-boot-to-menu.md) — the clean-TU5 boot-to-menu phase (App::Run flow-quit; §4.B context)
+- [09-rb3dx-title-to-menu.md](../../archive/rb3/09-rb3dx-title-to-menu.md) — the RB3DX title wedge / OOM (§4.C)
 - [CRASH-REPORT-main-hub-oom.md](CRASH-REPORT-main-hub-oom.md) — self-contained OOM crash report + Fable root-cause (§4.C)
 - [BRIEF-main-hub-load-stall.md](BRIEF-main-hub-load-stall.md) — the splash/main_hub stall brief + investigation + `--rb3dx_offline_join` implementation (§4.D)
 
