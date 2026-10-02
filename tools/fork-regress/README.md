@@ -110,6 +110,20 @@ this lane from integrate-2026-10 @ 6bf623353, which carries the bisect fix
 | S6 | FAIL: v1 (DC1) and v3 (RB3DX + DC3 cvars) leak the DC3 thread-6 dump; v2 clean | same | same |
 | passive | RB3 logs carry 472-528 DC3 dump lines each; DC3 logs 0 RB3 lines | DC3 logs 0 RB3 lines | as A |
 
+**FC** = `fork-cleanup-2026-10-d7e23d1a2621b7fe` (2026-10-02): the fork after
+the cleanup, tag `fork-cleanup-2026-10`. **Compare new work against this one.**
+It was recorded as an interleaved A/B against main `1f309687c`, and all 18 pairs
+were PASS/PASS:
+
+- S0 PASS;
+- S1 3/3 (title 12-15 s, game_screen 36-39 s);
+- S1V 40 frames;
+- S2 2/2;
+- S3 627 exact;
+- S4 3/3;
+- S5 3/3;
+- S6 3/3, with **no** leaking pattern in any variant. The thread-6 dump that A, C5 and I carry is gone.
+
 Which song the RB3 autopilot lands on varies run to run (tv3_a..e, 11-15
 channels), so the song is a watched measurement, not a criterion. Three of
 ~16 RB3 runs (A S5 seeded, A S6 v3, I S4 under load) aborted with the Checked
