@@ -54,12 +54,9 @@ constexpr const char* kKnownIds[] = {
     "skel.is_override_nop",
     // Runtime, NuiSkeletonGetNextFrame sequencer (dc3_nui_sequencer.cc).
     "seq.controller_mode",
-    // Runtime, main-thread autonav (dc3_autonav.cc, --dc3_headless_autonav).
-    "seq.nav_bridge",
     // Runtime, scripted-input adapter (dc3_scripted_input.cc); only with
     // --dc3_headless_autonav.
     "input.attract_press",
-    "input.attract_force",
 };
 
 struct DisableList {

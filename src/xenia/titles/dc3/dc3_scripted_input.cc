@@ -140,8 +140,6 @@ class Dc3ScriptedInputAdapter final
   std::chrono::steady_clock::time_point stuck_transition_start_;
   std::chrono::steady_clock::time_point attract_seen_since_;
   std::chrono::steady_clock::time_point last_attract_press_;
-  uint32_t title_screen_addr_ = 0;
-  int attract_force_gate_ = -1;
 };
 
 std::string Dc3ScriptedInputAdapter::ReadCurrentScreenName(Memory* memory) {
@@ -459,58 +457,10 @@ uint16_t Dc3ScriptedInputAdapter::WhileWaitingForScreen(
                "for title_screen");
       }
     }
-    if (memory && attract_ms >= 5000 && attract_force_gate_ < 0) {
-      attract_force_gate_ =
-          HackGate("input.attract_force",
-                   "4 MiB heap scan + UIManager stomp attract -> title")
-              ? 1
-              : 0;
-    }
-    if (memory && attract_ms >= 5000 && attract_force_gate_ == 1) {
-      auto* ui_ptr = IsGuestReadable(memory, kTheUI, 4)
-                         ? memory->TranslateVirtual<uint8_t*>(kTheUI)
-                         : nullptr;
-      uint32_t ui_addr = ui_ptr ? xe::load_and_swap<uint32_t>(ui_ptr) : 0;
-      auto* ui_obj = IsGuestReadable(memory, ui_addr, 0x50)
-                         ? memory->TranslateVirtual<uint8_t*>(ui_addr)
-                         : nullptr;
-      if (ui_obj) {
-        if (!title_screen_addr_) {
-          for (int scan_pass = 0; scan_pass < 2 && !title_screen_addr_;
-               ++scan_pass) {
-            bool strict_scan_range = scan_pass == 0;
-            if (scan_pass == 1) {
-              XELOGI("DC3 Script: retrying title screen scan without "
-                     ".rdata fence");
-            }
-            for (uint32_t addr = 0x40C00000; addr < 0x41000000; addr += 4) {
-              if (!IsGuestReadable(memory, addr + 0x20, 4)) {
-                continue;
-              }
-              std::string name =
-                  ReadGuestScreenName(memory, addr, strict_scan_range);
-              if (name == "title_screen" || name == "title") {
-                title_screen_addr_ = addr;
-                XELOGI("DC3 Script: resolved title screen object {:08X} "
-                       "via name '{}'",
-                       title_screen_addr_, name);
-                break;
-              }
-            }
-          }
-        }
-        if (title_screen_addr_) {
-          HackFired("input.attract_force");
-          xe::store_and_swap<uint32_t>(ui_obj + 0x48, title_screen_addr_);
-          xe::store_and_swap<uint32_t>(ui_obj + 0x4C, 0);
-          xe::store_and_swap<uint32_t>(ui_obj + 0x2C, 0);
-          *screen = "title_screen";
-          XELOGI("DC3 Script: forced UI jump attract_screen -> title_screen "
-                 "({:08X})",
-                 title_screen_addr_);
-        }
-      }
-    }
+    // (RETIRED 2026-10-02, lane B2) input.attract_force: after 5 s on
+    // attract, a 4 MiB heap scan for the title screen object and a
+    // UIManager mCurrentScreen stomp. The A-press above takes attract ->
+    // autosave_warning -> title through the game's own handlers.
   } else {
     attract_seen_since_ = std::chrono::steady_clock::time_point{};
   }
