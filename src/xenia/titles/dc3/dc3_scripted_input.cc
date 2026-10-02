@@ -130,7 +130,6 @@ class Dc3ScriptedInputAdapter final
   bool last_game_time_paused_ = false;
   bool last_game_real_time_ = false;
   bool last_game_has_intro_ = false;
-  bool unpause_nudged_ = false;
   bool pause_diag_logged_ = false;
 
   // LogWaitStatus / WhileWaitingForScreen.
@@ -366,44 +365,10 @@ void Dc3ScriptedInputAdapter::ProbeGameplayState(Memory* memory,
     game_wait_state = static_cast<int>(load_u32(game_addr + 0xA4));
   }
 
-  // Blocker 2 (unpause deadlock): headless, HamAudio never reaches IsReady, so
-  // Game::PostWaitStart never fires and mPaused stays 1 forever -- the game
-  // cannot self-unpause (the HX_NATIVE audio-fail wall-clock fallback is
-  // compiled out of debug.xex). Once the stable stuck state (load=3 wait=3
-  // paused=1) is observed on game_screen, force the unpause ourselves: the safe
-  // host analogue of the native audio-fail fallback. Verified offsets (DC3
-  // Game.h + binary): game+0xA4 mWaitState, gp+0xF8 unkf8 (Game::Poll
-  // clock-clobber gate), game+0x60 mRealTime, game+0x5E mPaused. ORDER: clear
-  // wait (HandleWait then returns without touching the not-ready audio stream) +
-  // unkf8=0 (stop Poll re-clobbering the host-driven TaskMgr clock) + realTime=1
-  // FIRST, then mPaused=0 LAST so the host beat-drive gate opens only after the
-  // clobbers are disabled. Fires once.
-  if (!unpause_nudged_ && game_addr && game_load_state == 3 &&
-      game_wait_state == 3 && game_paused && AutonavEnabled() &&
-      HackGate("input.unpause_nudge",
-               "Game wait=0 unkf8=0 realTime=1 paused=0 once stuck at "
-               "load=3 wait=3")) {
-    auto wr_u32 = [&](uint32_t va, uint32_t v) {
-      if (IsGuestReadable(memory, va, 4)) {
-        xe::store_and_swap<uint32_t>(memory->TranslateVirtual<uint8_t*>(va), v);
-      }
-    };
-    auto wr_u8 = [&](uint32_t va, uint8_t v) {
-      if (IsGuestReadable(memory, va, 1)) {
-        *memory->TranslateVirtual<uint8_t*>(va) = v;
-      }
-    };
-    wr_u32(game_addr + 0xA4, 0);                            // mWaitState = 0
-    if (game_panel_addr) wr_u8(game_panel_addr + 0xF8, 0);  // unkf8 = 0
-    wr_u8(game_addr + 0x60, 1);                             // mRealTime = 1
-    wr_u8(game_addr + 0x5E, 0);                             // mPaused = 0 (LAST)
-    unpause_nudged_ = true;
-    HackFired("input.unpause_nudge");
-    XELOGI(
-        "DC3 Script: UNPAUSE NUDGE applied (game={:08X} gp={:08X}): wait=0 "
-        "unkf8=0 realTime=1 paused=0",
-        game_addr, game_panel_addr);
-  }
+  // (RETIRED 2026-10-02) the "unpause nudge" (Game wait=0, unkf8=0,
+  // realTime=1, paused=0 once stuck at load=3 wait=3). HamAudio does reach
+  // IsReady headless once the HamAudio::IsReady / HandleWait patches are gone:
+  // Game::PostWaitStart unpauses by itself (docs/fork/dc3/BASELINE.md).
 
   // DIAGNOSTIC (Blocker A auto-pause root cause): when the Game flips back to
   // paused during playing, dump the UIEventMgr dialog-event queue so we can tell

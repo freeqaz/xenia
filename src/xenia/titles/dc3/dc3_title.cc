@@ -1168,16 +1168,13 @@ void ApplyDc3LaunchHooks(const titles::TitleLaunchContext& ctx) {
                "contexts are stubbed; the render callback must not run)");
       }
 
-      if (dc3::HackGate("audio.handle_wait",
-                        "Game::HandleWait+0x90 bne -> b")) {
-        patch4(0x82867288 + 0x90, 0x48000024,
-               "HandleWait+0x90: bne 40820024 -> b 48000024");
-      }
-      if (dc3::HackGate("audio.hamaudio_ready",
-                        "HamAudio::IsReady+0x70 bctrl -> li r3,1")) {
-        patch4(0x8252B9E0 + 0x70, 0x38600001,
-               "HamAudio::IsReady+0x70: bctrl -> li r3,1");
-      }
+      // (RETIRED 2026-10-02) Game::HandleWait+0x90 bne -> b and
+      // HamAudio::IsReady+0x70 bctrl -> li r3,1. Together with the unpause
+      // nudge they started the song before its stream left kInit, so
+      // Game's StandardStream::Play() MILO_FAILed ("Play() failed.
+      // IsReady=0 mState=0") -- silently, while mFailing was latched. Without
+      // them Game::HandleWait waits for HamAudio::IsReady by itself and
+      // PostWaitStart unpauses the game (docs/fork/dc3/BASELINE.md).
 
       constexpr uint32_t kHamDirectorSongAnim = 0x82475578;
       with_patch_target("anim.song_anim_expert", "HamDirector::SongAnim", kHamDirectorSongAnim, 8,
