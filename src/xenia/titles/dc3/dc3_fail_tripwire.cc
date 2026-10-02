@@ -9,6 +9,7 @@
 #include "xenia/titles/dc3/dc3_fail_tripwire.h"
 
 #include <chrono>
+#include <cstring>
 #include <string>
 
 #include "xenia/base/byte_order.h"
@@ -20,6 +21,8 @@
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/xthread.h"
 #include "xenia/memory.h"
+#include "xenia/titles/dc3/dc3_flags.h"
+#include "xenia/titles/dc3/dc3_hack_pack.h"
 #include "xenia/titles/dc3/dc3_hacks.h"
 #include "xenia/titles/probe_threads.h"
 
@@ -120,6 +123,49 @@ std::string LogMainThreadStackStrings(Memory* memory,
   return first;
 }
 
+// True when TheUI->mCurrentScreen's name is `name` (original layout).
+bool CurrentScreenNameIs(Memory* memory, const char* name) {
+  constexpr uint32_t kTheUI = 0x82F1A8E0;
+  if (!Readable(memory, kTheUI, 4)) return false;
+  uint32_t ui = xe::load_and_swap<uint32_t>(
+      memory->TranslateVirtual<uint8_t*>(kTheUI));
+  if (!Readable(memory, ui + 0x48, 4)) return false;
+  uint32_t scr =
+      xe::load_and_swap<uint32_t>(memory->TranslateVirtual<uint8_t*>(ui + 0x48));
+  size_t len = std::strlen(name);
+  for (uint32_t off : {0x1Cu, 0x20u}) {
+    if (!Readable(memory, scr + off, 4)) continue;
+    uint32_t p = xe::load_and_swap<uint32_t>(
+        memory->TranslateVirtual<uint8_t*>(scr + off));
+    if (!Readable(memory, p, static_cast<uint32_t>(len + 1))) continue;
+    if (std::memcmp(memory->TranslateVirtual<char*>(p), name, len + 1) == 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// seq.controller_mode (gap O6): TheGestureMgr->mInControllerMode := 1, so
+// pad presses navigate the shell (DC3 is Kinect-driven; ShellInput swallows
+// the first press out of controller mode to enter it). Was written by the
+// NuiSkeletonGetNextFrame sequencer on every NUI frame; the Kinect HLE
+// writes no title globals, so it lives here, every 100 ms, until phase 2
+// of docs/fork/nui/NUI_HLE_DESIGN.md decides it. Once set, nothing clears
+// it while calib.exit_controller_mode stubs ExitControllerMode.
+void ForceControllerMode(Memory* memory) {
+  constexpr uint32_t kTheGestureMgr = 0x82F5F7B4;
+  constexpr uint32_t kInControllerModeOff = 0x426D;
+  if (!Readable(memory, kTheGestureMgr, 4)) return;
+  uint32_t gm = xe::load_and_swap<uint32_t>(
+      memory->TranslateVirtual<uint8_t*>(kTheGestureMgr));
+  if (!Readable(memory, gm + kInControllerModeOff, 1)) return;
+  auto* flag = memory->TranslateVirtual<uint8_t*>(gm + kInControllerModeOff);
+  if (!*flag) {
+    *flag = 1;
+    HackFired("seq.controller_mode");
+  }
+}
+
 void TripwireThread(Memory* memory, cpu::Processor* processor,
                     kernel::KernelState* kernel_state) {
   if (!Readable(memory, kTheDebug, kFailThreadMsgOff + 4)) {
@@ -141,7 +187,23 @@ void TripwireThread(Memory* memory, cpu::Processor* processor,
   XELOGI("DC3 TRIPWIRE: watching TheDebug {:08X} (mFailing +0x5, "
          "mFailThreadMsg +0x104)",
          kTheDebug);
+  const bool force_controller_mode =
+      cvars::fake_kinect_data &&
+      HackGate("seq.controller_mode",
+               "GestureMgr mInControllerMode := 1 (probe thread, 100 ms)");
+  uint32_t ticks = 0;
   while (titles::ProbeSleep(100)) {
+    ++ticks;
+    if (force_controller_mode) {
+      ForceControllerMode(memory);
+    }
+    // IK telemetry (--dc3_ik_telemetry): ~1/s on game_screen. Read-only;
+    // ReadDc3IKTelemetry guards every guest read. Was driven by the NUI
+    // sequencer callback.
+    if (cvars::dc3_ik_telemetry && ticks % 10 == 0 &&
+        CurrentScreenNameIs(memory, "game_screen")) {
+      ReadDc3IKTelemetry(memory, ticks / 10);
+    }
     auto now = std::chrono::steady_clock::now();
     uint8_t failing = dbg[kFailingOff];
     uint32_t msg = xe::load_and_swap<uint32_t>(dbg + kFailThreadMsgOff);

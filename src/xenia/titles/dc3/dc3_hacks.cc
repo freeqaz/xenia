@@ -32,13 +32,12 @@ namespace {
 
 // Every hack id that is decided outside the launch hooks (runtime writers and
 // guest calls), plus the launch-time ones, so a disable list can be checked
-// before the runtime ones are first reached. The NUI SDK table adds its
-// per-function ids ("nui.<Function>") as it is registered.
+// before the runtime ones are first reached. The SmartGlass table adds its
+// per-function ids ("xbc.<Function>") as it is registered.
 constexpr const char* kKnownIds[] = {
     // Launch-time image patches and overrides (dc3_title.cc).
     "mmio.soft_fault_range",
     "content.wipe",
-    "nui.get_next_frame",
     "saveload.activate",
     "speech.grammar_unload",
     "calib.player_present_guard",
@@ -49,9 +48,8 @@ constexpr const char* kKnownIds[] = {
     "calib.exit_controller_mode",
     "game.pause_for_skeleton_loss",
     // dc3_hack_pack_skeleton.cc
-    "skel.wait_33ms",
     "skel.is_override_nop",
-    // Runtime, NuiSkeletonGetNextFrame sequencer (dc3_nui_sequencer.cc).
+    // Runtime, the probe thread (dc3_fail_tripwire.cc).
     "seq.controller_mode",
     // Runtime, scripted-input adapter (dc3_scripted_input.cc); only with
     // --dc3_headless_autonav.

@@ -28,9 +28,8 @@ Dc3HackApplyResult ApplyDc3SkeletonHackPack(const Dc3HackContext& ctx) {
   Memory* memory = ctx.memory;
 
   // (The PPC constant-frame stub that used to be written over
-  // NuiSkeletonGetNextFrame 0x829C2790 here is gone: the nui.get_next_frame
-  // override at the same address shadowed it -- the override audit measured
-  // handler hits on every frame and the guest body never resolved.)
+  // NuiSkeletonGetNextFrame 0x829C2790 here, and the nui.get_next_frame
+  // override that shadowed it, are gone: the Kinect HLE serves the frames.)
 
   struct BinaryPatch {
     const char* id;
@@ -39,8 +38,12 @@ Dc3HackApplyResult ApplyDc3SkeletonHackPack(const Dc3HackContext& ctx) {
     const char* name;
   };
   BinaryPatch skel_patches[] = {
-      {"skel.wait_33ms", 0x8242E74C, 0x3B800021,
-       "SkeletonUpdateThread: timeout INFINITE -> 33ms"},
+      // (RETIRED 2026-10-02, lane nui-hle) skel.wait_33ms:
+      // SkeletonUpdateThread+0xA4 0x8242E74C, the INFINITE wait on
+      // sNewSkeletonEvent -> 33 ms. It existed because the stubbed
+      // NuiSkeletonTrackingEnable never stored the title's event, so nothing
+      // ever set it. The Kinect HLE stores it and sets it once per depth
+      // frame at 30 Hz, as the SDK does (docs/fork/nui/NUI_DEVICE_SPEC.md).
       {"skel.is_override_nop", 0x8242E1B0, 0x60000000,
        "SkeletonUpdate::Update: NOP IsOverride branch"},
       // (REMOVED 2026-10-02) Debug::Fail thread-fail spin -> return

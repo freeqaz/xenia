@@ -72,7 +72,6 @@
 #include "xenia/titles/dc3/dc3_hacks.h"
 #include "xenia/titles/dc3/dc3_hack_pack.h"
 #include "xenia/titles/dc3/dc3_nui_patch_resolver.h"
-#include "xenia/titles/dc3/dc3_nui_sequencer.h"
 #include "xenia/titles/dc3/dc3_runtime_telemetry.h"
 #include "xenia/titles/dc3/dc3_scripted_input.h"
 #include "xenia/titles/dc3/decomp/dc3_decomp_launch.h"
@@ -141,6 +140,23 @@ void ApplyDc3LaunchHooks(const titles::TitleLaunchContext& ctx) {
     // probe, input.* automation). Only DC3 gets it: the player used to run
     // these DC3 address reads/writes for every title.
     dc3::InstallScriptedInputAdapter();
+
+    // Transitional (until phase 3 of docs/fork/nui/NUI_HLE_DESIGN.md deletes
+    // the cvar): --fake_kinect_data meant "a constant standing skeleton".
+    // That is now the Kinect HLE's constant pose source; an explicit
+    // --nui_pose_source wins.
+    if (cvars::fake_kinect_data) {
+      auto it = cvar::ConfigVars ? cvar::ConfigVars->find("nui_pose_source")
+                                 : decltype(cvar::ConfigVars->end()){};
+      if (cvar::ConfigVars && it != cvar::ConfigVars->end()) {
+        auto* var = dynamic_cast<cvar::ConfigVar<std::string>*>(it->second);
+        if (var && !var->has_commandline_value() &&
+            !var->has_game_config_value() && var->current_value()->empty()) {
+          var->SetGameConfigValue(std::string("constant"));
+          XELOGI("DC3: --fake_kinect_data -> nui_pose_source=constant");
+        }
+      }
+    }
 
     if (cvars::dc3_clean_content_cache &&
         dc3::HackGate("content.wipe",
@@ -269,151 +285,40 @@ void ApplyDc3LaunchHooks(const titles::TitleLaunchContext& ctx) {
     //   described above, since bl-called functions don't go through
     //   the CallExtern codepath.
 
+    // The NUI SDK entries that used to be overridden here (56 functions,
+    // `li r3,0|-1; blr` by DC3 address, plus the constant-pose sequencer on
+    // NuiSkeletonGetNextFrame) are gone: the title-agnostic Kinect HLE
+    // (src/xenia/kernel/nui/, docs/fork/nui/NUI_HLE_DESIGN.md) finds the SDK
+    // by its static-library version and emulates it for any title. What is
+    // left on the original layout is SmartGlass, which is not Kinect:
+    //
+    // Xbox SmartGlass (XBC) SDK - statically linked from XBC.lib.
+    // SmartGlassInit() calls XbcInitialize(), which calls
+    // CXbcImpl::Initialize(). If Initialize returns failure, the game
+    // prints "Failed to initialize Xbox SmartGlass library." and crashes.
+    // The thunk functions (XbcInitialize, XbcDoWork, XbcSendJSON) are
+    // only 4 bytes each (branch instructions), so we stub the real
+    // CXbcImpl implementations instead (gap analysis O15-O17).
     Dc3NuiPatchSpec patches[] = {
-        // Core lifecycle
-        {0x829D1200, kLiR3_0, kBlr, "NuiInitialize"},
-        {0x829CEDA0, kLiR3_0, kBlr, "NuiShutdown"},
-
-        // Skeleton tracking
-        {0x829C25F0, kLiR3_0, kBlr, "NuiSkeletonTrackingEnable"},
-        {0x829C1E18, kLiR3_0, kBlr, "NuiSkeletonTrackingDisable"},
-        {0x829C1F90, kLiR3_0, kBlr, "NuiSkeletonSetTrackedSkeletons"},
-        {0x829C2790, kLiR3_Neg1, kBlr, "NuiSkeletonGetNextFrame"},
-
-        // Image streams - return S_OK but don't write output handle.
-        // The handle pointer (r8) stays NULL -> GetNextFrame never called
-        // because LiveCameraInput::PollTracking guards with if(curBuf.unk0).
-        {0x829C9330, kLiR3_0, kBlr, "NuiImageStreamOpen"},
-        {0x829C86F0, kLiR3_Neg1, kBlr, "NuiImageStreamGetNextFrame"},
-        {0x829C8A18, kLiR3_0, kBlr, "NuiImageStreamReleaseFrame"},
-        {0x829C91C8, kLiR3_0, kBlr, "NuiImageGetColorPixelCoordinatesFromDepthPixel"},
-
-        // Audio - NuiAudioCreate returning failure (E_UNEXPECTED) prevents
-        // the game from calling NuiAudioRegisterCallbacks (no assert).
-        // LiveCameraInput sets unk11d4=0, destructor skips audio cleanup.
-        //
-        // TODO: NuiAudioCreate internally accesses global NUI state via
-        // RtlEnterCriticalSection on a NUI mutex, allocates buffers with
-        // XMemAlloc, calls XamVoiceGetMicArrayAudioEx for Kinect mic array,
-        // creates 2 audio threads. Full audio emulation would require
-        // implementing the NUIAUDIO subsystem with:
-        //   - MEC (Microphone Echo Cancellation) stub
-        //   - XamVoiceGetMicArrayAudioEx returning dummy audio streams
-        //   - Audio processing thread stubs
-        {0x82A0E028, kLiR3_Neg1, kBlr, "NuiAudioCreate"},
-        {0x82A0DA48, kLiR3_Neg1, kBlr, "NuiAudioCreatePrivate"},
-        {0x82A0D928, kLiR3_0, kBlr, "NuiAudioRegisterCallbacks"},
-        {0x82A0D9A0, kLiR3_0, kBlr, "NuiAudioUnregisterCallbacks"},
-        {0x82A0C0A0, kLiR3_0, kBlr, "NuiAudioRegisterCallbacksPrivate"},
-        {0x82A0C108, kLiR3_0, kBlr, "NuiAudioUnregisterCallbacksPrivate"},
-        {0x82A0D440, kLiR3_0, kBlr, "NuiAudioRelease"},
-
-        // Camera properties - called at end of LiveCameraInput ctor
-        // (SetColorCameraProperty) and in diagnostic/debug draw code.
-        // Must not crash; accessing uninitialized NUI global state would
-        // segfault without this stub.
-        //
-        // TODO: Camera property stubs could track set values in a map
-        // and return them from Get calls, enabling camera config testing
-        // without Kinect hardware.
-        {0x829C7F48, kLiR3_0, kBlr, "NuiCameraSetProperty"},
-        {0x829C7058, kLiR3_0, kBlr, "NuiCameraGetProperty"},
-        {0x829C7068, kLiR3_0, kBlr, "NuiCameraGetPropertyF"},
-        {0x829C7FA0, kLiR3_0, kBlr, "NuiCameraSetExposureRegionOfInterest"},
-        {0x829C6868, kLiR3_0, kBlr, "NuiCameraGetExposureRegionOfInterest"},
-        {0x829C3FE0, kLiR3_0, kBlr, "NuiCameraElevationSetAngle"},
-        {0x829C3EF8, kLiR3_0, kBlr, "NuiCameraElevationGetAngle"},
-        {0x829C4940, kLiR3_0, kBlr, "NuiCameraAdjustTilt"},
-        {0x829C4E38, kLiR3_0, kBlr, "NuiCameraGetNormalToGravity"},
-
-        // Identity (used by Skeleton.cpp for player identification)
-        //
-        // TODO: NuiIdentityIdentify takes a tracking ID, flags, callback,
-        // and user data. A proper stub could invoke the callback with a
-        // "no match" result to simulate identity processing completing.
-        {0x829C36B0, kLiR3_0, kBlr, "NuiIdentityEnroll"},
-        {0x829C3870, kLiR3_0, kBlr, "NuiIdentityIdentify"},
-        {0x829C3998, kLiR3_0, kBlr, "NuiIdentityGetEnrollmentInformation"},
-        {0x829C3BB0, kLiR3_0, kBlr, "NuiIdentityAbort"},
-
-        // Fitness tracking (FitnessFilter.cpp)
-        // Only called during fitness gameplay mode. All use MILO_NOTIFY
-        // on failure (not MILO_ASSERT), so failure is safe.
-        {0x829D1B68, kLiR3_Neg1, kBlr, "NuiFitnessStartTracking"},
-        {0x829D1E30, kLiR3_Neg1, kBlr, "NuiFitnessPauseTracking"},
-        {0x829D1F00, kLiR3_Neg1, kBlr, "NuiFitnessResumeTracking"},
-        {0x829D1FD0, kLiR3_Neg1, kBlr, "NuiFitnessStopTracking"},
-        {0x82E61690, kLiR3_Neg1, kBlr, "NuiFitnessGetCurrentFitnessData"},
-
-        // Wave gesture (WaveToTurnOnLight.cpp)
-        {0x829D1758, kLiR3_Neg1, kBlr, "NuiWaveSetEnabled"},
-        {0x829D1668, kLiR3_Neg1, kBlr, "NuiWaveGetGestureOwnerProgress"},
-
-        // Head tracking
-        {0x829DA0C8, kLiR3_0, kBlr, "NuiHeadOrientationDisable"},
-        {0x829DA598, kLiR3_0, kBlr, "NuiHeadPositionDisable"},
-
-        // Speech recognition (SpeechMgr.cpp) - many have MILO_ASSERT_FMT.
-        // SpeechMgr is only created if kinect.speech.enabled=1 in config.
-        // If speech IS enabled, these must return S_OK to avoid asserts
-        // in NuiSpeechCreateGrammar, NuiSpeechCommitGrammar, etc.
-        //
-        // TODO: Speech emulation could accept pre-scripted voice commands
-        // for automated testing of menu navigation and gameplay triggers.
-        // Would need to implement:
-        //   - Grammar state management (rule tree in host memory)
-        //   - Event queue with synthetic recognition events
-        //   - NuiSpeechGetEvents returning scripted results
-        {0x82A24B88, kLiR3_0, kBlr, "NuiSpeechEnable"},
-        {0x82A23B70, kLiR3_0, kBlr, "NuiSpeechDisable"},
-        {0x82A23BB0, kLiR3_0, kBlr, "NuiSpeechCreateGrammar"},
-        {0x82A23B80, kLiR3_0, kBlr, "NuiSpeechLoadGrammar"},
-        {0x82A23BA0, kLiR3_0, kBlr, "NuiSpeechUnloadGrammar"},
-        {0x82A22A48, kLiR3_0, kBlr, "NuiSpeechCommitGrammar"},
-        {0x82A21068, kLiR3_0, kBlr, "NuiSpeechStartRecognition"},
-        {0x82A22978, kLiR3_0, kBlr, "NuiSpeechStopRecognition"},
-        {0x82A21090, kLiR3_0, kBlr, "NuiSpeechSetEventInterest"},
-        {0x82A21078, kLiR3_0, kBlr, "NuiSpeechSetGrammarState"},
-        {0x82A22998, kLiR3_0, kBlr, "NuiSpeechSetRuleState"},
-        {0x82A229B8, kLiR3_0, kBlr, "NuiSpeechCreateRule"},
-        {0x82A229E0, kLiR3_0, kBlr, "NuiSpeechCreateState"},
-        {0x82A22A00, kLiR3_0, kBlr, "NuiSpeechAddWordTransition"},
-        {0x82A210A0, kLiR3_Neg1, kBlr, "NuiSpeechGetEvents"},
-        {0x82A22988, kLiR3_0, kBlr, "NuiSpeechDestroyEvent"},
-        // NOTE: 0x82A24A98 was previously stubbed as "NuiSpeech__E_init"
-        // but MAP file reveals it's actually Object::sFactories static
-        // initializer (Object.obj) — a critical game engine function.
-        // Stubbing it broke the object factory system and caused hangs
-        // in downstream initializers (gPropPaths at 0x82A24B28).
-        //
-        // The original JIT boundary issue (blr in EmulateRecognition stub
-        // at 0x82A24AB0 getting scanned into the initializer) is avoided
-        // by also not stubbing NuiSpeechEmulateRecognition — the original
-        // function prologue doesn't have an early blr, so the JIT
-        // boundary detection works correctly with the original code.
-        //
-        // NuiSpeechEmulateRecognition (0x82A24AB0) is never called
-        // because all speech API entry points are already stubbed above.
-
-        // Misc
-        {0x82B57560, kLiR3_0, kBlr, "NuiMetaCpuEvent"},
-
-        // Xbox SmartGlass (XBC) SDK - statically linked from XBC.lib
-        // SmartGlassInit() calls XbcInitialize(), which calls
-        // CXbcImpl::Initialize(). If Initialize returns failure, the game
-        // prints "Failed to initialize Xbox SmartGlass library." and crashes.
-        // The thunk functions (XbcInitialize, XbcDoWork, XbcSendJSON) are
-        // only 4 bytes each (branch instructions), so we stub the real
-        // CXbcImpl implementations instead.
-        //
-        // TODO: SmartGlass could be used for controller input automation
-        // (e.g., sending menu selections from a test harness). Would need:
-        //   - JSON message parsing/generation
-        //   - Client connection state management
-        //   - XLRC (Xbox Live Real-time Communication) stub layer
         {0x82606078, kLiR3_0, kBlr, "CXbcImpl::Initialize"},
         {0x82605960, kLiR3_0, kBlr, "CXbcImpl::DoWork"},
         {0x82605DF8, kLiR3_0, kBlr, "CXbcImpl::SendJSON"},
+    };
+    // Original-layout NUI SDK entry addresses, used ONLY by the zero-padding
+    // layout heuristic below (in a decomp image these addresses are padding).
+    static constexpr uint32_t kOriginalLayoutProbe[] = {
+        0x829D1200, 0x829CEDA0, 0x829C25F0, 0x829C1E18, 0x829C1F90,
+        0x829C2790, 0x829C9330, 0x829C86F0, 0x829C8A18, 0x829C91C8,
+        0x82A0E028, 0x82A0DA48, 0x82A0D928, 0x82A0D9A0, 0x82A0C0A0,
+        0x82A0C108, 0x82A0D440, 0x829C7F48, 0x829C7058, 0x829C7068,
+        0x829C7FA0, 0x829C6868, 0x829C3FE0, 0x829C3EF8, 0x829C4940,
+        0x829C4E38, 0x829C36B0, 0x829C3870, 0x829C3998, 0x829C3BB0,
+        0x829D1B68, 0x829D1E30, 0x829D1F00, 0x829D1FD0, 0x82E61690,
+        0x829D1758, 0x829D1668, 0x829DA0C8, 0x829DA598, 0x82A24B88,
+        0x82A23B70, 0x82A23BB0, 0x82A23B80, 0x82A23BA0, 0x82A22A48,
+        0x82A21068, 0x82A22978, 0x82A21090, 0x82A21078, 0x82A22998,
+        0x82A229B8, 0x82A229E0, 0x82A22A00, 0x82A210A0, 0x82A22988,
+        0x82B57560, 0x82606078, 0x82605960, 0x82605DF8,
     };
 
     // Log a stable .text fingerprint to support future resolver matching.
@@ -443,15 +348,16 @@ void ApplyDc3LaunchHooks(const titles::TitleLaunchContext& ctx) {
     // layout, and ALL patches use wrong addresses. In the original retail XEX,
     // no NUI function address would be zero-filled.
     int total_patches = static_cast<int>(sizeof(patches) / sizeof(patches[0]));
+    const int probe_count = static_cast<int>(std::size(kOriginalLayoutProbe));
     int zero_count = 0;
-    for (const auto& patch : patches) {
-      auto* mem = memory->TranslateVirtual<uint8_t*>(patch.address);
+    for (uint32_t probe_address : kOriginalLayoutProbe) {
+      auto* mem = memory->TranslateVirtual<uint8_t*>(probe_address);
       if (mem && xe::load_and_swap<uint32_t>(mem) == 0x00000000) {
         zero_count++;
       }
     }
 
-    bool is_decomp_layout = (zero_count > total_patches / 4);
+    bool is_decomp_layout = (zero_count > probe_count / 4);
     std::string_view layout_reason = "zero-padding heuristic";
     // Reuse manifest loaded earlier (before NUI block).
     auto& patch_manifest = dc3_patch_manifest;
@@ -569,7 +475,7 @@ void ApplyDc3LaunchHooks(const titles::TitleLaunchContext& ctx) {
     XELOGI(
         "DC3: NUI patch layout={} reason={} (zero-padding {}/{})",
         is_decomp_layout ? "decomp" : "original", layout_reason, zero_count,
-        total_patches);
+        probe_count);
     dc3_is_decomp_layout = is_decomp_layout;
 
     // Select the appropriate patch table based on XEX layout.
@@ -726,12 +632,6 @@ void ApplyDc3LaunchHooks(const titles::TitleLaunchContext& ctx) {
 
     auto guest_extern_handler_for_patch =
         [&](const Dc3NuiPatchSpec& patch) -> cpu::GuestFunction::ExternHandler {
-      // Preserve the original-layout fake skeleton path when enabled.
-      if (cvars::fake_kinect_data && !is_decomp_layout &&
-          std::string_view(patch.name) == "NuiSkeletonGetNextFrame" &&
-          dc3::HackEnabled("nui.get_next_frame")) {
-        return Dc3NuiSequencerExtern;
-      }
       if (patch.insn1 != kBlr) {
         return nullptr;
       }
@@ -815,19 +715,12 @@ void ApplyDc3LaunchHooks(const titles::TitleLaunchContext& ctx) {
         override_register_failed++;
         continue;
       }
-      // The fake-skeleton sequencer has its own id: it is also the NUI
-      // device frame source, not just an SDK stub.
-      const std::string hack_id = handler == Dc3NuiSequencerExtern
-                                      ? std::string("nui.get_next_frame")
-                                      : std::string("nui.") + patch.name;
+      // SmartGlass, not Kinect (O15-O17): its own `xbc.` ids.
+      const std::string hack_id = std::string("xbc.") + patch.name;
       if (!is_decomp_layout &&
-          !dc3::HackGate(hack_id,
-                         handler == Dc3NuiSequencerExtern
-                             ? "NuiSkeletonGetNextFrame -> fake-skeleton "
-                               "sequencer"
-                             : (handler == Dc3NuiReturnOkExtern
-                                    ? "NUI SDK override -> 0"
-                                    : "NUI SDK override -> -1"))) {
+          !dc3::HackGate(hack_id, handler == Dc3NuiReturnOkExtern
+                                      ? "XBC SDK override -> 0"
+                                      : "XBC SDK override -> -1")) {
         override_register_failed++;
         continue;
       }
