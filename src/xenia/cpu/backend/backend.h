@@ -60,6 +60,28 @@ class Backend {
   virtual uint64_t CalculateNextHostInstruction(ThreadDebugInfo* thread_info,
                                                 uint64_t current_pc) = 0;
 
+  // Guest exception support. One guest frame of a throw chain, newest first:
+  // the return address out of the frame and the caller's stack pointer.
+  struct GuestUnwindFrame {
+    uint32_t guest_return_address;
+    uint32_t guest_caller_sp;
+  };
+  // Called when a guest unwind has chosen frames[target_index] as the frame
+  // that will catch. frames[0] is the frame that called the raising kernel
+  // export; host_scan_from is a host stack address inside that export (its
+  // JIT caller's frame lies above it). Arms a one-shot "pending host return":
+  // when the guest later returns out of the target frame to its caller from
+  // somewhere higher on the host stack (the catch continuation runs as a
+  // fresh JIT entry), the backend resumes the target frame's ORIGINAL host
+  // caller instead of nesting deeper. False if the host frames could not be
+  // matched to the guest frames (nothing is armed; the guest still runs).
+  virtual bool ArmGuestUnwindReturn(uint64_t host_scan_from,
+                                    uint32_t first_guest_pc,
+                                    const GuestUnwindFrame* frames,
+                                    size_t frame_count, size_t target_index) {
+    return false;
+  }
+
   virtual void InstallBreakpoint(Breakpoint* breakpoint) {}
   virtual void InstallBreakpoint(Breakpoint* breakpoint, Function* fn) {}
   virtual void UninstallBreakpoint(Breakpoint* breakpoint) {}

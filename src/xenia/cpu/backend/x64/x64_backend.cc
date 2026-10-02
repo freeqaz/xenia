@@ -19,6 +19,7 @@
 #include "xenia/cpu/backend/x64/x64_assembler.h"
 #include "xenia/cpu/backend/x64/x64_code_cache.h"
 #include "xenia/cpu/backend/x64/x64_emitter.h"
+#include "xenia/cpu/backend/x64/x64_guest_unwind.h"
 #include "xenia/cpu/backend/x64/x64_function.h"
 #include "xenia/cpu/backend/x64/x64_sequences.h"
 #include "xenia/cpu/backend/x64/x64_stack_layout.h"
@@ -58,6 +59,7 @@ class X64ThunkEmitter : public X64Emitter {
   HostToGuestThunk EmitHostToGuestThunk();
   GuestToHostThunk EmitGuestToHostThunk();
   ResolveFunctionThunk EmitResolveFunctionThunk();
+  PendingReturnThunk EmitPendingReturnThunk();
 
  private:
   // The following four functions provide save/load functionality for registers.
@@ -131,6 +133,7 @@ bool X64Backend::Initialize(Processor* processor) {
   host_to_guest_thunk_ = thunk_emitter.EmitHostToGuestThunk();
   guest_to_host_thunk_ = thunk_emitter.EmitGuestToHostThunk();
   resolve_function_thunk_ = thunk_emitter.EmitResolveFunctionThunk();
+  pending_return_thunk_ = thunk_emitter.EmitPendingReturnThunk();
 
   // Set the code cache to use the ResolveFunction thunk for default
   // indirections.
@@ -625,6 +628,82 @@ ResolveFunctionThunk X64ThunkEmitter::EmitResolveFunctionThunk() {
 
   void* fn = Emplace(func_info);
   return (ResolveFunctionThunk)fn;
+}
+
+PendingReturnThunk X64ThunkEmitter::EmitPendingReturnThunk() {
+  // edx = guest return target, rsi = context. Called from a JIT frame whose
+  // guest return did not match its own GUEST_RET_ADDR.
+  struct _code_offsets {
+    size_t prolog;
+    size_t prolog_stack_alloc;
+    size_t body;
+    size_t epilog;
+    size_t tail;
+  } code_offsets = {};
+
+  const size_t stack_size = StackLayout::THUNK_STACK_SIZE;
+
+  code_offsets.prolog = getSize();
+  sub(rsp, stack_size);
+  code_offsets.prolog_stack_alloc = getSize();
+  code_offsets.body = getSize();
+
+  EmitSaveVolatileRegs();
+
+#if XE_PLATFORM_LINUX
+  mov(rdi, rsi);                              // context
+  mov(esi, edx);                              // guest target
+  lea(rdx, qword[rsp + stack_size + 8]);      // the JIT frame's rsp
+#else
+  mov(rcx, rsi);
+  mov(r8, rsp);
+  add(r8, static_cast<uint32_t>(stack_size + 8));
+  // rdx = guest target already
+#endif
+  mov(rax, reinterpret_cast<uint64_t>(&TakePendingHostReturn));
+  call(rax);
+
+  EmitLoadVolatileRegs();
+
+  Xbyak::Label resume_older_frame;
+  test(rax, rax);
+  jnz(resume_older_frame);
+
+  code_offsets.epilog = getSize();
+  add(rsp, stack_size);
+  ret();
+
+  // rax = the host slot holding the catching frame's original return
+  // address: return from that frame, discarding everything below it.
+  L(resume_older_frame);
+  mov(rsp, rax);
+  ret();
+
+  code_offsets.tail = getSize();
+
+  assert_zero(code_offsets.prolog);
+  EmitFunctionInfo func_info = {};
+  func_info.code_size.total = getSize();
+  func_info.code_size.prolog = code_offsets.body - code_offsets.prolog;
+  func_info.code_size.body = code_offsets.epilog - code_offsets.body;
+  func_info.code_size.epilog = code_offsets.tail - code_offsets.epilog;
+  func_info.code_size.tail = getSize() - code_offsets.tail;
+  func_info.prolog_stack_alloc_offset =
+      code_offsets.prolog_stack_alloc - code_offsets.prolog;
+  func_info.stack_size = stack_size;
+
+  void* fn = Emplace(func_info);
+  return (PendingReturnThunk)fn;
+}
+
+bool X64Backend::ArmGuestUnwindReturn(uint64_t host_scan_from,
+                                      uint32_t first_guest_pc,
+                                      const GuestUnwindFrame* frames,
+                                      size_t frame_count,
+                                      size_t target_index) {
+  return ArmPendingHostReturn(code_cache_.get(), host_scan_from,
+                              first_guest_pc, frames, frame_count,
+                              target_index);
 }
 
 void X64ThunkEmitter::EmitSaveVolatileRegs() {
