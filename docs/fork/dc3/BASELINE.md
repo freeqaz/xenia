@@ -329,8 +329,9 @@ Final S1 x5 (`3962c2c83`, shared flow, attract press only) interleaved with
 - cand r5 reached game_screen and was still in gpState=2 (`paused=0`) at
   228 s: the song clock ran slow. Its load climbed from 24 to 125 during the
   run (PSI cpu-some mean 35, the highest of the ten) and the guest frame rate
-  fell from 59.7 to 49.7 frames/s. Read as load; one extra repeat is the
-  cheap check.
+  fell from 59.7 to 49.7 frames/s. Read as load. The extra repeat, cand r6
+  (load 39 / 60): PASS, game_screen 39.1 s, gpState=3 195.4 s, ymca. So
+  cand **5/6**.
 - Title is 3-6 s later than the control because attract now leaves through
   the game (attract -> autosave_warning -> title) instead of the bridge's
   GotoScreen. ymca ends ~153 s after `gpState=2 playing`; thehustle ~156 s.
@@ -339,6 +340,13 @@ Final S1 x5 (`3962c2c83`, shared flow, attract press only) interleaved with
 - **S2 x2 on `3962c2c83`: PASS 2/2.** Answers `3`, refused, `10`, 702; first
   poll on thread 00000006; `{gamedata get song}` = `ymca`; SongAnim =
   `player_1_routine_builder.anim` with 79 clip keys, expert `song.anim` 6.
+- **S3 x2 on `3962c2c83`: PASS 2/2**, 627 traps, 43 distinct LRs.
+- **S0 on `3962c2c83`: PASS**; compare.py against `fork-cleanup-2026-10`
+  lists one removed cvar, `dc3_game_screen_real_goto`, and no ratchet change.
+- **S1V could not run on this box.** Both `3962c2c83` and `main` `5ac644b7d`
+  dump core (rc 139) right after "GPU backend: Vulkan": the NVIDIA kernel
+  module is 610.57.04 and userspace nvidia-utils 615.71.09, and `vulkaninfo`
+  finds no driver. The box needs a reboot; S1V is owed on this state.
 
 ### The valid-skeleton NUI frame does not retire `calib.*` (`5fdc816fa`, reverted in `0f430ecf2`)
 
