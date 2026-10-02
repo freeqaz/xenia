@@ -37,6 +37,14 @@
 #include "xenia/kernel/xtimer.h"
 #include "xenia/xbox.h"
 
+DEFINE_uint32(min_guest_thread_stack_size, 0,
+              "Raise every ExCreateThread stack smaller than this many bytes "
+              "to this size (rounded up to 4 KiB). 0 = off (upstream). The "
+              "per-title profile sets it for Dance Central 3, whose "
+              "SkeletonUpdate worker overflows its 256 KiB stack when the "
+              "fork's automation runs UI code on it.",
+              "Kernel");
+
 DEFINE_bool(headless_thread_diagnostics, false,
             "Enable verbose main-thread wait/delay diagnostics in headless mode.",
             "Kernel");
@@ -381,19 +389,13 @@ dword_result_t ExCreateThread_entry(lpdword_t handle_ptr, dword_t stack_size,
   actual_stack_size =
       std::max((uint32_t)0x4000, ((actual_stack_size + 0xFFF) & 0xFFFFF000));
 
-  // === DC3 songpush: worker thread minimum stack clamp (BEGIN) ===
-  // DC3 (title 0x373307D9) creates its SkeletonUpdate / gameplay worker
-  // threads with an explicit 256KB guest stack.  Under headless Xenia these
-  // workers can run deep call chains over partially-initialized song/gesture
-  // object graphs (uninitialized fields read as 0xBCBCBCBC) during the
-  // attract->gameplay transition, overflowing the 256KB guest stack and
-  // faulting in JIT'd code.  Clamp the minimum to 4MB for DC3 only so a
-  // deep-but-finite chain has room to complete; non-DC3 titles are unaffected.
-  if (kernel_state()->title_id() == 0x373307D9 &&
-      actual_stack_size < 4u * 1024u * 1024u) {
-    actual_stack_size = 4u * 1024u * 1024u;
+  // Fork: optional floor on guest thread stacks (min_guest_thread_stack_size,
+  // 0 = off). Set per title by titles/title_profile.cc.
+  if (cvars::min_guest_thread_stack_size &&
+      actual_stack_size < cvars::min_guest_thread_stack_size) {
+    actual_stack_size =
+        (cvars::min_guest_thread_stack_size + 0xFFF) & 0xFFFFF000;
   }
-  // === DC3 songpush: worker thread minimum stack clamp (END) ===
 
   auto thread = object_ref<XThread>(
       new XThread(kernel_state(), actual_stack_size, xapi_thread_startup,
