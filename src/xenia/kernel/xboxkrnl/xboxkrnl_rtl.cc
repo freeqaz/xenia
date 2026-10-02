@@ -23,6 +23,7 @@
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/user_module.h"
 #include "xenia/kernel/util/shim_utils.h"
+#include "xenia/kernel/xboxkrnl/xboxkrnl_guest_exceptions.h"
 #include "xenia/kernel/xboxkrnl/xboxkrnl_private.h"
 #include "xenia/kernel/xboxkrnl/xboxkrnl_threading.h"
 #include "xenia/kernel/xevent.h"
@@ -942,37 +943,18 @@ dword_result_t RtlDowncaseUnicodeChar_entry(dword_t source_char) {
 }
 DECLARE_XBOXKRNL_EXPORT1(RtlDowncaseUnicodeChar, kNone, kImplemented);
 
-// Exception handling stubs
+// Guest exception support: xboxkrnl_guest_exceptions.cc.
 void RtlCaptureContext_entry(lpvoid_t context_ptr) {
-  // TODO: real context capture for SEH
-  static std::atomic<bool> s_logged{false};
-  if (!s_logged.exchange(true, std::memory_order_relaxed)) {
-    XELOGW(
-        "RtlCaptureContext stub - zeroing context @0x{:08X} (further calls "
-        "not logged)",
-        context_ptr.guest_address());
-  }
-  if (!context_ptr) {
-    // Never memset through a null guest pointer.
-    return;
-  }
-  // 0x200 is a GUESSED CONTEXT struct size -- the real PPC CONTEXT layout was
-  // never confirmed and the caller's buffer size is not passed in, so this
-  // can over- or under-write. Kept because DC3/RB3 reach it; see C16 in
-  // docs/fork-cleanup-review.md.
-  std::memset(context_ptr, 0, 0x200);
+  CaptureGuestContext(context_ptr.guest_address());
 }
-DECLARE_XBOXKRNL_EXPORT1(RtlCaptureContext, kNone, kStub);
+DECLARE_XBOXKRNL_EXPORT1(RtlCaptureContext, kNone, kImplemented);
 
 void RtlUnwind_entry(lpvoid_t target_frame, lpvoid_t target_ip,
                       lpvoid_t exception_record, dword_t return_value) {
-  // TODO: real SEH unwind. This silently no-ops the unwind for every title.
-  static std::atomic<bool> s_logged{false};
-  if (!s_logged.exchange(true, std::memory_order_relaxed)) {
-    XELOGW("RtlUnwind stub - not implemented (further calls not logged)");
-  }
+  UnwindGuestFrames(target_frame.guest_address(), target_ip.guest_address(),
+                    exception_record.guest_address(), return_value);
 }
-DECLARE_XBOXKRNL_EXPORT1(RtlUnwind, kNone, kStub);
+DECLARE_XBOXKRNL_EXPORT1(RtlUnwind, kNone, kSketchy);
 
 dword_result_t __C_specific_handler_entry(lpvoid_t exception_record,
                                            lpvoid_t establisher_frame,

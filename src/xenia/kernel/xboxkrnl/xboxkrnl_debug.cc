@@ -7,14 +7,26 @@
  ******************************************************************************
  */
 
+#include "xenia/base/cvar.h"
 #include "xenia/base/debugging.h"
 #include "xenia/base/logging.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/util/shim_utils.h"
 #include "xenia/kernel/xboxkrnl/xboxkrnl_cpp_throw_hook.h"
+#include "xenia/kernel/xboxkrnl/xboxkrnl_guest_exceptions.h"
 #include "xenia/kernel/xboxkrnl/xboxkrnl_private.h"
 #include "xenia/kernel/xthread.h"
 #include "xenia/xbox.h"
+
+DEFINE_bool(guest_exception_dispatch_first, false,
+            "RtlRaiseException: run the guest exception dispatch (frame walk + "
+            "language handlers, docs/fork/core/GUEST_EXCEPTIONS.md) BEFORE a "
+            "registered C++ throw hook, which then only sees exceptions no "
+            "guest handler took. Off (the bring-up order): the hook goes "
+            "first, so an armed hook (the DC3 DTA channel) recovers as before "
+            "whether or not the guest has a catch. Either way, an exception "
+            "the hook does not take is dispatched.",
+            "Kernel");
 
 namespace xe {
 namespace kernel {
@@ -106,8 +118,20 @@ CppThrowHook g_cpp_throw_hook = nullptr;
 void HandleCppException(pointer_t<X_EXCEPTION_RECORD> record) {
   // A registered hook with a recovery point armed on this thread longjmps out
   // and never returns (see xboxkrnl_cpp_throw_hook.h).
-  if (g_cpp_throw_hook && record->number_parameters >= 2) {
-    g_cpp_throw_hook(record->exception_information[1]);
+  auto call_hook = [&record]() {
+    if (g_cpp_throw_hook && record->number_parameters >= 2) {
+      g_cpp_throw_hook(record->exception_information[1]);
+    }
+  };
+  if (!cvars::guest_exception_dispatch_first) {
+    call_hook();
+  }
+  // Guest dispatch: a handler that catches never returns here.
+  if (DispatchGuestException(record.guest_address())) {
+    return;  // a handler continued execution
+  }
+  if (cvars::guest_exception_dispatch_first) {
+    call_hook();
   }
 
   // C++ exception.
@@ -144,11 +168,13 @@ void RtlRaiseException_entry(pointer_t<X_EXCEPTION_RECORD> record) {
     }
   }
 
-  // TODO(benvanik): unwinding.
-  // This is going to suck.
+  if (DispatchGuestException(record.guest_address())) {
+    return;  // a handler continued execution
+  }
+  // Unhandled (or the frame walk failed).
   xe::debugging::Break();
 }
-DECLARE_XBOXKRNL_EXPORT2(RtlRaiseException, kDebug, kStub, kImportant);
+DECLARE_XBOXKRNL_EXPORT2(RtlRaiseException, kDebug, kImplemented, kImportant);
 
 void KeBugCheckEx_entry(dword_t code, dword_t param1, dword_t param2,
                         dword_t param3, dword_t param4) {
