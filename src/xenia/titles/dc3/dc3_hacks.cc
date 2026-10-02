@@ -51,8 +51,6 @@ constexpr const char* kKnownIds[] = {
     "calib.wait_recovery",
     "calib.exit_controller_mode",
     "game.pause_for_skeleton_loss",
-    "audio.xmahal_alloc",
-    "audio.dummy_driver",
     "anim.song_anim_expert",
     // dc3_hack_pack_skeleton.cc
     "skel.wait_33ms",
@@ -63,10 +61,8 @@ constexpr const char* kKnownIds[] = {
     "seq.transition_force",
     "seq.nav_bridge",
     "seq.loadsong_repair",
-    "seq.beat_drive",
     // Runtime, scripted-input adapter (dc3_scripted_input.cc); only with
     // --dc3_headless_autonav.
-    "input.beat_drive",
     "input.attract_press",
     "input.attract_force",
 };

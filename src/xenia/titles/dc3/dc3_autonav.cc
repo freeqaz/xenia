@@ -40,8 +40,7 @@ DEFINE_bool(dc3_headless_autonav, false,
             "stuck UI transitions, walk attract -> ... -> game_screen with "
             "UIManager::GotoScreen, inject the ymca song at loading_screen, "
             "and drive the 120 BPM song clock on game_screen. Also arms the "
-            "scripted-input automation (attract A-press/force, unpause "
-            "nudge, pad-poll beat drive). Off: the game boots to its own "
+            "scripted-input attract A-press/force. Off: the game boots to its own "
             "screens and only the DTA channel / scripted pad drive it.",
             "DC3");
 
@@ -67,9 +66,6 @@ void AutonavStep(cpu::ThreadState* ts) {
   static bool s_loadsong_probe_logged = false;
   static bool s_loadsong_repair_attempted = false;
   static bool s_content_refresh_forced = false;
-  static bool s_host_beat_drive_active = false;
-  static float s_host_song_seconds = 0.0f;
-  static float s_host_song_beat = 0.0f;
   static uint32_t s_last_stuck_cur_screen = 0;
   static uint32_t s_last_stuck_trans_screen = 0;
   static uint32_t s_last_stuck_trans_state = 0;
@@ -84,8 +80,6 @@ void AutonavStep(cpu::ThreadState* ts) {
   static const bool kHackLoadSong = HackGate(
       "seq.loadsong_repair",
       "loading_screen probe + ymca song injection via guest Executes");
-  static const bool kHackBeatDrive = HackGate(
-      "seq.beat_drive", "120 BPM TaskMgr timeline drive on game_screen");
 
   s_ticks++;
 
@@ -878,114 +872,10 @@ void AutonavStep(cpu::ThreadState* ts) {
       // IK telemetry capture requires the full gameplay pipeline running,
       // which in turn requires working ARK loading for all game assets.
 
-      if (cur_name == "game_screen") {
-        constexpr uint32_t kTheTaskMgr = 0x82F64A58;
-        auto load_u32 = [&](uint32_t guest_addr) -> uint32_t {
-          auto* ptr = is_guest_readable(guest_addr, 4)
-                          ? memory->TranslateVirtual<uint8_t*>(guest_addr)
-                          : nullptr;
-          return ptr ? xe::load_and_swap<uint32_t>(ptr) : 0;
-        };
-        auto store_float = [&](uint32_t guest_addr, float value) {
-          if (!is_guest_readable(guest_addr, 4)) {
-            return false;
-          }
-          auto* ptr = memory->TranslateVirtual<uint8_t*>(guest_addr);
-          if (!ptr) {
-            return false;
-          }
-          xe::store_and_swap<float>(ptr, value);
-          return true;
-        };
-        // Blocker 2 (gameplay crash): do not drive the song clock until the
-        // Game has actually started playback. Game::PostWaitStart clears
-        // mPaused (Game+0x5E) once its load/wait state machine completes;
-        // driving earlier runs the gameplay pipeline over a not-ready audio
-        // stream -> host SIGSEGV (the HamAudio resync / Voice path).
-        // TheGamePanel(0x83117410)->mGame(+0x38)->mPaused(+0x5E).
-        constexpr uint32_t kTheGamePanelGate = 0x83117410;
-        uint32_t gp_gate = load_u32(kTheGamePanelGate);
-        uint32_t game_gate =
-            (gp_gate && is_guest_readable(gp_gate + 0x38, 4))
-                ? load_u32(gp_gate + 0x38)
-                : 0;
-        bool beat_gate_ok = false;
-        if (game_gate && is_guest_readable(game_gate + 0x5E, 1)) {
-          auto* pp = memory->TranslateVirtual<uint8_t*>(game_gate + 0x5E);
-          beat_gate_ok = pp ? (*pp == 0) : false;  // mPaused==0 -> playing
-        }
-        if (!beat_gate_ok && s_host_beat_drive_active) {
-          XELOGI(
-              "DC3: Beat gate closed (Game paused/not ready) -> suspend beat "
-              "drive");
-          s_host_beat_drive_active = false;
-        }
-        uint32_t timelines_addr = load_u32(kTheTaskMgr + 0x2C);
-        if (kHackBeatDrive && beat_gate_ok && timelines_addr &&
-            is_guest_readable(timelines_addr + 0x54, 4) &&
-            is_guest_readable(kTheTaskMgr + 0x48, 1)) {
-          auto* auto_ptr =
-              memory->TranslateVirtual<uint8_t*>(kTheTaskMgr + 0x48);
-          if (auto_ptr) {
-            *auto_ptr = 0;
-          }
-
-          constexpr float kSecondsPerFrame = 1.0f / 30.0f;
-          constexpr float kBeatPerFrame = 120.0f / 60.0f * kSecondsPerFrame;
-          constexpr uint32_t kTimelineStride = 0x1C;
-          constexpr uint32_t kTimeOff = 0x10;
-          constexpr uint32_t kLastTimeOff = 0x14;
-
-          uint32_t seconds_time_addr = timelines_addr + 0 * kTimelineStride + kTimeOff;
-          uint32_t seconds_last_addr =
-              timelines_addr + 0 * kTimelineStride + kLastTimeOff;
-          uint32_t beats_time_addr = timelines_addr + 1 * kTimelineStride + kTimeOff;
-          uint32_t beats_last_addr =
-              timelines_addr + 1 * kTimelineStride + kLastTimeOff;
-          uint32_t ui_time_addr = timelines_addr + 2 * kTimelineStride + kTimeOff;
-          uint32_t ui_last_addr = timelines_addr + 2 * kTimelineStride + kLastTimeOff;
-
-          auto load_float = [&](uint32_t guest_addr) -> float {
-            auto* ptr = is_guest_readable(guest_addr, 4)
-                            ? memory->TranslateVirtual<uint8_t*>(guest_addr)
-                            : nullptr;
-            return ptr ? xe::load_and_swap<float>(ptr) : 0.0f;
-          };
-
-          float old_seconds = load_float(seconds_time_addr);
-          float old_beats = load_float(beats_time_addr);
-          float old_ui = load_float(ui_time_addr);
-          if (!s_host_beat_drive_active) {
-            HackFired("seq.beat_drive");
-            s_host_song_seconds = old_seconds;
-            s_host_song_beat = old_beats;
-            XELOGI(
-                "DC3: Host-driven beat activated taskmgr={:08X} timelines={:08X} "
-                "sec={:.3f} beat={:.3f}",
-                kTheTaskMgr, timelines_addr, s_host_song_seconds,
-                s_host_song_beat);
-            s_host_beat_drive_active = true;
-          }
-
-          s_host_song_seconds += kSecondsPerFrame;
-          s_host_song_beat += kBeatPerFrame;
-
-          store_float(seconds_last_addr, old_seconds);
-          store_float(seconds_time_addr, s_host_song_seconds);
-          store_float(beats_last_addr, old_beats);
-          store_float(beats_time_addr, s_host_song_beat);
-          store_float(ui_last_addr, old_ui);
-          store_float(ui_time_addr, s_host_song_seconds);
-
-          if ((s_ticks % 120) == 0) {
-            XELOGI("DC3: Beat drive sec={:.3f} beat={:.3f} nui={}",
-                   s_host_song_seconds, s_host_song_beat, s_ticks);
-          }
-        }
-      } else if (s_host_beat_drive_active) {
-        XELOGI("DC3: Host-driven beat deactivated on '{}'", cur_name);
-        s_host_beat_drive_active = false;
-      }
+      // (RETIRED 2026-10-02) beat drive A: 1/30 s per tick written into the
+      // TheTaskMgr seconds/beats/ui timelines on game_screen. With real XMA
+      // contexts and the paced nop driver the game's own song clock runs
+      // (gpState=3 on the audio clock, docs/fork/dc3/BASELINE.md).
     }
   }
 }

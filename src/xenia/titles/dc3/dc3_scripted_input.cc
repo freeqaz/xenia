@@ -112,13 +112,6 @@ class Dc3ScriptedInputAdapter final
  private:
   void ProbeGameplayState(Memory* memory, const std::string& screen);
 
-  // input.beat_drive (beat drive B).
-  bool beat_drive_active_ = false;
-  float song_seconds_ = 0.0f;
-  float song_beat_ = 0.0f;
-  std::chrono::steady_clock::time_point last_update_time_;
-  std::chrono::steady_clock::time_point last_log_time_;
-
   // Read-only gameplay probe.
   std::chrono::steady_clock::time_point probe_last_log_time_;
   uint32_t last_game_panel_addr_ = 0;
@@ -165,158 +158,12 @@ std::string Dc3ScriptedInputAdapter::ReadCurrentScreenName(Memory* memory) {
 
 void Dc3ScriptedInputAdapter::OnPrimaryPadPoll(Memory* memory,
                                                const std::string& screen) {
-  if (!memory) {
+  if (!memory || screen != "game_screen") {
     return;
   }
-  auto now = std::chrono::steady_clock::now();
-
-  if (screen != "game_screen") {
-    if (beat_drive_active_) {
-      XELOGI("DC3 Script: host beat drive deactivated on '{}'", screen);
-      beat_drive_active_ = false;
-    }
-    return;
-  }
-
-  constexpr uint32_t kTheTaskMgr = 0x82F64A58;
-  constexpr uint32_t kTimelineStride = 0x1C;
-  constexpr uint32_t kTimeOff = 0x10;
-  constexpr uint32_t kLastTimeOff = 0x14;
-
-  auto load_u32 = [&](uint32_t guest_addr) -> uint32_t {
-    auto* ptr = IsGuestReadable(memory, guest_addr, 4)
-                    ? memory->TranslateVirtual<uint8_t*>(guest_addr)
-                    : nullptr;
-    return ptr ? xe::load_and_swap<uint32_t>(ptr) : 0;
-  };
-  auto load_float = [&](uint32_t guest_addr) -> float {
-    auto* ptr = IsGuestReadable(memory, guest_addr, 4)
-                    ? memory->TranslateVirtual<uint8_t*>(guest_addr)
-                    : nullptr;
-    return ptr ? xe::load_and_swap<float>(ptr) : 0.0f;
-  };
-  auto store_float = [&](uint32_t guest_addr, float value) -> bool {
-    if (!IsGuestReadable(memory, guest_addr, 4)) {
-      return false;
-    }
-    auto* ptr = memory->TranslateVirtual<uint8_t*>(guest_addr);
-    if (!ptr) {
-      return false;
-    }
-    xe::store_and_swap<float>(ptr, value);
-    return true;
-  };
-
-  // Blocker 2 (gameplay crash): force-advancing the song clock while the Game
-  // is still paused/loading (mPaused==1) drives the gameplay pipeline over a
-  // not-ready audio stream and crashes (the HamAudio resync / Voice path). Only
-  // run the host beat drive once the Game's own load/wait state machine has
-  // started playback (Game::PostWaitStart sets mPaused=0).
-  // TheGamePanel(0x83117410)->mGame(+0x38)->Game.mPaused(+0x5E).
-  {
-    constexpr uint32_t kTheGamePanelGate = 0x83117410;
-    uint32_t gp_gate = load_u32(kTheGamePanelGate);
-    uint32_t game_gate =
-        (gp_gate && IsGuestReadable(memory, gp_gate + 0x38, 4))
-            ? load_u32(gp_gate + 0x38)
-            : 0;
-    bool paused = true;
-    if (game_gate && IsGuestReadable(memory, game_gate + 0x5E, 1)) {
-      auto* pp = memory->TranslateVirtual<uint8_t*>(game_gate + 0x5E);
-      paused = pp ? (*pp != 0) : true;
-    }
-    if (!game_gate || paused) {
-      if (beat_drive_active_) {
-        beat_drive_active_ = false;
-        XELOGI("DC3 Script: beat gate closed (Game paused/not ready)");
-      }
-      // Keep probing so we can watch the load/wait/paused progression.
-      ProbeGameplayState(memory, screen);
-      return;
-    }
-  }
-
-  uint32_t timelines_addr = load_u32(kTheTaskMgr + 0x2C);
-  if (!timelines_addr || !IsGuestReadable(memory, timelines_addr + 0x54, 4) ||
-      !IsGuestReadable(memory, kTheTaskMgr + 0x48, 1)) {
-    return;
-  }
-
-  static const bool kBeatDrive =
-      AutonavEnabled() &&
-      HackGate("input.beat_drive",
-               "second 120 BPM TaskMgr timeline drive from the pad poll "
-               "(wall clock)");
-  if (!kBeatDrive) {
-    ProbeGameplayState(memory, screen);
-    return;
-  }
-
-  auto* auto_ptr = memory->TranslateVirtual<uint8_t*>(kTheTaskMgr + 0x48);
-  if (auto_ptr) {
-    *auto_ptr = 0;
-  }
-
-  uint32_t seconds_time_addr = timelines_addr + 0 * kTimelineStride + kTimeOff;
-  uint32_t seconds_last_addr =
-      timelines_addr + 0 * kTimelineStride + kLastTimeOff;
-  uint32_t beats_time_addr = timelines_addr + 1 * kTimelineStride + kTimeOff;
-  uint32_t beats_last_addr =
-      timelines_addr + 1 * kTimelineStride + kLastTimeOff;
-  uint32_t ui_time_addr = timelines_addr + 2 * kTimelineStride + kTimeOff;
-  uint32_t ui_last_addr = timelines_addr + 2 * kTimelineStride + kLastTimeOff;
-
-  float old_seconds = load_float(seconds_time_addr);
-  float old_beats = load_float(beats_time_addr);
-  float old_ui = load_float(ui_time_addr);
-
-  if (!beat_drive_active_) {
-    HackFired("input.beat_drive");
-    song_seconds_ = old_seconds;
-    song_beat_ = old_beats;
-    last_update_time_ = now;
-    last_log_time_ = now;
-    beat_drive_active_ = true;
-    XELOGI(
-        "DC3 Script: host beat drive activated taskmgr={:08X} timelines={:08X} "
-        "sec={:.3f} beat={:.3f}",
-        kTheTaskMgr, timelines_addr, song_seconds_, song_beat_);
-    ProbeGameplayState(memory, screen);
-    return;
-  }
-
-  auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                        now - last_update_time_)
-                        .count();
-  if (elapsed_ms <= 0) {
-    return;
-  }
-  if (elapsed_ms > 100) {
-    elapsed_ms = 33;
-  }
-  last_update_time_ = now;
-
-  float delta_seconds = static_cast<float>(elapsed_ms) / 1000.0f;
-  float delta_beats = delta_seconds * (120.0f / 60.0f);
-  song_seconds_ += delta_seconds;
-  song_beat_ += delta_beats;
-
-  store_float(seconds_last_addr, old_seconds);
-  store_float(seconds_time_addr, song_seconds_);
-  store_float(beats_last_addr, old_beats);
-  store_float(beats_time_addr, song_beat_);
-  store_float(ui_last_addr, old_ui);
-  store_float(ui_time_addr, song_seconds_);
-
-  auto since_last_log = std::chrono::duration_cast<std::chrono::milliseconds>(
-                            now - last_log_time_)
-                            .count();
-  if (since_last_log >= 2000) {
-    last_log_time_ = now;
-    XELOGI("DC3 Script: host beat drive sec={:.3f} beat={:.3f}", song_seconds_,
-           song_beat_);
-  }
-
+  // Read-only gameplay probe: the gpState= lines the harness counts.
+  // (RETIRED 2026-10-02: beat drive B, a wall-clock 120 BPM TaskMgr timeline
+  // writer that ran from here; the game's audio clock runs now.)
   ProbeGameplayState(memory, screen);
 }
 

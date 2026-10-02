@@ -1127,47 +1127,13 @@ void ApplyDc3LaunchHooks(const titles::TitleLaunchContext& ctx) {
                                  kPauseForSkeletonLoss);
                         });
 
-      auto patch4 = [&](uint32_t addr, uint32_t val, const char* desc) {
-        auto* p = memory->TranslateVirtual<uint8_t*>(addr);
-        if (!p) {
-          return;
-        }
-        auto* h = memory->LookupHeap(addr);
-        if (!h) {
-          return;
-        }
-        h->Protect(addr, 4, kMemoryProtectRead | kMemoryProtectWrite);
-        xe::store_and_swap<uint32_t>(p, val);
-        XELOGI("DC3: Audio fix: {} at {:08X}", desc, addr);
-      };
-
-      constexpr uint32_t kXMAHALAlloc = 0x82E77250;
-      with_patch_target("audio.xmahal_alloc", "XMAHALAllocateContexts", kXMAHALAlloc, 8,
-                        [&](uint8_t* p) {
-                          xe::store_and_swap<uint32_t>(p + 0, 0x38600000);
-                          xe::store_and_swap<uint32_t>(p + 4, 0x4E800020);
-                          XELOGI("DC3: Audio fix: stubbed XMAHALAllocateContexts "
-                                 "at {:08X} to return S_OK",
-                                 kXMAHALAlloc);
-                        });
-
-      // The stub above leaves the XMA HAL with no contexts, which is only
-      // survivable while the guest's audio render callback never runs. The
-      // paced nop audio driver (77d85acaa) made it run: ~15 s into boot the
-      // callback faults in XMAHALWriteAndUnlockContexts (0x82E77C64) holding
-      // a lock that D3DDevice_Resume then waits on forever, so the main
-      // thread stops (no System::Poll, no DTA channel, menus only advance
-      // through the forced-transition fallbacks, game_screen never loads).
-      // Keep this title on the dummy driver unless explicitly asked for
-      // --nop_audio_driver=paced.
-      if (cvars::nop_audio_driver == "auto" &&
-          dc3::HackGate("audio.dummy_driver",
-                        "--nop_audio_driver auto -> dummy")) {
-        cvars::nop_audio_driver = "dummy";
-        XELOGI("DC3: Audio fix: --nop_audio_driver auto -> dummy (XMA HAL "
-               "contexts are stubbed; the render callback must not run)");
-      }
-
+      // (RETIRED 2026-10-02) XMAHALAllocateContexts -> 0 and the
+      // --nop_audio_driver auto -> dummy override. The stub was what made the
+      // paced nop driver's render callback fault; once the MMIO handler
+      // emulated the XMA HAL's 16-byte stvx128 context kicks (lane-d-mmio-
+      // vector), real contexts + the paced driver run the game's own audio
+      // clock (docs/fork/dc3/BASELINE.md). DC3 runs the nop APU's default
+      // driver (auto = paced).
       // (RETIRED 2026-10-02) Game::HandleWait+0x90 bne -> b and
       // HamAudio::IsReady+0x70 bctrl -> li r3,1. Together with the unpause
       // nudge they started the song before its stream left kInit, so
