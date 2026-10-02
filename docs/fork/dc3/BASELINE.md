@@ -179,6 +179,42 @@ The runs are interleaved run by run, one slot per run. Load is the mean of the
 - **This lane's L0 smoke run**, same as `main` plus instruments: a main-thread
   FAIL at 19.7 s latched `mFailing`, and the run stalled.
 
+## Lane B2 (2026-10-02)
+
+Branch `dc3-b2` off `main` `1f309687c`. Every run went through
+`/home/free/tmp/fr-slot.sh`; the outputs are under
+`/home/free/tmp/dc3-b2-runs/`.
+
+### Retirements: four original-layout hacks and seven decomp stubs (`0d44a727d`)
+
+Retired on Lane B's leftover evidence (lane-b-dc3 `c4f2fa891`, x1: S1 5/5
+with `seq.loadsong_repair`, `seq.transition_force`, `ui.hampanel_focus` and
+`ui.event_dialog_on_top` disabled; d7: S3 2/2 at 627 with the seven decomp
+stubs disabled), then re-measured with the code deleted.
+
+S1 x5, `0d44a727d` (cand) interleaved with `main` `1f309687c` (ctrl), the
+pinned xenia-ymca flow with `--dc3_headless_autonav`:
+
+| run | title | game_screen | gpState=2 playing | gpState=3 | gp2 samples | NON_XMA | latch | load |
+|---|---|---|---|---|---|---|---|---|
+| cand r1 | 12.0 s | 39.1 s | 45.1 s | 201.7 s | 79 | 0 | none | 202 |
+| cand r2 | 12.0 s | 36.0 s | 42.0 s | 198.3 s | 78 | 0 | none | 27 |
+| cand r3 | 15.1 s | 42.1 s | 45.1 s | 201.3 s | 78 | 0 | none | 32 |
+| cand r4 | 12.0 s | 36.0 s | 42.0 s | 198.2 s | 78 | 0 | none | 13 |
+| cand r5 | 12.0 s | 36.0 s | 42.0 s | 198.2 s | 78 | 0 | none | 21 |
+| ctrl r1 | 12.1 s | 36.1 s | 42.1 s | 198.2 s | 78 | 0 | none | 58 |
+| ctrl r2 | 12.0 s | 36.0 s | 42.0 s | 198.2 s | 78 | 0 | none | 25 |
+| ctrl r3 | 12.0 s | 36.0 s | 42.0 s | 198.2 s | 78 | 0 | none | 21 |
+| ctrl r4 | 12.0 s | 36.0 s | 42.0 s | 198.4 s | 78 | 0 | none | 34 |
+| ctrl r5 | 12.0 s | 36.0 s | 42.0 s | 198.1 s | 79 | 0 | none | 16 |
+
+- **S1: cand 5/5, ctrl 5/5.** No tripwire line in any run. The two slower
+  cand runs (r1, r3) are 3 s later at every milestone from title on, i.e. a
+  later boot; r1 ran at load 202.
+- **S3 x2 on `0d44a727d`: PASS 2/2**, 627 traps, histogram identical to s66,
+  43 distinct LRs. The seven stubs no longer appear in the log.
+- S2 and S1V on `0d44a727d`: S2_S1V_PLACEHOLDER
+
 ## What is still patched (original layout)
 
 These hacks remain; see `PATCH_MANIFEST.md` for the full list.

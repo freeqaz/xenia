@@ -11,7 +11,8 @@ Scope:
 - The decomp-layout pack (`titles/dc3/decomp/`) is not listed here. It only
   applies to a rebuilt image detected as the decomp layout, where harness S3
   fingerprints it as a whole. To skip one of its stubs, use
-  `--dc3_decomp_disable_stubs=<name,...>`.
+  `--dc3_decomp_disable_stubs=<name,...>`. Lane B2 deleted seven of its stubs
+  (see "Retired in lane B2" below).
 - "Masks" names the gap each hack covers, using the ids from
   `docs/fork/cleanup/DC3_HACK_GAP_ANALYSIS.md` (O1-O49).
 - "Status" is this lane's verdict (Lane B, 2026-10-02). See the end of this
@@ -44,8 +45,6 @@ tools/fork-regress/compare.py --paired out/cand out/ctrl
 | `mmio.soft_fault_range` | 0x83320000-0x836C0000 | MMIO write soft-fault range | O48: decomp `.data`, **outside the original image** | kept: inert on the original, decomp-only |
 | `content.wipe` | host FS | `remove_all(<content>/373307D9)` | O47 | **default off** (`--dc3_clean_content_cache=false`) |
 | `saveload.activate` | `SaveLoadManager::Activate` 0x82894A10 | `blr` | O37 | kept (L6, content/XAM) |
-| `ui.hampanel_focus` | `HamPanel::FocusComponent` 0x828EFE90 | branch to `UIPanel::FocusComponent` | O28 | kept, A/B pending |
-| `ui.event_dialog_on_top` | `HamScreen::IsEventDialogOnTop` 0x829626D8 | `return 0` | O29 | kept, A/B pending |
 | `content.refresh_done` | `ContentMgr::RefreshDone` 0x825FEB48 | `return 1` | O36: XAM cross-title enumeration | kept (L6) |
 | `speech.grammar_unload` | `SpeechMgr::Grammar::Unload` 0x82439F38 | `blr` | O7: the NUI S_OK stubs | kept (NUI) |
 | `calib.player_present_guard`, `calib.choose_player_sides`, `calib.warning_data`, `calib.nav_data`, `calib.wait_recovery`, `calib.exit_controller_mode` | SkeletonChooser / ShellInput (0x8290834C, 0x82909968, 0x82907880, 0x82909340, 0x82904CD0, 0x82902748) | `nop` / `blr` / rewrite | O8-O13: a constant skeleton is not a calibrated player | kept (NUI) |
@@ -71,9 +70,7 @@ These were removed:
 | id | where | what | masks | status |
 |---|---|---|---|---|
 | `seq.controller_mode` | NUI callback (worker) | `TheGestureMgr`+0x426D := 1 each frame | O6 | kept (NUI) |
-| `seq.transition_force` | **main thread**, autonav | force-enter/complete transitions stuck for 120 or more ticks | O30 | `--dc3_headless_autonav` only |
 | `seq.nav_bridge` | **main thread**, autonav | `UIManager::GotoScreen` walk to game_screen, held while the song merge is busy | O31, O32 | `--dc3_headless_autonav` only |
-| `seq.loadsong_repair` | **main thread**, autonav | `DataReadFile`, `HamSongMgr::AddSongs`, ymca injection | O33 | `--dc3_headless_autonav` only |
 | `input.attract_press` | pad poll | press A every 3 s at attract | O45 | `--dc3_headless_autonav` only |
 | `input.attract_force` | pad poll | 4 MiB scan + UIManager stomp, attract -> title | O46 | `--dc3_headless_autonav` only |
 
@@ -114,6 +111,21 @@ override fix merged.
 | `skel.ppc_get_next_frame` | 0x829C2790 | pre-override fake frame | shadowed by `nui.get_next_frame` (audit) |
 | `debug.fail_spin` | 0x825CE2DC | survive a worker FAIL | faithful spin restored; the worker FAIL it survived was self-inflicted (finding 2) |
 | `seq.transition_diag`, `--dc3_gameplay_probe` | off-thread Executes | diagnostics | deleted |
+
+## Retired in lane B2 (2026-10-02)
+
+Measured in `BASELINE.md`, "Lane B2". The ids are gone from the known-id
+table, so naming one in `--dc3_disable_hacks` is now a launch error.
+
+| id / stub | site | why it existed | evidence it is gone for good |
+|---|---|---|---|
+| `ui.hampanel_focus` | `HamPanel::FocusComponent` 0x828EFE90 | "focus crash": `TheHamUI.EventDialogPanel()` null when the host forced screens before HamUI loaded (O28) | Lane B x1: S1 5/5 with it off. B2 r1: S1 5/5 with the code deleted, 5/5 for main interleaved |
+| `ui.event_dialog_on_top` | `HamScreen::IsEventDialogOnTop` 0x829626D8 | same (O29) | same runs |
+| `seq.transition_force` | main-thread autonav | force-enter/complete transitions stuck for 120 ticks (O30) | same runs. Every transition completes by itself once the Bink/Splash/HamAudio chain is real |
+| `seq.loadsong_repair` | main-thread autonav | `DataReadFile` + `HamSongMgr::AddSongs` on a guessed path and a constructed `ymca` Symbol (O33) | same runs. The flow selects the song on song_select |
+| decomp `Splash::PrepareNext`, `Splash::BeginSplasher`, `Splash::Suspend`, `Splash::Resume` | decomp layout | lost-resume (thread created suspended, resume lost) | Lane B d7: S3 2/2 PASS, 627 traps, histogram identical, with the 7 off. B2: S3 2/2 PASS, 627, with the code deleted |
+| decomp `BinkStartAsyncThread`, `BinkMovieSys::PlatformInit` | decomp layout (both resolve to one noop 0x826B0EF0) | same | same |
+| decomp `UIManager::GotoFirstScreen` | decomp layout | "ChunkStream's async I/O threads fail to start" (same race) | same |
 
 ## Status legend
 

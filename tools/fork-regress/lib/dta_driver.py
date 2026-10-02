@@ -41,6 +41,10 @@ GAME_QUERIES = [
     "{{$hamdirector difficulty_song_anim 2} num_keys $hamdirector (clip)}",
 ]
 GAME_DELAY_S = float(os.environ.get("FR_DTA_GAME_DELAY_S", 10))
+# Exploration only: FR_DTA_SCREEN_PROBE="<screen>|<query>|<seconds>" sends
+# <query> back to back for <seconds> once the adapter logs `screen -> '<screen>'`
+# (answers land in driver.json "screen_probe" with host timestamps).
+SCREEN_PROBE = os.environ.get("FR_DTA_SCREEN_PROBE", "")
 WAIT_GAME_S = float(os.environ.get("FR_DTA_WAIT_GAME_S", 150))
 
 
@@ -92,6 +96,22 @@ def main():
             if q.startswith("{size") and CENSUS_DELAY_S:
                 time.sleep(CENSUS_DELAY_S)
             out["queries"].append(send(sock, q))
+    if out["error"] is None and SCREEN_PROBE:
+        scr, pq, secs = SCREEN_PROBE.split("|")
+        out["screen_probe"] = []
+        t1 = time.time()
+        while time.time() - t1 < 150 and alive(pid):
+            try:
+                if f"screen -> '{scr}'" in log.read_text(errors="replace"):
+                    break
+            except OSError:
+                pass
+            time.sleep(0.05)
+        t2 = time.time()
+        while time.time() - t2 < float(secs) and alive(pid):
+            r = send(sock, pq)
+            r["t"] = round(time.time() - t2, 3)
+            out["screen_probe"].append(r)
     out["game_queries"] = []
     out["game_error"] = None
     if out["error"] is None:
