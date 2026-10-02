@@ -182,16 +182,18 @@ class VulkanPipelineCache {
     // Including all the padding, for a stable hash.
     PipelineDescription() { Reset(); }
     PipelineDescription(const PipelineDescription& description) {
-      std::memcpy(this, &description, sizeof(*this));
+      std::memcpy(reinterpret_cast<void*>(this), &description, sizeof(*this));
     }
     PipelineDescription& operator=(const PipelineDescription& description) {
-      std::memcpy(this, &description, sizeof(*this));
+      std::memcpy(reinterpret_cast<void*>(this), &description, sizeof(*this));
       return *this;
     }
     bool operator==(const PipelineDescription& description) const {
       return std::memcmp(this, &description, sizeof(*this)) == 0;
     }
-    void Reset() { std::memset(this, 0, sizeof(*this)); }
+    void Reset() {
+      std::memset(reinterpret_cast<void*>(this), 0, sizeof(*this));
+    }
     uint64_t GetHash() const { return XXH3_64bits(this, sizeof(*this)); }
     struct Hasher {
       size_t operator()(const PipelineDescription& description) const {

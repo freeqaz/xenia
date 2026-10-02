@@ -105,7 +105,8 @@ XboxkrnlModule::XboxkrnlModule(Emulator* emulator, KernelState* kernel_state)
     auto lpKeDebugMonitorData =
         memory_->TranslateVirtual<X_KEDEBUGMONITORDATA*>(pKeDebugMonitorData +
                                                          4);
-    std::memset(lpKeDebugMonitorData, 0, sizeof(X_KEDEBUGMONITORDATA));
+    std::memset(reinterpret_cast<void*>(lpKeDebugMonitorData), 0,
+                sizeof(X_KEDEBUGMONITORDATA));
     lpKeDebugMonitorData->callback_fn =
         GenerateTrampoline("KeDebugMonitorCallback", KeDebugMonitorCallback);
   }
@@ -126,7 +127,8 @@ XboxkrnlModule::XboxkrnlModule(Emulator* emulator, KernelState* kernel_state)
                                  pKeCertMonitorData + 4);
     auto lpKeCertMonitorData =
         memory_->TranslateVirtual<X_KECERTMONITORDATA*>(pKeCertMonitorData + 4);
-    std::memset(lpKeCertMonitorData, 0, sizeof(X_KECERTMONITORDATA));
+    std::memset(reinterpret_cast<void*>(lpKeCertMonitorData), 0,
+                sizeof(X_KECERTMONITORDATA));
     lpKeCertMonitorData->callback_fn =
         GenerateTrampoline("KeCertMonitorCallback", KeCertMonitorCallback);
   }

@@ -317,7 +317,7 @@ class TypedPointerParam : public ParamBase<uint32_t> {
   }
   void Zero() const {
     assert_not_null(host_ptr_);
-    std::memset(host_ptr_, 0, sizeof(T));
+    std::memset(reinterpret_cast<void*>(host_ptr_), 0, sizeof(T));
   }
 
  protected:
