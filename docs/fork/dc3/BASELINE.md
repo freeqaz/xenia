@@ -215,6 +215,33 @@ pinned xenia-ymca flow with `--dc3_headless_autonav`:
   43 distinct LRs. The seven stubs no longer appear in the log.
 - S2 and S1V on `0d44a727d`: S2_S1V_PLACEHOLDER
 
+### SongAnim: the patch sustained the symptom it was written for (`87f5abce3`)
+
+`anim.song_anim_expert` patched `HamDirector::SongAnim(player)` to return
+`SongAnimByDifficulty(kDifficultyExpert)`, because "the routine-builder anim is
+empty headless (the remixer never runs)". The remixer does run:
+`perform.dta` calls `{[remixer] start_reset}`, whose `ham_objects.dta` body
+ends in `{$this reset}`, i.e. `OriginalChoreoRemixer::Reset -> SelectMove ->
+DanceRemixer::AddRoutineMove -> MoveMgr::InsertMoveInSong`. In the image,
+`InsertMoveInSong` writes its clip and move keys into
+`TheHamDirector->SongAnim(player)`. With the patch on, that is the authored
+EXPERT `song.anim`. So the routine-builder anim stayed empty because of the
+patch, and the remix was written over the authored expert anim.
+
+Measured with S2's gameplay DTA queries (sent 10 s after the first
+`gpState=2 paused=0`), binary `0d44a727d`, song `thehustle`, player 0
+difficulty 3 (beginner), `merge_moves` 1:
+
+| | `player_song_anim 0` | its clip keys | routine-builder clip keys | expert `song.anim` clip keys | S2 |
+|---|---|---|---|---|---|
+| patch on (r1-cand S2 r2) | `song.anim` (expert) | 85 | 0 | 85 | PASS |
+| patch off (e3 r1, r2) | `player_1_routine_builder.anim` | 71 | 71 | 17 | PASS 2/2 (game_screen 45/36 s, gpState=3 204/198 s; r1 at load 196) |
+
+The 68 extra keys in the expert anim with the patch on are the remix. The
+patch is deleted. **This is an intentional oracle change:** the dancers now
+evaluate the remixed routine-builder anim, as the 360 does, and the authored
+expert anim is no longer overwritten.
+
 ## What is still patched (original layout)
 
 These hacks remain; see `PATCH_MANIFEST.md` for the full list.

@@ -49,7 +49,6 @@ tools/fork-regress/compare.py --paired out/cand out/ctrl
 | `speech.grammar_unload` | `SpeechMgr::Grammar::Unload` 0x82439F38 | `blr` | O7: the NUI S_OK stubs | kept (NUI) |
 | `calib.player_present_guard`, `calib.choose_player_sides`, `calib.warning_data`, `calib.nav_data`, `calib.wait_recovery`, `calib.exit_controller_mode` | SkeletonChooser / ShellInput (0x8290834C, 0x82909968, 0x82907880, 0x82909340, 0x82904CD0, 0x82902748) | `nop` / `blr` / rewrite | O8-O13: a constant skeleton is not a calibrated player | kept (NUI) |
 | `game.pause_for_skeleton_loss` | `Game::PauseForSkeletonLoss` 0x82866D50 | `blr` | O14 | kept (NUI) |
-| `anim.song_anim_expert` | `HamDirector::SongAnim` 0x82475578 | `li r4,2; b SongAnimByDifficulty` | O34 | kept: changes which anim plays |
 
 ## `dc3_hack_pack_skeleton.cc` (with `--fake_kinect_data`)
 
@@ -125,6 +124,7 @@ table, so naming one in `--dc3_disable_hacks` is now a launch error.
 | `seq.loadsong_repair` | main-thread autonav | `DataReadFile` + `HamSongMgr::AddSongs` on a guessed path and a constructed `ymca` Symbol (O33) | same runs. The flow selects the song on song_select |
 | decomp `Splash::PrepareNext`, `Splash::BeginSplasher`, `Splash::Suspend`, `Splash::Resume` | decomp layout | lost-resume (thread created suspended, resume lost) | Lane B d7: S3 2/2 PASS, 627 traps, histogram identical, with the 7 off. B2: S3 2/2 PASS, 627, with the code deleted |
 | decomp `BinkStartAsyncThread`, `BinkMovieSys::PlatformInit` | decomp layout (both resolve to one noop 0x826B0EF0) | same | same |
+| `anim.song_anim_expert` | `HamDirector::SongAnim` 0x82475578 -> `li r4,2; b SongAnimByDifficulty` | "routine-builder anim empty headless, the remixer never runs" (O34) | Self-sustaining: `MoveMgr::InsertMoveInSong` writes the remix into `TheHamDirector->SongAnim(player)`, which the patch made the authored EXPERT song.anim. DTA, patch on: SongAnim = song.anim, 85 clip keys, routine-builder 0. Off: SongAnim = player_1_routine_builder.anim, 71 keys, expert song.anim back to its authored 17. S2 2/2 PASS off (e3). **Intentional oracle change**: the dancers now evaluate the remixed routine, as on the 360 |
 | decomp `UIManager::GotoFirstScreen` | decomp layout | "ChunkStream's async I/O threads fail to start" (same race) | same |
 
 ## Status legend
