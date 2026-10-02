@@ -8,6 +8,7 @@
 */
 
 #include <array>
+#include <filesystem>
 
 #include "xenia/base/threading.h"
 
@@ -1262,6 +1263,34 @@ TEST_CASE("Test Alertable Wait Returns kUserCallback", "[thread]") {
     REQUIRE(Wait(thread.get(), false, 1s) == WaitResult::kSuccess);
   }
 }
+
+#if XE_PLATFORM_LINUX
+static size_t CountOpenFds() {
+  size_t n = 0;
+  for (const auto& entry :
+       std::filesystem::directory_iterator("/proc/self/fd")) {
+    (void)entry;
+    ++n;
+  }
+  return n;
+}
+
+TEST_CASE("Alertable eventfd is closed when its thread exits", "[thread]") {
+  // Each thread that enters an alertable sleep/wait lazily creates an eventfd
+  // for APC wakeups. It used to be leaked at thread exit: one fd per thread.
+  Thread::CreationParameters params = {};
+  constexpr int kThreads = 32;
+  const size_t before = CountOpenFds();
+  for (int i = 0; i < kThreads; ++i) {
+    auto thread = Thread::Create(params, [] { AlertableSleep(1ms); });
+    REQUIRE(thread);
+    REQUIRE(Wait(thread.get(), false, 5s) == WaitResult::kSuccess);
+  }
+  const size_t after = CountOpenFds();
+  // A leak would add one fd per thread; allow a little unrelated slack.
+  REQUIRE(after < before + kThreads / 2);
+}
+#endif  // XE_PLATFORM_LINUX
 
 }  // namespace test
 }  // namespace base

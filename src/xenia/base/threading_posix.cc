@@ -199,10 +199,31 @@ static bool DrainCurrentThreadAPCs();
 // Defined after current_thread_ is in scope.
 static void ClearCurrentThreadPointer();
 
+// Closes this thread's alertable eventfd when the thread exits (it used to be
+// leaked: one fd per thread that ever entered an alertable wait). The fd stays
+// a plain thread_local int because the signal handler reads it, and touching a
+// thread_local with a destructor is not async-signal-safe; this separate guard
+// is only ever touched from EnsureAlertableEventfd. The handler runs on this
+// same thread, so publishing -1 before close() means it can never write to a
+// closed (or reused) descriptor.
+struct AlertableEventfdCloser {
+  bool armed = false;
+  ~AlertableEventfdCloser() {
+    int fd = alertable_eventfd_;
+    alertable_eventfd_ = -1;
+    if (fd >= 0) {
+      close(fd);
+    }
+  }
+};
+thread_local AlertableEventfdCloser alertable_eventfd_closer_;
+
 // Lazily create this thread's alertable eventfd. Called only on the normal
 // (non-signal) alertable path.
 static void EnsureAlertableEventfd() {
   if (alertable_eventfd_ < 0) {
+    // Touch the closer so its thread_local destructor is registered.
+    alertable_eventfd_closer_.armed = true;
     alertable_eventfd_ = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
     // If creation fails we fall back to timeout-only behavior; the predicate
     // re-check still guarantees correctness, just without early ppoll wakeup.
