@@ -67,6 +67,7 @@ void ApplyMitigationProfile(uint32_t title_id) {
   ProfileSet<bool>(title_id, "rtl_leave_critical_section_force_release", true);
   ProfileSet<uint64_t>(title_id, "fault_spin_limit", 4096);
   ProfileSet<bool>(title_id, "xam_enum_overlapped_nomorefiles_success", true);
+  ProfileSet<bool>(title_id, "xam_user_grant_privileges", true);
 }
 
 }  // namespace
@@ -83,6 +84,9 @@ void ApplyTitleProfile(const TitleLaunchContext& ctx) {
       // check in ExCreateThread).
       ProfileSet<uint32_t>(title_id, "min_guest_thread_stack_size",
                            4u * 1024u * 1024u);
+      // Kinect title: report the sensor connected (the fork has done this for
+      // every title since the DC3 bring-up).
+      ProfileSet<bool>(title_id, "nui_device_present", true);
       break;
     case kTitleRb3:
       ApplyMitigationProfile(title_id);

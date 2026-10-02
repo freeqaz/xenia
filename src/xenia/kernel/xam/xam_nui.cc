@@ -7,6 +7,9 @@
  ******************************************************************************
  */
 
+#include <atomic>
+
+#include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
 #include "xenia/emulator.h"
 #include "xenia/kernel/kernel_flags.h"
@@ -21,6 +24,12 @@
 #include "xenia/ui/window.h"
 #include "xenia/ui/windowed_app_context.h"
 #endif
+
+DEFINE_bool(nui_device_present, false,
+            "XamNuiGetDeviceStatus reports a connected Kinect sensor. Off by "
+            "default (upstream: not connected); the per-title profile sets it "
+            "for Kinect titles.",
+            "Kernel");
 
 namespace xe {
 namespace kernel {
@@ -39,12 +48,14 @@ struct X_NUI_DEVICE_STATUS {
 static_assert(sizeof(X_NUI_DEVICE_STATUS) == 24, "Size matters");
 
 void XamNuiGetDeviceStatus_entry(pointer_t<X_NUI_DEVICE_STATUS> status_ptr) {
-  static uint32_t nui_call_count = 0;
-  if (++nui_call_count <= 10 || (nui_call_count % 500) == 0)
-    XELOGD("XamNuiGetDeviceStatus called (count={}) - reporting connected",
-           nui_call_count);
+  static std::atomic<uint32_t> nui_call_count{0};
+  uint32_t n = nui_call_count.fetch_add(1, std::memory_order_relaxed) + 1;
+  if (n <= 10 || (n % 500) == 0) {
+    XELOGD("XamNuiGetDeviceStatus called (count={}) - reporting {}", n,
+           cvars::nui_device_present ? "connected" : "not connected");
+  }
   status_ptr.Zero();
-  status_ptr->status = 1;  // Report connected for DC3 Kinect init.
+  status_ptr->status = cvars::nui_device_present ? 1 : 0;
 }
 DECLARE_XAM_EXPORT1(XamNuiGetDeviceStatus, kNone, kStub);
 
