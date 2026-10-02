@@ -23,5 +23,12 @@ project("xenia-titles-dc3")
     "dc3/decomp/*.h",
     "dc3/decomp/*.cc",
   })
+  -- The DTA channel listens on a unix socket (sys/socket.h, sys/un.h); its
+  -- only caller (dc3_title.cc) is #if XE_PLATFORM_LINUX too.
+  filter("platforms:not Linux")
+    removefiles({
+      "dc3/dc3_dta_channel.cc",
+    })
+  filter({})
 
 include("dc3/testing")

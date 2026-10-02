@@ -21,6 +21,7 @@
 #include "xenia/config.h"
 #include "xenia/emulator.h"
 #include "xenia/kernel/kernel_state.h"
+#include "xenia/titles/dc3/dc3_title.h"
 #include "xenia/vfs/devices/host_path_device.h"
 
 // Headless backends
@@ -183,6 +184,10 @@ static int HeadlessMain(const std::vector<std::string>& args) {
   }
   cache_root = std::filesystem::absolute(cache_root);
   XELOGI("Cache root: {}", xe::path_to_utf8(cache_root));
+
+  // Per-title hooks (src/xenia/titles/). Only this binary registers them;
+  // the windowed xenia-app runs every title without them.
+  RegisterDc3TitleHooks();
 
   // Create emulator instance
   auto emulator =

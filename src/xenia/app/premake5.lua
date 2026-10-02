@@ -17,7 +17,6 @@ project("xenia-app")
     "xenia-hid",
     "xenia-hid-nop",
     "xenia-kernel",
-    "xenia-titles-dc3",  -- TEMPORARY: emulator.cc still calls DC3 code
     "xenia-ui",
     "xenia-ui-vulkan",
     "xenia-vfs",
