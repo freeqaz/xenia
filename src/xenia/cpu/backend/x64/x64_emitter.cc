@@ -12,6 +12,7 @@
 #include <stddef.h>
 
 #include <atomic>
+#include <cstdio>
 #include <climits>
 #include <cstring>
 
@@ -636,16 +637,21 @@ uint64_t ResolveFunction(void* raw_context, uint64_t target_address) {
     static std::atomic<int> null_count{0};
     int n = null_count.fetch_add(1, std::memory_order_relaxed);
     if (n < 5 || (n < 100 && (n % 10) == 0) || (n % 1000) == 0) {
-      XELOGE("ResolveFunction(00000000): null target — using no-op stub "
-             "(count={})",
-             n + 1);
+      XELOGE("ResolveFunction(00000000) from {:08X}: null target (count={})",
+             callsite_pc, n + 1);
     }
     cpu::NotifyUnresolvedCallStubHit("null_target", 0, callsite_pc);
     if (!cvars::tolerate_null_guest_calls) {
       // Upstream: assert_not_zero(target_address), then fall through to a
       // resolve that cannot succeed. Returning 0 hands the null target back to
       // the resolve thunk's `jmp rax`, which faults at PC 0 -- diagnosable,
-      // and the same outcome upstream produced.
+      // and the same outcome upstream produced. The log is asynchronous and
+      // a Checked assert aborts before it drains, so name the call site on
+      // stderr too.
+      std::fprintf(stderr,
+                   "ResolveFunction: call through a null pointer from guest "
+                   "%08X (--tolerate_null_guest_calls=false)\n",
+                   callsite_pc);
       assert_not_zero(target_address);
       return 0;
     }
@@ -693,6 +699,10 @@ uint64_t ResolveFunction(void* raw_context, uint64_t target_address) {
         "resolve_failed", static_cast<uint32_t>(target_address), callsite_pc);
     if (!cvars::tolerate_null_guest_calls) {
       // Upstream: assert_not_null(fn), then dereference it anyway.
+      std::fprintf(stderr,
+                   "ResolveFunction: no function at %08X, called from guest "
+                   "%08X (--tolerate_null_guest_calls=false)\n",
+                   static_cast<uint32_t>(target_address), callsite_pc);
       assert_not_null(fn);
       return 0;
     }
