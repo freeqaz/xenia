@@ -42,9 +42,6 @@ static_assert_size(XTASK_MESSAGE, 0x1C);
 dword_result_t XamTaskSchedule_entry(lpvoid_t callback,
                                      pointer_t<XTASK_MESSAGE> message,
                                      lpdword_t unknown, lpdword_t handle_ptr) {
-  // TODO(gibbed): figure out what this is for
-  *handle_ptr = 12345;
-
   uint32_t stack_size = kernel_state()->GetExecutableModule()->stack_size();
 
   // Stack must be aligned to 16kb pages
@@ -62,12 +59,27 @@ dword_result_t XamTaskSchedule_entry(lpvoid_t callback,
     return result;
   }
 
-  XELOGD("XAM task ({:08X}) scheduled asynchronously",
-         callback.guest_address());
+  // The task handle is the task thread's handle: a caller can wait on it
+  // for completion and must close it with XamTaskCloseHandle. It used to be
+  // the constant 12345, which made every wait on it fail immediately and
+  // every close a no-op on a handle that did not exist.
+  // As in ExCreateThread, the creation reference goes to the caller.
+  if (handle_ptr) {
+    *handle_ptr = thread->handle();
+  }
+
+  XELOGD("XAM task ({:08X}) scheduled asynchronously, handle {:08X}",
+         callback.guest_address(), handle_ptr ? uint32_t(*handle_ptr) : 0u);
 
   return X_STATUS_SUCCESS;
 }
 DECLARE_XAM_EXPORT2(XamTaskSchedule, kNone, kImplemented, kSketchy);
+
+dword_result_t XamTaskCloseHandle_entry(dword_t handle) {
+  X_STATUS result = kernel_state()->object_table()->ReleaseHandle(handle);
+  return XSUCCEEDED(result) ? X_ERROR_SUCCESS : X_ERROR_INVALID_HANDLE;
+}
+DECLARE_XAM_EXPORT1(XamTaskCloseHandle, kNone, kImplemented);
 
 dword_result_t XamTaskShouldExit_entry(dword_t r3) { return 0; }
 DECLARE_XAM_EXPORT2(XamTaskShouldExit, kNone, kStub, kSketchy);
