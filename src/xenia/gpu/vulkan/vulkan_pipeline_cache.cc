@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -40,12 +41,10 @@
 DEFINE_string(
     vulkan_pipeline_cache_path, "",
     "Directory to persist the VkPipelineCache blob "
-    "(xenia_vulkan_pipeline_cache.bin) in. Empty = "
-    "<temp_directory_path>/xenia-pipeline-cache. Warming this cache takes "
-    "pipeline creation from ~15ms to ~0.1ms and is what the DC3 "
-    "--dc3_inline_render path needs to avoid its CP-stall deadlock. Before "
-    "this cvar existed the path was hardcoded to /tmp/claude, which only "
-    "existed on one bring-up machine.",
+    "(xenia_vulkan_pipeline_cache.bin) in, overriding the default "
+    "<cache_root>/shaders/vulkan/<title_id>.vkpipelinecache. Requires "
+    "--store_shaders. A warm cache takes pipeline creation from ~15ms to "
+    "~0.1ms, which --headless_inline_render needs.",
     "GPU");
 
 namespace xe {
@@ -99,60 +98,15 @@ bool VulkanPipelineCache::Initialize() {
     }
   }
 
-  // Create Vulkan pipeline cache with optional file-backed persistence.
-  // This dramatically speeds up pipeline creation on subsequent runs
-  // (from ~15ms to ~0.1ms per pipeline) by caching compiled SPIR-V.
+  // A session-wide VkPipelineCache. InitializeShaderStorage merges the
+  // title's persisted blob into it; it is written back by
+  // SavePipelineCacheIfDirty and at Shutdown.
   {
-    const ui::vulkan::VulkanDevice::Functions& dfn =
-        vulkan_device->functions();
-    const VkDevice device = vulkan_device->device();
-
     VkPipelineCacheCreateInfo cache_create_info = {};
     cache_create_info.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
-
-    // Try to load existing cache from disk.
-    //
-    // This used to be a hardcoded "/tmp/claude" -- a scratch directory from
-    // the bring-up box that does not exist anywhere else, so on every other
-    // machine the load silently missed and the save silently created it.
-    // Derive it instead; --vulkan_pipeline_cache_path overrides.
-    if (!cvars::vulkan_pipeline_cache_path.empty()) {
-      pipeline_cache_path_ =
-          xe::to_path(cvars::vulkan_pipeline_cache_path) /
-          "xenia_vulkan_pipeline_cache.bin";
-    } else {
-      std::error_code temp_dir_ec;
-      std::filesystem::path temp_dir =
-          std::filesystem::temp_directory_path(temp_dir_ec);
-      if (temp_dir_ec) {
-        temp_dir = std::filesystem::path("/tmp");
-      }
-      pipeline_cache_path_ = temp_dir / "xenia-pipeline-cache" /
-                             "xenia_vulkan_pipeline_cache.bin";
-    }
-    std::vector<uint8_t> cache_data;
-    if (std::filesystem::exists(pipeline_cache_path_)) {
-      FILE* cache_file = fopen(pipeline_cache_path_.c_str(), "rb");
-      if (cache_file) {
-        fseek(cache_file, 0, SEEK_END);
-        size_t cache_size = ftell(cache_file);
-        fseek(cache_file, 0, SEEK_SET);
-        if (cache_size > 0) {
-          cache_data.resize(cache_size);
-          size_t read = fread(cache_data.data(), 1, cache_size, cache_file);
-          if (read == cache_size) {
-            cache_create_info.initialDataSize = cache_size;
-            cache_create_info.pInitialData = cache_data.data();
-            XELOGI("VulkanPipelineCache: Loaded {} byte pipeline cache from {}",
-                   cache_size, pipeline_cache_path_.string());
-          }
-        }
-        fclose(cache_file);
-      }
-    }
-
-    if (dfn.vkCreatePipelineCache(device, &cache_create_info, nullptr,
-                                  &vk_pipeline_cache_) != VK_SUCCESS) {
+    if (vulkan_device->functions().vkCreatePipelineCache(
+            vulkan_device->device(), &cache_create_info, nullptr,
+            &vk_pipeline_cache_) != VK_SUCCESS) {
       XELOGW("VulkanPipelineCache: Failed to create VkPipelineCache");
       vk_pipeline_cache_ = VK_NULL_HANDLE;
     }
@@ -242,30 +196,90 @@ void VulkanPipelineCache::Shutdown() {
 
   // Save and destroy the Vulkan pipeline cache.
   if (vk_pipeline_cache_ != VK_NULL_HANDLE) {
-    // Save cache data to disk for next run.
-    size_t cache_size = 0;
-    if (dfn.vkGetPipelineCacheData(device, vk_pipeline_cache_, &cache_size,
-                                   nullptr) == VK_SUCCESS &&
-        cache_size > 0) {
-      std::vector<uint8_t> cache_data(cache_size);
-      if (dfn.vkGetPipelineCacheData(device, vk_pipeline_cache_, &cache_size,
-                                     cache_data.data()) == VK_SUCCESS) {
-        std::filesystem::create_directories(pipeline_cache_path_.parent_path());
-        FILE* cache_file = fopen(pipeline_cache_path_.c_str(), "wb");
-        if (cache_file) {
-          fwrite(cache_data.data(), 1, cache_size, cache_file);
-          fclose(cache_file);
-          XELOGI("VulkanPipelineCache: Saved {} byte pipeline cache to {}",
-                 cache_size, pipeline_cache_path_.string());
-        }
-      }
-    }
+    SavePipelineCache();
     dfn.vkDestroyPipelineCache(device, vk_pipeline_cache_, nullptr);
     vk_pipeline_cache_ = VK_NULL_HANDLE;
   }
+  pipeline_cache_path_.clear();
 
   // Shut down shader translation.
   shader_translator_.reset();
+}
+
+void VulkanPipelineCache::InitializeShaderStorage(
+    const std::filesystem::path& cache_root, uint32_t title_id) {
+  if (vk_pipeline_cache_ == VK_NULL_HANDLE) {
+    return;
+  }
+  // A previous title's pipelines stay in the session cache; persist them under
+  // the previous title's path before switching.
+  SavePipelineCache();
+  if (!cvars::vulkan_pipeline_cache_path.empty()) {
+    pipeline_cache_path_ = xe::to_path(cvars::vulkan_pipeline_cache_path) /
+                           "xenia_vulkan_pipeline_cache.bin";
+  } else {
+    pipeline_cache_path_ = cache_root / "shaders" / "vulkan" /
+                           fmt::format("{:08X}.vkpipelinecache", title_id);
+  }
+
+  std::vector<uint8_t> cache_data;
+  {
+    FILE* cache_file = xe::filesystem::OpenFile(pipeline_cache_path_, "rb");
+    if (!cache_file) {
+      return;
+    }
+    std::fseek(cache_file, 0, SEEK_END);
+    long cache_size = std::ftell(cache_file);
+    std::fseek(cache_file, 0, SEEK_SET);
+    if (cache_size > 0) {
+      cache_data.resize(size_t(cache_size));
+      if (std::fread(cache_data.data(), 1, cache_data.size(), cache_file) !=
+          cache_data.size()) {
+        cache_data.clear();
+      }
+    }
+    std::fclose(cache_file);
+  }
+  if (cache_data.empty()) {
+    return;
+  }
+  // The driver validates the blob header (vendor, device, cache UUID) and
+  // ignores data from another device or driver version.
+  const ui::vulkan::VulkanDevice* const vulkan_device =
+      command_processor_.GetVulkanDevice();
+  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
+  const VkDevice device = vulkan_device->device();
+  VkPipelineCacheCreateInfo cache_create_info = {};
+  cache_create_info.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
+  cache_create_info.initialDataSize = cache_data.size();
+  cache_create_info.pInitialData = cache_data.data();
+  VkPipelineCache loaded_cache;
+  if (dfn.vkCreatePipelineCache(device, &cache_create_info, nullptr,
+                                &loaded_cache) != VK_SUCCESS) {
+    XELOGW("VulkanPipelineCache: Failed to load {}",
+           xe::path_to_utf8(pipeline_cache_path_));
+    return;
+  }
+  if (dfn.vkMergePipelineCaches(device, vk_pipeline_cache_, 1,
+                                &loaded_cache) == VK_SUCCESS) {
+    XELOGI("VulkanPipelineCache: Loaded {} bytes from {}", cache_data.size(),
+           xe::path_to_utf8(pipeline_cache_path_));
+  }
+  dfn.vkDestroyPipelineCache(device, loaded_cache, nullptr);
+}
+
+void VulkanPipelineCache::SavePipelineCacheIfDirty() {
+  if (!pipeline_cache_dirty_.load(std::memory_order_relaxed)) {
+    return;
+  }
+  // Pipelines are created in bursts (new areas, warmup); write the blob at
+  // most every 30 seconds. Headless runs end with _Exit, so waiting for
+  // Shutdown alone would never persist anything.
+  auto now = std::chrono::steady_clock::now();
+  if (now - pipeline_cache_last_save_ < std::chrono::seconds(30)) {
+    return;
+  }
+  SavePipelineCache();
 }
 
 VulkanShader* VulkanPipelineCache::LoadShader(xenos::ShaderType shader_type,
@@ -458,19 +472,6 @@ bool VulkanPipelineCache::ConfigurePipeline(
     // Check if async compilation is already in progress for this pipeline.
     auto pit = pending_pipelines_.find(description);
     if (pit != pending_pipelines_.end()) {
-      // If warmup_wait is enabled, spin-wait for the pipeline to finish
-      // instead of skipping the draw. This blocks the CP briefly but ensures
-      // the draw executes with the correct pipeline.
-      if (warmup_wait_ && !pit->second->done.load(std::memory_order_acquire)) {
-        auto wait_start = std::chrono::steady_clock::now();
-        while (!pit->second->done.load(std::memory_order_acquire)) {
-          std::this_thread::yield();
-          auto elapsed = std::chrono::steady_clock::now() - wait_start;
-          if (elapsed > std::chrono::milliseconds(500)) {
-            break;  // Don't wait forever
-          }
-        }
-      }
       if (pit->second->done.load(std::memory_order_acquire)) {
         // Async compilation finished - harvest the result.
         VkPipeline compiled = pit->second->result;
@@ -576,33 +577,10 @@ bool VulkanPipelineCache::ConfigurePipeline(
           CreationThread{std::move(creation_thread), pending});
     }
 
-    // In warmup mode, wait for the pipeline we just submitted.
-    if (warmup_wait_) {
-      auto wait_start = std::chrono::steady_clock::now();
-      while (!pending->done.load(std::memory_order_acquire)) {
-        std::this_thread::yield();
-        auto elapsed = std::chrono::steady_clock::now() - wait_start;
-        if (elapsed > std::chrono::milliseconds(500)) break;
-      }
-      if (pending->done.load(std::memory_order_acquire)) {
-        VkPipeline compiled = pending->result;
-        pending_pipelines_.erase(description);
-        if (compiled != VK_NULL_HANDLE) {
-          auto& entry =
-              *pipelines_.emplace(description, Pipeline(pipeline_layout)).first;
-          entry.second.pipeline = compiled;
-          last_pipeline_ = &entry;
-          pipeline_out = compiled;
-          pipeline_layout_out = pipeline_layout;
-          return true;
-        }
-      }
-    }
-
     return false;  // Draw skipped, pipeline compiling in background
   }
 
-  // Non-headless: synchronous pipeline creation (original path).
+  // Create the pipeline if not the latest and not already existing.
   const PipelineLayoutProvider* pipeline_layout =
       command_processor_.GetPipelineLayout(
           pixel_shader
@@ -2471,26 +2449,31 @@ bool VulkanPipelineCache::EnsurePipelineCreated(
   const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
   const VkDevice device = vulkan_device->device();
   VkPipeline pipeline;
-  auto vk_t0 = std::chrono::steady_clock::now();
   if (dfn.vkCreateGraphicsPipelines(device, vk_pipeline_cache_, 1,
                                     &pipeline_create_info, nullptr,
                                     &pipeline) != VK_SUCCESS) {
+    // TODO(Triang3l): Move these error messages outside.
+    /* if (creation_arguments.pixel_shader) {
+      XELOGE(
+          "Failed to create graphics pipeline with VS {:016X}, PS {:016X}",
+          creation_arguments.vertex_shader->shader().ucode_data_hash(),
+          creation_arguments.pixel_shader->shader().ucode_data_hash());
+    } else {
+      XELOGE("Failed to create graphics pipeline with VS {:016X}",
+             creation_arguments.vertex_shader->shader().ucode_data_hash());
+    } */
     return false;
   }
-  auto vk_t1 = std::chrono::steady_clock::now();
-  auto vk_us = std::chrono::duration_cast<std::chrono::microseconds>(
-      vk_t1 - vk_t0).count();
-  XELOGI("vkCreateGraphicsPipelines: {}us ({}ms)", vk_us, vk_us / 1000);
   creation_arguments.pipeline->second.pipeline = pipeline;
-
-  // Save pipeline cache to disk after each new pipeline creation.
-  // This ensures the cache persists even if the process is killed (std::_Exit).
-  SavePipelineCacheToDisk();
-
+  if (vk_pipeline_cache_ != VK_NULL_HANDLE) {
+    pipeline_cache_dirty_.store(true, std::memory_order_relaxed);
+  }
   return true;
 }
 
-void VulkanPipelineCache::SavePipelineCacheToDisk() {
+void VulkanPipelineCache::SavePipelineCache() {
+  pipeline_cache_last_save_ = std::chrono::steady_clock::now();
+  pipeline_cache_dirty_.store(false, std::memory_order_relaxed);
   if (vk_pipeline_cache_ == VK_NULL_HANDLE || pipeline_cache_path_.empty()) {
     return;
   }
@@ -2498,11 +2481,10 @@ void VulkanPipelineCache::SavePipelineCacheToDisk() {
       command_processor_.GetVulkanDevice();
   const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
   const VkDevice device = vulkan_device->device();
-
   size_t cache_size = 0;
   if (dfn.vkGetPipelineCacheData(device, vk_pipeline_cache_, &cache_size,
                                  nullptr) != VK_SUCCESS ||
-      cache_size == 0) {
+      !cache_size) {
     return;
   }
   std::vector<uint8_t> cache_data(cache_size);
@@ -2510,13 +2492,25 @@ void VulkanPipelineCache::SavePipelineCacheToDisk() {
                                  cache_data.data()) != VK_SUCCESS) {
     return;
   }
-  std::filesystem::create_directories(pipeline_cache_path_.parent_path());
-  FILE* cache_file = fopen(pipeline_cache_path_.c_str(), "wb");
-  if (cache_file) {
-    fwrite(cache_data.data(), 1, cache_size, cache_file);
-    fclose(cache_file);
-    XELOGI("VulkanPipelineCache: Saved {} byte pipeline cache to {}",
-           cache_size, pipeline_cache_path_.string());
+  // Write a temporary file and rename it over the old one, so a process that
+  // dies mid-write leaves the previous blob intact.
+  std::filesystem::path temp_path = pipeline_cache_path_;
+  temp_path += ".tmp";
+  std::error_code ec;
+  std::filesystem::create_directories(pipeline_cache_path_.parent_path(), ec);
+  FILE* cache_file = xe::filesystem::OpenFile(temp_path, "wb");
+  if (!cache_file) {
+    return;
+  }
+  bool written =
+      std::fwrite(cache_data.data(), 1, cache_size, cache_file) == cache_size;
+  std::fclose(cache_file);
+  if (written) {
+    std::filesystem::rename(temp_path, pipeline_cache_path_, ec);
+  }
+  if (!written || ec) {
+    XELOGW("VulkanPipelineCache: Failed to save {}",
+           xe::path_to_utf8(pipeline_cache_path_));
   }
 }
 

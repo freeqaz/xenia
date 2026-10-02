@@ -24,4 +24,10 @@ mkdir -p "$RD/frames" "$RD/pcache"
 xr_arg "--vulkan_device=$DEV" "--dump_frames_path=$RD/frames" --headless_capture_interval=300
 # A private pipeline cache: the default is a shared /tmp path.
 xr_opt vulkan_pipeline_cache_path "$RD/pcache"
+# The capture-path cvars default to upstream behaviour (false) since Lane E;
+# this scenario's measurement is the fork's capture flow, so opt in. xr_opt
+# drops them on a binary that predates them (where they were already true).
+xr_opt headless_skip_submission_wait true
+xr_opt headless_capture_only_draws true
+xr_opt headless_async_pipelines true
 xr_run "$RD" "$TIMEOUT_S" "$HARNESS/config/dc3-oracle.defaults.toml"
