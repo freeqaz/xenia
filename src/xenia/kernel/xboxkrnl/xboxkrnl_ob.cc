@@ -88,20 +88,14 @@ DECLARE_XBOXKRNL_EXPORT1(ObLookupThreadByThreadId, kNone, kImplemented);
 dword_result_t ObReferenceObjectByHandle_entry(dword_t handle,
                                                dword_t object_type_ptr,
                                                lpdword_t out_object_ptr) {
-  // A title identifies the expected object type in one of two ways, and we
-  // accept BOTH (fork-cleanup C14):
-  //
+  // A title identifies the expected object type in one of two ways; accept
+  // both:
   //  (a) the legacy Xenia sentinel D###BEEF, where ### is the ordinal of the
-  //      Ex*ObjectType data export. That is what upstream compared against and
-  //      what a title sees if it dereferences the (previously unmapped) export
-  //      variable and gets Xenia's uninitialized-data-export placeholder.
+  //      Ex*ObjectType data export: what a title sees if it dereferences the
+  //      export when it is not mapped;
   //  (b) the guest ADDRESS of the Ex*ObjectType export variable itself, which
-  //      is what a title that passes `&ExEventObjectType` actually supplies,
-  //      and what this fork switched to exclusively.
-  //
-  // Accepting only (b) silently broke every title that had been matching on
-  // (a). Log (once per type per form) which one the title used so the legacy
-  // path can eventually be retired with evidence.
+  //      is what a title passing `&ExEventObjectType` actually supplies.
+  // Log (once per type per form) which one a title used.
   auto* resolver = kernel_state()->processor()->export_resolver();
   struct ObjectTypeInfo {
     const char* module;
