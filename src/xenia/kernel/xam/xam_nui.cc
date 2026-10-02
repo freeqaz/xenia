@@ -215,11 +215,25 @@ DECLARE_XAM_EXPORT1(XamXlfsUnmountUploadQueueInstance, kNone, kStub);
 dword_result_t XamBackgroundDownloadSetMode_entry(dword_t mode) { return 0; }
 DECLARE_XAM_EXPORT1(XamBackgroundDownloadSetMode, kNone, kStub);
 
-dword_result_t XamXStudioRequest_entry(unknown_t unk1, unknown_t unk2,
-                                        unknown_t unk3) {
-  return 0;
+// Kinect Studio ("XStudio") record/playback seam. The NUI SDK asks it first
+// for every camera request and treats a non-negative result as "XStudio
+// handled it", reading the answer back from the request block
+// (NuipXStudioPsCamDeviceRequest: XamXStudioRequest(0x1003, &req), then
+// `lwz r3, 0x54(r1)` when r3 >= 0; NuipXStudioAttach(1): >= 0 installs the
+// XStudio camera path). Returning 0 here claimed an attached Kinect Studio
+// and handed the SDK an uninitialised result. No XStudio is ever attached, so
+// fail every opcode; the SDK then falls back to PsCamDeviceRequest.
+dword_result_t XamXStudioRequest_entry(dword_t opcode, lpvoid_t request) {
+  static std::atomic<uint32_t> calls{0};
+  if (calls.fetch_add(1, std::memory_order_relaxed) < 8) {
+    XELOGD("XamXStudioRequest({:08X}, {:08X}): no Kinect Studio attached",
+           static_cast<uint32_t>(opcode), request.guest_address());
+  }
+  // HRESULT_FROM_WIN32(ERROR_DEVICE_NOT_CONNECTED): any failure code is what
+  // the SDK tests for (cmpwi r3, 0; blt -> real driver path).
+  return 0x8007048F;
 }
-DECLARE_XAM_EXPORT1(XamXStudioRequest, kNone, kStub);
+DECLARE_XAM_EXPORT1(XamXStudioRequest, kNone, kImplemented);
 
 dword_result_t XamGetActiveDashAppInfo_entry(lpvoid_t info_ptr) {
   return X_E_FAIL;
