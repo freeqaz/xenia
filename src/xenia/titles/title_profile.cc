@@ -73,10 +73,10 @@ void ApplyDc3Profile(uint32_t title_id) {
 }
 
 void ApplyRb3Profile(uint32_t title_id) {
-  // Needed by the fork's own RB3DX UI probe, which walks guest back chains
-  // from host code and reads a fresh thread's stack_base (titles/rb3), not by
-  // the game.
-  ProfileSet<bool>(title_id, "soft_fault_unmapped_reads", true);
+  // soft_fault_unmapped_reads is not needed: the only unmapped reads in RB3
+  // runs were the fork's own UI probe walking a not-yet-started thread's back
+  // chain into its stack guard page, and titles/rb3's GuestReader now reads
+  // only pages the heap grants read access to.
   // Retail TU5 Splash::Show calls Enter() on a null RndDir: a splash milo is
   // missing from the harness content (no TU5 update patch ark), not an
   // emulator gap.
