@@ -15,6 +15,7 @@
 #include "third_party/fmt/include/fmt/format.h"
 #include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
+#include "xenia/cpu/unresolved_call_observer.h"
 
 DEFINE_bool(dc3_runtime_telemetry_enable, false,
             "DC3: enable structured runtime telemetry (JSONL) for DC3 bring-up "
@@ -330,7 +331,30 @@ void ResetSessionStateLocked(Dc3TelemetryState& state) {
 
 }  // namespace
 
+namespace {
+
+// Forwards the JIT's unresolved-call reports (x64_emitter.cc) to this sink.
+// The CPU used to call Dc3RuntimeTelemetryIsActive() /
+// Dc3RuntimeTelemetryRecordUnresolvedCallStubHit() directly; it now only knows
+// cpu::UnresolvedCallObserver. Installed by the first BeginSession, which is the
+// only way the sink can become active, so the JIT sees exactly what it saw
+// before: inactive until a session begins.
+class Dc3UnresolvedCallObserver final : public cpu::UnresolvedCallObserver {
+ public:
+  bool IsActive() const override { return Dc3RuntimeTelemetryIsActive(); }
+  void OnUnresolvedCallStubHit(std::string_view reason, uint32_t guest_addr,
+                               uint32_t callsite_pc) override {
+    Dc3RuntimeTelemetryRecordUnresolvedCallStubHit(reason, guest_addr,
+                                                   callsite_pc);
+  }
+};
+
+Dc3UnresolvedCallObserver g_dc3_unresolved_call_observer;
+
+}  // namespace
+
 void Dc3RuntimeTelemetryBeginSession(const Dc3RuntimeTelemetryConfig& config) {
+  cpu::SetUnresolvedCallObserver(&g_dc3_unresolved_call_observer);
   auto& state = GetTelemetryState();
   std::lock_guard<std::mutex> lock(state.mutex);
 
