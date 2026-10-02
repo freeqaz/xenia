@@ -74,6 +74,7 @@
 #include "xenia/kernel/xboxkrnl/xboxkrnl_module.h"
 #include "xenia/kernel/xevent.h"
 #include "xenia/memory.h"
+#include "xenia/titles/title_hooks.h"
 #include "xenia/vfs/devices/disc_image_device.h"
 #include "xenia/vfs/devices/host_path_device.h"
 #include "xenia/vfs/devices/null_device.h"
@@ -4504,6 +4505,7 @@ Emulator::~Emulator() {
   // torn down (fork-cleanup-review.md C10). No-op if TerminateTitle already
   // joined or no probes were armed.
   Rb3dxJoinProbeThreads();
+  titles::OnShutdown();
 
   // Give the systems time to shutdown before we delete them.
   if (graphics_system_) {
@@ -4664,6 +4666,7 @@ X_STATUS Emulator::TerminateTitle() {
   // Stop and join the RB3DX/DC3 probe sampler threads before the title (and
   // later memory_) goes away under them (fork-cleanup-review.md C10).
   Rb3dxJoinProbeThreads();
+  titles::OnTerminateTitle();
 
   if (processor_) {
     processor_->ClearGuestFunctionOverrides();
@@ -4679,6 +4682,7 @@ X_STATUS Emulator::TerminateTitle() {
 }
 
 X_STATUS Emulator::LaunchPath(const std::filesystem::path& path) {
+  titles::OnLaunchPath();
   Dc3RuntimeTelemetryEndSession("launch_path_reset");
   cpu::MiloTraceEnd("launch_path_reset");
   if (processor_) {
@@ -4726,6 +4730,7 @@ X_STATUS Emulator::LaunchXexFile(const std::filesystem::path& path) {
   // Create symlinks to the device.
   file_system_->RegisterSymbolicLink("game:", mount_path);
   file_system_->RegisterSymbolicLink("d:", mount_path);
+  titles::OnXexMounted(file_system_.get(), mount_path);
   // RB3 boot-to-menu experiment (cvar default OFF -> inert for DC3 and normal
   // runs): optionally mount update: at the disc dir so RB3 finds
   // update:\gen\patch_xbox.hdr instead of failing the open. Tests whether the
@@ -5421,6 +5426,20 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
   graphics_system_->InitializeShaderStorage(cache_root_, title_id_.value(),
                                             true);
   on_shader_storage_initialization(false);
+
+  {
+    titles::TitleLaunchContext title_ctx;
+    title_ctx.memory = memory_.get();
+    title_ctx.processor = processor_.get();
+    title_ctx.kernel_state = kernel_state_.get();
+    title_ctx.module = module.get();
+    title_ctx.title_id = title_id_;
+    title_ctx.content_root = content_root_;
+#ifdef XE_HEADLESS_BUILD
+    title_ctx.headless = true;
+#endif
+    titles::ApplyLaunchHooks(title_ctx);
+  }
 
   // Push --rb3dx_alloc_probe down into the MMIO fault handler. src/xenia/cpu
   // used to DECLARE_bool this cvar, which made the CPU library depend on a
