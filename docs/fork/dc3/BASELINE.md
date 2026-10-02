@@ -370,7 +370,7 @@ stays in history for the NUI HLE lane.
 ### Other findings
 
 - **A boot race in `Rnd::DoWorldEnd`** (`0x82662B18`, null+8 read) on the
-  splash render thread (guest thread 0x12) at ~5 s: 1 of the 27 lane-B2 S1/S2
+  splash render thread (guest thread 0x12) at ~5 s: 1 of the 43 lane-B2 S1/S2
   runs (r1-cand S2 r1, load 14). `mPostProcessors` is walked while the main
   thread is still building it. The splash thread is real since lane B
   retired the `Splash::*` stubs. Recorded, not fixed.
