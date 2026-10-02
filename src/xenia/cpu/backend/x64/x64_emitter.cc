@@ -37,8 +37,8 @@
 #include "xenia/cpu/processor.h"
 #include "xenia/cpu/symbol.h"
 #include "xenia/cpu/thread_state.h"
+#include "xenia/cpu/unresolved_call_observer.h"
 #include "xenia/cpu/xex_module.h"
-#include "xenia/dc3_runtime_telemetry.h"
 
 DEFINE_bool(debugprint_trap_log, false,
             "Log debugprint traps to the active debugger", "CPU");
@@ -87,7 +87,8 @@ static const size_t kStashOffset = 32;
 
 // Purely diagnostic: names the PE section an executable call target landed in
 // when it is not .text. NEVER affects control flow -- the result is only fed to
-// the DC3 telemetry sink and a rate-limited warning.
+// the unresolved-call observer (cpu/unresolved_call_observer.h; the DC3
+// telemetry sink) and a rate-limited warning.
 //
 // Not cheap. Processor::GetModules() takes the global critical region and
 // copies the module list, and dynamic_cast + GetPESection follow. Do not call
@@ -126,15 +127,15 @@ const char* ClassifyNonTextExecutableTarget(Processor* processor,
   return nullptr;
 }
 
-// Gate for the above. The classification has exactly two consumers -- the DC3
-// telemetry sink and a rate-limited XELOGW -- so it is only worth running while
-// at least one of them can still use the answer. Once the warning budget for a
-// site is spent and telemetry is not recording, the global-critical-region walk
-// stops happening entirely.
+// Gate for the above. The classification has exactly two consumers -- the
+// unresolved-call observer (the DC3 telemetry sink) and a rate-limited XELOGW
+// -- so it is only worth running while at least one of them can still use the
+// answer. Once the warning budget for a site is spent and telemetry is not
+// recording, the global-critical-region walk stops happening entirely.
 static bool ShouldClassifyNonTextTarget(const std::atomic<int>& seen_count,
                                         int log_limit) {
   return seen_count.load(std::memory_order_relaxed) <= log_limit ||
-         xe::Dc3RuntimeTelemetryIsActive();
+         cpu::UnresolvedCallObserverIsActive();
 }
 
 const uint32_t X64Emitter::gpr_reg_map_[X64Emitter::GPR_COUNT] = {
@@ -635,8 +636,7 @@ uint64_t ResolveFunction(void* raw_context, uint64_t target_address) {
              "(count={})",
              n + 1);
     }
-    xe::Dc3RuntimeTelemetryRecordUnresolvedCallStubHit("null_target", 0,
-                                                       callsite_pc);
+    cpu::NotifyUnresolvedCallStubHit("null_target", 0, callsite_pc);
     if (!cvars::tolerate_null_guest_calls) {
       // Upstream: assert_not_zero(target_address), then fall through to a
       // resolve that cannot succeed. Returning 0 hands the null target back to
@@ -656,7 +656,7 @@ uint64_t ResolveFunction(void* raw_context, uint64_t target_address) {
             static_cast<uint32_t>(target_address))) {
       std::string telemetry_reason = "resolved_non_text_";
       telemetry_reason += reason;
-      xe::Dc3RuntimeTelemetryRecordUnresolvedCallStubHit(
+      cpu::NotifyUnresolvedCallStubHit(
           telemetry_reason, static_cast<uint32_t>(target_address), callsite_pc);
       int n = non_text_count.fetch_add(1, std::memory_order_relaxed);
       if (n < kNonTextLogLimit) {
@@ -685,7 +685,7 @@ uint64_t ResolveFunction(void* raw_context, uint64_t target_address) {
           "no-op stub (count={})",
           static_cast<uint32_t>(target_address), callsite_pc, n + 1);
     }
-    xe::Dc3RuntimeTelemetryRecordUnresolvedCallStubHit(
+    cpu::NotifyUnresolvedCallStubHit(
         "resolve_failed", static_cast<uint32_t>(target_address), callsite_pc);
     if (!cvars::tolerate_null_guest_calls) {
       // Upstream: assert_not_null(fn), then dereference it anyway.
@@ -702,7 +702,7 @@ uint64_t ResolveFunction(void* raw_context, uint64_t target_address) {
         "ResolveFunction({:08X}): function '{}' resolved but machine_code is "
         "null — using no-op stub",
         static_cast<uint32_t>(target_address), fn->name());
-    xe::Dc3RuntimeTelemetryRecordUnresolvedCallStubHit(
+    cpu::NotifyUnresolvedCallStubHit(
         "resolved_no_machine_code", static_cast<uint32_t>(target_address),
         callsite_pc);
     if (!cvars::tolerate_null_guest_calls) {
@@ -728,7 +728,7 @@ void X64Emitter::Call(const hir::Instr* instr, GuestFunction* function) {
                                : 0;
       std::string telemetry_reason = "direct_call_non_text_";
       telemetry_reason += reason;
-      xe::Dc3RuntimeTelemetryRecordUnresolvedCallStubHit(
+      cpu::NotifyUnresolvedCallStubHit(
           telemetry_reason, function->address(), caller_fn);
       int n = direct_non_text_count.fetch_add(1, std::memory_order_relaxed);
       if (n < kDirectNonTextLogLimit) {

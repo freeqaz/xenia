@@ -13,6 +13,16 @@ project("xenia-core")
   defines({
   })
   files({"*.h", "*.cc"})
+  -- The per-title hook registry and (empty) cvar profile are core: the
+  -- emulator calls them for every title. The title modules themselves are in
+  -- titles/premake5.lua and are linked by xenia-headless only.
+  files({
+    "titles/title_hooks.h",
+    "titles/title_hooks.cc",
+    "titles/title_ids.h",
+    "titles/title_profile.h",
+    "titles/title_profile.cc",
+  })
 
 -- Headless variant (no UI dependencies)
 project("xenia-core-headless")
@@ -27,5 +37,15 @@ project("xenia-core-headless")
     "XE_HEADLESS_BUILD",
   })
   files({"*.h", "*.cc"})
+  -- The per-title hook registry and (empty) cvar profile are core: the
+  -- emulator calls them for every title. The title modules themselves are in
+  -- titles/premake5.lua and are linked by xenia-headless only.
+  files({
+    "titles/title_hooks.h",
+    "titles/title_hooks.cc",
+    "titles/title_ids.h",
+    "titles/title_profile.h",
+    "titles/title_profile.cc",
+  })
 
-include("testing")
+include("titles")

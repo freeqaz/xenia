@@ -9,7 +9,7 @@
  * contract and docs/dc3-oracle/SPIKE_LOG.md for the measurements behind it.
  */
 
-#include "xenia/dc3_dta_channel.h"
+#include "xenia/titles/dc3/dc3_dta_channel.h"
 
 #include <sys/socket.h>
 #include <sys/un.h>

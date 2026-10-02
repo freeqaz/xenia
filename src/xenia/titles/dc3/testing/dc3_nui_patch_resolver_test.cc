@@ -4,7 +4,7 @@
  ******************************************************************************
  */
 
-#include "xenia/dc3_nui_patch_resolver.h"
+#include "xenia/titles/dc3/dc3_nui_patch_resolver.h"
 
 #include <array>
 #include <chrono>

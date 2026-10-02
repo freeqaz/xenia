@@ -40,6 +40,14 @@ project("xenia-app")
     "XBYAK_ENABLE_OMITTED_OPERAND",
   })
   local_platform_files()
+  -- The headless app's sources belong to xenia-headless only. The glob above
+  -- used to pull emulator_headless.cc into the windowed app as dead code,
+  -- which linked its DC3 telemetry calls (and cvars) into xenia-app.
+  removefiles({
+    "emulator_headless.cc",
+    "emulator_headless.h",
+    "xenia_headless_main.cc",
+  })
   files({
     "../base/main_init_"..platform_suffix..".cc",
     "../ui/windowed_app_main_"..platform_suffix..".cc",
@@ -158,6 +166,9 @@ project("xenia-headless")
     "xenia-hid",
     "xenia-hid-nop",
     "xenia-kernel-headless",
+    "xenia-titles",
+    "xenia-titles-dc3",
+    "xenia-titles-rb3",
     "xenia-ui",
     "xenia-ui-vulkan",
     "xenia-vfs",
