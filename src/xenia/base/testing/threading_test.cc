@@ -9,6 +9,7 @@
 
 #include <array>
 #include <filesystem>
+#include <functional>
 
 #include "xenia/base/threading.h"
 
@@ -1261,6 +1262,63 @@ TEST_CASE("Test Alertable Wait Returns kUserCallback", "[thread]") {
     REQUIRE(callback_ran.load());
 
     REQUIRE(Wait(thread.get(), false, 1s) == WaitResult::kSuccess);
+  }
+}
+
+TEST_CASE("Alertable SignalAndWait, WaitAny and AlertableSleep take APCs",
+          "[thread]") {
+  // The other three alertable entry points: each must return its 'user
+  // callback' result when an APC is queued while it is parked, and run it.
+  Thread::CreationParameters params = {};
+
+  auto run_case = [&](std::function<bool()> park_alertably) {
+    std::atomic<bool> parked(false);
+    std::atomic<bool> callback_ran(false);
+    std::atomic<int> outcome(-1);  // 1 = returned the APC result
+    auto thread = Thread::Create(params, [&] {
+      parked = true;
+      outcome = park_alertably() ? 1 : 0;
+    });
+    REQUIRE(thread);
+    REQUIRE(spin_wait_for(1s, [&] { return parked.load(); }));
+    Sleep(20ms);
+    thread->QueueUserCallback([&] { callback_ran = true; });
+    REQUIRE(spin_wait_for(2s, [&] { return outcome.load() != -1; }));
+    REQUIRE(outcome.load() == 1);
+    REQUIRE(callback_ran.load());
+    REQUIRE(Wait(thread.get(), false, 1s) == WaitResult::kSuccess);
+  };
+
+  SECTION("SignalAndWait") {
+    auto to_signal = Event::CreateAutoResetEvent(false);
+    auto never_signaled = Event::CreateManualResetEvent(false);
+    run_case([&] {
+      return SignalAndWait(to_signal.get(), never_signaled.get(), true,
+                           std::chrono::milliseconds::max()) ==
+             WaitResult::kUserCallback;
+    });
+    // The signal half still happened.
+    REQUIRE(Wait(to_signal.get(), false, 0ms) == WaitResult::kSuccess);
+  }
+
+  SECTION("WaitAny") {
+    auto a = Event::CreateManualResetEvent(false);
+    auto b = Event::CreateManualResetEvent(false);
+    run_case([&] {
+      std::vector<WaitHandle*> handles = {a.get(), b.get()};
+      return WaitAny(handles, true, std::chrono::milliseconds::max()).first ==
+             WaitResult::kUserCallback;
+    });
+  }
+
+  SECTION("AlertableSleep") {
+    run_case([&] { return AlertableSleep(10s) == SleepResult::kAlerted; });
+  }
+
+  SECTION("AlertableSleep without an APC sleeps the full duration") {
+    auto start = std::chrono::steady_clock::now();
+    REQUIRE(AlertableSleep(50ms) == SleepResult::kSuccess);
+    REQUIRE(std::chrono::steady_clock::now() - start >= 50ms);
   }
 }
 
