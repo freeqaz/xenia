@@ -610,22 +610,7 @@ void RtlEnterCriticalSection_entry(pointer_t<X_RTL_CRITICAL_SECTION> cs) {
     return;
   }
 
-  // Always try the fast CAS path at least once before falling through
-  // to the slow waiter path. On real hardware, RtlEnterCriticalSection
-  // always attempts the lock before queuing. Without this, a CS with
-  // spin_count=0 would skip the CAS entirely and deadlock on first entry.
-  //
-  // NOTE(fork-cleanup 2026-08-25): this is an all-title behaviour change that
-  // is not DC3/RB3-specific and looks correct on its own merits -- it is a
-  // standalone upstreamable fix and should be split into its own commit with
-  // that framing before any rebase onto upstream/master.
-  if (xe::atomic_cas(-1, 0, &cs->lock_count)) {
-    cs->owning_thread = cur_thread;
-    cs->recursion_count = 1;
-    return;
-  }
-
-  // Spin loop for additional attempts
+  // Spin loop
   while (spin_count--) {
     if (xe::atomic_cas(-1, 0, &cs->lock_count)) {
       // Acquired.

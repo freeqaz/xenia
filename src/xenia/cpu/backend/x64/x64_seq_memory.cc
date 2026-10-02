@@ -1078,7 +1078,7 @@ struct CACHE_CONTROL
     : Sequence<CACHE_CONTROL,
                I<OPCODE_CACHE_CONTROL, VoidOp, I64Op, OffsetOp>> {
   static void Emit(X64Emitter& e, const EmitArgType& i) {
-    bool is_clflush = false, is_prefetch = false;
+    bool is_prefetch = false;
     switch (CacheControlType(i.instr->flags)) {
       case CacheControlType::CACHE_CONTROL_TYPE_DATA_TOUCH:
       case CacheControlType::CACHE_CONTROL_TYPE_DATA_TOUCH_FOR_STORE:
@@ -1131,9 +1131,6 @@ struct CACHE_CONTROL
       }
       addr = e.GetMembaseReg() + e.rax;
     }
-    if (is_clflush) {
-      e.clflush(e.ptr[addr]);
-    }
     if (is_prefetch) {
       e.prefetcht0(e.ptr[addr]);
     }
@@ -1144,9 +1141,6 @@ struct CACHE_CONTROL
         addr = e.GetMembaseReg() + (address_constant ^ 64);
       } else {
         e.xor_(e.eax, 64);
-      }
-      if (is_clflush) {
-        e.clflush(e.ptr[addr]);
       }
       if (is_prefetch) {
         e.prefetcht0(e.ptr[addr]);

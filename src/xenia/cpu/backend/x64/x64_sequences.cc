@@ -1659,10 +1659,6 @@ struct MUL_HI_I32
         e.mov(e.edx, i.src1);
         if (i.src2.is_constant) {
           e.mov(e.eax, i.src2.constant());
-          // MULX r32a, r32b, r/m32 := r32b (low), r32a (high) of r/m32 * EDX,
-          // written low-then-high. The low destination is a don't-care here, so
-          // it can be either scratch; edx is used because MULX reads EDX before
-          // writing either destination.
           e.mulx(i.dest, e.edx, e.eax);
         } else {
           e.mulx(i.dest, e.edx, i.src2);
@@ -1711,7 +1707,6 @@ struct MUL_HI_I64
         e.mov(e.rdx, i.src1);
         if (i.src2.is_constant) {
           e.mov(e.rax, i.src2.constant());
-          // See the MUL_HI_I32 note above; rdx here to match the I32 form.
           e.mulx(i.dest, e.rdx, e.rax);
         } else {
           e.mulx(i.dest, e.rax, i.src2);

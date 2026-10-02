@@ -913,12 +913,12 @@ void X64Emitter::CallIndirect(const hir::Instr* instr,
 
 uint64_t UndefinedCallExtern(void* raw_context, uint64_t function_ptr) {
   auto function = reinterpret_cast<Function*>(function_ptr);
-  const auto& name = function->name();
   if (!cvars::ignore_undefined_externs) {
     xe::FatalError(fmt::format("undefined extern call to {:08X} {}",
-                               function->address(), name.c_str()));
+                               function->address(), function->name().c_str()));
   } else {
-    XELOGE("undefined extern call to {:08X} {}", function->address(), name);
+    XELOGE("undefined extern call to {:08X} {}", function->address(),
+           function->name());
   }
   return 0;
 }
