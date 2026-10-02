@@ -1,0 +1,13 @@
+# S0 title-ID allow-list (FORK_CLEANUP_PLAN.md Phase 3).
+#
+# Title IDs (0x373307D9 DC3, 0x45410914 RB3/RB3DX, with or without 0x, any
+# case, and the kTitleDc3 / kTitleRb3 constants) may appear only under
+# src/xenia/titles/. Every other occurrence must be listed here with a
+# maximum line count and a reason; analyze/static.py fails S0 on any line
+# that is not covered. Counts are per file (git grep -c), not line numbers,
+# so unrelated edits do not churn this file. An entry whose file now has
+# fewer lines than allowed is reported as stale: lower it.
+#
+# path<TAB>max lines<TAB>reason
+src/xenia/cpu/ppc/ppc_emit-private.h	1	Comment only: names the two decomp targets that depend on the translator's keep-going behaviour for unimplemented opcodes. No code. (cpu/ is the core lane's; it can drop the IDs from the comment.)
+src/xenia/kernel/xboxkrnl/xboxkrnl_memory.cc	4	rb3dx_force_zero_commit (default off) gates on 0x45410914 (2 code lines + 2 comment lines). Plan section 2.5 bucket 4: the core lane deletes the cvar, and with it these lines. Lower to 0 when it lands.

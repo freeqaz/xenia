@@ -18,7 +18,7 @@ emulator, open unix sockets, and S1V uses GPU 1.
 
 | ID | What runs | What it measures | PASS | N (need) |
 |---|---|---|---|---|
-| S0 | nothing (static) | the binary's compiled-in cvar defaults (full map); source ratchets on this tree: title-ID literals outside `src/xenia/titles/`, `/home/free` in `src/`, `XELOGI(` in `src/xenia/gpu/` | measurements taken; the comparator lists every changed default and fails a ratchet increase | 1 (1) |
+| S0 | nothing (static) | the binary's compiled-in cvar defaults (full map); source ratchets on this tree: title-ID literals outside `src/xenia/titles/`, `/home/free` in `src/`, `XELOGI(` in `src/xenia/gpu/`; the title-ID **allow-list** | measurements taken, and no title-ID line (`373307D9`/`45410914`, any case, `0x` optional, or `kTitleDc3`/`kTitleRb3`) outside `src/xenia/titles/` beyond `scenarios/S0.title-id-allowlist` (path, max lines, reason; a file below its allowance is reported as a stale entry); the comparator lists every changed default and fails a ratchet increase | 1 (1) |
 | S1 | DC3 original `debug.xex`, null GPU, ymca flow, 230 s (the dc3-oracle command) | milestone times title/main/choose_mode/song_select/game_screen, first `gpState=2 paused=0`, first `gpState=3`, gpState=2 sample count, max SIGSEGV, `mFailThreadMsg`/TAINTED lines | title ≤ 30 s, game_screen ≤ 60 s, ≥ 60 gpState=2 samples, gpState=3 seen, rc 0 + `TIMEOUT` line, SIGSEGV 0 | 5 (2): the reference chan5 passes only 5 of 8 flows on a quiet host, so "2 of 3" would fail a good binary 32% of the time |
 | S1V | S1 on Vulkan, `--vulkan_device=1`, capture every 300 swaps, private pipeline cache | frame count, capture swap indices, flow milestones, Milo fail-screen frames (first swap, screen, PNG); keeps one PNG from game_screen (else the furthest screen) | rc 0 + TIMEOUT, title reached, ≥ 10 frames, kept frame not a uniform fill. game_screen and the fail screen are recorded, not required: on chan5 and both BASELINE.md runs the Vulkan run hits a MILO_FAIL at song_select (`Could not find preview.tmov in dir song_info`) from swap 1200 | 1 (1) |
 | S2 | S1 + `--dc3_dta_channel=<run>/dta.sock`; `lib/dta_driver.py` drives `dc3-decomp/tools/console/dc3_eval.py -T xenia --socket` | channel installed, first poll thread, answers + latency, `object_list main` count, plus the S1 flow on the same run | thread `00000006`; `{+ 1 2}`→`=> 3`; `{no_such_func 1}`→`=> !! refused: script error…`; `{+ 5 5}`→`=> 10`; `{size {object_list main Object FALSE}}`→`=> <int>`; S1 criteria | 2 (1) |
@@ -109,6 +109,20 @@ this lane from integrate-2026-10 @ 6bf623353, which carries the bisect fix
 | S5 | PASS 2/2: main_hub 27 s, game_screen 100-109 s | n/a | PASS 2/2: main_hub 27-42 s, game_screen 91-100 s |
 | S6 | FAIL: v1 (DC1) and v3 (RB3DX + DC3 cvars) leak the DC3 thread-6 dump; v2 clean | same | same |
 | passive | RB3 logs carry 472-528 DC3 dump lines each; DC3 logs 0 RB3 lines | DC3 logs 0 RB3 lines | as A |
+
+**FC** = `fork-cleanup-2026-10-d7e23d1a2621b7fe` (2026-10-02): the fork after
+the cleanup, tag `fork-cleanup-2026-10`. **Compare new work against this one.**
+It was recorded as an interleaved A/B against main `1f309687c`, and all 18 pairs
+were PASS/PASS:
+
+- S0 PASS;
+- S1 3/3 (title 12-15 s, game_screen 36-39 s);
+- S1V 40 frames;
+- S2 2/2;
+- S3 627 exact;
+- S4 3/3;
+- S5 3/3;
+- S6 3/3, with **no** leaking pattern in any variant. The thread-6 dump that A, C5 and I carry is gone.
 
 Which song the RB3 autopilot lands on varies run to run (tv3_a..e, 11-15
 channels), so the song is a watched measurement, not a criterion. Three of

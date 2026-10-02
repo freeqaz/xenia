@@ -10,6 +10,13 @@ title-specific code under `src/xenia/titles/`, default every mitigation cvar to
 upstream behaviour and opt in per title or per run, and check every change with
 the regression harness before landing it.
 
+Two of those rules are enforced by the harness's static scenario (S0). A title
+ID (`373307D9`, `45410914`, or `kTitleDc3`/`kTitleRb3`) outside
+`src/xenia/titles/` fails S0 unless
+[`tools/fork-regress/scenarios/S0.title-id-allowlist`](../../tools/fork-regress/scenarios/S0.title-id-allowlist)
+lists it with a reason. S0 also lists every compiled-in cvar default that
+differs from the baseline.
+
 ## Start here
 
 | Doc | What it is |
@@ -26,6 +33,19 @@ make -C build xenia-headless config=checked_linux -j12   # headless runner
 make -C build xenia-app config=checked_linux -j12        # windowed app (binary: xenia)
 ```
 
+Both apps link the same `xenia-core` and `xenia-kernel`. There is no separate
+headless compile, and no `XE_HEADLESS_BUILD` define. Headless behaviour is
+decided at runtime, in two ways:
+
+- `display_window_ == nullptr` in `emulator.cc`, which also feeds
+  `TitleLaunchContext::headless`;
+- `cvars::headless` in the XAM dialogs. `xenia-headless` forces `--headless`
+  as a command-line value, so a config file cannot turn it off.
+
+Only `xenia-headless` links the title modules (`xenia-titles*`). To confirm,
+run `nm -C build/bin/Linux/Checked/xenia | grep -E 'Dc3|Rb3'`. It shows only
+the per-title cvar profile in `titles/title_profile.cc`, which is core.
+
 Run scenarios through the harness rather than by hand
 (`flock /home/free/tmp/fork-regress.lock tools/fork-regress/run.sh <bin> <out> --scenarios S1`).
 A by-hand run must pass a private `--storage_root`, or Xenia rewrites the shared
@@ -40,6 +60,19 @@ A by-hand run must pass a private `--storage_root`, or Xenia rewrites the shared
 | [FORK_CLEANUP_PLAN.md](cleanup/FORK_CLEANUP_PLAN.md) | The plan (2026-10). |
 | [DC3_HACK_GAP_ANALYSIS.md](cleanup/DC3_HACK_GAP_ANALYSIS.md) | DC3 hack -> masked Xenia gap -> real fix. |
 | [fork-cleanup-review.md](cleanup/fork-cleanup-review.md) | 2026-08-25 review of `frag-alloc-trace`. Superseded as a worklist; source comments still cite its finding IDs (C1, C4, C16, ...). |
+
+### Core: cpu, kernel, profile (`core/`)
+
+| Doc | |
+|---|---|
+| [core/TITLE_PROFILE.md](core/TITLE_PROFILE.md) | The per-title cvar profile (`titles/title_profile.cc`): when it applies, precedence, and the evidence for each DC3/RB3 mitigation it sets. |
+| [core/GUEST_EXCEPTIONS.md](core/GUEST_EXCEPTIONS.md) | Guest SEH / C++ exception dispatch: today's `RtlRaiseException`/`RtlUnwind` behaviour and the design for real dispatch (gap G13). Designed, not implemented. |
+
+### Kinect / NUI (`nui/`)
+
+| Doc | |
+|---|---|
+| [nui/NUI_HLE_DESIGN.md](nui/NUI_HLE_DESIGN.md) | A title-agnostic Kinect (NUI) HLE device: where the console boundary sits under DC3's statically linked NUI/ST stack, and the design for a device that replaces the DC3 NUI hacks. Design only, not built. |
 
 ### DC3 (`dc3/`)
 
