@@ -138,6 +138,22 @@ bool PPCHIRBuilder::Emit(GuestFunction* function, uint32_t flags) {
                   function_->name().c_str());
   }
 
+  // A guest function replaced by a host handler (Processor::
+  // RegisterGuestFunctionOverride: kExtern behaviour, a handler, no kernel
+  // export) must not compile its original body. Direct calls already go to
+  // the handler (X64Emitter::Call), but this machine code is what the
+  // indirection table hands to INDIRECT calls (bctrl through a vtable or a
+  // function pointer), so compiling the guest body here let every indirect
+  // call bypass the override. The body is just "call the handler, return",
+  // the same thing an import thunk's "sc 2; blr" compiles to.
+  if (function_->behavior() == Function::Behavior::kExtern &&
+      function_->extern_handler() && !function_->export_data()) {
+    Comment("guest function override: call the host handler");
+    CallExtern(function_);
+    Return();
+    return Finalize();
+  }
+
   // Allocate offset list.
   // This is used to quickly map labels to instructions.
   // The list is built as the instructions are traversed, with the values
