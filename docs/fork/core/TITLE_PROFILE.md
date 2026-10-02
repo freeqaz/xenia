@@ -32,7 +32,7 @@ gpState=3 at about 198 s.
 
 | cvar | upstream | fires (census) | without it | in profile |
 |---|---|---|---|---|
-| `soft_fault_unmapped_reads` | false | DC3: never. RB3 S4/S5: yes, but **from host code**: guest lr = r1 = 0, reads at a fresh thread's exact `stack_base`. That is `Rb3dxUiProbeThread`'s back-chain walk (titles/rb3, ~L1249). | RB3 all-off: early crash. DC3 S3: 627 without it. | **RB3 only**, for the fork's probe. Drop it once Lane C bounds the probe's reads. |
+| `soft_fault_unmapped_reads` | false | DC3: never. RB3 S4/S5 before Lane C: yes, but **from host code**: guest lr = r1 = 0, reads at a fresh thread's exact `stack_base` (the committed no-access guard page above every guest stack). That was the RB3 UI probe's back-chain walk, whose readability test accepted any committed page. | RB3 all-off: early crash (before the probe fix). After Lane C's fix (titles/rb3 `GuestReader` reads only pages the heap grants Read; lane-c-rb3 aad61d8d2), forced off on the command line: RB3 S5 PASS 2/2; S4 PASS 1, plus 1 run aborted by the unrelated `RtlEnterCriticalSection` `cs->owning_thread == 0` assert with no unmapped read before it; 0 `soft-fault read from unmapped` lines vs 20 on main. DC3 S3: 627 without it. | **dropped** (Lane C, ca331bab5) |
 | `tolerate_null_guest_calls` | false | silent when on (the fast path skips the call) | DC3 S3: assert in the decomp image's boot. RB3 S4: null `Splash::Show` dir (r3 = 0x188). DC3 S1: PASS without it (whole song). RB3 S5: PASS without it. | **DC3** (decomp image only, K11) and **RB3** (TU5 content; see below) |
 | `io_force_synchronous_completion` | false | yes, on async reads (DC3 S1, RB3 S4/S5) | DC3 S1 2/2 PASS (whole song, gpState=3 at 198 s); DC3 S3 627; RB3 S4/S5 PASS | dropped |
 | `xam_enum_overlapped_nomorefiles_success` | false | RB3 S5: 2 conversions; nothing elsewhere | RB3 S4/S5 PASS; DC3 S3 627 | dropped |
@@ -65,7 +65,15 @@ only file failure in that run is `update:\gen\patch_xbox.hdr`: the S4
 content set has no TU5 title-update patch ark (the README excludes RB3DX's
 encrypted one). That makes the fix a content-provenance task for
 `tools/fork-regress/build_content.sh`, not a VFS or CPU change. Until then RB3
-keeps `tolerate_null_guest_calls`.
+keeps `tolerate_null_guest_calls`, as a CONTENT gap, not an emulator gap.
+
+Searched 2026-10-02 (Lane C): the TU5 patch ark is **not on this box**. A
+filesystem-wide `find` for `patch_xbox*` turns up only RB3DX's
+`/srv/torrents/games/arbys/rb3/gen/patch_xbox.hdr` + `patch_xbox_0.ark`, whose
+header starts `LOLZ` (the RB3DX repack's ark, which retail TU5 rejects).
+`rb3-xenon/orig/45410914/` and `milo-executable-library/rb3/360 xexp/tu5/`
+hold executables and the `.xexp` only. Retiring `tolerate_null_guest_calls`
+for RB3 needs the TU5 title-update package's own `gen/patch_xbox.*`.
 
 The two candidates the diagnostic was there to tell apart:
 
