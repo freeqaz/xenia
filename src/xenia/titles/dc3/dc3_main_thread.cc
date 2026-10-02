@@ -90,10 +90,14 @@ void PollExtern(cpu::ppc::PPCContext* ctx, kernel::KernelState*) {
              "connection (TAINTED)");
     }
   }
+  static std::chrono::steady_clock::time_point s_last;
+  static uint64_t s_last_n = 0;
+  if (n == 1) {
+    s_last = std::chrono::steady_clock::now();
+    s_last_n = 1;
+  }
   if (n % 1800 == 0) {
     // The frame rate the `+N` flow offsets are measured in.
-    static auto s_last = std::chrono::steady_clock::now();
-    static uint64_t s_last_n = 0;
     auto now = std::chrono::steady_clock::now();
     double secs = std::chrono::duration<double>(now - s_last).count();
     XELOGI("DC3 main-thread hook: frame {} ({:.1f} frames/s over the last {})",
