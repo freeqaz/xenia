@@ -615,19 +615,11 @@ uint16_t NopInputDriver::ButtonToVK(uint16_t button) const {
   }
 }
 
-X_RESULT NopInputDriver::GetState(uint32_t user_index,
-                                  X_INPUT_STATE* out_state) {
-  if (!scripted_mode_ || user_index >= kMaxPads) {
-    return X_ERROR_DEVICE_NOT_CONNECTED;
-  }
-
-  uint16_t active_buttons = GetCurrentButtons(user_index);
-
-  // Generate keystroke events for button transitions
+void NopInputDriver::QueueKeystrokeEdges(uint32_t user_index,
+                                         uint16_t active_buttons) {
+  // Generate keystroke events for button transitions since the last poll.
   uint16_t pressed = active_buttons & ~prev_buttons_[user_index];
   uint16_t released = prev_buttons_[user_index] & ~active_buttons;
-
-  // Check each button bit for transitions
   for (uint16_t bit = 1; bit != 0; bit <<= 1) {
     if (pressed & bit) {
       X_INPUT_KEYSTROKE ks = {};
@@ -651,6 +643,16 @@ X_RESULT NopInputDriver::GetState(uint32_t user_index,
     }
   }
   prev_buttons_[user_index] = active_buttons;
+}
+
+X_RESULT NopInputDriver::GetState(uint32_t user_index,
+                                  X_INPUT_STATE* out_state) {
+  if (!scripted_mode_ || user_index >= kMaxPads) {
+    return X_ERROR_DEVICE_NOT_CONNECTED;
+  }
+
+  uint16_t active_buttons = GetCurrentButtons(user_index);
+  QueueKeystrokeEdges(user_index, active_buttons);
 
   std::memset(reinterpret_cast<void*>(out_state), 0, sizeof(*out_state));
   out_state->packet_number = packet_number_++;
@@ -676,29 +678,7 @@ X_RESULT NopInputDriver::GetKeystroke(uint32_t user_index, uint32_t flags,
   // Poll current state to generate any pending keystroke events
   // (in case GetKeystroke is called without GetState)
   uint16_t active_buttons = GetCurrentButtons(user_index);
-  uint16_t pressed = active_buttons & ~prev_buttons_[user_index];
-  uint16_t released = prev_buttons_[user_index] & ~active_buttons;
-  for (uint16_t bit = 1; bit != 0; bit <<= 1) {
-    if (pressed & bit) {
-      X_INPUT_KEYSTROKE ks = {};
-      ks.virtual_key = ButtonToVK(bit);
-      ks.flags = X_INPUT_KEYSTROKE_KEYDOWN;
-      ks.user_index = static_cast<uint8_t>(user_index);
-      if (ks.virtual_key) {
-        keystroke_queue_[user_index].push_back(ks);
-        XELOGI("Keystroke KEYDOWN: VK=0x{:04X} button=0x{:04X} pad={}",
-               (uint16_t)ks.virtual_key, bit, user_index);
-      }
-    }
-    if (released & bit) {
-      X_INPUT_KEYSTROKE ks = {};
-      ks.virtual_key = ButtonToVK(bit);
-      ks.flags = X_INPUT_KEYSTROKE_KEYUP;
-      ks.user_index = static_cast<uint8_t>(user_index);
-      if (ks.virtual_key) keystroke_queue_[user_index].push_back(ks);
-    }
-  }
-  prev_buttons_[user_index] = active_buttons;
+  QueueKeystrokeEdges(user_index, active_buttons);
 
   if (!keystroke_queue_[user_index].empty()) {
     *out_keystroke = keystroke_queue_[user_index].front();

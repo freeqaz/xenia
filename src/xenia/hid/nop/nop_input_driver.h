@@ -120,6 +120,8 @@ class NopInputDriver final : public InputDriver {
   };
 
   uint16_t GetCurrentButtons(uint32_t pad);
+  // Queues KEYDOWN/KEYUP keystrokes for the edges since the previous poll.
+  void QueueKeystrokeEdges(uint32_t user_index, uint16_t active_buttons);
   uint16_t ButtonToVK(uint16_t button) const;
 
   // The current screen name, through the title adapter.
