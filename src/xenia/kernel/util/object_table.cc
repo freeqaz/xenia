@@ -223,6 +223,22 @@ X_STATUS ObjectTable::RemoveHandle(X_HANDLE handle) {
     }
 
     XELOGI("Removed handle:{:08X} for {}", handle, typeid(*object).name());
+    if (object->is_native_wrapper()) {
+      // The guest never received this handle (GetNativeObject made it for a
+      // dispatcher header the title initialized inline), so whatever just
+      // dropped it was holding a stale or borrowed handle. Name the culprit.
+      auto* thread = XThread::IsInThread() ? XThread::GetCurrentThread()
+                                           : nullptr;
+      XELOGW(
+          "RemoveHandle: native-wrapper {} handle {:08X} for guest object "
+          "0x{:08X} removed on {} (guest lr 0x{:08X})",
+          typeid(*object).name(), handle, object->guest_object(),
+          thread ? fmt::format("guest thread {:08X}", thread->thread_id())
+                 : std::string("a host thread"),
+          thread ? static_cast<uint32_t>(
+                       thread->thread_state()->context()->lr)
+                 : 0u);
+    }
 
     // Remove object name from mapping to prevent naming collision.
     if (!object->name().empty()) {

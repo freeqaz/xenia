@@ -500,6 +500,81 @@ dword_result_t RtlInitializeCriticalSectionAndSpinCount_entry(
 DECLARE_XBOXKRNL_EXPORT1(RtlInitializeCriticalSectionAndSpinCount, kNone,
                          kImplemented);
 
+// Post-mortem for RtlEnterCriticalSection admitting a thread while the lock is
+// owned. Everything here is read-only.
+static void ReportCriticalSectionHandoffViolation(uint32_t cs_addr,
+                                                  X_RTL_CRITICAL_SECTION* cs,
+                                                  bool waited,
+                                                  uint32_t wait_status) {
+  auto* thread = XThread::GetCurrentThread();
+  auto* context = thread->thread_state()->context();
+  auto* memory = kernel_state()->memory();
+  uint32_t owner = cs->owning_thread;
+  int32_t raw_lock = *reinterpret_cast<volatile int32_t*>(
+      reinterpret_cast<uint8_t*>(cs) + 0x10);
+
+  // Which XThread is the recorded owner?
+  std::string owner_desc = "unknown";
+  for (auto& t :
+       kernel_state()->object_table()->GetObjectsByType<XThread>()) {
+    if (t->guest_object() == owner) {
+      owner_desc = fmt::format("tid {:08X} '{}'", t->thread_id(), t->name());
+      break;
+    }
+  }
+
+  // The dispatcher header: is the stashed native object really this CS's?
+  std::string event_desc = "not wrapped (no XEN signature)";
+  if (cs->header.wait_list_flink == kXObjSignature) {
+    uint32_t handle = cs->header.wait_list_blink;
+    auto object = kernel_state()->object_table()->LookupObject<XObject>(handle);
+    if (!object) {
+      event_desc = fmt::format("handle {:08X} -> EMPTY SLOT", handle);
+    } else {
+      XObject* obj = object.get();
+      event_desc = fmt::format(
+          "handle {:08X} -> {} guest 0x{:08X} wrapper={} {}", handle,
+          typeid(*obj).name(), object->guest_object(),
+          object->is_native_wrapper(),
+          object->guest_object() == cs_addr ? "(this CS)" : "(ANOTHER OBJECT)");
+    }
+  }
+
+  // Guest back chain: LR saved at [caller_sp - 8] (MSVC PPC prologue).
+  std::string chain;
+  uint32_t sp = static_cast<uint32_t>(context->r[1]);
+  for (int i = 0; i < 12 && sp; ++i) {
+    auto* heap = memory->LookupHeap(sp);
+    if (!heap || heap->QueryRangeAccess(sp, sp + 3) ==
+                     xe::memory::PageAccess::kNoAccess) {
+      break;
+    }
+    uint32_t caller_sp = xe::load_and_swap<uint32_t>(memory->TranslateVirtual(sp));
+    if (!caller_sp || caller_sp <= sp) break;
+    auto* caller_heap = memory->LookupHeap(caller_sp - 8);
+    if (!caller_heap ||
+        caller_heap->QueryRangeAccess(caller_sp - 8, caller_sp - 5) ==
+            xe::memory::PageAccess::kNoAccess) {
+      break;
+    }
+    uint32_t lr = xe::load_and_swap<uint32_t>(
+        memory->TranslateVirtual(caller_sp - 8));
+    chain += fmt::format(" {:08X}", lr);
+    sp = caller_sp;
+  }
+
+  XELOGE(
+      "RtlEnterCriticalSection: HANDOFF VIOLATION cs=0x{:08X} entered by "
+      "tid {:08X} '{}' (guest lr 0x{:08X}) while owned by 0x{:08X} ({}); "
+      "lock_count(raw)={} recursion={} type={} signal_state={} spin/256={}; "
+      "waited={} wait_status=0x{:08X}; event: {}; back chain:{}",
+      cs_addr, thread->thread_id(), thread->name(),
+      static_cast<uint32_t>(context->lr), owner, owner_desc, raw_lock,
+      static_cast<int32_t>(cs->recursion_count), cs->header.type,
+      static_cast<int32_t>(cs->header.signal_state), cs->header.absolute,
+      waited, wait_status, event_desc, chain);
+}
+
 void RtlEnterCriticalSection_entry(pointer_t<X_RTL_CRITICAL_SECTION> cs) {
   g_rtl_enter_cs_count.fetch_add(1, std::memory_order_relaxed);
   uint32_t cur_thread = XThread::GetCurrentThread()->guest_object();
@@ -620,12 +695,22 @@ void RtlEnterCriticalSection_entry(pointer_t<X_RTL_CRITICAL_SECTION> cs) {
     }
   }
 
+  uint32_t wait_status = X_STATUS_SUCCESS;
+  bool waited = false;
   if (xe::atomic_inc(&cs->lock_count) != 0) {
     // Create a full waiter.
-    xeKeWaitForSingleObject(reinterpret_cast<void*>(cs.host_address()), 8, 0, 0,
-                            nullptr);
+    waited = true;
+    wait_status = xeKeWaitForSingleObject(
+        reinterpret_cast<void*>(cs.host_address()), 8, 0, 0, nullptr);
   }
 
+  if (cs->owning_thread != 0) {
+    // We were let in while another thread still holds the lock. Say exactly
+    // what the lock looked like before the Checked assert ends the process
+    // (the harness runs with core dumps off, so this line is the post-mortem).
+    ReportCriticalSectionHandoffViolation(cs.guest_address(), &*cs, waited,
+                                          wait_status);
+  }
   assert_true(cs->owning_thread == 0);
   cs->owning_thread = cur_thread;
   cs->recursion_count = 1;

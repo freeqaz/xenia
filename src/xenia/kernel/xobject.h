@@ -161,6 +161,13 @@ class XObject {
   const std::string& name() const { return name_; }
   uint32_t guest_object() const { return guest_object_ptr_; }
 
+  // True for an object GetNativeObject created on first use of a guest-
+  // initialized dispatcher header (an event/mutant/semaphore the title set up
+  // inline, e.g. the KEVENT inside an RTL_CRITICAL_SECTION). The guest never
+  // received a handle for it, so nothing the guest does with handles should
+  // ever remove it from the table.
+  bool is_native_wrapper() const { return native_wrapper_; }
+
   // Has this object been created for use by the host?
   // Host objects are persisted through reloads/etc.
   bool is_host_object() const { return host_object_; }
@@ -244,6 +251,7 @@ class XObject {
   // if we allocated it!
   uint32_t guest_object_ptr_ = 0;
   bool allocated_guest_object_ = false;
+  bool native_wrapper_ = false;
 };
 
 template <typename T>
