@@ -199,6 +199,7 @@ bool X64Emitter::Emit(GuestFunction* function, HIRBuilder* builder,
   // capture hook needs no FunctionTraceData.
   milo_trace_func_va_ = function->address();
   source_map_arena_.Reset();
+  current_guest_address_ = 0;
 
   // Fill the generator with code.
   EmitFunctionInfo func_info = {};
@@ -409,6 +410,7 @@ bool X64Emitter::Emit(HIRBuilder* builder, EmitFunctionInfo& func_info) {
 void X64Emitter::MarkSourceOffset(const Instr* i) {
   auto entry = source_map_arena_.Alloc<SourceMapEntry>();
   entry->guest_address = static_cast<uint32_t>(i->src1.offset);
+  current_guest_address_ = entry->guest_address;
   entry->hir_offset = uint32_t(i->block->ordinal << 16) | i->ordinal;
   entry->code_offset = static_cast<uint32_t>(getSize());
 
@@ -576,7 +578,9 @@ void X64Emitter::Trap(uint16_t trap_type) {
     case 22:
       // Always trap?
       // TODO(benvanik): post software interrupt to debugger.
-      CallNative(TrapDebugBreak, 0);
+      // Pass the guest address of the trap (the last source offset marked),
+      // so the 'forced trap hit' log names the trapping instruction.
+      CallNative(TrapDebugBreak, current_guest_address_);
       break;
     case 25:
       // ?
