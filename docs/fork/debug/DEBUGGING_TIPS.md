@@ -558,7 +558,7 @@ CRT constructor table caveat (relinks / stale manifests):
 ### E. Interactive debugging (Phase 4): choose the right path
 
 1. **Snapshot-backed (stable, currently most reliable)**
-   - Use `tools/dc3_gdb_rsp_snapshot_bridge.sh` + `tools/dc3_gdb_rsp_mvp_mock.py`
+   - Use `tools/archive/dc3_gdb_rsp_snapshot_bridge.sh` + `tools/dc3_gdb_rsp_mvp_mock.py`
    - Best for postmortem register/memory inspection without live timing issues
 
 2. **Live headless in-process RSP MVP (Linux, experimental)**

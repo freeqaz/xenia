@@ -225,7 +225,7 @@ watch-items, cheapest evidence first:
 - [~] **T4 — reach main_hub + instrument-select.** PARTIAL (blocked one flow
   downstream — see Results). Extend the nav script
   (title→hub is START; menu selects are A; P2 join `START@1`; per
-  `rb3-verify/scripts/rb3dx_title_to_guitar.txt`, re-timed on the working
+  `tools/rb3/input/rb3dx_title_to_guitar.txt`, re-timed on the working
   boot). Capture frames (`--dump_frames_path --headless_capture_interval=40`).
   **Milestone:** instrument-select screen reached headless = the acceptance
   test for this whole plan. (Same-instrument A/B is the NEXT phase, staged in

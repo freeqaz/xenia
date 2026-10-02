@@ -274,7 +274,7 @@ and not input-driven.
 main loop* (`DxRnd::Present`/`Game::PostUpdate` every report) rendering real
 boot UI, but does **not** reach the interactive `main_hub`/overshell menu before
 the ~18s teardown abort — so the scripted two-guitar same-instrument proof
-(`rb3-verify/scripts/two_guitar_p1p2.txt`) remains **unreachable**, now blocked
+(`tools/rb3/input/two_guitar_p1p2.txt`) remains **unreachable**, now blocked
 by this teardown SIGABRT rather than the old NULL fault. Whether the ~18s exit is
 a guest title self-exit (nodd boot has no full mounted disc content) or the
 emulator ending emulation is undetermined; no explicit `XamLoaderTerminateTitle`

@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """Apply the RB3 same-instrument patch to the uncompressed clean-TU5 XEX.
 
+NOT REPRODUCIBLE (2026-10-02): WRITES below points into a deleted rb3-xenon
+worktree (.claude/worktrees/tu5-migrate), so this script cannot be re-run as
+is. Kept as the record of how clean_tu5_patched.xex was produced.
+
 clean_tu5.xex stores its basefile as a FLAT image (compression=0, encryption=0),
 so VA->file_off = pe_off(0x3000) + (VA - image_base(0x82000000)). The writes list
 (default_tu5_patched.writes.json: 671 cave words + 4 detours) is the same one that

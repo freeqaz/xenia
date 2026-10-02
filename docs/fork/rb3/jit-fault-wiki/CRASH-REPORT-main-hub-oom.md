@@ -246,7 +246,7 @@ Prioritized, all already scoped by prior passes (`09` §L5/L6 "next lever",
 
 Once the corruptor is fixed and the #600 allocation is clean on 100% of boots,
 re-run the good-boot START-spam nav (`long_1` already progresses past the title;
-`rb3-verify/scripts/rb3dx_title_to_guitar.txt`, input = **START** not A) to drive
+`tools/rb3/input/rb3dx_title_to_guitar.txt`, input = **START** not A) to drive
 `main_hub` → instrument-select.
 
 ---
@@ -542,7 +542,7 @@ tree uncommitted):**
 
 - **main_hub pixel confirmation.** The OOM blocker is gone (both #600 content
   creates complete on 100% of boots), but this investigation did not run the
-  START-spam nav (`rb3-verify/scripts/rb3dx_title_to_guitar.txt`) to a legible
+  START-spam nav (`tools/rb3/input/rb3dx_title_to_guitar.txt`) to a legible
   main_hub screenshot — that is the next step from §7, now unblocked.
 - **Why the stack residue's low word was the stable `0x1520`** (leftover
   pointer arithmetic in a prior host call on that thread) was not chased —
