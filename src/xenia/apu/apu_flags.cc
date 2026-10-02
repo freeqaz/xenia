@@ -10,3 +10,12 @@
 #include "xenia/apu/apu_flags.h"
 
 DEFINE_bool(mute, false, "Mutes all audio output.", "APU")
+
+DEFINE_string(nop_audio_driver, "paced",
+              "Render driver behind the nop APU (--apu=nop). 'paced': discard "
+              "the samples but release the client semaphore at 48 kHz "
+              "cadence, so the guest's render callback runs and titles that "
+              "clock gameplay off the audio stream advance. 'dummy': no "
+              "driver; XAudioRegisterRenderDriverClient hands the guest a "
+              "dummy handle and the render callback never runs.",
+              "APU");
