@@ -133,6 +133,7 @@ class Dc3ScriptedInputAdapter final
   bool last_game_real_time_ = false;
   bool last_game_has_intro_ = false;
   bool pause_diag_logged_ = false;
+  bool song_logged_ = false;
 
   // LogWaitStatus / WhileWaitingForScreen.
   uint32_t last_stuck_transition_ = 0;
@@ -212,6 +213,26 @@ void Dc3ScriptedInputAdapter::ProbeGameplayState(Memory* memory,
                     : nullptr;
     return ptr ? *ptr : 0;
   };
+
+  // The selected song, once per game_screen entry (harness contract:
+  // `DC3 Script: song '<sym>'`, read by the S1/S2 song criterion).
+  // TheGameData (HamGameData*) 0x82F60034, mSong (Symbol) at +0x30.
+  if (!song_logged_) {
+    constexpr uint32_t kTheGameData = 0x82F60034;
+    uint32_t gd = load_u32(kTheGameData);
+    uint32_t sym = gd ? load_u32(gd + 0x30) : 0;
+    std::string song;
+    for (uint32_t i = 0; sym && i < 64; ++i) {
+      if (!IsGuestReadable(memory, sym + i, 1)) break;
+      char c = *memory->TranslateVirtual<char*>(sym + i);
+      if (!c) break;
+      song.push_back(c);
+    }
+    if (!song.empty()) {
+      song_logged_ = true;
+      XELOGI("DC3 Script: song '{}' (TheGameData {:08X})", song, gd);
+    }
+  }
 
   constexpr uint32_t kTheGamePanel = 0x83117410;
   uint32_t game_panel_addr = load_u32(kTheGamePanel);
