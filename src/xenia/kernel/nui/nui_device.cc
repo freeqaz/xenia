@@ -35,27 +35,31 @@ namespace nui {
 
 namespace {
 std::mutex g_device_lock;
-std::unique_ptr<NuiDevice> g_device;
+std::shared_ptr<NuiDevice> g_device;
 constexpr double kFramePeriodMs = 1000.0 / 30.0;
 }  // namespace
 
-NuiDevice* NuiDevice::Get() {
+std::shared_ptr<NuiDevice> NuiDevice::Get() {
   std::lock_guard<std::mutex> guard(g_device_lock);
-  return g_device.get();
+  return g_device;
 }
 
 void NuiDevice::Create(KernelState* kernel_state) {
   std::lock_guard<std::mutex> guard(g_device_lock);
-  g_device = std::make_unique<NuiDevice>(kernel_state);
+  g_device = std::make_shared<NuiDevice>(kernel_state);
 }
 
 void NuiDevice::Destroy() {
-  std::unique_ptr<NuiDevice> device;
+  std::shared_ptr<NuiDevice> device;
   {
     std::lock_guard<std::mutex> guard(g_device_lock);
     device = std::move(g_device);
   }
-  device.reset();
+  if (device) {
+    // Stops the clock and releases any guest thread waiting for a frame;
+    // the last reference (possibly that thread's) frees the device.
+    device->StopFrameClock();
+  }
 }
 
 NuiDevice::NuiDevice(KernelState* kernel_state)
@@ -231,7 +235,9 @@ uint32_t NuiDevice::SkeletonGetNextFrame(uint32_t timeout_ms,
   }
   // The SDK waits on its internal event with the (capped) timeout. A host
   // wait here blocks only the calling guest thread.
-  auto ready = [this] { return internal_event_ || !tracking_enabled_; };
+  auto ready = [this] {
+    return internal_event_ || !tracking_enabled_ || clock_stop_.load();
+  };
   if (!ready()) {
     if (wait_ms == 0) {
       ++counters_.pending;

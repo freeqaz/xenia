@@ -85,25 +85,25 @@ void Return(cpu::ppc::PPCContext* ctx, uint32_t hr) {
 
 // --- Device-backed entries -------------------------------------------------
 
-using Handler = uint32_t (*)(cpu::ppc::PPCContext* ctx);
+using Handler = uint32_t (*)(NuiDevice* device, cpu::ppc::PPCContext* ctx);
 
-uint32_t DoInitialize(cpu::ppc::PPCContext* ctx) {
-  return NuiDevice::Get()->Initialize(Arg(ctx, 0));
+uint32_t DoInitialize(NuiDevice* d, cpu::ppc::PPCContext* ctx) {
+  return d->Initialize(Arg(ctx, 0));
 }
-uint32_t DoShutdown(cpu::ppc::PPCContext*) {
-  return NuiDevice::Get()->Shutdown();
+uint32_t DoShutdown(NuiDevice* d, cpu::ppc::PPCContext*) {
+  return d->Shutdown();
 }
-uint32_t DoTrackingEnable(cpu::ppc::PPCContext* ctx) {
-  return NuiDevice::Get()->SkeletonTrackingEnable(Arg(ctx, 0), Arg(ctx, 1));
+uint32_t DoTrackingEnable(NuiDevice* d, cpu::ppc::PPCContext* ctx) {
+  return d->SkeletonTrackingEnable(Arg(ctx, 0), Arg(ctx, 1));
 }
-uint32_t DoTrackingDisable(cpu::ppc::PPCContext*) {
-  return NuiDevice::Get()->SkeletonTrackingDisable();
+uint32_t DoTrackingDisable(NuiDevice* d, cpu::ppc::PPCContext*) {
+  return d->SkeletonTrackingDisable();
 }
-uint32_t DoSetTracked(cpu::ppc::PPCContext* ctx) {
-  return NuiDevice::Get()->SkeletonSetTrackedSkeletons(Arg(ctx, 0));
+uint32_t DoSetTracked(NuiDevice* d, cpu::ppc::PPCContext* ctx) {
+  return d->SkeletonSetTrackedSkeletons(Arg(ctx, 0));
 }
-uint32_t DoGetNextFrame(cpu::ppc::PPCContext* ctx) {
-  return NuiDevice::Get()->SkeletonGetNextFrame(Arg(ctx, 0), Arg(ctx, 1));
+uint32_t DoGetNextFrame(NuiDevice* d, cpu::ppc::PPCContext* ctx) {
+  return d->SkeletonGetNextFrame(Arg(ctx, 0), Arg(ctx, 1));
 }
 
 // --- Phase 1 "legacy-equivalent" entries -----------------------------------
@@ -151,8 +151,9 @@ template <size_t I>
 void Thunk(cpu::ppc::PPCContext* ctx, KernelState*) {
   NoteHit(I);
   const Behaviour* b = g_behaviour[I];
-  if (b && b->handler && NuiDevice::Get()) {
-    Return(ctx, b->handler(ctx));
+  if (b && b->handler) {
+    auto device = NuiDevice::Get();
+    Return(ctx, device ? b->handler(device.get(), ctx) : b->legacy);
   } else {
     Return(ctx, b ? b->legacy : 0);
   }

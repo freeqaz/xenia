@@ -68,8 +68,9 @@ class NuiDevice {
   ~NuiDevice();
 
   // The device for the running title, or null when the facade is not
-  // installed (no supported NUI SDK in the image).
-  static NuiDevice* Get();
+  // installed (no supported NUI SDK in the image). Shared: a guest thread
+  // blocked in GetNextFrame keeps it alive across Destroy().
+  static std::shared_ptr<NuiDevice> Get();
   static void Create(KernelState* kernel_state);
   static void Destroy();
 
