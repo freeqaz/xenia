@@ -137,7 +137,7 @@ dword_result_t XamContentAggregateCreateEnumerator_entry(qword_t xuid,
   *handle_out = e->handle();
   return X_ERROR_SUCCESS;
 }
-DECLARE_XAM_EXPORT1(XamContentAggregateCreateEnumerator, kContent, kStub);
+DECLARE_XAM_EXPORT1(XamContentAggregateCreateEnumerator, kContent, kImplemented);
 
 }  // namespace xam
 }  // namespace kernel
