@@ -66,10 +66,18 @@ class UiProbe {
         kernel_state_(kernel_state),
         processor_(processor) {}
 
+  // The full sample runs every 2 s; between samples the UI state line is
+  // re-read every 250 ms and logged again whenever it changes, so a screen
+  // that is current for less than one sample period (the menu autopilot can
+  // advance through one in under 2 s) still appears in the log.
   void Run() {
-    while (ProbeSleep(2000)) {
-      ++sample_;
-      Sample();
+    for (int tick = 1; ProbeSleep(250); ++tick) {
+      if (tick % 8 == 0) {
+        ++sample_;
+        Sample();
+      } else if (sample_ > 0) {
+        UiStateLine(/*only_if_changed=*/true);
+      }
     }
   }
 
@@ -103,6 +111,9 @@ class UiProbe {
   }
 
   void Sample();
+  // The `RB3DX UI PROBE[n]: transState=... curScreen=...'name'
+  // transScreen=...'name'` line (a harness contract).
+  void UiStateLine(bool only_if_changed);
   void ThreadCensus();
   void GuestThreads();
   void LoadQueue();
@@ -118,6 +129,7 @@ class UiProbe {
   kernel::KernelState* kernel_state_;
   cpu::Processor* processor_;
   int sample_ = 0;
+  std::string last_ui_state_;
   uint32_t saveload_obj_ = 0, netsync_obj_ = 0, session_obj_ = 0,
            overshell_obj_ = 0;
   bool dumped_names_ = false;
@@ -131,15 +143,9 @@ void UiProbe::Sample() {
   if (sample_ >= 3 && sample_ <= 9 && kernel_state_) {
     ThreadCensus();
   }
-  uint32_t ts = ReadTransitionState(reader_);
+  UiStateLine(/*only_if_changed=*/false);
   uint32_t cur = r32(kTheBandUI + kUiCurrentScreen);
   uint32_t trans = r32(kTheBandUI + kUiTransitionScreen);
-  std::string cur_name = cur ? rstr(r32(cur + kScreenName)) : "<null>";
-  std::string trans_name = trans ? rstr(r32(trans + kScreenName)) : "<null>";
-  XELOGI(
-      "RB3DX UI PROBE[{}]: transState={} curScreen=0x{:08X}'{}' "
-      "transScreen=0x{:08X}'{}'",
-      sample_, ts, cur, cur_name, trans, trans_name);
   if (processor_) {
     GuestThreads();
   }
@@ -158,6 +164,22 @@ void UiProbe::Sample() {
   ObjectWindows();
   Joypads();
   Overshell();
+}
+
+void UiProbe::UiStateLine(bool only_if_changed) {
+  uint32_t ts = ReadTransitionState(reader_);
+  uint32_t cur = r32(kTheBandUI + kUiCurrentScreen);
+  uint32_t trans = r32(kTheBandUI + kUiTransitionScreen);
+  std::string cur_name = cur ? rstr(r32(cur + kScreenName)) : "<null>";
+  std::string trans_name = trans ? rstr(r32(trans + kScreenName)) : "<null>";
+  std::string line = fmt::format(
+      "transState={} curScreen=0x{:08X}'{}' transScreen=0x{:08X}'{}'", ts, cur,
+      cur_name, trans, trans_name);
+  if (only_if_changed && line == last_ui_state_) {
+    return;
+  }
+  last_ui_state_ = line;
+  XELOGI("RB3DX UI PROBE[{}]: {}", sample_, line);
 }
 
 void UiProbe::ThreadCensus() {
