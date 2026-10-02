@@ -561,13 +561,16 @@ void RtlEnterCriticalSection_entry(pointer_t<X_RTL_CRITICAL_SECTION> cs) {
           lock_corrupted ? "**LOCK_CORRUPTED**" : "");
     }
 
+    // Diagnostics only: this used to re-initialize the CS here, so turning
+    // the diagnostics on changed guest lock state (and did so even with
+    // --autoinit_critical_sections off). The autoinit block below is the one
+    // place that may repair a CS.
     if (looks_uninit || needs_lock_fix || lock_corrupted) {
       XELOGW(
-          "RtlEnterCriticalSection: CS at 0x{:08X} needs re-init "
-          "(type={}, lock_count={}, raw_lock={}, expected type=1 "
-          "raw_lock=-1). Caller LR=0x{:08X}. Auto-initializing.",
+          "RtlEnterCriticalSection: CS at 0x{:08X} looks uninitialized or "
+          "corrupt (type={}, lock_count={}, raw_lock={}, expected type=1 "
+          "raw_lock=-1). Caller LR=0x{:08X}.",
           cs_addr, cs_type, lock_count, raw_lock, caller_lr);
-      xeRtlInitializeCriticalSection(cs, cs_addr);
     }
   }
 
