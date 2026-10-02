@@ -11,6 +11,7 @@
 #define XENIA_HID_NOP_NOP_INPUT_DRIVER_H_
 
 #include <chrono>
+#include <cstdint>
 #include <deque>
 #include <mutex>
 #include <string>
@@ -49,7 +50,23 @@ class ScriptedInputTitleAdapter {
   // Called every 2 s while a wait_screen directive is pending.
   virtual void LogWaitStatus(Memory* memory, const std::string& wanted,
                              const std::string& screen) {}
+  // True while the UI is between screens (the game's UIManager::InTransition).
+  // A `wait_screen` is satisfied only on a settled screen, as in the native
+  // port's player (dc3-decomp native/src/platform/Joypad_Native.cpp).
+  virtual bool InTransition(Memory* memory) { return false; }
+  // A guest frame clock: true if FrameNumber() counts guest frames (one tick
+  // per pass of the game's main loop). With a clock the player runs the
+  // native port's semantics: `+N` is N frames after the last satisfied
+  // wait_screen, a press lasts exactly one frame, and a wait_screen gives up
+  // after 1800 frames. Without one it keeps the legacy wall-clock timing
+  // (`+N` = N x 50 ms, 350 ms hold).
+  virtual bool HasFrameClock() { return false; }
+  virtual int64_t FrameNumber() { return -1; }
 };
+
+// True once LoadScriptFile() loaded a screen-aware script (set before the
+// title launches, so a title module can install its frame clock).
+bool ScreenAwareScriptLoaded();
 
 // Installs the adapter for the running title (nullptr removes it). The
 // adapter must outlive every driver call; title modules use a static one.
@@ -75,10 +92,17 @@ class NopInputDriver final : public InputDriver {
 
   // Enable screen-aware scripted input mode.
   // Script file format (one directive per line):
-  //   wait_screen <screen_name>    — wait until UIManager.mCurrentScreen matches
-  //   +<frames> <button>           — after wait is satisfied, wait N frames then press button
-  //   +<frames> NONE              — after wait is satisfied, wait N frames with no button press
+  //   wait_screen <screen_name>    — wait until the current screen is
+  //                                  <screen_name> and not in transition
+  //   +<frames> <button>           — press <button> N frames after the last
+  //                                  satisfied wait_screen
+  //   <frames> <button>            — press <button> at absolute frame N
   //   # comment                    — ignored
+  // The format and the semantics are the native port's
+  // (dc3-decomp native/src/platform/Joypad_Native.cpp), so one flow file
+  // drives both. Buttons: confirm/a, cancel/b, x, y, start, option/back/
+  // select, up/down/left/right, l1/lb, r1/rb, l2/lt, r2/rt, l3/ls, r3/rs.
+  // NONE/NOOP/IDLE lines are accepted and press nothing.
   //
   // Requires SetMemory() to be called first so we can read guest memory.
   void LoadScriptFile(const std::string& path);
@@ -107,8 +131,11 @@ class NopInputDriver final : public InputDriver {
     enum Type { kWaitScreen, kDelayedPress };
     Type type;
     std::string screen_name;  // For kWaitScreen
-    int delay_ms;             // For kDelayedPress: ms after wait satisfied
+    int delay_ms;             // For kDelayedPress (legacy timing): N x 50 ms
     uint16_t buttons;         // For kDelayedPress
+    int frame = 0;            // For kDelayedPress (frame clock): N
+    bool relative = true;     // `+N` (after the last wait) or absolute `N`
+    uint8_t triggers = 0;     // bit 0 = left trigger, bit 1 = right trigger
   };
 
   // Dynamic injection event
@@ -132,6 +159,12 @@ class NopInputDriver final : public InputDriver {
 
   // Process screen-aware script state machine
   uint16_t GetScreenAwareButtons();
+  // Frame-clock mode: the native port's player, evaluated once per guest
+  // frame. Returns the buttons for the current frame.
+  uint16_t GetFrameScriptButtons(ScriptedInputTitleAdapter* adapter);
+  // One frame of the native state machine.
+  uint16_t StepFrameScript(ScriptedInputTitleAdapter* adapter, int64_t frame,
+                           uint8_t* triggers);
 
   bool scripted_mode_ = false;
   std::vector<ScriptedEvent> scripted_events_;
@@ -148,6 +181,16 @@ class NopInputDriver final : public InputDriver {
   std::chrono::steady_clock::time_point wait_satisfied_time_;  // When wait was satisfied
   std::string last_screen_name_;      // Cache to avoid re-reading every call
   std::chrono::steady_clock::time_point last_screen_read_time_;  // Throttle reads
+
+  // Frame-clock scripting state (mode decided at the first evaluation).
+  int frame_mode_ = -1;  // -1 undecided, 0 legacy, 1 frame clock
+  bool frame_waiting_ = false;
+  int64_t frame_wait_start_ = -1;
+  int64_t frame_wait_satisfied_ = -1;
+  int64_t frame_last_eval_ = -1;
+  uint16_t frame_buttons_ = 0;
+  uint8_t frame_triggers_ = 0;
+  std::chrono::steady_clock::time_point frame_last_log_;
 
   // Guest memory access
   Memory* memory_ = nullptr;

@@ -7,7 +7,8 @@ Harness contracts read here (cleanup must keep them or update this file in the
 same commit): `Thread Status Report (<ms>ms)… SIGSEGV=<n>`
 (emulator_headless.cc), `DC3 FAULTS (<ms>ms): SIGSEGV=<n> XMA=<m>
 NON_XMA=<k>` (titles/dc3/dc3_fail_tripwire.cc), `DC3 Script: wait_screen '<x>'
-SATISFIED` and `gpState=` (titles/dc3/dc3_scripted_input.cc), `TIMEOUT: <ms>ms
+SATISFIED`, `DC3 Script: screen -> '<x>'` and `gpState=`
+(titles/dc3/dc3_scripted_input.cc), `TIMEOUT: <ms>ms
 reached` (headless main).
 
 Fault gate: every guest store to the XMA register aperture [0x7FEA0000,
@@ -17,15 +18,22 @@ audio (titles/dc3 since the XMA stub went, 2026-10-02) SIGSEGV counts
 criterion is max NON_XMA == 0; older binaries (no such line) are still gated on
 max SIGSEGV == 0.
 """
+import os
 import re
 from pathlib import Path
 
+def _screen(name):
+    # A flow's wait_screen, or (for a screen the flow does not wait on, e.g.
+    # game_screen in dc3-decomp's ymca.txt) the adapter's screen-change line.
+    return re.compile(rf"wait_screen '{name}' SATISFIED|DC3 Script: screen -> '{name}'")
+
+
 MILESTONES = [
-    ("title_screen", re.compile(r"wait_screen 'title_screen' SATISFIED")),
-    ("main_screen", re.compile(r"wait_screen 'main_screen' SATISFIED")),
-    ("choose_mode_screen", re.compile(r"wait_screen 'choose_mode_screen' SATISFIED")),
-    ("song_select_screen", re.compile(r"wait_screen 'song_select_screen' SATISFIED")),
-    ("game_screen", re.compile(r"wait_screen 'game_screen' SATISFIED")),
+    ("title_screen", _screen("title_screen")),
+    ("main_screen", _screen("main_screen")),
+    ("choose_mode_screen", _screen("choose_mode_screen")),
+    ("song_select_screen", _screen("song_select_screen")),
+    ("game_screen", _screen("game_screen")),
     ("first_gpstate2_playing", re.compile(r"gpState=2 .*paused=0")),
     ("first_gpstate3", re.compile(r"gpState=3")),
 ]
@@ -34,6 +42,13 @@ FAULTS_RE = re.compile(r"DC3 FAULTS \((\d+)ms\): SIGSEGV=(\d+) XMA=(\d+) NON_XMA
 TIMEOUT_RE = re.compile(r"TIMEOUT: (\d+)ms reached")
 FAILMSG_RE = re.compile(r"mFailThreadMsg=([0-9A-Fa-f]+) '([^']*)'")
 TAINT_RE = re.compile(r"TAINTED")
+SONG_RE = re.compile(r"DC3 Script: song '([^']*)'")
+
+# The song S1's flow selects. Enforced when the binary logs the song (an
+# adapter with the `screen ->` line); xenia-ymca.txt played `thehustle` for
+# weeks while every S1 passed (measured 2026-10-02, lane B2, via S2's DTA
+# query), so the song is a criterion, not a measurement.
+EXPECT_SONG = os.environ.get("FR_DC3_EXPECT_SONG", "ymca")
 
 # Pass criteria (plan §4.2 S1).
 TITLE_MAX_S = 30.0
@@ -61,6 +76,7 @@ def parse(log: Path) -> dict:
     now, seen, segv, gp2, reports = 0, {}, 0, 0, 0
     xma, non_xma, fault_lines = 0, 0, 0
     timeout_line, fail_msgs, tainted = None, [], 0
+    song, screen_lines = None, 0
     last_line = ""
     with open(log, errors="replace") as f:
         for line in f:
@@ -90,6 +106,12 @@ def parse(log: Path) -> dict:
                 fail_msgs.append(fm.group(2))
             if TAINT_RE.search(line):
                 tainted += 1
+            if song is None:
+                sm = SONG_RE.search(line)
+                if sm:
+                    song = sm.group(1)
+            if "DC3 Script: screen -> '" in line:
+                screen_lines += 1
     if timeout_line is None:
         timeout_line = timeout_from_tail(log)
     return {
@@ -105,6 +127,10 @@ def parse(log: Path) -> dict:
         "timeout_reached_ms": timeout_line,
         "mfailthreadmsg_seen": fail_msgs,
         "tainted_lines": tainted,
+        # The song the game is playing (`DC3 Script: song`); None on a binary
+        # whose adapter predates the line (no `screen ->` lines either).
+        "song": song,
+        "song_probe": screen_lines > 0,
         "last_line": last_line.strip()[:200],
     }
 
@@ -142,6 +168,10 @@ def judge(m: dict, rc, timeout_ms_expected=None):
         reasons.append(f"gpState=2&paused=0 samples {m['gpstate2_paused0_samples']} < {GP2_MIN}")
     if ms["first_gpstate3"] is None:
         reasons.append("first gpState=3 never seen")
+    if m.get("song_probe") and EXPECT_SONG:
+        crit["song"] = EXPECT_SONG
+        if m.get("song") != EXPECT_SONG:
+            reasons.append(f"song {m.get('song')!r} != {EXPECT_SONG!r}")
     if rc != 0:
         reasons.append(f"rc {rc} != 0")
     if m["timeout_reached_ms"] is None:

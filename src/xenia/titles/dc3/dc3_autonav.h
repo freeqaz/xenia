@@ -4,11 +4,9 @@
  ******************************************************************************
  * DC3 headless autonav (NOT upstream).
  *
- * Harness automation for a Kinect-less headless DC3: the menus are gesture
- * driven, so the ymca flow needs the host to complete stuck transitions, call
- * UIManager::GotoScreen, inject the song and (until the audio clock runs)
- * drive the song clock. All of it runs on the guest MAIN thread through
- * dc3_main_thread.h, and only with --dc3_headless_autonav.
+ * Harness input for a headless DC3. Since lane B2 it is only the attract
+ * A-press (input.attract_press in dc3_scripted_input.cc); the flow file drives
+ * every other screen. --dc3_headless_autonav arms it.
  ******************************************************************************
  */
 

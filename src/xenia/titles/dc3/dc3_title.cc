@@ -944,30 +944,11 @@ void ApplyDc3LaunchHooks(const titles::TitleLaunchContext& ctx) {
                             kSaveLoadManagerActivate);
                       });
 
-    constexpr uint32_t kHamPanelFocusComponent = 0x828EFE90;
-    constexpr uint32_t kUIPanelFocusComponent = 0x827A6310;
-    with_patch_target("ui.hampanel_focus", "HamPanel::FocusComponent", kHamPanelFocusComponent, 4,
-                      [&](uint8_t* ptr) {
-                        constexpr uint32_t kBranchMask = 0x03FFFFFC;
-                        uint32_t branch =
-                            0x48000000 |
-                            ((kUIPanelFocusComponent - kHamPanelFocusComponent) &
-                             kBranchMask);
-                        xe::store_and_swap<uint32_t>(ptr, branch);
-                        XELOGI("DC3: UI fix: redirected HamPanel::FocusComponent "
-                               "at {:08X} to UIPanel::FocusComponent {:08X}",
-                               kHamPanelFocusComponent, kUIPanelFocusComponent);
-                      });
-
-    constexpr uint32_t kHamScreenIsEventDialogOnTop = 0x829626D8;
-    with_patch_target("ui.event_dialog_on_top", "HamScreen::IsEventDialogOnTop",
-                      kHamScreenIsEventDialogOnTop, 8, [&](uint8_t* ptr) {
-                        xe::store_and_swap<uint32_t>(ptr + 0, 0x38600000);
-                        xe::store_and_swap<uint32_t>(ptr + 4, 0x4E800020);
-                        XELOGI("DC3: UI fix: stubbed HamScreen::IsEventDialogOnTop "
-                               "at {:08X} to return false",
-                               kHamScreenIsEventDialogOnTop);
-                      });
+    // (RETIRED 2026-10-02, lane B2) HamPanel::FocusComponent -> branch to
+    // UIPanel::FocusComponent, and HamScreen::IsEventDialogOnTop -> return 0
+    // (gap analysis O28/O29). With the real bodies the ymca flow reaches
+    // game_screen and song end 5/5 with no mFailing latch
+    // (docs/fork/dc3/BASELINE.md, "B2 retirements").
 
     constexpr uint32_t kContentMgrRefreshDone = 0x825FEB48;
     with_patch_target("content.refresh_done", "ContentMgr::RefreshDone", kContentMgrRefreshDone, 8,
@@ -1142,31 +1123,15 @@ void ApplyDc3LaunchHooks(const titles::TitleLaunchContext& ctx) {
       // them Game::HandleWait waits for HamAudio::IsReady by itself and
       // PostWaitStart unpauses the game (docs/fork/dc3/BASELINE.md).
 
-      constexpr uint32_t kHamDirectorSongAnim = 0x82475578;
-      with_patch_target("anim.song_anim_expert", "HamDirector::SongAnim", kHamDirectorSongAnim, 8,
-                        [&](uint8_t* p) {
-                          // SongAnim(playerIndex): force the pre-authored EXPERT
-                          // song.anim (which has baked clip keyframes) instead of
-                          // the routine-builder anim (empty headless — the
-                          // remixer never runs). Mirrors the #ifdef HX_NATIVE
-                          // fallback compiled out of debug.xex.
-                          //   li r4,2 (kDifficultyExpert)
-                          //   b  0x82473E58  (HamDirector::SongAnimByDifficulty)
-                          // NOTE: branch MUST target the function ENTRY 0x82473E58
-                          // (0x4BFFE8DC), NOT 0x82473E5C/+4 (0x4BFFE8E0). The +4
-                          // target landed on the SongAnimByDifficulty survival
-                          // patch's `blr`, skipping `li r3,0`, so SongAnim returned
-                          // r3 unchanged == TheHamDirector -> ClipPlayer::Init then
-                          // called GetKeys with this==HamDirector -> infinite hang.
-                          // (Survival patch now removed; SongAnimByDifficulty runs
-                          // its real `return mSongAnims[diff]` on the healthy map.)
-                          xe::store_and_swap<uint32_t>(p + 0, 0x38800002);
-                          xe::store_and_swap<uint32_t>(p + 4, 0x4BFFE8DC);
-                          XELOGI("DC3: Anim fix: patched HamDirector::SongAnim "
-                                 "at {:08X} to tail-call SongAnimByDifficulty"
-                                 "(expert)",
-                                 kHamDirectorSongAnim);
-                        });
+      // (RETIRED 2026-10-02, lane B2) anim.song_anim_expert: HamDirector::
+      // SongAnim -> li r4,2; b SongAnimByDifficulty, "the routine-builder
+      // anim is empty headless (the remixer never runs)". The remixer does
+      // run (perform.dta start_reset -> OriginalChoreoRemixer::Reset ->
+      // SelectMove -> MoveMgr::InsertMoveInSong), but InsertMoveInSong writes
+      // into TheHamDirector->SongAnim(player): with the patch on, that was the
+      // authored EXPERT song.anim, which the remix overwrote, while the
+      // routine-builder anim stayed empty. The patch sustained the symptom it
+      // was written for (docs/fork/dc3/BASELINE.md, "SongAnim").
     }
 
     // Apply IK telemetry instrumentation to the original XEX if requested.
@@ -1185,6 +1150,9 @@ void ApplyDc3LaunchHooks(const titles::TitleLaunchContext& ctx) {
     // Headless menu automation, on the guest main thread
     // (--dc3_headless_autonav, default off).
     dc3::InstallAutonav(processor, memory, ctx.kernel_state);
+    // The scripted-input player's guest frame clock (flow files use the
+    // native port's frame semantics).
+    dc3::InstallScriptedInputFrameClock(processor, memory);
 
 #if XE_PLATFORM_LINUX
     // dc3-oracle: DTA evaluation channel (default off => no override, no

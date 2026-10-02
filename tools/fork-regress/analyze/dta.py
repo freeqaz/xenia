@@ -5,6 +5,7 @@ thread <tid>` (dc3_dta_channel.cc); reply body `=> <value>` /
 `=> !! refused: script error...` (the RB3Enhanced /dta/eval contract).
 """
 import json
+import os
 import re
 from pathlib import Path
 
@@ -26,6 +27,10 @@ EXPECT = {
     "{+ 5 5}": ("exact", "10"),
     "{size {object_list main Object FALSE}}": ("int", None),
 }
+
+# The song the flow must select (S2 criterion, from the gameplay DTA query
+# {gamedata get song}). Empty = record only.
+EXPECT_SONG = os.environ.get("FR_DTA_EXPECT_SONG", "ymca")
 
 
 def strip_prefix(out: str) -> str:
@@ -71,6 +76,16 @@ def analyze(run_dir: Path, meta: dict):
     if "{size {object_list main Object FALSE}}" in m["answers"]:
         mm = re.fullmatch(r"(\d+)", m["answers"]["{size {object_list main Object FALSE}}"])
         m["object_list_main_count"] = int(mm.group(1)) if mm else None
+    # Gameplay queries (recorded; the song is a criterion only when
+    # FR_DTA_EXPECT_SONG names one).
+    m["game_error"] = drv.get("game_error")
+    m["game_answers"] = {q["q"]: strip_prefix(q["stdout"].strip())
+                         for q in drv.get("game_queries", [])}
+    m["song"] = m["game_answers"].get("{gamedata get song}")
+    want_song = EXPECT_SONG
+    if want_song and m["song"] != want_song:
+        reasons.append(f"song {m['song']!r} != {want_song!r} "
+                       f"(game_error {m['game_error']!r})")
     flow = dc3_flow.parse(run_dir / "run.log")
     flow_reasons, flow_crit = dc3_flow.judge(flow, meta.get("rc"))
     m["flow"] = flow
@@ -78,5 +93,5 @@ def analyze(run_dir: Path, meta: dict):
     reasons += [f"flow: {r}" for r in flow_reasons]
     crit = {"installed": True, "first_poll_thread": "00000006",
             "answers": {q: (k, w) for q, (k, w) in EXPECT.items()},
-            "flow": flow_crit}
+            "flow": flow_crit, "song": EXPECT_SONG}
     return ("PASS" if not reasons else "FAIL"), reasons, m, crit

@@ -21,13 +21,8 @@ DEFINE_string(dc3_crt_skip_indices, "",
               "Default empty = use dc3_crt_skip_nui.",
               "DC3");
 DEFINE_bool(dc3_ik_telemetry, false, "DC3: enable IK telemetry", "DC3");
-DEFINE_bool(dc3_game_screen_real_goto, true,
-            "DC3: drive loading->game_screen via the real UIManager::GotoScreen "
-            "(runs game_panel Load()->CreateGame() and the per-frame Poll state "
-            "machine that creates the Game and sets up dancer anims). Only safe "
-            "once the song FileMerger merge has completed (gated on merge_busy). "
-            "Set false to fall back to the old host force-set (no Game created).",
-            "DC3");
+// (RETIRED 2026-10-02, lane B2) dc3_game_screen_real_goto: the nav bridge
+// it configured is gone (dc3_autonav.cc).
 DEFINE_bool(dc3_null_read_cache_stream, false, "DC3: null read cache", "DC3");
 DEFINE_bool(dc3_crt_skip_nui, true,
             "DC3: auto-nullify NUI/Kinect SDK CRT constructors (indices "

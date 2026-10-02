@@ -15,10 +15,19 @@
 #define XENIA_TITLES_DC3_DC3_SCRIPTED_INPUT_H_
 
 namespace xe {
+class Memory;
+namespace cpu {
+class Processor;
+}  // namespace cpu
 namespace dc3 {
 
 // Installs the DC3 adapter into the nop input driver's scripted-input player.
 void InstallScriptedInputAdapter();
+
+// Original debug.xex only, and only when a screen-aware script is loaded:
+// registers the main-thread hook (dc3_main_thread.h) as the player's guest
+// frame clock, so flow files run with the native port's frame semantics.
+void InstallScriptedInputFrameClock(cpu::Processor* processor, Memory* memory);
 
 }  // namespace dc3
 }  // namespace xe

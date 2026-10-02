@@ -11,7 +11,8 @@ Scope:
 - The decomp-layout pack (`titles/dc3/decomp/`) is not listed here. It only
   applies to a rebuilt image detected as the decomp layout, where harness S3
   fingerprints it as a whole. To skip one of its stubs, use
-  `--dc3_decomp_disable_stubs=<name,...>`.
+  `--dc3_decomp_disable_stubs=<name,...>`. Lane B2 deleted seven of its stubs
+  (see "Retired in lane B2" below).
 - "Masks" names the gap each hack covers, using the ids from
   `docs/fork/cleanup/DC3_HACK_GAP_ANALYSIS.md` (O1-O49).
 - "Status" is this lane's verdict (Lane B, 2026-10-02). See the end of this
@@ -44,13 +45,10 @@ tools/fork-regress/compare.py --paired out/cand out/ctrl
 | `mmio.soft_fault_range` | 0x83320000-0x836C0000 | MMIO write soft-fault range | O48: decomp `.data`, **outside the original image** | kept: inert on the original, decomp-only |
 | `content.wipe` | host FS | `remove_all(<content>/373307D9)` | O47 | **default off** (`--dc3_clean_content_cache=false`) |
 | `saveload.activate` | `SaveLoadManager::Activate` 0x82894A10 | `blr` | O37 | kept (L6, content/XAM) |
-| `ui.hampanel_focus` | `HamPanel::FocusComponent` 0x828EFE90 | branch to `UIPanel::FocusComponent` | O28 | kept, A/B pending |
-| `ui.event_dialog_on_top` | `HamScreen::IsEventDialogOnTop` 0x829626D8 | `return 0` | O29 | kept, A/B pending |
 | `content.refresh_done` | `ContentMgr::RefreshDone` 0x825FEB48 | `return 1` | O36: XAM cross-title enumeration | kept (L6) |
 | `speech.grammar_unload` | `SpeechMgr::Grammar::Unload` 0x82439F38 | `blr` | O7: the NUI S_OK stubs | kept (NUI) |
 | `calib.player_present_guard`, `calib.choose_player_sides`, `calib.warning_data`, `calib.nav_data`, `calib.wait_recovery`, `calib.exit_controller_mode` | SkeletonChooser / ShellInput (0x8290834C, 0x82909968, 0x82907880, 0x82909340, 0x82904CD0, 0x82902748) | `nop` / `blr` / rewrite | O8-O13: a constant skeleton is not a calibrated player | kept (NUI) |
 | `game.pause_for_skeleton_loss` | `Game::PauseForSkeletonLoss` 0x82866D50 | `blr` | O14 | kept (NUI) |
-| `anim.song_anim_expert` | `HamDirector::SongAnim` 0x82475578 | `li r4,2; b SongAnimByDifficulty` | O34 | kept: changes which anim plays |
 
 ## `dc3_hack_pack_skeleton.cc` (with `--fake_kinect_data`)
 
@@ -71,11 +69,7 @@ These were removed:
 | id | where | what | masks | status |
 |---|---|---|---|---|
 | `seq.controller_mode` | NUI callback (worker) | `TheGestureMgr`+0x426D := 1 each frame | O6 | kept (NUI) |
-| `seq.transition_force` | **main thread**, autonav | force-enter/complete transitions stuck for 120 or more ticks | O30 | `--dc3_headless_autonav` only |
-| `seq.nav_bridge` | **main thread**, autonav | `UIManager::GotoScreen` walk to game_screen, held while the song merge is busy | O31, O32 | `--dc3_headless_autonav` only |
-| `seq.loadsong_repair` | **main thread**, autonav | `DataReadFile`, `HamSongMgr::AddSongs`, ymca injection | O33 | `--dc3_headless_autonav` only |
-| `input.attract_press` | pad poll | press A every 3 s at attract | O45 | `--dc3_headless_autonav` only |
-| `input.attract_force` | pad poll | 4 MiB scan + UIManager stomp, attract -> title | O46 | `--dc3_headless_autonav` only |
+| `input.attract_press` | pad poll | press A every 3 s while attract blocks `wait_screen title_screen` | O45: the attract movie plays for real (Bink is real since lane B), and the shared flow has no attract step because the native port's movie fails to open | `--dc3_headless_autonav` only; the one host input left. It takes attract -> autosave_warning -> title through the game's own handlers |
 
 These were removed:
 
@@ -91,8 +85,9 @@ These were removed:
 | Debug::Fail tripwire | host probe thread (`dc3_fail_tripwire.cc`) | `--dc3_fail_tripwire` (on). Reads `TheDebug` 0x82F655D8 |
 | Override audit | same thread, every 30 s | per override: handler hits, `resolved_indirect` |
 | `gpState=` gameplay probe | pad poll (`dc3_scripted_input.cc`) | read-only; counted by the harness |
+| `screen ->` and `song` lines | pad poll (`dc3_scripted_input.cc`) | read-only: one line per screen change, and the selected song (`TheGameData`+0x30) once on game_screen. S1 milestones and the S1 song criterion |
 | DTA channel | main-thread hook | `--dc3_dta_channel`. Scratch is allocated on the first request |
-| main-thread hook | `HolmesClientPollKeyboard` 0x825F0F78 override | installed only when a task exists (autonav or the DTA channel). It skips the stock body, which does nothing while `gHolmesStream` is 0 (logged; a non-zero value is logged as TAINTED) |
+| main-thread hook | `HolmesClientPollKeyboard` 0x825F0F78 override | installed only when a task exists: the DTA channel, or the scripted-input frame clock (`input_frame_clock`, a no-op task whose poll count is the flow's frame number) when a screen-aware flow is loaded. It skips the stock body, which does nothing while `gHolmesStream` is 0 (logged; a non-zero value is logged as TAINTED) |
 | IK telemetry | code caves in the zero padding after `.text` | `--dc3_ik_telemetry`. Refuses if there is no padding. It no longer writes inside `UtilDrawPlane` |
 
 ## Retired in this lane (2026-10-02)
@@ -115,11 +110,29 @@ override fix merged.
 | `debug.fail_spin` | 0x825CE2DC | survive a worker FAIL | faithful spin restored; the worker FAIL it survived was self-inflicted (finding 2) |
 | `seq.transition_diag`, `--dc3_gameplay_probe` | off-thread Executes | diagnostics | deleted |
 
+## Retired in lane B2 (2026-10-02)
+
+Measured in `BASELINE.md`, "Lane B2". The ids are gone from the known-id
+table, so naming one in `--dc3_disable_hacks` is now a launch error.
+
+| id / stub | site | why it existed | evidence it is gone for good |
+|---|---|---|---|
+| `ui.hampanel_focus` | `HamPanel::FocusComponent` 0x828EFE90 | "focus crash": `TheHamUI.EventDialogPanel()` null when the host forced screens before HamUI loaded (O28) | Lane B x1: S1 5/5 with it off. B2 r1: S1 5/5 with the code deleted, 5/5 for main interleaved |
+| `ui.event_dialog_on_top` | `HamScreen::IsEventDialogOnTop` 0x829626D8 | same (O29) | same runs |
+| `seq.transition_force` | main-thread autonav | force-enter/complete transitions stuck for 120 ticks (O30) | same runs. Every transition completes by itself once the Bink/Splash/HamAudio chain is real |
+| `seq.loadsong_repair` | main-thread autonav | `DataReadFile` + `HamSongMgr::AddSongs` on a guessed path and a constructed `ymca` Symbol (O33) | same runs. The flow selects the song on song_select |
+| decomp `Splash::PrepareNext`, `Splash::BeginSplasher`, `Splash::Suspend`, `Splash::Resume` | decomp layout | lost-resume (thread created suspended, resume lost) | Lane B d7: S3 2/2 PASS, 627 traps, histogram identical, with the 7 off. B2: S3 2/2 PASS, 627, with the code deleted |
+| decomp `BinkStartAsyncThread`, `BinkMovieSys::PlatformInit` | decomp layout (both resolve to one noop 0x826B0EF0) | same | same |
+| `seq.nav_bridge` | main-thread autonav: `UIManager::GotoScreen` walk attract -> ... -> game_screen, `merge_busy` hold, `--dc3_game_screen_real_goto` | Kinect-only menus; scripted A "does not navigate" (O31, O32) | It skipped each screen's own handler (title -> wait_main without `NAV_SELECT_MSG` latched "Data 0 is not String (file ui/title/title.dta, line 261)"). The native-semantics player and `flows/dc3-ymca.txt` drive every screen: e13 S2 PASS with it off, then S1 x5 (BASELINE "Flow"). The cvar `dc3_game_screen_real_goto` is deleted |
+| `input.attract_force` | scripted-input adapter | 4 MiB heap scan + UIManager stomp attract -> title (O46) | The attract press goes through the game: attract -> autosave_warning -> title (e7, e13) |
+| `anim.song_anim_expert` | `HamDirector::SongAnim` 0x82475578 -> `li r4,2; b SongAnimByDifficulty` | "routine-builder anim empty headless, the remixer never runs" (O34) | Self-sustaining: `MoveMgr::InsertMoveInSong` writes the remix into `TheHamDirector->SongAnim(player)`, which the patch made the authored EXPERT song.anim. DTA, patch on: SongAnim = song.anim, 85 clip keys, routine-builder 0. Off: SongAnim = player_1_routine_builder.anim, 71 keys, expert song.anim back to its authored 17. S2 2/2 PASS off (e3). **Intentional oracle change**: the dancers now evaluate the remixed routine, as on the 360 |
+| decomp `UIManager::GotoFirstScreen` | decomp layout | "ChunkStream's async I/O threads fail to start" (same race) | same |
+
 ## Status legend
 
 | status | meaning |
 |---|---|
 | kept (NUI) | Needed until a NUI HLE with a pose source exists (analysis L8). A Kinect title genuinely requires it |
 | kept (L6) | Content/XAM enumeration, owned by a later lane |
-| `--dc3_headless_autonav` only | Harness automation. Off by default; the harness passes the cvar |
+| `--dc3_headless_autonav` only | Harness input. Off by default; the harness passes the cvar. Since lane B2 it arms only `input.attract_press` |
 | see results | Measured in this lane. The outcome is in `BASELINE.md` |

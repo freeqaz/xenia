@@ -157,17 +157,24 @@ dc3_original_args() {
   local gpu="$1" timeout_ms="$2"
   local I="$CONTENT/dc3-inputs"
   xr_input xex "$CONTENT/dc3-original/debug.xex"
-  xr_input ymca "$I/xenia-ymca.txt"
+  # The flow is dc3-decomp's scripts/dc3-input-flows/ymca.txt (6d9785b8f)
+  # with five timing lines moved (flows/dc3-ymca.txt; the same file drives the
+  # native port to ymca, see docs/fork/dc3/BASELINE.md "Flow"). The player
+  # runs it with the native port's frame semantics. FR_DC3_FLOW overrides it
+  # (exploration only).
+  local flow="${FR_DC3_FLOW:-$HARNESS/flows/dc3-ymca.txt}"
+  xr_input ymca "$flow"
   xr_input symbols "$I/symbols.dc3-decomp-c362ede1c.txt"
   xr_input fingerprints "$I/dc3_nui_fingerprints.xenia-a5fc2f1b6.txt"
   xr_arg "--target=$CONTENT/dc3-original/debug.xex" "--gpu=$gpu" \
          --dc3_nui_patch_layout=original --dc3_crt_skip_nui=true \
          --stub_nui_functions=true --fake_kinect_data=true \
-         "--scripted_input_file=$I/xenia-ymca.txt" \
+         "--scripted_input_file=$flow" \
          "--headless_timeout_ms=$timeout_ms"
-  # The ymca flow needs the host menu automation; since titles/dc3 moved it to
-  # the guest main thread it is opt-in (dc3_autonav.cc). Older binaries do not
-  # define the cvar and always run the automation (on the NUI worker).
+  # --dc3_headless_autonav arms the one host input left, the attract A-press
+  # (the attract movie plays for real; dc3_autonav.cc). On binaries before
+  # lane B2 it also armed the nav bridge. Older binaries do not define the
+  # cvar and always run their automation (on the NUI worker).
   xr_opt dc3_headless_autonav true
   xr_opt dc3_nui_symbol_map_path "$I/symbols.dc3-decomp-c362ede1c.txt"
   xr_opt dc3_nui_layout_fingerprint_cache_path "$I/dc3_nui_fingerprints.xenia-a5fc2f1b6.txt"

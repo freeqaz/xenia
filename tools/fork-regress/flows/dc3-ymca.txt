@@ -1,0 +1,75 @@
+# YMCA — Full DTA flow from boot to gameplay
+#
+# Navigates through the complete screen chain:
+#   attract -> (auto) autosave_warning -> (auto) title
+#   -> (auto) wait_main_after_saveload -> main -> choose_mode
+#   -> song_select -> multiuser (difficulty, play, skip_waiting) -> loading
+#   -> preloading -> real_loading -> game_screen
+#
+# Splash screens (ESRB/Harmonix logos) happen during App init before the
+# UI screen system starts, so no input is needed to dismiss them.
+# autosave_warning_screen and wait_main_after_saveload_screen auto-advance
+# without input.
+#
+# IMPORTANT: +N offsets are all relative to the LAST wait_screen satisfaction
+# frame, NOT to the previous directive. They must be monotonically increasing.
+#
+# NOTE: A HamNavList ignores buttons while its enter animation runs (~20 UI
+# frames -- the image's HamNavList::OnMsg(ButtonDownMsg) checks IsAnimating()),
+# so the first press on title/main/choose_mode waits +30.  With DC3_FAST_BOOT=1
+# title_screen auto-advances after 60 frames, so its confirm must land before.
+#
+# Usage:
+#   MILO_HEADLESS=1 MILO_FATAL_FAILS=0 \
+#     MILO_MAX_FRAMES=5000 \
+#     MILO_INPUT_SCRIPT=scripts/dc3-input-flows/ymca.txt \
+#     native/build/dc3-native
+
+# attract_screen needs no input: its movie (no .bik ships in the extracted
+# tree) fails to open, so MoviePanel::Poll sends movie_done on the first poll
+# and attract_movie_panel's handler goes to next_screen -- what the image does
+# with a movie that did not open (BinkMovieImpl::Poll returns false).
+
+# autosave_warning_screen auto-transitions to title_screen.
+# Title screen -- press confirm to proceed.
+wait_screen title_screen
++45 confirm
+
+# wait_main_after_saveload_screen auto-transitions to main_screen.
+# Main screen -- select "gameplay" (first item).
+wait_screen main_screen
++45 confirm
+
+# Choose mode -- select "perform" (first item).
+wait_screen choose_mode_screen
++45 confirm
+
+# Song select -- ONE down, derived from the list, not tuned until green.
+# In perform mode song_select.dta's enter handler runs
+# `{right_hand.hnl scroll_to_index 2 2}` (focus_song_index 2, top_index 2), and
+# the list (song_offer_provider, sort_with_headers TRUE) reads
+#   0 playlists  1 random_song  2 song_tier_0  3 ymca  4 betteroffalone
+#   5 thehustle  6 song_tier_1  7 starships ...
+# Tier headers are NOT skipped by the d-pad: HamNavList::OnMsg only skips
+# !IsActive rows, and NavListHeaderNode::IsActive is true whenever any child is
+# (selecting one collapses the list to its headers).  So the cursor starts on
+# song_tier_0 and one down lands on ymca.  The old four downs landed on the
+# song_tier_1 HEADER; they only reached a song because OnMsg's ScrollDown edge
+# carried an invented `- 1` that fired one row early and jumped the cursor
+# over index 6 to starships (so this flow was playing starships, not ymca).
+wait_screen song_select_screen
++45 down
++105 confirm
+
+# multiuser_screen is driven by the controller, as on the 360: the focused
+# list (right_hand_p1) is seldiff_pane -> confirm the highlighted difficulty;
+# startgame_pane -> confirm `play` (ready); readywait_pane -> confirm
+# `skip_waiting` -> start_game -> enter_gameplay.  Each pane change replays the
+# list's enter animation (presses dropped meanwhile), hence the spacing.
+wait_screen multiuser_screen
++40 confirm
++150 confirm
++270 confirm
+
+# Loading screens auto-advance via DTA handlers:
+#   loading -> preloading -> real_loading -> game_screen

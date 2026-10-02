@@ -24,6 +24,7 @@
 #include "xenia/memory.h"
 #include "xenia/titles/dc3/dc3_autonav.h"
 #include "xenia/titles/dc3/dc3_hacks.h"
+#include "xenia/titles/dc3/dc3_main_thread.h"
 
 namespace xe {
 namespace dc3 {
@@ -108,8 +109,16 @@ class Dc3ScriptedInputAdapter final
                                  std::string* screen) override;
   void LogWaitStatus(Memory* memory, const std::string& wanted,
                      const std::string& screen) override;
+  bool InTransition(Memory* memory) override;
+  bool HasFrameClock() override { return frame_clock_; }
+  int64_t FrameNumber() override {
+    return static_cast<int64_t>(MainThreadFrame());
+  }
+
+  bool frame_clock_ = false;
 
  private:
+  std::string last_logged_screen_;
   void ProbeGameplayState(Memory* memory, const std::string& screen);
 
   // Read-only gameplay probe.
@@ -124,14 +133,13 @@ class Dc3ScriptedInputAdapter final
   bool last_game_real_time_ = false;
   bool last_game_has_intro_ = false;
   bool pause_diag_logged_ = false;
+  bool song_logged_ = false;
 
   // LogWaitStatus / WhileWaitingForScreen.
   uint32_t last_stuck_transition_ = 0;
   std::chrono::steady_clock::time_point stuck_transition_start_;
   std::chrono::steady_clock::time_point attract_seen_since_;
   std::chrono::steady_clock::time_point last_attract_press_;
-  uint32_t title_screen_addr_ = 0;
-  int attract_force_gate_ = -1;
 };
 
 std::string Dc3ScriptedInputAdapter::ReadCurrentScreenName(Memory* memory) {
@@ -156,8 +164,25 @@ std::string Dc3ScriptedInputAdapter::ReadCurrentScreenName(Memory* memory) {
   return ReadGuestScreenName(memory, cur_screen, false);
 }
 
+bool Dc3ScriptedInputAdapter::InTransition(Memory* memory) {
+  // UIManager::InTransition(): mTransitionState (+0x2C) != kTransitionNone.
+  if (!IsGuestReadable(memory, kTheUI, 4)) return false;
+  uint32_t ui_addr =
+      xe::load_and_swap<uint32_t>(memory->TranslateVirtual<uint8_t*>(kTheUI));
+  if (!IsGuestReadable(memory, ui_addr, 0x50)) return false;
+  return xe::load_and_swap<uint32_t>(
+             memory->TranslateVirtual<uint8_t*>(ui_addr) + 0x2C) != 0;
+}
+
 void Dc3ScriptedInputAdapter::OnPrimaryPadPoll(Memory* memory,
                                                const std::string& screen) {
+  if (memory && !screen.empty() && screen != last_logged_screen_) {
+    // One line per screen change (harness contract: the S1 milestones of a
+    // flow that has no wait_screen for that screen).
+    last_logged_screen_ = screen;
+    XELOGI("DC3 Script: screen -> '{}' (frame {})", screen,
+           frame_clock_ ? static_cast<int64_t>(MainThreadFrame()) : -1);
+  }
   if (!memory || screen != "game_screen") {
     return;
   }
@@ -186,6 +211,26 @@ void Dc3ScriptedInputAdapter::ProbeGameplayState(Memory* memory,
                     : nullptr;
     return ptr ? *ptr : 0;
   };
+
+  // The selected song, once per game_screen entry (harness contract:
+  // `DC3 Script: song '<sym>'`, read by the S1/S2 song criterion).
+  // TheGameData (HamGameData*) 0x82F60034, mSong (Symbol) at +0x30.
+  if (!song_logged_) {
+    constexpr uint32_t kTheGameData = 0x82F60034;
+    uint32_t gd = load_u32(kTheGameData);
+    uint32_t sym = gd ? load_u32(gd + 0x30) : 0;
+    std::string song;
+    for (uint32_t i = 0; sym && i < 64; ++i) {
+      if (!IsGuestReadable(memory, sym + i, 1)) break;
+      char c = *memory->TranslateVirtual<char*>(sym + i);
+      if (!c) break;
+      song.push_back(c);
+    }
+    if (!song.empty()) {
+      song_logged_ = true;
+      XELOGI("DC3 Script: song '{}' (TheGameData {:08X})", song, gd);
+    }
+  }
 
   constexpr uint32_t kTheGamePanel = 0x83117410;
   uint32_t game_panel_addr = load_u32(kTheGamePanel);
@@ -412,58 +457,10 @@ uint16_t Dc3ScriptedInputAdapter::WhileWaitingForScreen(
                "for title_screen");
       }
     }
-    if (memory && attract_ms >= 5000 && attract_force_gate_ < 0) {
-      attract_force_gate_ =
-          HackGate("input.attract_force",
-                   "4 MiB heap scan + UIManager stomp attract -> title")
-              ? 1
-              : 0;
-    }
-    if (memory && attract_ms >= 5000 && attract_force_gate_ == 1) {
-      auto* ui_ptr = IsGuestReadable(memory, kTheUI, 4)
-                         ? memory->TranslateVirtual<uint8_t*>(kTheUI)
-                         : nullptr;
-      uint32_t ui_addr = ui_ptr ? xe::load_and_swap<uint32_t>(ui_ptr) : 0;
-      auto* ui_obj = IsGuestReadable(memory, ui_addr, 0x50)
-                         ? memory->TranslateVirtual<uint8_t*>(ui_addr)
-                         : nullptr;
-      if (ui_obj) {
-        if (!title_screen_addr_) {
-          for (int scan_pass = 0; scan_pass < 2 && !title_screen_addr_;
-               ++scan_pass) {
-            bool strict_scan_range = scan_pass == 0;
-            if (scan_pass == 1) {
-              XELOGI("DC3 Script: retrying title screen scan without "
-                     ".rdata fence");
-            }
-            for (uint32_t addr = 0x40C00000; addr < 0x41000000; addr += 4) {
-              if (!IsGuestReadable(memory, addr + 0x20, 4)) {
-                continue;
-              }
-              std::string name =
-                  ReadGuestScreenName(memory, addr, strict_scan_range);
-              if (name == "title_screen" || name == "title") {
-                title_screen_addr_ = addr;
-                XELOGI("DC3 Script: resolved title screen object {:08X} "
-                       "via name '{}'",
-                       title_screen_addr_, name);
-                break;
-              }
-            }
-          }
-        }
-        if (title_screen_addr_) {
-          HackFired("input.attract_force");
-          xe::store_and_swap<uint32_t>(ui_obj + 0x48, title_screen_addr_);
-          xe::store_and_swap<uint32_t>(ui_obj + 0x4C, 0);
-          xe::store_and_swap<uint32_t>(ui_obj + 0x2C, 0);
-          *screen = "title_screen";
-          XELOGI("DC3 Script: forced UI jump attract_screen -> title_screen "
-                 "({:08X})",
-                 title_screen_addr_);
-        }
-      }
-    }
+    // (RETIRED 2026-10-02, lane B2) input.attract_force: after 5 s on
+    // attract, a 4 MiB heap scan for the title screen object and a
+    // UIManager mCurrentScreen stomp. The A-press above takes attract ->
+    // autosave_warning -> title through the game's own handlers.
   } else {
     attract_seen_since_ = std::chrono::steady_clock::time_point{};
   }
@@ -476,6 +473,22 @@ Dc3ScriptedInputAdapter g_adapter;
 
 void InstallScriptedInputAdapter() {
   hid::nop::SetScriptedInputTitleAdapter(&g_adapter);
+}
+
+namespace {
+void FrameClockTask(cpu::ThreadState*, uint64_t) {}
+}  // namespace
+
+void InstallScriptedInputFrameClock(cpu::Processor* processor,
+                                    Memory* memory) {
+  if (!hid::nop::ScreenAwareScriptLoaded()) {
+    return;
+  }
+  // The task does nothing: the hook's poll counter is the clock.
+  if (AddMainThreadTask(processor, memory, "input_frame_clock",
+                        &FrameClockTask)) {
+    g_adapter.frame_clock_ = true;
+  }
 }
 
 }  // namespace dc3

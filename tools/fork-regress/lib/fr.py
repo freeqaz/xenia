@@ -204,8 +204,11 @@ def norm_value(v):
     return str(v)
 
 
-def effective_cvars(defaults_toml: str, config_toml: str | None, argv: list[str]):
-    """defaults <- --config file <- argv. Values as strings."""
+def effective_cvars(defaults_toml: str, config_toml: str | None, argv: list[str],
+                    binary: str | None = None):
+    """defaults <- --config file <- argv. Values as strings. xenia-headless
+    forces `headless` on as a command-line value after parsing
+    (app/xenia_headless_main.cc), so neither the config nor argv decides it."""
     eff = {k: norm_value(v) for k, v in flatten_toml(defaults_toml).items()}
     defaults = dict(eff)
     src = {k: "default" for k in eff}
@@ -221,6 +224,9 @@ def effective_cvars(defaults_toml: str, config_toml: str | None, argv: list[str]
             unknown.append(k)
         eff[k] = v
         src[k] = "argv"
+    if binary and Path(binary).name.startswith("xenia-headless") and "headless" in eff:
+        eff["headless"] = "true"
+        src["headless"] = "binary (xenia-headless forces it)"
     nondefault = {k: {"value": eff[k], "default": defaults.get(k), "source": src[k]}
                   for k in sorted(eff) if defaults.get(k) != eff[k]}
     return dict(sorted(eff.items())), nondefault, unknown
@@ -280,7 +286,7 @@ def provenance(run_dir: Path, meta: dict) -> dict:
         "dropped_cvars": meta.get("dropped_cvars", []),
     }
     if defaults_toml and Path(defaults_toml).exists():
-        eff, nondefault, unknown = effective_cvars(defaults_toml, config, argv)
+        eff, nondefault, unknown = effective_cvars(defaults_toml, config, argv, binary)
         prov["cvars_effective"] = eff
         prov["cvars_nondefault"] = nondefault
         prov["cvars_unknown_on_argv"] = unknown
