@@ -58,21 +58,28 @@ void* Arena::Alloc(size_t size, size_t align) {
     return (align - deviation) & mask;
   };
 
+  // A request larger than chunk_size_ gets a chunk of its own size (plus the
+  // same 4 KiB slack the fit test keeps). Fresh chunks start at offset 0 and
+  // their buffers are 16-byte aligned, so they need no padding.
+  const size_t fresh_chunk_size =
+      size + 4_KiB < chunk_size_ ? chunk_size_ : size + 4_KiB;
   if (active_chunk_) {
     if (active_chunk_->capacity - active_chunk_->offset <
         size + get_padding() + 4_KiB) {
       Chunk* next = active_chunk_->next;
-      if (!next) {
-        assert_true(size + get_padding() < chunk_size_,
-                    "need to support larger chunks");
-        next = new Chunk(chunk_size_);
-        active_chunk_->next = next;
+      // A chunk kept from before the last Reset() is reused only if the
+      // request fits in it; otherwise a big-enough chunk goes in front of it.
+      if (!next || next->capacity < size + 4_KiB) {
+        Chunk* fresh = new Chunk(fresh_chunk_size);
+        fresh->next = next;
+        active_chunk_->next = fresh;
+        next = fresh;
       }
       next->offset = 0;
       active_chunk_ = next;
     }
   } else {
-    head_chunk_ = active_chunk_ = new Chunk(chunk_size_);
+    head_chunk_ = active_chunk_ = new Chunk(fresh_chunk_size);
   }
 
   active_chunk_->offset += get_padding();
