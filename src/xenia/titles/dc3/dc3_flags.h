@@ -32,5 +32,7 @@ DECLARE_string(dc3_nui_patch_resolver_mode);
 DECLARE_string(dc3_nui_patch_manifest_path);
 DECLARE_bool(dc3_nui_enable_signature_resolver);
 DECLARE_bool(dc3_nui_signature_trace);
+DECLARE_bool(stub_nui_functions);
+DECLARE_bool(fake_kinect_data);
 
 #endif  // XENIA_TITLES_DC3_DC3_FLAGS_H_

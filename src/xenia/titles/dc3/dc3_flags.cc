@@ -96,3 +96,18 @@ DEFINE_bool(dc3_nui_signature_trace, false,
             "DC3: log runtime PPC words for NUI/XBC patch targets "
             "at catalog and resolved addresses (debugging signature resolver).",
             "DC3");
+
+// DC3 NUI cvars. Defined in the GPU layer until the fork cleanup (Lane E
+// moved them to a transitional file in gpu/, Lane B moved them here); names,
+// defaults and help text unchanged so existing configs and scripts still work.
+DEFINE_bool(stub_nui_functions, false,
+            "Stub NUI (Kinect SDK) functions in guest memory for DC3 debug "
+            "builds. Writes PPC return-S_OK stubs at known NUI function "
+            "addresses so the game boots without Kinect hardware.",
+            "Headless");
+
+DEFINE_bool(fake_kinect_data, false,
+            "Provide synthetic Kinect skeleton data (T-pose) for DC3. "
+            "Requires --stub_nui_functions. Enables game to detect a "
+            "player and progress past the Kinect player detection screen.",
+            "Headless");
