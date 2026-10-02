@@ -7,6 +7,8 @@
  ******************************************************************************
  */
 
+#include <atomic>
+
 #include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/string_util.h"
@@ -97,6 +99,12 @@ uint32_t xeXamEnumerate(uint32_t handle, uint32_t flags, lpvoid_t buffer_ptr,
       X_RESULT result = run(extended_error, length);
       if (result == X_ERROR_NO_MORE_FILES &&
           cvars::xam_enum_overlapped_nomorefiles_success) {
+        static std::atomic<uint32_t> converted{0};
+        if (converted.fetch_add(1, std::memory_order_relaxed) < 4) {
+          XELOGW(
+              "XamEnumerate: overlapped NO_MORE_FILES completed as "
+              "SUCCESS/0 (--xam_enum_overlapped_nomorefiles_success)");
+        }
         extended_error = 0;
         length = 0;
         return X_ERROR_SUCCESS;

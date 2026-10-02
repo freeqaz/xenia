@@ -515,6 +515,12 @@ dword_result_t XamUserCheckPrivilege_entry(dword_t user_index, dword_t mask,
   if (out_value) {
     *out_value = cvars::xam_user_grant_privileges ? 1 : 0;
   }
+  static std::atomic<uint32_t> s_logged{0};
+  if (s_logged.fetch_add(1, std::memory_order_relaxed) < 8) {
+    XELOGI("XamUserCheckPrivilege(user={:X}, privilege={}) -> {}",
+           uint32_t(user_index), uint32_t(mask),
+           cvars::xam_user_grant_privileges ? "granted" : "denied");
+  }
   return X_ERROR_SUCCESS;
 }
 DECLARE_XAM_EXPORT1(XamUserCheckPrivilege, kUserProfiles, kStub);

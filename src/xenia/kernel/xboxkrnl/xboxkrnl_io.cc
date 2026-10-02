@@ -42,6 +42,20 @@ namespace xe {
 namespace kernel {
 namespace xboxkrnl {
 
+// Records that --io_force_synchronous_completion changed a result (an async
+// file whose read/write would otherwise have returned STATUS_PENDING), so a
+// run shows whether a title actually depends on it.
+static void NoteForcedSynchronousCompletion(const char* op) {
+  static std::atomic<uint32_t> count{0};
+  uint32_t n = count.fetch_add(1, std::memory_order_relaxed);
+  if (n < 4) {
+    XELOGW(
+        "{}: --io_force_synchronous_completion suppressed STATUS_PENDING "
+        "for an asynchronous file (hit {})",
+        op, n + 1);
+  }
+}
+
 struct CreateOptions {
   // https://processhacker.sourceforge.io/doc/ntioapi_8h.html
   static const uint32_t FILE_DIRECTORY_FILE = 0x00000001;
@@ -281,8 +295,12 @@ dword_result_t NtReadFile_entry(dword_t file_handle, dword_t event_handle,
       // Either way io_status_block above already holds the FINAL status and
       // byte count, so a caller that polls the status block (rather than the
       // return value) observes a completed request in both modes.
-      if (!cvars::io_force_synchronous_completion && !file->is_synchronous()) {
-        result = X_STATUS_PENDING;
+      if (!file->is_synchronous()) {
+        if (cvars::io_force_synchronous_completion) {
+          NoteForcedSynchronousCompletion("NtReadFile");
+        } else {
+          result = X_STATUS_PENDING;
+        }
       }
 
       // Mark that we should signal the event now. We do this after
@@ -348,8 +366,12 @@ dword_result_t NtReadFileScatter_entry(
       // Note: We always complete synchronously (even for async files),
       // so by default we do NOT return STATUS_PENDING. io_status_block still
       // carries the final status either way. See NtReadFile for details.
-      if (!cvars::io_force_synchronous_completion && !file->is_synchronous()) {
-        result = X_STATUS_PENDING;
+      if (!file->is_synchronous()) {
+        if (cvars::io_force_synchronous_completion) {
+          NoteForcedSynchronousCompletion("NtReadFileScatter");
+        } else {
+          result = X_STATUS_PENDING;
+        }
       }
 
       // Mark that we should signal the event now. We do this after
@@ -421,8 +443,12 @@ dword_result_t NtWriteFile_entry(dword_t file_handle, dword_t event_handle,
       // Note: We always complete synchronously (even for async files),
       // so by default we do NOT return STATUS_PENDING. io_status_block still
       // carries the final status either way. See NtReadFile for details.
-      if (!cvars::io_force_synchronous_completion && !file->is_synchronous()) {
-        result = X_STATUS_PENDING;
+      if (!file->is_synchronous()) {
+        if (cvars::io_force_synchronous_completion) {
+          NoteForcedSynchronousCompletion("NtWriteFile");
+        } else {
+          result = X_STATUS_PENDING;
+        }
       }
 
       // Mark that we should signal the event now. We do this after

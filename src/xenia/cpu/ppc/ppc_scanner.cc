@@ -67,10 +67,10 @@ static void LogScannerTruncation(const char* what, uint32_t fn_address,
   static std::atomic<uint32_t> count{0};
   uint32_t n = count.fetch_add(1, std::memory_order_relaxed);
   if (n < kScannerTruncationLogLimit) {
-    XELOGD("PPCScanner: fn {:08X} truncated at {:08X} ({})", fn_address,
+    XELOGW("PPCScanner: fn {:08X} truncated at {:08X} ({})", fn_address,
            at_address, what);
   } else if (n == kScannerTruncationLogLimit) {
-    XELOGD(
+    XELOGW(
         "PPCScanner: fn {:08X} truncated at {:08X} ({}) -- hit {} times, "
         "suppressing further reports",
         fn_address, at_address, what, kScannerTruncationLogLimit + 1);
