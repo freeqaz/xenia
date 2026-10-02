@@ -28,8 +28,9 @@ EXPECT = {
     "{size {object_list main Object FALSE}}": ("int", None),
 }
 
-# The song the flow must select (S2 criterion). Empty = record only.
-EXPECT_SONG = os.environ.get("FR_DTA_EXPECT_SONG", "")
+# The song the flow must select (S2 criterion, from the gameplay DTA query
+# {gamedata get song}). Empty = record only.
+EXPECT_SONG = os.environ.get("FR_DTA_EXPECT_SONG", "ymca")
 
 
 def strip_prefix(out: str) -> str:
