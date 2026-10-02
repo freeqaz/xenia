@@ -307,7 +307,38 @@ attract movie does not end within 30 s, which is why `input.attract_press`
 stays.
 
 Final S1 x5 (`3962c2c83`, shared flow, attract press only) interleaved with
-`main` `5ac644b7d` on its own `xenia-ymca.txt`: FINAL_PLACEHOLDER
+`main` `5ac644b7d` on its own `xenia-ymca.txt`:
+
+| run | title | game_screen | gpState=2 playing | gpState=3 | gp2 samples | song | NON_XMA | latch | load (mean / max) |
+|---|---|---|---|---|---|---|---|---|---|
+| cand r1 | 18.0 s | 36.1 s | 39.1 s | 192.4 s | 76 | ymca | 0 | none | 36 |
+| cand r2 | 15.0 s | 33.0 s | 36.0 s | 189.1 s | 77 | ymca | 0 | none | 20 |
+| cand r3 | 18.0 s | 36.1 s | 42.1 s | 195.4 s | 77 | ymca | 0 | none | 47 |
+| cand r4 | 15.0 s | 33.1 s | 39.1 s | 189.3 s | 76 | ymca | 0 | none | 35 |
+| cand r5 | 15.0 s | 33.0 s | 39.0 s | **not by 228 s** | 76 | ymca | 0 | none | 60 / 125 |
+| ctrl r1 | 12.0 s | 36.0 s | 42.0 s | 198.3 s | 78 | (thehustle) | 0 | none | 32 |
+| ctrl r2 | 12.0 s | 39.0 s | 42.1 s | 198.3 s | 78 | | 0 | none | 29 |
+| ctrl r3 | 12.0 s | 39.0 s | 45.1 s | 201.4 s | 78 | | 0 | none | 38 |
+| ctrl r4 | 12.0 s | 36.0 s | 42.0 s | 198.2 s | 78 | | 0 | none | 17 |
+| ctrl r5 | 12.0 s | 36.0 s | 42.0 s | 198.1 s | 78 | | 0 | none | 20 |
+
+- **cand 4/5, ctrl 5/5.** The bar is 4/5 reaching game_screen and song end
+  with no latch and NON_XMA 0: met. Every cand run played ymca with no
+  nav-bridge or transition-force line; the only `HACK fired` from autonav
+  code is `input.attract_press`.
+- cand r5 reached game_screen and was still in gpState=2 (`paused=0`) at
+  228 s: the song clock ran slow. Its load climbed from 24 to 125 during the
+  run (PSI cpu-some mean 35, the highest of the ten) and the guest frame rate
+  fell from 59.7 to 49.7 frames/s. Read as load; one extra repeat is the
+  cheap check.
+- Title is 3-6 s later than the control because attract now leaves through
+  the game (attract -> autosave_warning -> title) instead of the bridge's
+  GotoScreen. ymca ends ~153 s after `gpState=2 playing`; thehustle ~156 s.
+- The control's song is thehustle (its own `xenia-ymca.txt`); main's binary
+  has no song line.
+- **S2 x2 on `3962c2c83`: PASS 2/2.** Answers `3`, refused, `10`, 702; first
+  poll on thread 00000006; `{gamedata get song}` = `ymca`; SongAnim =
+  `player_1_routine_builder.anim` with 79 clip keys, expert `song.anim` 6.
 
 ### The valid-skeleton NUI frame does not retire `calib.*` (`5fdc816fa`, reverted in `0f430ecf2`)
 
