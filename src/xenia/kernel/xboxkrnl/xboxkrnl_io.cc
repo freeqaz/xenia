@@ -28,19 +28,15 @@
 #include "xenia/xbox.h"
 
 DEFINE_bool(
-    io_force_synchronous_completion, true,
-    "NtReadFile/NtReadFileScatter/NtWriteFile always complete the transfer "
-    "before returning; with this enabled they also suppress the "
-    "STATUS_PENDING return upstream produced for files opened for "
-    "asynchronous IO. Required by the XAPILIB ReadFile wrapper, which sets "
-    "OVERLAPPED.Internal = STATUS_PENDING before the syscall and passes a "
-    "separate stack IO_STATUS_BLOCK -- if we return PENDING, its "
-    "GetOverlappedResult never observes completion and spins forever (this "
-    "is what stalled the DC3 decomp in AsyncFile::Read -> "
-    "AsyncFileWin::_ReadDone). Disable to restore the upstream STATUS_PENDING "
-    "return for non-synchronous files; the transfer still completes eagerly "
-    "and the caller's IO_STATUS_BLOCK still receives the final status.",
+    io_force_synchronous_completion, false,
+    "NtReadFile/NtReadFileScatter/NtWriteFile: suppress the STATUS_PENDING "
+    "return for files opened for asynchronous IO. The transfer completes "
+    "eagerly and the IO_STATUS_BLOCK receives the final status either way. "
+    "Off by default (upstream). The fork's original rationale (XAPILIB "
+    "passing a separate IO_STATUS_BLOCK) was refuted by ac0052e5b: the IOSB "
+    "is the OVERLAPPED.",
     "Kernel");
+UPDATE_from_bool(io_force_synchronous_completion, 2026, 10, 2, 12, true);
 
 DEFINE_bool(
     rb3_overlapped_writeback, false,

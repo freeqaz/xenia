@@ -48,18 +48,16 @@ DEFINE_bool(emit_source_annotations, false,
             "Add extra movs and nops to make disassembly easier to read.",
             "CPU");
 DEFINE_bool(
-    tolerate_null_guest_calls, true,
+    tolerate_null_guest_calls, false,
     "Treat a call through a null or unresolvable guest function pointer as a "
-    "no-op that returns an undefined value, instead of asserting. This is a "
-    "decomp-support flag: the DC3 (0x373307D9) and RB3DX (0x45410914) decomp "
-    "targets are /FORCE-linked with unresolved externs and null vtable slots "
-    "and cannot boot without it. UPSTREAM SEMANTICS ARE false -- for a retail "
-    "title a null vtable slot means the object graph is already corrupt and "
-    "the emulator should say so rather than silently continue. Turning this "
-    "off restores upstream's assert_not_zero/assert_not_null and lets the "
-    "null call reach the host. Diagnostics (the rate-limited ResolveFunction "
-    "XELOGE) are emitted either way.",
+    "no-op that returns an undefined value, instead of asserting. Off by "
+    "default (upstream): for a retail title a null vtable slot means the "
+    "object graph is already corrupt and the emulator should say so. Titles "
+    "that need it get it from the per-title profile "
+    "(titles/title_profile.cc). Diagnostics (the rate-limited "
+    "ResolveFunction XELOGE) are emitted either way.",
     "CPU");
+UPDATE_from_bool(tolerate_null_guest_calls, 2026, 10, 2, 12, true);
 
 namespace xe {
 namespace cpu {

@@ -23,15 +23,15 @@
 #include "xenia/cpu/processor.h"
 
 DEFINE_bool(
-    scanner_stop_on_invalid_run, true,
+    scanner_stop_on_invalid_run, false,
     "Terminate function-boundary detection after 8 consecutive undecodable "
     "instructions with no reachable branch target beyond them. Keeps the "
     "scanner from walking megabytes of data when a /FORCE-linked decomp image "
-    "puts an unresolved stub where code should be. Upstream Xenia does not do "
-    "this (it ignores invalid words and keeps scanning); a legitimate function "
-    "with 8+ words of embedded data -- jump tables, constant pools -- will be "
-    "truncated here, so set this to false if a title's functions look short.",
+    "puts an unresolved stub where code should be. Off by default (upstream "
+    "ignores invalid words and keeps scanning): a legitimate function with 8+ "
+    "words of embedded data -- jump tables, constant pools -- is truncated.",
     "CPU");
+UPDATE_from_bool(scanner_stop_on_invalid_run, 2026, 10, 2, 12, true);
 
 DEFINE_bool(
     scanner_clamp_to_mapped_memory, true,

@@ -31,12 +31,14 @@
 // resets the counter and never trips. 0 disables. (RB3 Deluxe title-screen heap
 // OOM falls into MemHeap::Alloc's post-assert dead code and stores to guest
 // 0xFFFFFFFC forever; this surfaces it as a diagnosable crash. DC3-inert.)
-DEFINE_uint64(fault_spin_limit, 4096,
+DEFINE_uint64(fault_spin_limit, 0,
               "After this many consecutive handled faults that resume at the "
               "same host instruction and address without advancing (no "
               "progress), park the faulting thread and flag a livelock; "
-              "xenia-headless then exits. 0 = disabled.",
+              "xenia-headless then exits. 0 = disabled (default; upstream has "
+              "no such limit).",
               "CPU");
+UPDATE_from_uint64(fault_spin_limit, 2026, 10, 2, 12, 4096);
 
 namespace xe {
 

@@ -23,16 +23,15 @@
 #include "xenia/base/platform.h"
 
 DEFINE_bool(
-    soft_fault_unmapped_reads, true,
-    "Decomp/stub-guest support, ON by default in this fork: a read access "
-    "violation on unmapped guest memory zeroes the destination register and "
-    "resumes at the next instruction instead of crashing. Upstream semantics "
-    "are OFF -- the fault propagates and the emulator reports it with a PC. "
-    "The first occurrences are logged at warning level either way. Turn this "
-    "off to find real uninitialised-pointer and stack-overrun bugs; leave it "
-    "on for the DC3 (0x373307D9) and RB3DX (0x45410914) decomp targets, which "
-    "rely on it.",
+    soft_fault_unmapped_reads, false,
+    "A read access violation on unmapped guest memory zeroes the destination "
+    "register and resumes at the next instruction instead of crashing. Off "
+    "by default (upstream): the fault propagates and the emulator reports it "
+    "with a PC. The first occurrences are logged at warning level either way. "
+    "Titles that need it get it from the per-title profile "
+    "(titles/title_profile.cc).",
     "CPU");
+UPDATE_from_bool(soft_fault_unmapped_reads, 2026, 10, 2, 12, true);
 
 namespace xe {
 namespace cpu {

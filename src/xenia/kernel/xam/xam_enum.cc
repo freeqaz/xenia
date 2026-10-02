@@ -23,13 +23,15 @@
 
 #include "third_party/fmt/include/fmt/format.h"
 
-DEFINE_bool(xam_enum_overlapped_nomorefiles_success, true,
+DEFINE_bool(xam_enum_overlapped_nomorefiles_success, false,
             "Overlapped XamEnumerate: complete an exhausted enumerator with "
             "SUCCESS and 0 items instead of ERROR_NO_MORE_FILES (0x12). Not "
             "upstream behaviour and not confirmed on hardware; the fork "
             "carries it for Dance Central 3. The synchronous path always "
             "returns 0x12.",
             "Kernel");
+UPDATE_from_bool(xam_enum_overlapped_nomorefiles_success, 2026, 10, 2, 12,
+                 true);
 
 namespace xe {
 namespace kernel {

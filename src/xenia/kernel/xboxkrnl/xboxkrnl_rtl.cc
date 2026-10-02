@@ -34,7 +34,7 @@ DEFINE_bool(crt_critical_section_diagnostics, false,
             "Kernel");
 
 DEFINE_bool(
-    autoinit_critical_sections, true,
+    autoinit_critical_sections, false,
     "RtlEnterCriticalSection silently initializes a critical section whose "
     "dispatch header type != 1 instead of operating on it as-is. This is "
     "decomp-support: the DC3 decomp /FORCE-links unresolved extern lock "
@@ -43,12 +43,13 @@ DEFINE_bool(
     "loaded with call_entry=false so its .bss critical sections are never "
     "constructed. For a retail title a type != 1 header more likely means the "
     "lock's memory was misread or corrupted, and re-initializing it drops a "
-    "lock that is genuinely held. Disable to leave such a CS alone (upstream "
-    "behaviour).",
+    "lock that is genuinely held. Off by default (upstream behaviour); the "
+    "per-title profile opts titles in.",
     "Kernel");
+UPDATE_from_bool(autoinit_critical_sections, 2026, 10, 2, 12, true);
 
 DEFINE_bool(
-    rtl_leave_critical_section_force_release, true,
+    rtl_leave_critical_section_force_release, false,
     "RtlLeaveCriticalSection repairs guest lock state when the caller is not "
     "the recorded owner (rewrites owning_thread) or when recursion_count is "
     "already <= 0 (clamps to 1), then releases. Both are demotions of "
@@ -56,10 +57,12 @@ DEFINE_bool(
     "state, so a detectable double-unlock becomes a corrupted lock. Both our "
     "titles reach these paths (DC3 boot logs record one ownership mismatch -- "
     "docs/dc3-boot/STATUS.md; RB3Enhanced.dll's unconstructed .bss critical "
-    "sections hit the same family, see b77f0fa27), so it defaults on. Disable "
-    "to log and return without touching the lock, which is what upstream's "
-    "Release build effectively did before the repair was added.",
+    "sections hit the same family, see b77f0fa27). Off by default: log and "
+    "return without touching the lock, which is what upstream's Release "
+    "build effectively did. The per-title profile opts titles in.",
     "Kernel");
+UPDATE_from_bool(rtl_leave_critical_section_force_release, 2026, 10, 2, 13,
+                 true);
 
 namespace xe {
 namespace kernel {
