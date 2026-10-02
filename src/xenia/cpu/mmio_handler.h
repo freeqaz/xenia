@@ -162,6 +162,10 @@ class MMIOHandler {
     ptrdiff_t mem_displacement;
     bool is_constant;
     int32_t constant;
+    // x86-64 only: a 128-bit VEX vector load/store (vmovaps/vmovups/
+    // vmovdqa/vmovdqu); value_reg is then an XMM register index. The 16 bytes
+    // are the guest memory image, accessed as four 32-bit registers.
+    bool is_vector;
   };
 
   static bool TryDecodeLoadStore(const uint8_t* p,
