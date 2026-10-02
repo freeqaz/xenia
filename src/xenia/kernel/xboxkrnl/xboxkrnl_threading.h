@@ -32,6 +32,9 @@ uint32_t xeKeWaitForSingleObject(void* object_ptr, uint32_t wait_reason,
                                  uint64_t* timeout_ptr);
 uint32_t xeKeSetEvent(X_KEVENT* event_ptr, uint32_t increment, uint32_t wait);
 
+// Stops and joins the --headless_thread_diagnostics wait-census reaper.
+void WaitCensusShutdown();
+
 }  // namespace xboxkrnl
 }  // namespace kernel
 }  // namespace xe

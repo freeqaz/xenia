@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <map>
 #include <mutex>
 #include <thread>
@@ -128,7 +129,6 @@ struct WaitCensusEntry {
 };
 static std::mutex g_wait_census_mutex;
 static std::map<uint32_t, WaitCensusEntry> g_wait_census_active;
-static std::atomic<bool> g_wait_census_reaper_started{false};
 
 // Per-handle NtSetEvent accounting, so a PARKED report can say whether the
 // event the thread is waiting on was EVER signalled and by whom -- the
@@ -158,6 +158,124 @@ static void SetEventCensusRecord(uint32_t handle) {
   s.last_lr = lr;
   s.last_when = std::chrono::steady_clock::now();
 }
+
+// Frame budget for the census stack walks: the requested depth, capped by
+// --kernel_stack_walk_frames (which used to be ignored here).
+static int WaitCensusWalkDepth(int wanted) {
+  return std::min(
+      wanted, std::max(0, static_cast<int>(cvars::kernel_stack_walk_frames)));
+}
+
+// Logs every census entry parked for more than 10 s. Called every 5 s by the
+// reaper thread.
+static void WaitCensusScanParked() {
+  auto now = std::chrono::steady_clock::now();
+  std::lock_guard<std::mutex> g(g_wait_census_mutex);
+  for (auto& [tid, e] : g_wait_census_active) {
+    auto ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(now - e.enter)
+            .count();
+    if (ms > 10000) {
+      // Annotate with the handle's NtSetEvent history: never-set vs
+      // set-but-consumed-elsewhere is the whole diagnosis.
+      std::string set_info = "NEVER-SET";
+      {
+        std::lock_guard<std::mutex> g2(g_set_event_stats_mutex);
+        auto it = g_set_event_stats.find(e.handle);
+        if (it != g_set_event_stats.end()) {
+          auto ago = std::chrono::duration_cast<std::chrono::milliseconds>(
+                         now - it->second.last_when)
+                         .count();
+          set_info = fmt::format(
+              "set_count={} last_set_by tid={} lr={:08X} {}ms ago",
+              it->second.count, it->second.last_tid, it->second.last_lr, ago);
+        }
+      }
+      XELOGE(
+          "WAITCENSUS: tid={} PARKED {}ms in wait handle/obj=0x{:08X} "
+          "guest_lr={:08X} sp={:08X} [{}]",
+          tid, ms, e.handle, e.guest_lr, e.guest_sp, set_info);
+      // Walk the parked thread's back-chain; for each frame also dump
+      // the 6 words above the back-chain pointer -- the callee register
+      // save area (std r30/r31 land there), which carries the waiting
+      // object's this-pointer and target state for handshake loops.
+      auto* memory = kernel_state()->memory();
+      if (memory && e.guest_sp) {
+        uint32_t sp2 = e.guest_sp;
+        for (int frame = 0; frame < WaitCensusWalkDepth(10); frame++) {
+          uint32_t bc = 0;
+          if (!ReadGuestStackWord(memory, sp2, &bc) || bc <= sp2 ||
+              bc - sp2 > 0x100000) {
+            break;
+          }
+          uint32_t slr = 0;
+          ReadGuestStackWord(memory, bc - 8, &slr);
+          uint32_t saves[6] = {0};
+          for (int k = 0; k < 6; ++k) {
+            ReadGuestStackWord(memory, bc + 0x44 + 4 * k, &saves[k]);
+          }
+          XELOGE(
+              "WAITCENSUS:   tid={} frame[{}] bc={:08X} saved_lr={:08X} "
+              "save+44..58: {:08X} {:08X} {:08X} {:08X} {:08X} {:08X}",
+              tid, frame, bc, slr, saves[0], saves[1], saves[2], saves[3],
+              saves[4], saves[5]);
+          sp2 = bc;
+        }
+      }
+    }
+  }
+}
+
+// The reaper thread. It used to be a detached infinite std::thread: it could
+// not be stopped and outlived the kernel it reads from. Now it is owned,
+// started on the first census entry, and stopped + joined when the xboxkrnl
+// module is destroyed (WaitCensusShutdown) or, failing that, at static
+// destruction.
+class WaitCensusReaper {
+ public:
+  static WaitCensusReaper& Get() {
+    static WaitCensusReaper reaper;
+    return reaper;
+  }
+  void EnsureStarted() {
+    if (started_.exchange(true)) {
+      return;
+    }
+    thread_ = std::thread([this]() {
+      std::unique_lock<std::mutex> lock(mutex_);
+      while (!stop_) {
+        if (cv_.wait_for(lock, std::chrono::seconds(5),
+                         [this]() { return stop_; })) {
+          break;
+        }
+        lock.unlock();
+        WaitCensusScanParked();
+        lock.lock();
+      }
+    });
+  }
+  ~WaitCensusReaper() { Stop(); }
+  void Stop() {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      stop_ = true;
+    }
+    cv_.notify_all();
+    if (thread_.joinable()) {
+      thread_.join();
+    }
+  }
+
+ private:
+  WaitCensusReaper() = default;
+  std::atomic<bool> started_{false};
+  std::mutex mutex_;
+  std::condition_variable cv_;
+  bool stop_ = false;
+  std::thread thread_;
+};
+
+void WaitCensusShutdown() { WaitCensusReaper::Get().Stop(); }
 
 static void WaitCensusEnter(uint32_t handle_or_obj) {
   auto* thread = XThread::GetCurrentThread();
@@ -201,7 +319,8 @@ static void WaitCensusEnter(uint32_t handle_or_obj) {
     if (dump_this) {
       auto* memory = kernel_state()->memory();
       uint32_t sp2 = sp;
-      for (int frame = 0; frame < 8 && memory && sp2; frame++) {
+      for (int frame = 0; frame < WaitCensusWalkDepth(8) && memory && sp2;
+           frame++) {
         uint32_t bc = 0;
         if (!ReadGuestStackWord(memory, sp2, &bc) || bc <= sp2 ||
             bc - sp2 > 0x100000) {
@@ -223,70 +342,7 @@ static void WaitCensusEnter(uint32_t handle_or_obj) {
       }
     }
   }
-  if (!g_wait_census_reaper_started.exchange(true)) {
-    std::thread([]() {
-      for (;;) {
-        std::this_thread::sleep_for(std::chrono::seconds(5));
-        auto now = std::chrono::steady_clock::now();
-        std::lock_guard<std::mutex> g(g_wait_census_mutex);
-        for (auto& [tid, e] : g_wait_census_active) {
-          auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                        now - e.enter)
-                        .count();
-          if (ms > 10000) {
-            // Annotate with the handle's NtSetEvent history: never-set vs
-            // set-but-consumed-elsewhere is the whole diagnosis.
-            std::string set_info = "NEVER-SET";
-            {
-              std::lock_guard<std::mutex> g2(g_set_event_stats_mutex);
-              auto it = g_set_event_stats.find(e.handle);
-              if (it != g_set_event_stats.end()) {
-                auto ago = std::chrono::duration_cast<
-                               std::chrono::milliseconds>(now -
-                                                          it->second.last_when)
-                               .count();
-                set_info = fmt::format(
-                    "set_count={} last_set_by tid={} lr={:08X} {}ms ago",
-                    it->second.count, it->second.last_tid, it->second.last_lr,
-                    ago);
-              }
-            }
-            XELOGE(
-                "WAITCENSUS: tid={} PARKED {}ms in wait handle/obj=0x{:08X} "
-                "guest_lr={:08X} sp={:08X} [{}]",
-                tid, ms, e.handle, e.guest_lr, e.guest_sp, set_info);
-            // Walk the parked thread's back-chain; for each frame also dump
-            // the 6 words above the back-chain pointer -- the callee register
-            // save area (std r30/r31 land there), which carries the waiting
-            // object's this-pointer and target state for handshake loops.
-            auto* memory = kernel_state()->memory();
-            if (memory && e.guest_sp) {
-              uint32_t sp2 = e.guest_sp;
-              for (int frame = 0; frame < 10; frame++) {
-                uint32_t bc = 0;
-                if (!ReadGuestStackWord(memory, sp2, &bc) || bc <= sp2 ||
-                    bc - sp2 > 0x100000) {
-                  break;
-                }
-                uint32_t slr = 0;
-                ReadGuestStackWord(memory, bc - 8, &slr);
-                uint32_t saves[6] = {0};
-                for (int k = 0; k < 6; ++k) {
-                  ReadGuestStackWord(memory, bc + 0x44 + 4 * k, &saves[k]);
-                }
-                XELOGE(
-                    "WAITCENSUS:   tid={} frame[{}] bc={:08X} saved_lr={:08X} "
-                    "save+44..58: {:08X} {:08X} {:08X} {:08X} {:08X} {:08X}",
-                    tid, frame, bc, slr, saves[0], saves[1], saves[2],
-                    saves[3], saves[4], saves[5]);
-                sp2 = bc;
-              }
-            }
-          }
-        }
-      }
-    }).detach();
-  }
+  WaitCensusReaper::Get().EnsureStarted();
 }
 
 static void WaitCensusExit() {
