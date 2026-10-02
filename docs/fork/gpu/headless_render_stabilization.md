@@ -9,6 +9,14 @@
 > `--headless_verbose_diagnostics`; `RSTAB: LOAD` and `RSTAB2: RESOLVE_DUMP` were deleted.
 > The pipeline cache now lives at `<cache_root>/shaders/vulkan/<title>.vkpipelinecache`
 > unless `--vulkan_pipeline_cache_path` is given. Branch names below are historical.
+>
+> **2026-10-02 measurement (Lane E, harness S1V, post-upstream-merge binaries main `6d826e5f0` and
+> lane-e `641f5fe6a`):** the deferred-replay path still shows this doc's split black|blue clears, plus
+> grey/blocky move-card textures and a black triangle across the stage. The same flow with
+> `--headless_inline_render=true` captures clean gameplay frames (venue, dancers, move-card
+> silhouettes correct). These artifacts belong to the deferred replay, not to the upstream
+> `95a5c3ee2` texture-cache change. The pre-upstream GPU tree never reached gameplay on Vulkan
+> (0/4 runs, MILO_FAIL at song_select), so a deferred-path before/after comparison was not possible.
 
 **Status:** OPEN. The DC3 song-playing scene (dancers + venue) renders, but **intermittently**:
 roughly every *other* captured frame resolves the 3D scene to the visible/captured buffer; the
