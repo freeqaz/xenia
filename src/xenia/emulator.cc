@@ -44,12 +44,10 @@
 #include "xenia/kernel/xboxkrnl/xboxkrnl_module.h"
 #include "xenia/memory.h"
 #include "xenia/titles/title_hooks.h"
-#ifndef XE_HEADLESS_BUILD
 #include "xenia/ui/imgui_dialog.h"
 #include "xenia/ui/imgui_drawer.h"
 #include "xenia/ui/window.h"
 #include "xenia/ui/windowed_app_context.h"
-#endif
 #include "xenia/vfs/devices/disc_image_device.h"
 #include "xenia/vfs/devices/host_path_device.h"
 #include "xenia/vfs/devices/null_device.h"
@@ -635,7 +633,6 @@ bool Emulator::ExceptionCallback(Exception* ex) {
   DumpGuestCrashDetails(memory_.get(), ex, guest_function, context);
 
   // Display a dialog telling the user the guest has crashed.
-#ifndef XE_HEADLESS_BUILD
   if (display_window_ && imgui_drawer_) {
     display_window_->app_context().CallInUIThreadSynchronous([this]() {
       xe::ui::ImGuiDialog::ShowMessageBox(
@@ -645,15 +642,13 @@ bool Emulator::ExceptionCallback(Exception* ex) {
           "Xenia has now paused itself.\n"
           "A crash dump has been written into the log.");
     });
-  }
-#else
-  if (guest_function) {
+  } else if (guest_function) {
     XELOGE("Guest crashed! PC: 0x{:08X}",
            guest_function->MapMachineCodeToGuestAddress(ex->pc()));
   } else {
-    XELOGE("Guest crashed! host PC=0x{:016X} (guest function unknown)", ex->pc());
+    XELOGE("Guest crashed! host PC=0x{:016X} (guest function unknown)",
+           ex->pc());
   }
-#endif
 
   // Now suspend ourself (we should be a guest thread).
   current_thread->Suspend(nullptr);
@@ -771,14 +766,11 @@ static std::string format_version(xex2_version version) {
 
 X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
                                   const std::string_view module_path) {
-#ifndef XE_HEADLESS_BUILD
   // Making changes to the UI (setting the icon) and executing game config load
-  // callbacks which expect to be called from the UI thread.
-  assert_true(display_window_->app_context().IsInUIThread());
-#else
-  // Headless mode: no display window
-  assert_true(display_window_ == nullptr);
-#endif
+  // callbacks which expect to be called from the UI thread. The headless app
+  // has no display window.
+  assert_true(!display_window_ ||
+              display_window_->app_context().IsInUIThread());
 
   // Setup NullDevices for raw HDD partition accesses
   // Cache/STFC code baked into games tries reading/writing to these
@@ -803,9 +795,9 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
   title_id_ = std::nullopt;
   title_name_ = "";
   title_version_ = "";
-#ifndef XE_HEADLESS_BUILD
-  display_window_->SetIcon(nullptr, 0);
-#endif
+  if (display_window_) {
+    display_window_->SetIcon(nullptr, 0);
+  }
 
   // Allow xam to request module loads.
   auto xam = kernel_state()->GetKernelModule<kernel::xam::XamModule>("xam.xex");
@@ -867,10 +859,8 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
       XELOGI("----------------- END OF ACHIEVEMENTS ----------------");
 
       auto icon_block = db.icon();
-      if (icon_block) {
-#ifndef XE_HEADLESS_BUILD
+      if (icon_block && display_window_) {
         display_window_->SetIcon(icon_block.buffer, icon_block.size);
-#endif
       }
     }
   }
@@ -920,9 +910,7 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
     title_ctx.module = module.get();
     title_ctx.title_id = title_id_;
     title_ctx.content_root = content_root_;
-#ifdef XE_HEADLESS_BUILD
-    title_ctx.headless = true;
-#endif
+    title_ctx.headless = display_window_ == nullptr;
     titles::ApplyLaunchHooks(title_ctx);
   }
 

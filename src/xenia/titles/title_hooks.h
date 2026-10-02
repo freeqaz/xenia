@@ -45,8 +45,8 @@ struct TitleLaunchContext {
   kernel::UserModule* module = nullptr;
   std::optional<uint32_t> title_id;
   std::filesystem::path content_root;
-  // True in the headless build (XE_HEADLESS_BUILD), where there is no display
-  // window.
+  // True when the emulator runs without a display window (xenia-headless).
+  // Read at runtime: there is no separate headless compile of the core.
   bool headless = false;
 };
 

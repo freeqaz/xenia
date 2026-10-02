@@ -8,7 +8,7 @@ test_suite("xenia-titles-dc3-tests", project_root, ".", {
     "fmt",
     "xenia-base",
     "xenia-cpu",
-    "xenia-core-headless",
+    "xenia-core",
     "xenia-titles-dc3",
   },
 })

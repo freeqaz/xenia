@@ -161,14 +161,14 @@ project("xenia-headless")
     "xenia-apu",
     "xenia-apu-nop",
     "xenia-base",
-    "xenia-core-headless",
+    "xenia-core",
     "xenia-cpu",
     "xenia-gpu",
     "xenia-gpu-null",
     "xenia-gpu-vulkan",
     "xenia-hid",
     "xenia-hid-nop",
-    "xenia-kernel-headless",
+    "xenia-kernel",
     "xenia-titles",
     "xenia-titles-dc3",
     "xenia-titles-rb3",
@@ -182,6 +182,7 @@ project("xenia-headless")
     "dxbc",
     "fmt",
     "glslang-spirv",
+    "imgui",
     "libavcodec",
     "libavutil",
     "mspack",
@@ -194,7 +195,6 @@ project("xenia-headless")
   })
 
   defines({
-    "XE_HEADLESS_BUILD",
     "XBYAK_NO_OP_NAMES",
     "XBYAK_ENABLE_OMITTED_OPERAND",
   })

@@ -21,6 +21,7 @@
 #include "xenia/config.h"
 #include "xenia/debug/gdb_rsp/gdb_rsp_server.h"
 #include "xenia/emulator.h"
+#include "xenia/kernel/kernel_flags.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/titles/dc3/dc3_title.h"
 #include "xenia/titles/rb3/rb3_title.h"
@@ -323,6 +324,22 @@ static int HeadlessMain(const std::vector<std::string>& args) {
 int main(int argc, char** argv) {
   // Parse arguments first
   cvar::ParseLaunchArguments(argc, argv, "", {});
+
+  // This app has no display window, so it always runs as `--headless`: XAM
+  // dialogs auto-answer (xam_ui.cc, xam_nui.cc). Set as the command-line value
+  // so neither a config file nor a per-game config can turn it off, and so it
+  // is never written back into the config file.
+  if (auto it = cvar::ConfigVars->find("headless");
+      it != cvar::ConfigVars->end()) {
+    if (auto* headless_var =
+            dynamic_cast<cvar::ConfigVar<bool>*>(it->second)) {
+      headless_var->SetCommandLineValue(true);
+    }
+  }
+  if (!cvars::headless) {
+    std::cerr << "xenia-headless: could not force the 'headless' cvar on\n";
+    return EXIT_FAILURE;
+  }
 
   // Initialize logging (needs parsed cvars)
   xe::InitializeLogging("xenia-headless");

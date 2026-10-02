@@ -7,6 +7,7 @@
  ******************************************************************************
  */
 
+#include "third_party/imgui/imgui.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/string_util.h"
 #include "xenia/emulator.h"
@@ -15,15 +16,11 @@
 #include "xenia/kernel/util/shim_utils.h"
 #include "xenia/kernel/xam/xam_private.h"
 #include "xenia/kernel/xthread.h"
-#include "xenia/xbox.h"
-
-#ifndef XE_HEADLESS_BUILD
-#include "third_party/imgui/imgui.h"
 #include "xenia/ui/imgui_dialog.h"
 #include "xenia/ui/imgui_drawer.h"
 #include "xenia/ui/window.h"
 #include "xenia/ui/windowed_app_context.h"
-#endif
+#include "xenia/xbox.h"
 
 namespace xe {
 namespace kernel {
@@ -48,8 +45,6 @@ namespace xam {
 // to create a listener (if they're insane enough do this).
 
 extern std::atomic<int> xam_dialogs_shown_;
-
-#ifndef XE_HEADLESS_BUILD
 
 class XamDialog : public xe::ui::ImGuiDialog {
  public:
@@ -160,8 +155,6 @@ X_RESULT xeXamDispatchDialogEx(
   }
 }
 
-#endif  // XE_HEADLESS_BUILD
-
 X_RESULT xeXamDispatchHeadless(std::function<X_RESULT()> run_callback,
                                uint32_t overlapped) {
   auto pre = []() {
@@ -213,8 +206,6 @@ X_RESULT xeXamDispatchHeadlessEx(
 
 dword_result_t XamIsUIActive_entry() { return xeXamIsUIActive(); }
 DECLARE_XAM_EXPORT2(XamIsUIActive, kUI, kImplemented, kHighFrequency);
-
-#ifndef XE_HEADLESS_BUILD
 
 class MessageBoxDialog : public XamDialog {
  public:
@@ -274,26 +265,11 @@ class MessageBoxDialog : public XamDialog {
   uint32_t chosen_button_ = 0;
 };
 
-#endif  // XE_HEADLESS_BUILD
-
 // https://www.se7ensins.com/forums/threads/working-xshowmessageboxui.844116/
 dword_result_t XamShowMessageBoxUI_entry(
     dword_t user_index, lpu16string_t title_ptr, lpu16string_t text_ptr,
     dword_t button_count, lpdword_t button_ptrs, dword_t active_button,
     dword_t flags, lpdword_t result_ptr, pointer_t<XAM_OVERLAPPED> overlapped) {
-#ifdef XE_HEADLESS_BUILD
-  XELOGI("XamShowMessageBoxUI: user={} title='{}' text='{}' buttons={} active={}",
-         uint32_t(user_index),
-         title_ptr ? xe::to_utf8(title_ptr.value()) : "(null)",
-         text_ptr ? xe::to_utf8(text_ptr.value()) : "(null)",
-         uint32_t(button_count), uint32_t(active_button));
-  // Auto-pick the focused button.
-  auto run = [result_ptr, active_button]() -> X_RESULT {
-    *result_ptr = static_cast<uint32_t>(active_button);
-    return X_ERROR_SUCCESS;
-  };
-  return xeXamDispatchHeadless(run, overlapped);
-#else
   std::string title;
   if (title_ptr) {
     title = xe::to_utf8(title_ptr.value());
@@ -311,6 +287,12 @@ dword_result_t XamShowMessageBoxUI_entry(
 
   X_RESULT result;
   if (cvars::headless) {
+    XELOGI(
+        "XamShowMessageBoxUI: user={} title='{}' text='{}' buttons={} "
+        "active={}",
+        uint32_t(user_index), title,
+        text_ptr ? xe::to_utf8(text_ptr.value()) : "(null)",
+        uint32_t(button_count), uint32_t(active_button));
     // Auto-pick the focused button.
     auto run = [result_ptr, active_button]() -> X_RESULT {
       *result_ptr = static_cast<uint32_t>(active_button);
@@ -345,11 +327,8 @@ dword_result_t XamShowMessageBoxUI_entry(
         close, overlapped);
   }
   return result;
-#endif  // XE_HEADLESS_BUILD
 }
 DECLARE_XAM_EXPORT1(XamShowMessageBoxUI, kUI, kImplemented);
-
-#ifndef XE_HEADLESS_BUILD
 
 class KeyboardInputDialog : public XamDialog {
  public:
@@ -432,8 +411,6 @@ class KeyboardInputDialog : public XamDialog {
   bool cancelled_ = true;
 };
 
-#endif  // XE_HEADLESS_BUILD
-
 // https://www.se7ensins.com/forums/threads/release-how-to-use-xshowkeyboardui-release.906568/
 dword_result_t XamShowKeyboardUI_entry(
     dword_t user_index, dword_t flags, lpu16string_t default_text,
@@ -447,19 +424,6 @@ dword_result_t XamShowKeyboardUI_entry(
 
   auto buffer_size = static_cast<size_t>(buffer_length) * 2;
 
-#ifdef XE_HEADLESS_BUILD
-  auto run = [default_text, buffer, buffer_length, buffer_size]() -> X_RESULT {
-    // Redirect default_text back into the buffer.
-    if (!default_text) {
-      std::memset(buffer, 0, buffer_size);
-    } else {
-      string_util::copy_and_swap_truncating(buffer, default_text.value(),
-                                            buffer_length);
-    }
-    return X_ERROR_SUCCESS;
-  };
-  return xeXamDispatchHeadless(run, overlapped);
-#else
   X_RESULT result;
   if (cvars::headless) {
     auto run = [default_text, buffer, buffer_length,
@@ -502,7 +466,6 @@ dword_result_t XamShowKeyboardUI_entry(
         close, overlapped);
   }
   return result;
-#endif  // XE_HEADLESS_BUILD
 }
 DECLARE_XAM_EXPORT1(XamShowKeyboardUI, kUI, kImplemented);
 
@@ -521,13 +484,12 @@ dword_result_t XamShowDeviceSelectorUI_entry(
 DECLARE_XAM_EXPORT1(XamShowDeviceSelectorUI, kUI, kImplemented);
 
 void XamShowDirtyDiscErrorUI_entry(dword_t user_index) {
-#ifdef XE_HEADLESS_BUILD
-  // Log the guest caller so a title's dirty-disc bail-out can be traced back to
-  // the code that raised it (a content-integrity / disc-read decision made by
-  // the game, not the emulator). Cheap and only fires on this error path.
-  {
-    auto* thread = XThread::GetCurrentThread();
-    if (thread) {
+  if (cvars::headless) {
+    // Log the guest caller so a title's dirty-disc bail-out can be traced back
+    // to the code that raised it (a content-integrity / disc-read decision
+    // made by the game, not the emulator), then let the title carry on.
+    // Upstream asserts and exits here.
+    if (auto* thread = XThread::GetCurrentThread()) {
       auto* ctx = thread->thread_state()->context();
       XELOGE(
           "XamShowDirtyDiscErrorUI: raised by guest LR=0x{:08X} SP=0x{:08X} "
@@ -535,13 +497,9 @@ void XamShowDirtyDiscErrorUI_entry(dword_t user_index) {
           static_cast<uint32_t>(ctx->lr), static_cast<uint32_t>(ctx->r[1]),
           (uint32_t)user_index);
     }
-  }
-  XELOGE("XamShowDirtyDiscErrorUI: Dirty disc error in headless mode (ignored)");
-  return;
-#else
-  if (cvars::headless) {
-    assert_always();
-    exit(1);
+    XELOGE(
+        "XamShowDirtyDiscErrorUI: Dirty disc error in headless mode "
+        "(ignored)");
     return;
   }
   const Emulator* emulator = kernel_state()->emulator();
@@ -556,7 +514,6 @@ void XamShowDirtyDiscErrorUI_entry(dword_t user_index) {
   // This is death, and should never return.
   // TODO(benvanik): cleaner exit.
   exit(1);
-#endif  // XE_HEADLESS_BUILD
 }
 DECLARE_XAM_EXPORT1(XamShowDirtyDiscErrorUI, kUI, kImplemented);
 

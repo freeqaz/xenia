@@ -16,14 +16,11 @@
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/util/shim_utils.h"
 #include "xenia/kernel/xam/xam_private.h"
-#include "xenia/xbox.h"
-
-#ifndef XE_HEADLESS_BUILD
 #include "xenia/ui/imgui_dialog.h"
 #include "xenia/ui/imgui_drawer.h"
 #include "xenia/ui/window.h"
 #include "xenia/ui/windowed_app_context.h"
-#endif
+#include "xenia/xbox.h"
 
 DEFINE_bool(nui_device_present, false,
             "XamNuiGetDeviceStatus reports a connected Kinect sensor. Off by "
@@ -65,10 +62,6 @@ dword_result_t XamShowNuiTroubleshooterUI_entry(unknown_t unk1, unknown_t unk2,
   // unk1 is 0xFF - possibly user index?
   // unk2, unk3 appear to always be zero.
 
-#ifdef XE_HEADLESS_BUILD
-  // Headless: just return success
-  return 0;
-#else
   if (cvars::headless) {
     return 0;
   }
@@ -91,7 +84,6 @@ dword_result_t XamShowNuiTroubleshooterUI_entry(unknown_t unk1, unknown_t unk2,
   }
 
   return 0;
-#endif  // XE_HEADLESS_BUILD
 }
 DECLARE_XAM_EXPORT1(XamShowNuiTroubleshooterUI, kNone, kStub);
 
