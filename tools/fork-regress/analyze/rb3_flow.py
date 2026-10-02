@@ -22,6 +22,8 @@ import re
 from pathlib import Path
 
 TS_RE = re.compile(r"Thread Status Report \((\d+)ms\).*SIGSEGV=(\d+)")
+# Headless binaries since Lane C also print XMA=<m> NON_XMA=<k> on that line.
+NON_XMA_RE = re.compile(r"Thread Status Report .* NON_XMA=(\d+)")
 UI_RE = re.compile(r"UI PROBE\[(\d+)\]: transState=(\d+) curScreen=\S+'([^']*)' "
                    r"transScreen=\S+'([^']*)'")
 STREAM_RE = re.compile(r"STREAM-CENSUS 0x([0-9A-Fa-f]+) mState=(\d+) .*?\(n=(\d+)\).*?\(n=(\d+)\)")
@@ -62,6 +64,7 @@ def parse(log: Path) -> dict:
     autopilot = 0
     timeout_ms = None
     max_segv = 0
+    max_non_xma = None  # None: the binary does not print NON_XMA
     trans_to_game = None
     with open(log, errors="replace") as f:
         for line in f:
@@ -69,6 +72,9 @@ def parse(log: Path) -> dict:
             if m:
                 now = int(m.group(1))
                 max_segv = max(max_segv, int(m.group(2)))
+                nx = NON_XMA_RE.search(line)
+                if nx:
+                    max_non_xma = max(max_non_xma or 0, int(nx.group(1)))
                 continue
             m = UI_RE.search(line)
             if m:
@@ -122,7 +128,7 @@ def parse(log: Path) -> dict:
             "game_screen_entered_s": game_t0, "streams_after_game_screen": playing,
             "installs": installs, "livelock_aborts": livelock,
             "autopilot_actions": autopilot, "timeout_reached_ms": timeout_ms,
-            "max_sigsegv": max_segv, "last_report_s": round(now / 1000, 1)}
+            "max_sigsegv": max_segv, "max_non_xma_faults": max_non_xma, "last_report_s": round(now / 1000, 1)}
 
 
 def analyze(run_dir: Path, meta: dict):

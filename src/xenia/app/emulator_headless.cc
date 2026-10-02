@@ -34,11 +34,11 @@
 
 DEFINE_bool(
     headless_report_real_fault, false,
-    "Headless: in the periodic Thread Status Report, also print the count of "
-    "benign XMA-aperture [0x7FEA0000,0x7FEB0000) MMIO soft-faults and the "
-    "last fault OUTSIDE that aperture, resolved to its guest function. The "
-    "plain last_fault is almost always the XMA-decoder poke once audio "
-    "starts, which masks a genuine fault. Read-only.",
+    "Headless: in the periodic Thread Status Report, also print the last "
+    "fault OUTSIDE the XMA register aperture [0x7FEA0000,0x7FEB0000), "
+    "resolved to its guest function. The plain last_fault is almost always "
+    "an XMA register write once audio starts, which masks a genuine fault. "
+    "Read-only.",
     "Headless");
 DEFINE_bool(rb3dx_hub_teardown_trace, false,
             "DEPRECATED: use --headless_report_real_fault.", "CPU");
@@ -302,20 +302,24 @@ void EmulatorHeadless::ReportThreadStatus(int64_t elapsed) {
   auto threads = kernel_state->object_table()->GetObjectsByType<kernel::XThread>(
       kernel::XObject::Type::Thread);
   auto last_rip = ExceptionHandler::GetLastFaultRip();
+  // XMA= counts guest stores to the XMA register aperture [0x7FEA0000,
+  // 0x7FEB0000): trapped-and-emulated device register writes, recovered by
+  // construction. NON_XMA = SIGSEGV - XMA is the number that means "a guest
+  // access faulted".
+  uint64_t segv = ExceptionHandler::GetSigsegvCount();
+  uint64_t xma = ExceptionHandler::GetXmaSoftFaultCount();
   fprintf(stderr,
           "=== Thread Status Report (%ldms) === %zu threads, SIGSEGV=%lu "
-          "last_fault=0x%lX last_rip=0x%lX%s\n",
+          "XMA=%lu NON_XMA=%lu last_fault=0x%lX last_rip=0x%lX%s\n",
           static_cast<long>(elapsed), threads.size(),
-          static_cast<unsigned long>(ExceptionHandler::GetSigsegvCount()),
+          static_cast<unsigned long>(segv), static_cast<unsigned long>(xma),
+          static_cast<unsigned long>(segv - xma),
           static_cast<unsigned long>(ExceptionHandler::GetLastFaultAddress()),
           static_cast<unsigned long>(last_rip),
           DescribeJitAddress(processor, last_rip, "crash_guest").c_str());
   if (cvars::headless_report_real_fault || cvars::rb3dx_hub_teardown_trace) {
     auto real_rip = ExceptionHandler::GetLastRealFaultRip();
-    fprintf(stderr,
-            "  [demask] XMA-benign-faults=%lu  last_REAL_fault=0x%lX "
-            "last_REAL_rip=0x%lX%s\n",
-            static_cast<unsigned long>(ExceptionHandler::GetXmaSoftFaultCount()),
+    fprintf(stderr, "  [demask] last_REAL_fault=0x%lX last_REAL_rip=0x%lX%s\n",
             static_cast<unsigned long>(
                 ExceptionHandler::GetLastRealFaultAddress()),
             static_cast<unsigned long>(real_rip),
