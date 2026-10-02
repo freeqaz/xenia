@@ -42,14 +42,8 @@ constexpr const char* kKnownIds[] = {
     "saveload.activate",
     "ui.hampanel_focus",
     "ui.event_dialog_on_top",
-    "io.cd_read_done",
     "content.refresh_done",
-    "splash.prepare_next",
-    "splash.begin_splasher",
-    "splash.suspend",
-    "splash.resume",
     "speech.grammar_unload",
-    "bink.sys_init",
     "calib.player_present_guard",
     "calib.choose_player_sides",
     "calib.warning_data",
@@ -57,7 +51,6 @@ constexpr const char* kKnownIds[] = {
     "calib.wait_recovery",
     "calib.exit_controller_mode",
     "game.pause_for_skeleton_loss",
-    "movie.poll",
     "audio.xmahal_alloc",
     "audio.dummy_driver",
     "audio.handle_wait",
@@ -66,9 +59,6 @@ constexpr const char* kKnownIds[] = {
     // dc3_hack_pack_skeleton.cc
     "skel.wait_33ms",
     "skel.is_override_nop",
-    "bink.impl_ready",
-    "movie.panel_is_loaded",
-    "ui.goto_first_screen",
     // Runtime, NuiSkeletonGetNextFrame sequencer (dc3_nui_sequencer.cc).
     "seq.controller_mode",
     // Runtime, main-thread autonav (dc3_autonav.cc, --dc3_headless_autonav).

@@ -969,14 +969,6 @@ void ApplyDc3LaunchHooks(const titles::TitleLaunchContext& ctx) {
                                kHamScreenIsEventDialogOnTop);
                       });
 
-    constexpr uint32_t kCDReadDone = 0x826026E0;
-    with_patch_target("io.cd_read_done", "CDReadDone", kCDReadDone, 8, [&](uint8_t* cdr_ptr) {
-      xe::store_and_swap<uint32_t>(cdr_ptr + 0, 0x38600001);
-      xe::store_and_swap<uint32_t>(cdr_ptr + 4, 0x4E800020);
-      XELOGI("DC3: Stubbed CDReadDone at {:08X} to return true",
-             kCDReadDone);
-    });
-
     constexpr uint32_t kContentMgrRefreshDone = 0x825FEB48;
     with_patch_target("content.refresh_done", "ContentMgr::RefreshDone", kContentMgrRefreshDone, 8,
                       [&](uint8_t* crd_ptr) {
@@ -985,43 +977,6 @@ void ApplyDc3LaunchHooks(const titles::TitleLaunchContext& ctx) {
                         XELOGI("DC3: Stubbed ContentMgr::RefreshDone at {:08X} "
                                "to return true",
                                kContentMgrRefreshDone);
-                      });
-
-    constexpr uint32_t kSplashPrepareNext = 0x82554388;
-    with_patch_target("splash.prepare_next", "Splash::PrepareNext", kSplashPrepareNext, 8,
-                      [&](uint8_t* ptr) {
-                        xe::store_and_swap<uint32_t>(ptr + 0, 0x38600000);
-                        xe::store_and_swap<uint32_t>(ptr + 4, 0x4E800020);
-                        XELOGI("DC3: Splash bypass: stubbed Splash::PrepareNext "
-                               "at {:08X} to return false",
-                               kSplashPrepareNext);
-                      });
-
-    constexpr uint32_t kSplashBeginSplasher = 0x825554C8;
-    with_patch_target("splash.begin_splasher", "Splash::BeginSplasher", kSplashBeginSplasher, 4,
-                      [&](uint8_t* ptr) {
-                        xe::store_and_swap<uint32_t>(ptr, 0x4E800020);
-                        XELOGI("DC3: Splash bypass: stubbed Splash::BeginSplasher "
-                               "at {:08X} to blr",
-                               kSplashBeginSplasher);
-                      });
-
-    constexpr uint32_t kSplashSuspend = 0x82553BE0;
-    with_patch_target("splash.suspend", "Splash::Suspend", kSplashSuspend, 4,
-                      [&](uint8_t* ptr) {
-                        xe::store_and_swap<uint32_t>(ptr, 0x4E800020);
-                        XELOGI("DC3: Splash bypass: stubbed Splash::Suspend "
-                               "at {:08X} to blr",
-                               kSplashSuspend);
-                      });
-
-    constexpr uint32_t kSplashResume = 0x82553D68;
-    with_patch_target("splash.resume", "Splash::Resume", kSplashResume, 4,
-                      [&](uint8_t* ptr) {
-                        xe::store_and_swap<uint32_t>(ptr, 0x4E800020);
-                        XELOGI("DC3: Splash bypass: stubbed Splash::Resume "
-                               "at {:08X} to blr",
-                               kSplashResume);
                       });
 
     constexpr uint32_t kSpeechGrammarUnload = 0x82439F38;
@@ -1033,36 +988,16 @@ void ApplyDc3LaunchHooks(const titles::TitleLaunchContext& ctx) {
                                kSpeechGrammarUnload);
                       });
 
-    constexpr uint32_t kMovieInit = 0x82555678;
-    // Intentionally NOT stubbed. Movie::Init() is just `{ TheMovieSys.Init(); }`,
-    // the boot's entry into movie-system init. The old `blr` stub here was the
-    // root of the regression: it skipped TheMovieSys.Init() entirely, so
-    // BinkMovieSys::Init never ran, isInitalized stayed false, and the guest's
-    // MILO_ASSERT(TheMovieSys.IsInitialized()) in Movie::BeginFromFile (line 220)
-    // fired fatally on the attract movie. Letting Movie::Init run now dispatches
-    // to BinkMovieSys::Init (patched below to set isInitalized=1 and return
-    // before the hanging BinkStartAsyncThread), which is the whole point.
-    XELOGI("DC3: Movie bypass: leaving Movie::Init at {:08X} intact so it "
-           "calls TheMovieSys.Init() (BinkMovieSys::Init patched to set flag)",
-           kMovieInit);
-
-    constexpr uint32_t kBinkMovieSysInit = 0x82E214A8;
-    // Set TheMovieSys.isInitalized = true instead of a bare blr. The old blr
-    // stub skipped MovieSys::Init() entirely, so isInitalized stayed false and
-    // the guest's MILO_ASSERT(TheMovieSys.IsInitialized()) (Movie.cpp:220)
-    // fired fatally at boot, freezing the whole game on the debug error screen.
-    // MovieSys layout: vptr @0, isInitalized(bool) @4; r3 == this (BinkMovieSys
-    // base coincides with the MovieSys base). We still skip BinkStartAsyncThread
-    // (the part that hangs headless and the reason Init was stubbed at all).
-    with_patch_target("bink.sys_init", "BinkMovieSys::Init", kBinkMovieSysInit, 12,
-                      [&](uint8_t* ptr) {
-                        xe::store_and_swap<uint32_t>(ptr + 0, 0x38000001);  // li  r0, 1
-                        xe::store_and_swap<uint32_t>(ptr + 4, 0x98030004);  // stb r0, 4(r3)
-                        xe::store_and_swap<uint32_t>(ptr + 8, 0x4E800020);  // blr
-                        XELOGI("DC3: Movie bypass: BinkMovieSys::Init at {:08X} "
-                               "now sets isInitalized=1 (was blr)",
-                               kBinkMovieSysInit);
-                      });
+    // (RETIRED 2026-10-02) CDReadDone -> 1, Splash::PrepareNext/BeginSplasher/
+    // Suspend/Resume, BinkMovieSys::Init -> "set isInitalized, skip
+    // BinkStartAsyncThread", Movie::Poll -> 0 (with --fake_kinect_data). They
+    // covered two refuted/fixed gaps: the separate-IOSB OVERLAPPED theory
+    // (refuted by ac0052e5b) and the POSIX lost-resume race behind "thread
+    // created suspended + XSetThreadProcessor + ResumeThread never runs"
+    // (fixed upstream of this lane, 6bf623353). Measured (docs/fork/dc3/
+    // BASELINE.md): with BinkMovieSys::Init stubbed the song_select screen
+    // FAILs "Could not find preview.tmov in dir song_info"; with the real
+    // Init it passes.
 
     if (cvars::fake_kinect_data) {
       XELOGI("DC3: Entering original-XEX fake Kinect patch block");
@@ -1190,16 +1125,6 @@ void ApplyDc3LaunchHooks(const titles::TitleLaunchContext& ctx) {
                                  "(suppress fake-Kinect false skeleton-loss "
                                  "auto-pause)",
                                  kPauseForSkeletonLoss);
-                        });
-
-      constexpr uint32_t kMoviePoll = 0x82555CB8;
-      with_patch_target("movie.poll", "Movie::Poll", kMoviePoll, 8,
-                        [&](uint8_t* mp_ptr) {
-                          xe::store_and_swap<uint32_t>(mp_ptr + 0, 0x38600000);
-                          xe::store_and_swap<uint32_t>(mp_ptr + 4, 0x4E800020);
-                          XELOGI("DC3: Movie bypass: stubbed Movie::Poll at "
-                                 "{:08X} to return false",
-                                 kMoviePoll);
                         });
 
       auto patch4 = [&](uint32_t addr, uint32_t val, const char* desc) {
