@@ -121,7 +121,56 @@ on the game's own clock.
 
 ### S1 x5, final state (`ebc57f43a`) against the remaining hacks on (`378049f40`)
 
-PENDING
+The runs are interleaved run by run, one slot per run. Load is the mean of the
+1-minute load average over the run.
+
+| run | binary | title | game_screen | gpState=2 playing | gpState=3 | gp2 samples | NON_XMA | latch | load |
+|---|---|---|---|---|---|---|---|---|---|
+| fin-cand r1 | ebc57f43a (no host clock) | 12 s | 36 s | 42 s | 198.3 s | 78 | 0 | none | 29 |
+| fin-cand r2 | ebc57f43a | 12 s | 36 s | 42 s | 198.2 s | 78 | 0 | none | 20 |
+| fin-cand r3 | ebc57f43a | 15 s | 39 s | 45 s | 201.5 s | 78 | 0 | none | 103 |
+| fin-cand r4 | ebc57f43a | 12 s | 36 s | 42 s | 198.2 s | 78 | 0 | none | 47 |
+| fin-cand r5 | ebc57f43a | 12 s | 36 s | 42 s | 198.2 s | 78 | 0 | none | 21 |
+| fin-ctrl r1 | 378049f40 (XMA stub, dummy driver, two drives) | 12 s | 36 s | 42 s | 189.2 s | 75 | – | none | 19 |
+| fin-ctrl r2 | 378049f40 | 12 s | 36 s | 42 s | 213.4 s | 86 | – | none | 66 |
+| fin-ctrl r3 | 378049f40 | 12 s | 36 s | 42 s | 210.6 s | 85 | – | none | 62 |
+| fin-ctrl r4 | 378049f40 | 12 s | 36 s | 42 s | 189.4 s | 75 | – | none | 25 |
+| fin-ctrl r5 | 378049f40 | 15 s | 39 s | 45 s | 207.6 s | 81 | – | none | 51 |
+
+- **Result: 5/5 PASS on the final state**, gpState=3 on the game's own clock,
+  and no `mFailing` latch in any run. The landing bar was at least 3/5.
+- **The game's clock is deterministic.** gpState=3 lands at 198.2-201.5 s,
+  even at load 103, because the paced audio driver sets the song time.
+- **The host drives were not.** They put gpState=3 anywhere from 189 to 213 s
+  (5/5 PASS, but by a different clock each run),
+  depending on load. This is a direct measure of how much the 120 BPM drives
+  perturbed the oracle (TaskMgr timelines drive RndPropAnim/CharClip).
+- **S2 (DTA channel) on ebc57f43a: PASS.** The answers are identical to the
+  baseline (`3`, refused `no_such_func`, `10`, `object_list main` = 702).
+  The first poll is on guest thread 00000006, at 13 s (it was 9 s; the
+  scratch block is now allocated on the first request).
+- **S1V (Vulkan) on ebc57f43a: PASS, with 38 frames and 0 fail-screen
+  frames.** On every earlier baseline, the Milo red fail screen ("Could not
+  find preview.tmov") appeared from swap 1200 at song_select. It is gone
+  (finding 3). The kept frame is game_screen at swap 2400. This run used the
+  pre-merge S1V scenario, i.e. the deferred-replay capture; Lane E
+  recommends `--headless_inline_render` for visual goldens.
+- **Fault gate sabotage.** `--dc3_disable_hacks=audio.dummy_driver` on
+  378049f40 means the paced driver runs with stubbed XMA contexts, the Aug-29
+  configuration. That run fails with `max NON_XMA faults 1 != 0 (SIGSEGV 1,
+  XMA 0)`, from a null guest access at 12 s, and stalls. The gate catches a
+  real fault while the ~700,000 XMA register writes in the PASS runs do not
+  trip it.
+- **The branch tip after merging main (`4138f93f8`)** passed S0 and 2/2 S1
+  runs (gpState=3 at 201.6 and 198.2 s, no latch). compare.py against
+  integrate-6bf623353 reports no regression. Its S0 output lists the changed
+  defaults: `dc3_clean_content_cache` is now false, and the two
+  `headless_capture_*` defaults are Lane E's. Cvars added: `dc3_disable_hacks`,
+  `dc3_fail_tripwire`, `dc3_headless_autonav`, `dc3_decomp_disable_stubs`, and
+  four from Lane E. Cvars removed: `dc3_gameplay_probe`, `dc3_guest_overrides`,
+  `dc3_runtime_telemetry_include_ppc_words`. The ratchets improved:
+  title-ID literals outside `titles/` went from 65 to 14, and `/home/free`
+  in `src/` from 3 to 0.
 
 ### Before (for comparison)
 
