@@ -20,7 +20,6 @@ DECLARE_bool(dc3_ik_telemetry);
 DECLARE_bool(dc3_game_screen_real_goto);
 DECLARE_bool(dc3_null_read_cache_stream);
 DECLARE_bool(dc3_crt_skip_nui);
-DECLARE_bool(dc3_guest_overrides);
 DECLARE_bool(dc3_debug_read_cache_stream_step_override);
 DECLARE_bool(dc3_debug_mempool_alloc_probe);
 DECLARE_string(dc3_debug_findarray_override_mode);

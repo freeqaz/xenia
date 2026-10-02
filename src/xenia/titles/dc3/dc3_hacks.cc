@@ -64,7 +64,6 @@ constexpr const char* kKnownIds[] = {
     "audio.hamaudio_ready",
     "anim.song_anim_expert",
     // dc3_hack_pack_skeleton.cc
-    "skel.ppc_get_next_frame",
     "skel.wait_33ms",
     "skel.is_override_nop",
     "debug.fail_spin",

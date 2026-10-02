@@ -114,17 +114,6 @@ void Dc3NuiReturnNeg1Extern(cpu::ppc::PPCContext* ppc_context,
   ppc_context->r[3] = UINT64_C(0xFFFFFFFFFFFFFFFF);
 }
 
-void Dc3NuiReturn1Extern(cpu::ppc::PPCContext* ppc_context,
-                         kernel::KernelState* kernel_state) {
-  (void)kernel_state;
-  if (ppc_context && ppc_context->scratch) {
-    Dc3RuntimeTelemetryRecordNuiOverrideHit(
-        static_cast<uint32_t>(ppc_context->scratch));
-    dc3::HackCountOverrideHit(static_cast<uint32_t>(ppc_context->scratch));
-  }
-  ppc_context->r[3] = 1;
-}
-
 }  // namespace
 
 void ApplyDc3LaunchHooks(const titles::TitleLaunchContext& ctx) {
@@ -182,10 +171,10 @@ void ApplyDc3LaunchHooks(const titles::TitleLaunchContext& ctx) {
     // Load the patch manifest early so it's available for both NUI patching
     // and the hack pack (which runs independently of --stub_nui_functions).
     std::filesystem::path early_manifest_path;
+    // Inputs are explicit: no host path is auto-probed (the original layout
+    // resolves from the compiled-in table + signatures).
     if (!cvars::dc3_nui_patch_manifest_path.empty()) {
       early_manifest_path = cvars::dc3_nui_patch_manifest_path;
-    } else if (auto auto_path = Dc3AutoProbePatchManifestPath()) {
-      early_manifest_path = *auto_path;
     }
     if (!early_manifest_path.empty()) {
       dc3_patch_manifest = Dc3LoadNuiPatchManifest(early_manifest_path);
@@ -223,7 +212,6 @@ void ApplyDc3LaunchHooks(const titles::TitleLaunchContext& ctx) {
 
     // PPC instructions (big-endian)
     const uint32_t kLiR3_0 = 0x38600000;    // li r3, 0  (return S_OK / 0)
-    const uint32_t kLiR3_1 = 0x38600001;    // li r3, 1
     const uint32_t kLiR3_Neg1 = 0x3860FFFF; // li r3, -1 (return E_UNEXPECTED)
     const uint32_t kBlr = 0x4E800020;       // blr
 
@@ -473,8 +461,6 @@ void ApplyDc3LaunchHooks(const titles::TitleLaunchContext& ctx) {
     std::filesystem::path fingerprint_cache_path;
     if (!cvars::dc3_nui_layout_fingerprint_cache_path.empty()) {
       fingerprint_cache_path = cvars::dc3_nui_layout_fingerprint_cache_path;
-    } else if (auto auto_cache_path = Dc3AutoProbeFingerprintCachePath()) {
-      fingerprint_cache_path = *auto_cache_path;
     }
     if (!fingerprint_cache_path.empty()) {
       fingerprint_cache = Dc3LoadFingerprintCacheFile(fingerprint_cache_path);
@@ -596,8 +582,6 @@ void ApplyDc3LaunchHooks(const titles::TitleLaunchContext& ctx) {
     std::filesystem::path symbol_manifest_path;
     if (!cvars::dc3_nui_symbol_map_path.empty()) {
       symbol_manifest_path = cvars::dc3_nui_symbol_map_path;
-    } else if (auto auto_path = Dc3AutoProbeNuiSymbolMapPath()) {
-      symbol_manifest_path = *auto_path;
     }
     if (!symbol_manifest_path.empty()) {
       symbol_manifest = Dc3LoadNuiSymbolManifest(symbol_manifest_path);
@@ -736,24 +720,12 @@ void ApplyDc3LaunchHooks(const titles::TitleLaunchContext& ctx) {
       }
     }
 
-    const bool requested_guest_overrides = cvars::dc3_guest_overrides;
-    const bool enable_guest_overrides = true;
-    if (!requested_guest_overrides) {
-      XELOGW(
-          "DC3: DC3 NUI/XBC legacy byte-patch path has been removed; "
-          "forcing guest overrides on (rollback by reverting commit)");
-    }
-    XELOGI("DC3: NUI/XBC apply path guest_overrides={} resolver_mode={} "
+    XELOGI("DC3: NUI/XBC apply path guest_overrides=1 resolver_mode={} "
            "signature_resolver={}",
-           enable_guest_overrides ? 1 : 0, resolver_mode,
-           cvars::dc3_nui_enable_signature_resolver ? 1 : 0);
+           resolver_mode, cvars::dc3_nui_enable_signature_resolver ? 1 : 0);
 
-    processor->ClearGuestFunctionOverrides();
     auto guest_extern_handler_for_patch =
         [&](const Dc3NuiPatchSpec& patch) -> cpu::GuestFunction::ExternHandler {
-      if (!enable_guest_overrides) {
-        return nullptr;
-      }
       // Preserve the original-layout fake skeleton path when enabled.
       if (cvars::fake_kinect_data && !is_decomp_layout &&
           std::string_view(patch.name) == "NuiSkeletonGetNextFrame" &&
@@ -768,9 +740,6 @@ void ApplyDc3LaunchHooks(const titles::TitleLaunchContext& ctx) {
       }
       if (patch.insn0 == kLiR3_Neg1) {
         return Dc3NuiReturnNeg1Extern;
-      }
-      if (patch.insn0 == kLiR3_1) {
-        return Dc3NuiReturn1Extern;
       }
       return nullptr;
     };
@@ -795,26 +764,14 @@ void ApplyDc3LaunchHooks(const titles::TitleLaunchContext& ctx) {
         continue;
       }
       const uint32_t patch_addr = resolved_patch.resolved_address;
-            if (std::string_view(patch.name) == "NuiSkeletonGetNextFrame") {
-        auto* h = guest_extern_handler_for_patch(patch);
-        if (h && !is_decomp_layout &&
-            !dc3::HackGate(h == Dc3NuiSequencerExtern
-                               ? "nui.get_next_frame"
-                               : "nui.NuiSkeletonGetNextFrame",
-                           h == Dc3NuiSequencerExtern
-                               ? "NuiSkeletonGetNextFrame -> fake-skeleton "
-                                 "sequencer (also the host automation tick)"
-                               : "NuiSkeletonGetNextFrame -> -1")) {
-          h = nullptr;
-          override_register_failed++;
-          continue;
-        }
-        if (h) {
+      if (is_decomp_layout &&
+          std::string_view(patch.name) == "NuiSkeletonGetNextFrame") {
+        // Decomp layout only (S3 fingerprint): registered without the .text
+        // and zero-fill checks below, as the old "ULTRA FORCED" block did.
+        if (auto* h = guest_extern_handler_for_patch(patch)) {
           processor->RegisterGuestFunctionOverride(patch_addr, h, patch.name);
-          dc3::HackNoteOverride(patch_addr, h == Dc3NuiSequencerExtern
-                                                ? "nui.get_next_frame"
-                                                : "nui.NuiSkeletonGetNextFrame");
-          XELOGI("DC3: ULTRA FORCED registration of NUI sequencer at {:08X}", patch_addr);
+          XELOGI("DC3: ULTRA FORCED registration of NUI sequencer at {:08X}",
+                 patch_addr);
           override_registered++;
           continue;
         }
@@ -858,20 +815,26 @@ void ApplyDc3LaunchHooks(const titles::TitleLaunchContext& ctx) {
         override_register_failed++;
         continue;
       }
+      // The fake-skeleton sequencer has its own id: it is also the NUI
+      // device frame source, not just an SDK stub.
+      const std::string hack_id = handler == Dc3NuiSequencerExtern
+                                      ? std::string("nui.get_next_frame")
+                                      : std::string("nui.") + patch.name;
       if (!is_decomp_layout &&
-          !dc3::HackGate(std::string("nui.") + patch.name,
-                         handler == Dc3NuiReturnOkExtern
-                             ? "NUI SDK override -> 0"
-                             : (handler == Dc3NuiReturnNeg1Extern
-                                    ? "NUI SDK override -> -1"
-                                    : "NUI SDK override"))) {
+          !dc3::HackGate(hack_id,
+                         handler == Dc3NuiSequencerExtern
+                             ? "NuiSkeletonGetNextFrame -> fake-skeleton "
+                               "sequencer"
+                             : (handler == Dc3NuiReturnOkExtern
+                                    ? "NUI SDK override -> 0"
+                                    : "NUI SDK override -> -1"))) {
         override_register_failed++;
         continue;
       }
       processor->RegisterGuestFunctionOverride(patch_addr, handler,
                                                 std::string(patch.name));
       if (!is_decomp_layout) {
-        dc3::HackNoteOverride(patch_addr, std::string("nui.") + patch.name);
+        dc3::HackNoteOverride(patch_addr, hack_id);
       }
       XELOGI("DC3: Registered guest extern override {:08X}: {} (resolver={})",
              patch_addr, patch.name,
@@ -889,16 +852,15 @@ void ApplyDc3LaunchHooks(const titles::TitleLaunchContext& ctx) {
         override_register_failed, override_register_non_text,
         override_register_unresolved);
 
-    const int patched = 0;
+    const int patched = 0;  // the byte-patch path is gone; telemetry field
     const int overridden = override_registered;
     const int skipped = active_count - overridden;
     XELOGI(
-        "DC3: NUI patch/override summary: patched={} overridden={} skipped={} "
+        "DC3: NUI override summary: overridden={} skipped={} "
         "total={} layout={} unsupported_override_entries={} "
         "override_registration_failures={} "
-        "override_registration_non_text={} skipped_unresolved={} "
-        "legacy_byte_patching_removed=1",
-        patched, overridden, skipped, active_count,
+        "override_registration_non_text={} skipped_unresolved={}",
+        overridden, skipped, active_count,
         is_decomp_layout ? "decomp" : "original", override_unsupported,
         override_register_failed, override_register_non_text,
         override_register_unresolved);

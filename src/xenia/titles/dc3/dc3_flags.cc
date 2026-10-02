@@ -34,14 +34,6 @@ DEFINE_bool(dc3_crt_skip_nui, true,
             "75,98-101,210-328). These call unresolved internal NUI "
             "functions that corrupt the heap. Set false to disable.",
             "DC3");
-DEFINE_bool(dc3_guest_overrides, true,
-            "DC3: use guest extern overrides for eligible simple NUI/XBC "
-            "stub-return functions (default cutover path; skips byte patching "
-            "for registered entries; preserves fake_kinect_data "
-            "NuiSkeletonGetNextFrame path). The legacy NUI/XBC byte-patch "
-            "fallback path has been removed; false logs a warning and is "
-            "ignored for this path.",
-            "DC3");
 DEFINE_bool(dc3_debug_read_cache_stream_step_override, false,
             "DC3: enable invasive ReadCacheStream step-by-step guest override "
             "for DTB debugging. WARNING: performs extra reads/seeks and can "
@@ -81,8 +73,9 @@ DEFINE_string(
 DEFINE_string(
     dc3_nui_symbol_map_path, "",
     "DC3: optional symbol map manifest used by the NUI/XBC resolver "
-    "(symbols.txt-style 'name = .text:0xADDR;'). If unset, a local "
-    "dc3-decomp symbols.txt path is auto-probed.",
+    "(symbols.txt-style 'name = .text:0xADDR;'). Unset: none (no path is "
+    "auto-probed; the original layout resolves from the compiled-in table "
+    "and signatures).",
     "DC3");
 DEFINE_string(dc3_nui_patch_resolver_mode, "hybrid",
               "DC3: NUI/XBC patch target resolver mode "
