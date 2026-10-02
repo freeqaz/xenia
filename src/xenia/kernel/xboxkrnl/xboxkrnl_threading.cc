@@ -20,6 +20,8 @@
 #include "xenia/kernel/util/shim_utils.h"
 #include "xenia/kernel/xboxkrnl/xboxkrnl_private.h"
 #include "xenia/kernel/xboxkrnl/xboxkrnl_threading.h"
+
+#include <atomic>
 #include "xenia/kernel/xevent.h"
 #include "xenia/kernel/xmutant.h"
 #include "xenia/kernel/xsemaphore.h"
@@ -406,7 +408,17 @@ DECLARE_XBOXKRNL_EXPORT1(KeInitializeEvent, kThreading, kImplemented);
 uint32_t xeKeSetEvent(X_KEVENT* event_ptr, uint32_t increment, uint32_t wait) {
   auto ev = XObject::GetNativeObject<XEvent>(kernel_state(), event_ptr);
   if (!ev) {
-    assert_always();
+    // Reachable from guest data, not only from emulator bugs: a critical
+    // section whose embedded event header was never initialised (e.g. in a
+    // module loaded without running its CRT) cannot be typed. Release builds
+    // returned 0 here; do that in every build, and say which object it was.
+    static std::atomic<bool> s_logged{false};
+    if (!s_logged.exchange(true, std::memory_order_relaxed)) {
+      XELOGW(
+          "xeKeSetEvent: GetNativeObject failed for event @0x{:08X} -- "
+          "returning 0 (further hits not logged)",
+          kernel_state()->memory()->HostToGuestVirtual(event_ptr));
+    }
     return 0;
   }
 
@@ -782,8 +794,16 @@ uint32_t xeKeWaitForSingleObject(void* object_ptr, uint32_t wait_reason,
   auto object = XObject::GetNativeObject<XObject>(kernel_state(), object_ptr);
 
   if (!object) {
-    // The only kind-of failure code (though this should never happen)
-    assert_always();
+    // The only kind-of failure code. Reachable from guest data for the same
+    // reason as in xeKeSetEvent (an uninitialised critical-section event on
+    // the contended RtlEnterCriticalSection path).
+    static std::atomic<bool> s_logged{false};
+    if (!s_logged.exchange(true, std::memory_order_relaxed)) {
+      XELOGW(
+          "xeKeWaitForSingleObject: GetNativeObject failed for object "
+          "@0x{:08X} -- returning ABANDONED_WAIT_0 (further hits not logged)",
+          kernel_state()->memory()->HostToGuestVirtual(object_ptr));
+    }
     return X_STATUS_ABANDONED_WAIT_0;
   }
 

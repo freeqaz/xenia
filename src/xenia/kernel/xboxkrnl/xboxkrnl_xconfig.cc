@@ -59,7 +59,10 @@ X_STATUS xeExGetXConfigSetting(uint16_t category, uint16_t setting,
           xe::store_and_swap<uint32_t>(value, 0x00001000);  // USA/Canada
           break;
         default:
-          assert_unhandled_case(setting);
+          XELOGW(
+              "ExGetXConfigSetting: unhandled secured-category setting "
+              "0x{:04X}; returning INVALID_PARAMETER_2",
+              setting);
           return X_STATUS_INVALID_PARAMETER_2;
       }
       break;
@@ -95,12 +98,18 @@ X_STATUS xeExGetXConfigSetting(uint16_t category, uint16_t setting,
           value[0] = static_cast<uint8_t>(cvars::user_country);
           break;
         default:
-          assert_unhandled_case(setting);
+          XELOGW(
+              "ExGetXConfigSetting: unhandled user-category setting 0x{:04X}; "
+              "returning INVALID_PARAMETER_2",
+              setting);
           return X_STATUS_INVALID_PARAMETER_2;
       }
       break;
     default:
-      assert_unhandled_case(category);
+      XELOGW(
+          "ExGetXConfigSetting: unhandled category 0x{:04X} (setting "
+          "0x{:04X}); returning INVALID_PARAMETER_1",
+          category, setting);
       return X_STATUS_INVALID_PARAMETER_1;
   }
 
