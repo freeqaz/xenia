@@ -4,7 +4,8 @@
  ******************************************************************************
  * RB3 / RB3DX (title 45410914): same-instrument (RB3Enhanced.dll) harness
  * (NOT upstream). --si_load_dll, --si_init_va, --si_force_allow_va,
- * --si_hook_verify. WORKSTREAM-rb3-on-xenia-bringup.md §8f.
+ * --si_hook_verify. §8f of
+ * docs/fork/rb3/jit-fault-wiki/WORKSTREAM-rb3-on-xenia-bringup.md.
  ******************************************************************************
  */
 

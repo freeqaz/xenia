@@ -8,7 +8,7 @@
  *
  * In-process GDB RSP server. Moved out of app/emulator_headless.cc, where it
  * was the DC3-named "Dc3GdbRspHeadlessListener"; nothing in it is title
- * specific. Usage: docs/dc3_gdb_debugging.md.
+ * specific. Usage: docs/fork/debug/gdb_debugging.md.
  */
 
 #include "xenia/debug/gdb_rsp/gdb_rsp_server.h"
@@ -239,7 +239,8 @@ class GdbRspServer final : public cpu::DebugListener {
     // the standard org.gnu.gdb.power.core feature served over qXfer. With the
     // architecture left out, the client selects it via
     // `set architecture powerpc:common[64]; set endian big` and the standard
-    // power.core feature is accepted cleanly. See docs/dc3_gdb_debugging.md.
+    // power.core feature is accepted cleanly. See
+    // docs/fork/debug/gdb_debugging.md.
     xml += "  <feature name=\"org.gnu.gdb.power.core\">\n";
     int regnum = 0;
     for (int i = 0; i < 32; ++i, ++regnum) {

@@ -7,8 +7,10 @@
  * ApplyRb3LaunchHooks runs from Emulator::CompleteLaunch, before the title's
  * main thread exists. Everything here is gated on the title ID and on its own
  * default-off cvar (rb3_flags.cc). The workarounds below are the ones the
- * documented RB3 recipes need (WORKSTREAM-rb3-on-xenia-bringup.md §8v-§8x);
- * the diagnostics and harness automation live in their own files.
+ * documented RB3 recipes need (§8v-§8x of
+ * docs/fork/rb3/jit-fault-wiki/WORKSTREAM-rb3-on-xenia-bringup.md, "the
+ * WORKSTREAM" below); the diagnostics and harness automation live in their
+ * own files.
  ******************************************************************************
  */
 

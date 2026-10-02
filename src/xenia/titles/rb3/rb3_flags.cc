@@ -8,7 +8,8 @@
  * when these lived in emulator.cc, so existing config files still apply.
  *
  * Removed in the 2026-10 cleanup (FORK_CLEANUP_PLAN.md Lane C), each for a
- * hypothesis that was refuted or solved in WORKSTREAM-rb3-on-xenia-bringup.md:
+ * hypothesis that was refuted or solved in "the WORKSTREAM",
+ * docs/fork/rb3/jit-fault-wiki/WORKSTREAM-rb3-on-xenia-bringup.md:
  * rb3_mount_update, rb3_splash_unwedge, rb3_loadmgr_unbudget,
  * rb3_overlapped_scan, rb3_tu5_hash_poke, rb3dx_clamp_alloc, si_probe,
  * si_selftest, si_hook_vas (SI approach (b)).
