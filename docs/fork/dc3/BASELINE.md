@@ -18,7 +18,7 @@ The patch manifest for this baseline is `PATCH_MANIFEST.md` (same directory).
 - **Harness.** `tools/fork-regress` scenario S1: null GPU, the ymca flow,
   230 s. The command is `dc3_original_args` in `lib/common.sh`. Since this
   lane, it includes `--dc3_headless_autonav=true`.
-  `docs/dc3-oracle/run_dc3_oracle.sh` passes the same cvars.
+  `docs/fork/dc3/run_dc3_oracle.sh` passes the same cvars.
 - **One-hack A/Bs.** Same binary, with `--dc3_disable_hacks=<id,...>` on one
   side only (`run.sh --extra-arg`, `ab.sh --extra-a`). Every run went through
   the shared slot lock (`/home/free/tmp/fr-slot.sh`). Load is recorded per run.

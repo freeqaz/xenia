@@ -10,7 +10,7 @@
 # usage: run_dc3_oracle.sh <run-dir> [gpu: null|vulkan] [timeout_s] [extra cvars...]
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
-WT="$(cd "$HERE/../.." && pwd)"
+WT="$(cd "$HERE/../../.." && pwd)"
 DC3="${DC3:-/home/free/code/milohax/dc3-decomp}"
 XENIA="${XENIA:-$WT/build/bin/Linux/Checked/xenia-headless}"
 RUN="${1:?run dir}"; GPU="${2:-null}"; TIMEOUT_S="${3:-240}"; shift 3 || shift $#

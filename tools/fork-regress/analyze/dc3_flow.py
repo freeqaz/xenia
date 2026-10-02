@@ -1,4 +1,4 @@
-"""S1: DC3 original layout, ymca flow (docs/dc3-oracle/analyze_run.py, extended).
+"""S1: DC3 original layout, ymca flow (docs/fork/dc3/analyze_run.py, extended).
 
 Host time of a milestone = the nearest PRECEDING `Thread Status Report (<ms>ms)`
 line (emitted every ~3 s), so every time is an upper bound good to +0..3 s.

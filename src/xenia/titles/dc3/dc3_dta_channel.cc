@@ -6,7 +6,7 @@
  ******************************************************************************
  *
  * DC3 DTA evaluation channel (dc3-oracle). See dc3_dta_channel.h for the
- * contract and docs/dc3-oracle/SPIKE_LOG.md for the measurements behind it.
+ * contract and docs/fork/dc3/SPIKE_LOG.md for the measurements behind it.
  */
 
 #include "xenia/titles/dc3/dc3_dta_channel.h"

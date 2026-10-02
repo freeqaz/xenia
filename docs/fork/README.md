@@ -41,18 +41,16 @@ A by-hand run must pass a private `--storage_root`, or Xenia rewrites the shared
 | [DC3_HACK_GAP_ANALYSIS.md](cleanup/DC3_HACK_GAP_ANALYSIS.md) | DC3 hack -> masked Xenia gap -> real fix. |
 | [fork-cleanup-review.md](cleanup/fork-cleanup-review.md) | 2026-08-25 review of `frag-alloc-trace`. Superseded as a worklist; source comments still cite its finding IDs (C1, C4, C16, ...). |
 
-### DC3 (`dc3/`, plus two not-yet-moved locations)
+### DC3 (`dc3/`)
 
 | Doc | |
 |---|---|
-| [`../dc3-oracle/BASELINE.md`](../dc3-oracle/BASELINE.md) | DC3 original `debug.xex` on Xenia: measured baseline. Being re-measured by Lane B; moves to `docs/fork/dc3/`. |
-| [`../dc3-oracle/SPIKE_LOG.md`](../dc3-oracle/SPIKE_LOG.md) | The DTA-evaluation-channel spike log (the oracle). |
-| [`../dc3-oracle/`](../dc3-oracle/) `run_dc3_oracle.sh`, `analyze_run.py`, `xenia.dc3-oracle.defaults.toml` | The oracle run script, analyzer and all-defaults toml (the harness has its own copies in `tools/fork-regress/`). |
+| [dc3/BASELINE.md](dc3/BASELINE.md) | DC3 original `debug.xex` on Xenia: measured baseline, re-measured by Lane B (2026-10-02) -- the FAILs the old hacks hid, S1 results. |
+| [dc3/PATCH_MANIFEST.md](dc3/PATCH_MANIFEST.md) | Every DC3 original-layout hack by `--dc3_disable_hacks` id: what it changes, what it masks, retired or kept. |
+| [dc3/SPIKE_LOG.md](dc3/SPIKE_LOG.md) | The DTA-evaluation-channel spike log (the oracle). |
+| [`dc3/`](dc3/) `run_dc3_oracle.sh`, `analyze_run.py`, `xenia.dc3-oracle.defaults.toml` | The oracle run script, analyzer and all-defaults toml (the harness has its own copies in `tools/fork-regress/`). |
+| [dc3/dc3_nui_fingerprints.txt](dc3/dc3_nui_fingerprints.txt) | NUI resolver fingerprint cache (data). Nothing auto-probes it any more; pass `--dc3_nui_layout_fingerprint_cache_path` explicitly. |
 | [decomp_layout_hack_pack.md](decomp_layout_hack_pack.md) | Rebuild workflow for the kept decomp-layout hack pack (`src/xenia/titles/dc3/decomp/`), salvaged from the old `CLAUDE.md`. |
-| [`../dc3-boot/dc3_nui_fingerprints.txt`](../dc3-boot/dc3_nui_fingerprints.txt) | Load-bearing data, not a doc: the NUI resolver auto-probes this path. Moves when the code stops probing it. |
-
-`docs/fork/dc3/` belongs to the DC3 lane; `docs/dc3-oracle/` moves there with
-its BASELINE.md rewrite.
 
 ### RB3 (`rb3/`)
 
@@ -111,6 +109,8 @@ Source comments in other lanes' files still cite some old paths; this is the map
 | `rb3-verify/patch/`, `rb3-verify/scripts/` | `tools/rb3/patch/`, `tools/rb3/input/` |
 | `tools/{dc3_nui_cutover_gate.sh,dc3_crt_bisect.sh,dc3_extract_addresses.py,analyze_poolalloc.py,dc3_gdb_rsp_snapshot_bridge.sh}` | `tools/archive/` |
 | `docs/dc3-boot/agent_e_extracted_addresses.txt` | deleted (stale generated header) |
+| `docs/dc3-oracle/{BASELINE.md,SPIKE_LOG.md,run_dc3_oracle.sh,analyze_run.py,xenia.dc3-oracle.defaults.toml}` | `docs/fork/dc3/` (BASELINE.md rewritten) |
+| `docs/dc3-boot/dc3_nui_fingerprints.txt` | `docs/fork/dc3/dc3_nui_fingerprints.txt` (no longer auto-probed) |
 
 Cited in source but not in this repo: `docs/W5_X8CE_CALL_EFFECTS.md` and
 `docs/research/02-xenia-capture.md` (`cpu_flags.cc`, `ppc_translator.cc`,
