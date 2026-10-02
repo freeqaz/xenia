@@ -11,6 +11,7 @@
 
 #include "xenia/titles/dc3/dc3_dta_channel.h"
 
+#include <poll.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
@@ -35,6 +36,7 @@
 #include "xenia/kernel/xboxkrnl/xboxkrnl_cpp_throw_hook.h"
 #include "xenia/kernel/xthread.h"
 #include "xenia/memory.h"
+#include "xenia/titles/dc3/dc3_main_thread.h"
 
 DEFINE_string(dc3_dta_channel, "",
               "DC3 (original debug.xex only): unix socket path for the DTA "
@@ -143,12 +145,18 @@ struct Channel {
   cpu::Processor* processor = nullptr;
   Memory* memory = nullptr;
   std::string socket_path;
+  // Guest scratch block, allocated on the main thread by the first request
+  // (not at install: an idle channel must not shift the guest heap).
   uint32_t scratch = 0;
   std::mutex qmtx;
   std::deque<std::shared_ptr<Request>> queue;
   std::atomic<uint64_t> polls{0};
   std::atomic<uint64_t> evals{0};
-  std::atomic<uint32_t> main_thread_id{0};
+  // The socket server thread, owned and joined by Dc3DtaChannelShutdown.
+  int listen_fd = -1;
+  std::atomic<int> conn_fd{-1};
+  std::atomic<bool> stop{false};
+  std::thread server;
 };
 Channel* g_channel = nullptr;
 
@@ -401,6 +409,16 @@ void PrintNode(std::string& out, uint32_t node, int depth) {
 // ---------------------------------------------------------------------------
 void Evaluate(cpu::ThreadState* ts, Request& req) {
   auto* mem = g_channel->memory;
+  if (!g_channel->scratch) {
+    g_channel->scratch = mem->SystemHeapAlloc(kScratchBytes);
+    if (!g_channel->scratch) {
+      req.status = 500;
+      req.reply = "SystemHeapAlloc failed";
+      return;
+    }
+    XELOGI("DC3 DTA channel: scratch {:08X} allocated on first request",
+           g_channel->scratch);
+  }
   const uint32_t script = g_channel->scratch + kScratchScriptOff;
   const uint32_t result = g_channel->scratch + kScratchResultOff;
   if (req.body.size() >= kMaxScriptBytes) {
@@ -493,24 +511,16 @@ void Evaluate(cpu::ThreadState* ts, Request& req) {
   req.reply = std::move(out);
 }
 
-// Override of HolmesClientPollKeyboard (void()). The stock body polls the
-// Holmes host-PC connection for remote keystrokes; with no Holmes stream
-// (gHolmesStream == 0, verified and logged below) it does nothing observable.
-void PollExtern(cpu::ppc::PPCContext* ctx, kernel::KernelState*) {
-  auto* ts = ctx->thread_state;
+// Main-thread task (dc3_main_thread.h), once per frame on the guest main
+// thread. The hook saves and restores the caller's registers around it.
+void PollTask(cpu::ThreadState* ts, uint64_t) {
   uint64_t n = ++g_channel->polls;
   uint32_t tid = kernel::XThread::GetCurrentThreadId();
   if (n == 1) {
-    const cpu::ppc::PPCContext saved = *ctx;
-    uint32_t is_main = static_cast<uint32_t>(
-        g_channel->processor->Execute(ts, kMainThread, nullptr, 0));
-    *ctx = saved;
-    g_channel->main_thread_id = tid;
     auto* xt = kernel::XThread::GetCurrentThread();
-    XELOGI(
-        "DC3 DTA channel: first poll on guest thread {:08X} ('{}'); guest "
-        "MainThread()={} gHolmesStream={:08X}",
-        tid, xt ? xt->name() : "?", is_main & 0xFF, Load32(kGHolmesStream));
+    XELOGI("DC3 DTA channel: first poll on guest thread {:08X} ('{}'); "
+           "gHolmesStream={:08X}",
+           tid, xt ? xt->name() : "?", Load32(kGHolmesStream));
   }
   if (n == 1 || (n & (n - 1)) == 0) {
     // Debug state that decides whether a MILO_FAIL can reach our trap at all:
@@ -521,15 +531,6 @@ void PollExtern(cpu::ppc::PPCContext* ctx, kernel::KernelState*) {
            n, Load8(kTheDebug + 0x4), Load8(kTheDebug + kDebugFailingOff),
            Load32(kTheDebug + kDebugTryOff), ftm,
            Plausible(ftm) ? ReadCString(ftm, 200) : "");
-  }
-  if (tid != g_channel->main_thread_id) {
-    static std::atomic<int> warned{0};
-    if (warned++ < 5) {
-      XELOGW("DC3 DTA channel: poll from UNEXPECTED guest thread {:08X} "
-             "(first poll was {:08X}); not draining here",
-             tid, g_channel->main_thread_id.load());
-    }
-    return;
   }
   if ((n & (n - 1)) == 0 && n >= 1024) {
     XELOGI("DC3 DTA channel: {} polls, {} evals", n, g_channel->evals.load());
@@ -542,7 +543,6 @@ void PollExtern(cpu::ppc::PPCContext* ctx, kernel::KernelState*) {
   }
   if (batch.empty()) return;
 
-  const cpu::ppc::PPCContext saved = *ctx;
   for (auto& req : batch) {
     auto t0 = std::chrono::steady_clock::now();
     const uint8_t failing_before = Load8(kTheDebug + kDebugFailingOff);
@@ -567,8 +567,6 @@ void PollExtern(cpu::ppc::PPCContext* ctx, kernel::KernelState*) {
     }
     req->cv.notify_one();
   }
-  // Leave the caller's registers exactly as a void call that did nothing.
-  *ctx = saved;
 }
 
 // ---------------------------------------------------------------------------
@@ -640,7 +638,17 @@ void ServeConnection(int fd) {
 }
 
 void ServerThread(int listen_fd) {
-  for (;;) {
+  while (!g_channel->stop.load()) {
+    // Poll with a timeout so Dc3DtaChannelShutdown can stop and join us.
+    pollfd pfd{listen_fd, POLLIN, 0};
+    int pr = ::poll(&pfd, 1, 250);
+    if (pr <= 0) {
+      if (pr < 0 && errno != EINTR) {
+        XELOGE("DC3 DTA channel: poll failed: {}", strerror(errno));
+        return;
+      }
+      continue;
+    }
     int fd = ::accept(listen_fd, nullptr, nullptr);
     if (fd < 0) {
       if (errno == EINTR) continue;
@@ -649,7 +657,12 @@ void ServerThread(int listen_fd) {
     }
     // One connection at a time is the contract (eval is serialised on the
     // main thread anyway).
+    g_channel->conn_fd = fd;
+    if (g_channel->stop.load()) {
+      ::shutdown(fd, SHUT_RDWR);
+    }
     ServeConnection(fd);
+    g_channel->conn_fd = -1;
   }
 }
 
@@ -695,24 +708,40 @@ bool Dc3DtaChannelInstall(cpu::Processor* processor, Memory* memory,
   g_channel->processor = processor;
   g_channel->memory = memory;
   g_channel->socket_path = socket_path;
-  g_channel->scratch = memory->SystemHeapAlloc(kScratchBytes);
-  if (!g_channel->scratch) {
-    XELOGE("DC3 DTA channel: NOT installed: SystemHeapAlloc failed");
+  if (!dc3::AddMainThreadTask(processor, memory, "dta_channel", &PollTask)) {
+    XELOGE("DC3 DTA channel: NOT installed: no main-thread hook");
     ::close(fd);
     delete g_channel;
     g_channel = nullptr;
     return false;
   }
   kernel::xboxkrnl::g_cpp_throw_hook = &CppThrowHook;
-  processor->RegisterGuestFunctionOverride(kHolmesClientPollKeyboard,
-                                           &PollExtern,
-                                           "dc3_dta_channel_poll");
-  std::thread(ServerThread, fd).detach();
+  g_channel->listen_fd = fd;
+  g_channel->server = std::thread(ServerThread, fd);
   XELOGI(
-      "DC3 DTA channel: installed on '{}' (hook HolmesClientPollKeyboard "
-      "{:08X}, scratch {:08X})",
-      socket_path, kHolmesClientPollKeyboard, g_channel->scratch);
+      "DC3 DTA channel: installed on '{}' (main-thread hook "
+      "HolmesClientPollKeyboard {:08X}; scratch allocated on first request)",
+      socket_path, kHolmesClientPollKeyboard);
   return true;
+}
+
+void Dc3DtaChannelShutdown() {
+  if (!g_channel || !g_channel->server.joinable()) {
+    return;
+  }
+  g_channel->stop = true;
+  // Unblock a connection being served: the server reads with plain read().
+  ::shutdown(g_channel->listen_fd, SHUT_RDWR);
+  int conn = g_channel->conn_fd.load();
+  if (conn >= 0) {
+    ::shutdown(conn, SHUT_RDWR);
+  }
+  g_channel->server.join();
+  ::close(g_channel->listen_fd);
+  ::unlink(g_channel->socket_path.c_str());
+  kernel::xboxkrnl::g_cpp_throw_hook = nullptr;
+  // g_channel itself stays: the main-thread task may still be registered
+  // until the title is torn down.
 }
 
 }  // namespace xe

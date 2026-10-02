@@ -1353,9 +1353,17 @@ void Dc3OnTerminateTitle() {
   // The tripwire thread reads guest memory; join it before the title goes.
   titles::JoinProbeThreads();
   hid::nop::SetScriptedInputTitleAdapter(nullptr);
+#if XE_PLATFORM_LINUX
+  Dc3DtaChannelShutdown();
+#endif  // XE_PLATFORM_LINUX
 }
 
-void Dc3OnShutdown() { titles::JoinProbeThreads(); }
+void Dc3OnShutdown() {
+  titles::JoinProbeThreads();
+#if XE_PLATFORM_LINUX
+  Dc3DtaChannelShutdown();
+#endif  // XE_PLATFORM_LINUX
+}
 
 }  // namespace
 
