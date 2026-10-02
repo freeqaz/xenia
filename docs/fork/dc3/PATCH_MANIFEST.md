@@ -1,0 +1,119 @@
+# DC3 patch manifest (original `debug.xex`)
+
+Every guest-visible change the `titles/dc3` module makes to Dance Central 3
+(title `373307D9`) when it runs the original `debug.xex`
+(sha256 `2d5e4a32…`). The ids are the ones `--dc3_disable_hacks` takes
+(`src/xenia/titles/dc3/dc3_hacks.cc`). Each applied hack logs one
+`DC3 HACK on: <id>` line, and a runtime hack also logs `DC3 HACK fired: <id>`
+the first time it acts.
+
+Scope:
+- The decomp-layout pack (`titles/dc3/decomp/`) is not listed here. It only
+  applies to a rebuilt image detected as the decomp layout, where harness S3
+  fingerprints it as a whole. To skip one of its stubs, use
+  `--dc3_decomp_disable_stubs=<name,...>`.
+- "Masks" names the gap each hack covers, using the ids from
+  `docs/fork/cleanup/DC3_HACK_GAP_ANALYSIS.md` (O1-O49).
+- "Status" is this lane's verdict (Lane B, 2026-10-02). See the end of this
+  file for what each status means.
+
+## How to A/B one hack
+
+```
+tools/fork-regress/ab.sh $BIN out/cand $BIN out/ctrl --scenarios S1 --repeat 5 \
+    --lock /home/free/tmp/fork-regress.lock --extra-a "--dc3_disable_hacks=<id>"
+tools/fork-regress/compare.py --paired out/cand out/ctrl
+```
+
+- `--dc3_disable_hacks` accepts exact ids and `prefix*` entries.
+- An unknown id is logged as `DC3 HACK: UNKNOWN id … (TAINTED)`. Check that the
+  candidate's logs contain the `DC3 HACK off:` lines you expect.
+- Before believing an A/B, check two more things:
+  - **Tripwire.** `DC3 TRIPWIRE … TAINTED` means Debug::Fail fired on a worker,
+    or `mFailing` latched.
+  - **Override audit.** Every 30 s, `DC3 HACK audit: <id> <addr> handler_hits=…
+    resolved_indirect=…` reports one of: effective, INERT (the guest body ran),
+    MIXED, or not reached.
+
+## Launch-time image patches and overrides (`dc3_title.cc`)
+
+| id | guest site | change | masks | status |
+|---|---|---|---|---|
+| `nui.<Function>` (56 functions + `CXbcImpl::Initialize/DoWork/SendJSON`) | NUI SDK / XBC, statically linked (table in `dc3_title.cc`) | override: return 0 (44) or -1 (12) | O1, O15-O17: no Kinect device; SmartGlass init | kept (title requirement until a NUI HLE exists) |
+| `nui.get_next_frame` | `NuiSkeletonGetNextFrame` 0x829C2790 | override: the constant-pose fake skeleton frame (`dc3_nui_sequencer.cc`), and `mInControllerMode` | O2, O6 | kept |
+| `mmio.soft_fault_range` | 0x83320000-0x836C0000 | MMIO write soft-fault range | O48: decomp `.data`, **outside the original image** | kept: inert on the original, decomp-only |
+| `content.wipe` | host FS | `remove_all(<content>/373307D9)` | O47 | **default off** (`--dc3_clean_content_cache=false`) |
+| `saveload.activate` | `SaveLoadManager::Activate` 0x82894A10 | `blr` | O37 | kept (L6, content/XAM) |
+| `ui.hampanel_focus` | `HamPanel::FocusComponent` 0x828EFE90 | branch to `UIPanel::FocusComponent` | O28 | kept, A/B pending |
+| `ui.event_dialog_on_top` | `HamScreen::IsEventDialogOnTop` 0x829626D8 | `return 0` | O29 | kept, A/B pending |
+| `io.cd_read_done` | `CDReadDone` 0x826026E0 | `return 1` | O35: mechanism refuted (`ac0052e5b`) | see results |
+| `content.refresh_done` | `ContentMgr::RefreshDone` 0x825FEB48 | `return 1` | O36: XAM cross-title enumeration | kept (L6) |
+| `splash.prepare_next` / `splash.begin_splasher` / `splash.suspend` / `splash.resume` | 0x82554388 / 0x825554C8 / 0x82553BE0 / 0x82553D68 | `return 0` / `blr` ×3 | O23-O26: lost-resume thread race | see results |
+| `speech.grammar_unload` | `SpeechMgr::Grammar::Unload` 0x82439F38 | `blr` | O7: the NUI S_OK stubs | kept (NUI) |
+| `bink.sys_init` | `BinkMovieSys::Init` 0x82E214A8 | set `isInitalized`, skip `BinkStartAsyncThread` | O19: lost-resume | see results |
+| `calib.player_present_guard`, `calib.choose_player_sides`, `calib.warning_data`, `calib.nav_data`, `calib.wait_recovery`, `calib.exit_controller_mode` | SkeletonChooser / ShellInput (0x8290834C, 0x82909968, 0x82907880, 0x82909340, 0x82904CD0, 0x82902748) | `nop` / `blr` / rewrite | O8-O13: a constant skeleton is not a calibrated player | kept (NUI) |
+| `game.pause_for_skeleton_loss` | `Game::PauseForSkeletonLoss` 0x82866D50 | `blr` | O14 | kept (NUI) |
+| `movie.poll` | `Movie::Poll` 0x82555CB8 | `return 0` | O22 | see results |
+| `audio.xmahal_alloc` | `XMAHALAllocateContexts` 0x82E77250 | `return 0` | O38 | see results |
+| `audio.dummy_driver` | `--nop_audio_driver` | `auto` -> `dummy` for DC3 | O39 | see results |
+| `audio.handle_wait` | `Game::HandleWait`+0x90 0x82867318 | `bne` -> `b` | O41 | see results |
+| `audio.hamaudio_ready` | `HamAudio::IsReady`+0x70 0x8252BA50 | `bctrl` -> `li r3,1` | O40 | see results |
+| `anim.song_anim_expert` | `HamDirector::SongAnim` 0x82475578 | `li r4,2; b SongAnimByDifficulty` | O34 | kept: changes which anim plays |
+
+## `dc3_hack_pack_skeleton.cc` (with `--fake_kinect_data`)
+
+| id | guest site | change | masks | status |
+|---|---|---|---|---|
+| `skel.wait_33ms` | `SkeletonUpdateThread`+0xA4 0x8242E74C | INFINITE wait -> 33 ms | O4 | kept (NUI) |
+| `skel.is_override_nop` | `SkeletonUpdate::Update`+0x40 0x8242E1B0 | `nop` | O5 | kept (NUI) |
+| `bink.impl_ready` | `BinkMovieImpl::Ready` 0x82E221C8 | override: `return 1` | O20 | measured INERT before the override-API fix (vtable path); see results |
+| `movie.panel_is_loaded` | `MoviePanel::IsLoaded` 0x82E0EFE8 | override: `return 1` | O21 | measured INERT before the override-API fix (vtable path); see results |
+| `ui.goto_first_screen` | `UIManager::GotoFirstScreen` 0x8277B140 | override: navigates only once `FindObject("attract_screen")` resolves | O27 | see results |
+
+These were removed:
+
+| what | id | removed |
+|---|---|---|
+| PPC constant-frame stub over 0x829C2790 | `skel.ppc_get_next_frame` | deleted. Shadowed by `nui.get_next_frame`: the audit measured handler hits on every frame and showed the guest body never resolved |
+| `Debug::Fail` thread-fail spin -> return, 0x825CE2DC | `debug.fail_spin` | deleted. The spin is faithful again (see BASELINE.md, "Debug::Fail") |
+
+## Runtime guest writers and guest calls
+
+| id | where | what | masks | status |
+|---|---|---|---|---|
+| `seq.controller_mode` | NUI callback (worker) | `TheGestureMgr`+0x426D := 1 each frame | O6 | kept (NUI) |
+| `seq.transition_force` | **main thread**, autonav | force-enter/complete transitions stuck for 120 or more ticks | O30 | `--dc3_headless_autonav` only |
+| `seq.nav_bridge` | **main thread**, autonav | `UIManager::GotoScreen` walk to game_screen, held while the song merge is busy | O31, O32 | `--dc3_headless_autonav` only |
+| `seq.loadsong_repair` | **main thread**, autonav | `DataReadFile`, `HamSongMgr::AddSongs`, ymca injection | O33 | `--dc3_headless_autonav` only |
+| `seq.beat_drive` | **main thread**, autonav | 120 BPM TaskMgr timeline drive | O42 | see results |
+| `input.beat_drive` | pad poll | second 120 BPM drive | O43 | see results |
+| `input.unpause_nudge` | pad poll | `Game` wait=0, realTime=1, paused=0 | O44 | see results |
+| `input.attract_press` | pad poll | press A every 3 s at attract | O45 | `--dc3_headless_autonav` only |
+| `input.attract_force` | pad poll | 4 MiB scan + UIManager stomp, attract -> title | O46 | `--dc3_headless_autonav` only |
+
+These were removed:
+
+| what | id | removed |
+|---|---|---|
+| "Transition diag": Executes `UIScreen::CheckIsLoaded/Exiting/Entering` off-thread | `seq.transition_diag` | deleted |
+| `--dc3_gameplay_probe` GATE PROBE / PKPROBE (guest Executes per frame) | – | deleted |
+
+## Instruments (no guest change)
+
+| what | where | notes |
+|---|---|---|
+| Debug::Fail tripwire | host probe thread (`dc3_fail_tripwire.cc`) | `--dc3_fail_tripwire` (on). Reads `TheDebug` 0x82F655D8 |
+| Override audit | same thread, every 30 s | per override: handler hits, `resolved_indirect` |
+| `gpState=` gameplay probe | pad poll (`dc3_scripted_input.cc`) | read-only; counted by the harness |
+| DTA channel | main-thread hook | `--dc3_dta_channel`. Scratch is allocated on the first request |
+| main-thread hook | `HolmesClientPollKeyboard` 0x825F0F78 override | installed only when a task exists (autonav or the DTA channel). It skips the stock body, which does nothing while `gHolmesStream` is 0 (logged; a non-zero value is logged as TAINTED) |
+| IK telemetry | code caves in the zero padding after `.text` | `--dc3_ik_telemetry`. Refuses if there is no padding. It no longer writes inside `UtilDrawPlane` |
+
+## Status legend
+
+| status | meaning |
+|---|---|
+| kept (NUI) | Needed until a NUI HLE with a pose source exists (analysis L8). A Kinect title genuinely requires it |
+| kept (L6) | Content/XAM enumeration, owned by a later lane |
+| `--dc3_headless_autonav` only | Harness automation. Off by default; the harness passes the cvar |
+| see results | Measured in this lane. The outcome is in `BASELINE.md` |
