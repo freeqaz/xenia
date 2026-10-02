@@ -98,10 +98,24 @@ void PollExtern(cpu::ppc::PPCContext* ctx, kernel::KernelState*) {
     }
     return;
   }
+  // A task's guest call can reach SystemPoll -> KeyboardPoll again (a load
+  // that pumps the frame loop); never run the tasks re-entrantly.
+  static thread_local int t_depth = 0;
+  if (t_depth > 0) {
+    static std::atomic<int> nested{0};
+    if (nested++ < 5) {
+      XELOGW("DC3 main-thread hook: re-entered from a task's guest call "
+             "(poll #{}); tasks skipped",
+             n);
+    }
+    return;
+  }
+  ++t_depth;
   for (const auto& task : g_tasks) {
     task.fn(ts, n);
     *ctx = saved;
   }
+  --t_depth;
 }
 
 }  // namespace
