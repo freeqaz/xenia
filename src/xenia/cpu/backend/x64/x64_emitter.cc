@@ -125,15 +125,17 @@ const char* ClassifyNonTextExecutableTarget(Processor* processor,
   return nullptr;
 }
 
-// Gate for the above. The classification has exactly two consumers -- the
-// unresolved-call observer (the DC3 telemetry sink) and a rate-limited XELOGW
-// -- so it is only worth running while at least one of them can still use the
-// answer. Once the warning budget for a site is spent and telemetry is not
-// recording, the global-critical-region walk stops happening entirely.
+// Gate for the above: classify only while an unresolved-call observer (the
+// DC3 telemetry sink) is recording. The old gate also stayed open "until the
+// warning budget is spent" -- but the budget counter only advanced when a
+// non-.text target was FOUND, so for a clean title it never closed and every
+// ResolveFunction paid the GetModules() global-lock walk. The rate-limited
+// warning below is therefore only emitted under telemetry.
 static bool ShouldClassifyNonTextTarget(const std::atomic<int>& seen_count,
                                         int log_limit) {
-  return seen_count.load(std::memory_order_relaxed) <= log_limit ||
-         cpu::UnresolvedCallObserverIsActive();
+  (void)seen_count;
+  (void)log_limit;
+  return cpu::UnresolvedCallObserverIsActive();
 }
 
 const uint32_t X64Emitter::gpr_reg_map_[X64Emitter::GPR_COUNT] = {
