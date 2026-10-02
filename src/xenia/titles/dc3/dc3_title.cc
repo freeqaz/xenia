@@ -950,15 +950,14 @@ void ApplyDc3LaunchHooks(const titles::TitleLaunchContext& ctx) {
     // game_screen and song end 5/5 with no mFailing latch
     // (docs/fork/dc3/BASELINE.md, "B2 retirements").
 
-    constexpr uint32_t kContentMgrRefreshDone = 0x825FEB48;
-    with_patch_target("content.refresh_done", "ContentMgr::RefreshDone", kContentMgrRefreshDone, 8,
-                      [&](uint8_t* crd_ptr) {
-                        xe::store_and_swap<uint32_t>(crd_ptr + 0, 0x38600001);
-                        xe::store_and_swap<uint32_t>(crd_ptr + 4, 0x4E800020);
-                        XELOGI("DC3: Stubbed ContentMgr::RefreshDone at {:08X} "
-                               "to return true",
-                               kContentMgrRefreshDone);
-                      });
+    // (RETIRED 2026-10-02, lane nui-hle) content.refresh_done:
+    // ContentMgr::RefreshDone 0x825FEB48 -> `li r3,1; blr` (gap analysis O36,
+    // "content discovery never completes"). The cross-title enumerate chain
+    // it masked is implemented (XContentCreateCrossTitleEnumerator ->
+    // XamGetPrivateEnumStructureFromHandle -> XamTaskSchedule ->
+    // XMsgInProcessCall(0xFE, 0x2000E) -> XMsgCompleteIORequest, core-d2
+    // d056ec7c8), so PollRefresh finishes on its own: S1 x5 with the code
+    // deleted (docs/fork/dc3/BASELINE.md, "Lane NUI-HLE").
 
     constexpr uint32_t kSpeechGrammarUnload = 0x82439F38;
     with_patch_target("speech.grammar_unload", "SpeechMgr::Grammar::Unload", kSpeechGrammarUnload, 4,

@@ -40,7 +40,6 @@ constexpr const char* kKnownIds[] = {
     "content.wipe",
     "nui.get_next_frame",
     "saveload.activate",
-    "content.refresh_done",
     "speech.grammar_unload",
     "calib.player_present_guard",
     "calib.choose_player_sides",

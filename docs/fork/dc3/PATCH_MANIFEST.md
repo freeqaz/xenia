@@ -45,7 +45,6 @@ tools/fork-regress/compare.py --paired out/cand out/ctrl
 | `mmio.soft_fault_range` | 0x83320000-0x836C0000 | MMIO write soft-fault range | O48: decomp `.data`, **outside the original image** | kept: inert on the original, decomp-only |
 | `content.wipe` | host FS | `remove_all(<content>/373307D9)` | O47 | **default off** (`--dc3_clean_content_cache=false`) |
 | `saveload.activate` | `SaveLoadManager::Activate` 0x82894A10 | `blr` | O37 | kept (L6, content/XAM) |
-| `content.refresh_done` | `ContentMgr::RefreshDone` 0x825FEB48 | `return 1` | O36: XAM cross-title enumeration | kept (L6) |
 | `speech.grammar_unload` | `SpeechMgr::Grammar::Unload` 0x82439F38 | `blr` | O7: the NUI S_OK stubs | kept (NUI) |
 | `calib.player_present_guard`, `calib.choose_player_sides`, `calib.warning_data`, `calib.nav_data`, `calib.wait_recovery`, `calib.exit_controller_mode` | SkeletonChooser / ShellInput (0x8290834C, 0x82909968, 0x82907880, 0x82909340, 0x82904CD0, 0x82902748) | `nop` / `blr` / rewrite | O8-O13: a constant skeleton is not a calibrated player | kept (NUI) |
 | `game.pause_for_skeleton_loss` | `Game::PauseForSkeletonLoss` 0x82866D50 | `blr` | O14 | kept (NUI) |
@@ -127,6 +126,15 @@ table, so naming one in `--dc3_disable_hacks` is now a launch error.
 | `input.attract_force` | scripted-input adapter | 4 MiB heap scan + UIManager stomp attract -> title (O46) | The attract press goes through the game: attract -> autosave_warning -> title (e7, e13) |
 | `anim.song_anim_expert` | `HamDirector::SongAnim` 0x82475578 -> `li r4,2; b SongAnimByDifficulty` | "routine-builder anim empty headless, the remixer never runs" (O34) | Self-sustaining: `MoveMgr::InsertMoveInSong` writes the remix into `TheHamDirector->SongAnim(player)`, which the patch made the authored EXPERT song.anim. DTA, patch on: SongAnim = song.anim, 85 clip keys, routine-builder 0. Off: SongAnim = player_1_routine_builder.anim, 71 keys, expert song.anim back to its authored 17. S2 2/2 PASS off (e3). **Intentional oracle change**: the dancers now evaluate the remixed routine, as on the 360 |
 | decomp `UIManager::GotoFirstScreen` | decomp layout | "ChunkStream's async I/O threads fail to start" (same race) | same |
+
+## Retired in lane NUI-HLE (2026-10-02)
+
+Measured in `BASELINE.md`, "Lane NUI-HLE". The ids are gone from the
+known-id table.
+
+| id | site | why it existed | evidence it is gone for good |
+|---|---|---|---|
+| `content.refresh_done` | `ContentMgr::RefreshDone` 0x825FEB48 -> `li r3,1; blr` | O36: "content discovery never completes" (XAM cross-title enumeration) | core-d2 `d056ec7c8`: S1 PASS with `--dc3_disable_hacks=content.refresh_done` on main `1f309687c` and on core-d2 (whole song, gpState=3 at 198-204 s). The chain is implemented: `XContentCreateCrossTitleEnumerator` -> `XamGetPrivateEnumStructureFromHandle` -> `XamTaskSchedule` -> `XMsgInProcessCall(0xFE, 0x2000E)` -> `XMsgCompleteIORequest`. This lane: S1 x5 with the code deleted, interleaved with main `3cf2e27c3` (BASELINE.md) |
 
 ## Status legend
 
