@@ -2536,10 +2536,13 @@ struct UNPACK : Sequence<UNPACK, I<OPCODE_UNPACK, V128Op, V128Op>> {
     e.vpor(i.dest, e.GetXmmConstPtr(XMMOne));
     // To convert to 0 to 1, games multiply by 0x47008081 and add 0xC7008081.
   }
-  static __m128 EmulateFLOAT16_2(void*, __m128i src1) {
+  // The emitter passes the stashed source by pointer (lea of the stash slot),
+  // like the other SysV-safe helpers in this file; taking __m128i by value
+  // read garbage from xmm0 on a non-F16C host.
+  static __m128 EmulateFLOAT16_2(void*, const vec128_t* src1_ptr) {
     alignas(16) uint16_t a[8];
     alignas(16) float b[4];
-    _mm_store_si128(reinterpret_cast<__m128i*>(a), src1);
+    std::memcpy(a, src1_ptr, sizeof(a));
 
     for (int i = 0; i < 2; i++) {
       b[i] = half_float::detail::half2float(a[VEC128_W(6 + i)]);
@@ -2593,10 +2596,13 @@ struct UNPACK : Sequence<UNPACK, I<OPCODE_UNPACK, V128Op, V128Op>> {
       e.vmovaps(i.dest, e.xmm0);
     }
   }
-  static __m128 EmulateFLOAT16_4(void*, __m128i src1) {
+  // The emitter passes the stashed source by pointer (lea of the stash slot),
+  // like the other SysV-safe helpers in this file; taking __m128i by value
+  // read garbage from xmm0 on a non-F16C host.
+  static __m128 EmulateFLOAT16_4(void*, const vec128_t* src1_ptr) {
     alignas(16) uint16_t a[8];
     alignas(16) float b[4];
-    _mm_store_si128(reinterpret_cast<__m128i*>(a), src1);
+    std::memcpy(a, src1_ptr, sizeof(a));
 
     for (int i = 0; i < 4; i++) {
       b[i] = half_float::detail::half2float(a[VEC128_W(4 + i)]);
