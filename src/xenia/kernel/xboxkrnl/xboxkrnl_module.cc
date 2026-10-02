@@ -160,6 +160,28 @@ XboxkrnlModule::XboxkrnlModule(Emulator* emulator, KernelState* kernel_state)
       "xboxkrnl.exe", ordinals::ExConsoleGameRegion, pExConsoleGameRegion);
   xe::store<uint32_t>(lpExConsoleGameRegion, 0xFFFFFFFF);
 
+  // ExEventObjectType - pointer to object type structure
+  // Games pass this to ObOpenObjectByName/ObCreateObject for events.
+  uint32_t pExEventObjectType = memory_->SystemHeapAlloc(4);
+  export_resolver_->SetVariableMapping(
+      "xboxkrnl.exe", ordinals::ExEventObjectType, pExEventObjectType);
+  xe::store_and_swap<uint32_t>(memory_->TranslateVirtual(pExEventObjectType),
+                               0xD00BEEF0);
+
+  // ExThreadObjectType - pointer to object type structure
+  uint32_t pExThreadObjectType = memory_->SystemHeapAlloc(4);
+  export_resolver_->SetVariableMapping(
+      "xboxkrnl.exe", ordinals::ExThreadObjectType, pExThreadObjectType);
+  xe::store_and_swap<uint32_t>(memory_->TranslateVirtual(pExThreadObjectType),
+                               0xD00BEEF1);
+
+  // ExSemaphoreObjectType - pointer to object type structure
+  uint32_t pExSemaphoreObjectType = memory_->SystemHeapAlloc(4);
+  export_resolver_->SetVariableMapping(
+      "xboxkrnl.exe", ordinals::ExSemaphoreObjectType, pExSemaphoreObjectType);
+  xe::store_and_swap<uint32_t>(
+      memory_->TranslateVirtual(pExSemaphoreObjectType), 0xD00BEEF2);
+
   // XexExecutableModuleHandle (?**)
   // Games try to dereference this to get a pointer to some module struct.
   // So far it seems like it's just in loader code, and only used to look up
