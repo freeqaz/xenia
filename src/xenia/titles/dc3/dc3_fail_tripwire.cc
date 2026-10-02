@@ -12,6 +12,7 @@
 #include <string>
 
 #include "xenia/base/byte_order.h"
+#include "xenia/base/exception_handler.h"
 #include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
 #include "xenia/cpu/processor.h"
@@ -134,6 +135,9 @@ void TripwireThread(Memory* memory, cpu::Processor* processor,
   auto latched_since = start;
   bool latched_reported = false;
   bool main_scan_pending = false;
+  auto last_faults = start;
+  uint64_t last_segv = 0;
+  uint64_t last_xma = 0;
   XELOGI("DC3 TRIPWIRE: watching TheDebug {:08X} (mFailing +0x5, "
          "mFailThreadMsg +0x104)",
          kTheDebug);
@@ -199,6 +203,25 @@ void TripwireThread(Memory* memory, cpu::Processor* processor,
       XELOGE("DC3 TRIPWIRE: TAINTED at {}ms: Debug::mFailing LATCHED (set "
              "for 2 s); every later MILO_FAIL is silent. mFailThreadMsg={:08X}",
              ms, msg);
+    }
+    // Fault counters for the harness: every guest store to the XMA register
+    // aperture [0x7FEA0000,0x7FEB0000) is a trapped-and-emulated device
+    // register write (recovered by construction), so SIGSEGV alone counts
+    // real audio as faults. NON_XMA is the number that means "a guest access
+    // faulted". Logged when it changes, at most every 3 s.
+    if (now - last_faults >= std::chrono::seconds(3)) {
+      last_faults = now;
+      uint64_t segv = ExceptionHandler::GetSigsegvCount();
+      uint64_t xma = ExceptionHandler::GetXmaSoftFaultCount();
+      if (segv != last_segv || xma != last_xma) {
+        last_segv = segv;
+        last_xma = xma;
+        XELOGI("DC3 FAULTS ({}ms): SIGSEGV={} XMA={} NON_XMA={} "
+               "last_non_xma=0x{:X} rip=0x{:X}",
+               ms, segv, xma, segv - xma,
+               ExceptionHandler::GetLastRealFaultAddress(),
+               ExceptionHandler::GetLastRealFaultRip());
+      }
     }
     if (now - last_audit >= std::chrono::seconds(30)) {
       last_audit = now;

@@ -5,8 +5,17 @@ line (emitted every ~3 s), so every time is an upper bound good to +0..3 s.
 
 Harness contracts read here (cleanup must keep them or update this file in the
 same commit): `Thread Status Report (<ms>ms)… SIGSEGV=<n>`
-(emulator_headless.cc), `DC3 Script: wait_screen '<x>' SATISFIED` and
-`gpState=` (nop_input_driver.cc), `TIMEOUT: <ms>ms reached` (headless main).
+(emulator_headless.cc), `DC3 FAULTS (<ms>ms): SIGSEGV=<n> XMA=<m>
+NON_XMA=<k>` (titles/dc3/dc3_fail_tripwire.cc), `DC3 Script: wait_screen '<x>'
+SATISFIED` and `gpState=` (titles/dc3/dc3_scripted_input.cc), `TIMEOUT: <ms>ms
+reached` (headless main).
+
+Fault gate: every guest store to the XMA register aperture [0x7FEA0000,
+0x7FEB0000) is a trapped-and-emulated device register write, so with real XMA
+audio (titles/dc3 since the XMA stub went, 2026-10-02) SIGSEGV counts
+~100,000 benign faults per run. When the binary logs `DC3 FAULTS` lines the
+criterion is max NON_XMA == 0; older binaries (no such line) are still gated on
+max SIGSEGV == 0.
 """
 import re
 from pathlib import Path
@@ -21,6 +30,7 @@ MILESTONES = [
     ("first_gpstate3", re.compile(r"gpState=3")),
 ]
 TS_RE = re.compile(r"Thread Status Report \((\d+)ms\).*SIGSEGV=(\d+)")
+FAULTS_RE = re.compile(r"DC3 FAULTS \((\d+)ms\): SIGSEGV=(\d+) XMA=(\d+) NON_XMA=(\d+)")
 TIMEOUT_RE = re.compile(r"TIMEOUT: (\d+)ms reached")
 FAILMSG_RE = re.compile(r"mFailThreadMsg=([0-9A-Fa-f]+) '([^']*)'")
 TAINT_RE = re.compile(r"TAINTED")
@@ -49,6 +59,7 @@ def timeout_from_tail(log, tail_bytes=16384):
 
 def parse(log: Path) -> dict:
     now, seen, segv, gp2, reports = 0, {}, 0, 0, 0
+    xma, non_xma, fault_lines = 0, 0, 0
     timeout_line, fail_msgs, tainted = None, [], 0
     last_line = ""
     with open(log, errors="replace") as f:
@@ -59,6 +70,12 @@ def parse(log: Path) -> dict:
                 now = int(m.group(1))
                 segv = max(segv, int(m.group(2)))
                 reports += 1
+                continue
+            fl = FAULTS_RE.search(line)
+            if fl:
+                fault_lines += 1
+                xma = max(xma, int(fl.group(3)))
+                non_xma = max(non_xma, int(fl.group(4)))
                 continue
             if "gpState=2" in line and "paused=0" in line:
                 gp2 += 1
@@ -80,6 +97,9 @@ def parse(log: Path) -> dict:
                          for n, _ in MILESTONES},
         "gpstate2_paused0_samples": gp2,
         "max_sigsegv": segv,
+        # None = the binary does not log DC3 FAULTS (gate falls back to SIGSEGV).
+        "max_xma_faults": xma if fault_lines else None,
+        "max_non_xma_faults": non_xma if fault_lines else None,
         "status_reports": reports,
         "last_report_s": round(now / 1000, 1),
         "timeout_reached_ms": timeout_line,
@@ -108,8 +128,12 @@ def judge(m: dict, rc, timeout_ms_expected=None):
     crit = {
         "title_screen_le_s": TITLE_MAX_S, "game_screen_le_s": GAME_MAX_S,
         "gpstate2_paused0_samples_ge": GP2_MIN, "first_gpstate3": "seen",
-        "rc": 0, "timeout_line": "present", "max_sigsegv": 0,
+        "rc": 0, "timeout_line": "present",
     }
+    if m.get("max_non_xma_faults") is not None:
+        crit["max_non_xma_faults"] = 0
+    else:
+        crit["max_sigsegv"] = 0
     if ms["title_screen"] is None or ms["title_screen"] > TITLE_MAX_S:
         reasons.append(f"title_screen {ms['title_screen']} s (want <= {TITLE_MAX_S})")
     if ms["game_screen"] is None or ms["game_screen"] > GAME_MAX_S:
@@ -122,7 +146,11 @@ def judge(m: dict, rc, timeout_ms_expected=None):
         reasons.append(f"rc {rc} != 0")
     if m["timeout_reached_ms"] is None:
         reasons.append("no 'TIMEOUT: <ms>ms reached' line (did not run to its own timeout)")
-    if m["max_sigsegv"] != 0:
+    if m.get("max_non_xma_faults") is not None:
+        if m["max_non_xma_faults"] != 0:
+            reasons.append(f"max NON_XMA faults {m['max_non_xma_faults']} != 0 "
+                           f"(SIGSEGV {m['max_sigsegv']}, XMA {m['max_xma_faults']})")
+    elif m["max_sigsegv"] != 0:
         reasons.append(f"max SIGSEGV {m['max_sigsegv']} != 0")
     return reasons, crit
 
