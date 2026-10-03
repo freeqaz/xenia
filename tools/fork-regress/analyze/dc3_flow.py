@@ -43,7 +43,12 @@ FAULTS_RE = re.compile(r"DC3 FAULTS \((\d+)ms\): SIGSEGV=(\d+) XMA=(\d+) NON_XMA
 # ('TIMEOUT: i> 001445C9 230000ms reachedTimeout of 230000ms reached, ...',
 # measured 2026-10-03 on an S1V run, ~1000 lines before the end of the log, so
 # outside timeout_from_tail's window).
-TIMEOUT_RE = re.compile(r"TIMEOUT: (?:[a-zA-Z!]> [0-9A-Fa-f]{8} )?(\d+)ms reached")
+# The same branch of emulator_headless.cc first logs a whole XELOGI line,
+# 'Timeout of <ms>ms reached, terminating...', which cannot be split; it is
+# accepted too (S1V x2 run-02, 2026-10-03: the cout line was split by ten
+# XMA lines).
+TIMEOUT_RE = re.compile(r"TIMEOUT: (?:[a-zA-Z!]> [0-9A-Fa-f]{8} )?(\d+)ms reached"
+                        r"|Timeout of (\d+)ms reached, terminating")
 FAILMSG_RE = re.compile(r"mFailThreadMsg=([0-9A-Fa-f]+) '([^']*)'")
 TAINT_RE = re.compile(r"TAINTED")
 SONG_RE = re.compile(r"DC3 Script: song '([^']*)'")
@@ -107,7 +112,7 @@ def parse(log: Path) -> dict:
                     seen[name] = now
             t = TIMEOUT_RE.search(line)
             if t:
-                timeout_line = int(t.group(1))
+                timeout_line = int(t.group(1) or t.group(2))
             fm = FAILMSG_RE.search(line)
             if fm and fm.group(2) not in fail_msgs:
                 fail_msgs.append(fm.group(2))
