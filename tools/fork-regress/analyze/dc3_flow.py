@@ -39,7 +39,11 @@ MILESTONES = [
 ]
 TS_RE = re.compile(r"Thread Status Report \((\d+)ms\).*SIGSEGV=(\d+)")
 FAULTS_RE = re.compile(r"DC3 FAULTS \((\d+)ms\): SIGSEGV=(\d+) XMA=(\d+) NON_XMA=(\d+)")
-TIMEOUT_RE = re.compile(r"TIMEOUT: (\d+)ms reached")
+# Another thread's log prefix can land between "TIMEOUT: " and the number
+# ('TIMEOUT: i> 001445C9 230000ms reachedTimeout of 230000ms reached, ...',
+# measured 2026-10-03 on an S1V run, ~1000 lines before the end of the log, so
+# outside timeout_from_tail's window).
+TIMEOUT_RE = re.compile(r"TIMEOUT: (?:[a-zA-Z!]> [0-9A-Fa-f]{8} )?(\d+)ms reached")
 FAILMSG_RE = re.compile(r"mFailThreadMsg=([0-9A-Fa-f]+) '([^']*)'")
 TAINT_RE = re.compile(r"TAINTED")
 SONG_RE = re.compile(r"DC3 Script: song '([^']*)'")
