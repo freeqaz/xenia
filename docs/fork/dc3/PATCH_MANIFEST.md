@@ -22,7 +22,7 @@ Scope:
 
 ```
 tools/fork-regress/ab.sh $BIN out/cand $BIN out/ctrl --scenarios S1 --repeat 5 \
-    --lock /home/free/tmp/fork-regress.lock --extra-a "--dc3_disable_hacks=<id>"
+    --slot --extra-a "--dc3_disable_hacks=<id>"
 tools/fork-regress/compare.py --paired out/cand out/ctrl
 ```
 

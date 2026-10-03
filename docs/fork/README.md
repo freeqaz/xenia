@@ -21,7 +21,7 @@ differs from the baseline.
 
 | Doc | What it is |
 |---|---|
-| [cleanup/FORK_CLEANUP_PLAN.md](cleanup/FORK_CLEANUP_PLAN.md) | **Current plan.** Classification of every fork change, target layout, lanes. |
+| [cleanup/FORK_CLEANUP_PLAN.md](cleanup/FORK_CLEANUP_PLAN.md) | The cleanup plan: classification of every fork change, target layout, lanes. Phases 0-3 are done (tag `fork-cleanup-2026-10`); the open work is the DC3 hacks still listed in the gap analysis and the NUI device. |
 | [`tools/fork-regress/README.md`](../../tools/fork-regress/README.md) | The regression harness (scenarios S0-S6, baselines, load gate). Every lane runs it. |
 | [cleanup/DC3_HACK_GAP_ANALYSIS.md](cleanup/DC3_HACK_GAP_ANALYSIS.md) | What each DC3 hack masks, and the real Xenia fix that would replace it. |
 
@@ -46,8 +46,9 @@ Only `xenia-headless` links the title modules (`xenia-titles*`). To confirm,
 run `nm -C build/bin/Linux/Checked/xenia | grep -E 'Dc3|Rb3'`. It shows only
 the per-title cvar profile in `titles/title_profile.cc`, which is core.
 
-Run scenarios through the harness rather than by hand
-(`flock /home/free/tmp/fork-regress.lock tools/fork-regress/run.sh <bin> <out> --scenarios S1`).
+Run scenarios through the harness rather than by hand, inside a shared slot
+(`tools/fork-regress/slot.sh tools/fork-regress/run.sh <bin> <out> --scenarios S1`;
+`ab.sh --slot` takes one per run).
 A by-hand run must pass a private `--storage_root`, or Xenia rewrites the shared
 `~/.local/share/Xenia/xenia.config.toml`.
 
@@ -66,7 +67,7 @@ A by-hand run must pass a private `--storage_root`, or Xenia rewrites the shared
 | Doc | |
 |---|---|
 | [core/TITLE_PROFILE.md](core/TITLE_PROFILE.md) | The per-title cvar profile (`titles/title_profile.cc`): when it applies, precedence, and the evidence for each DC3/RB3 mitigation it sets. |
-| [core/GUEST_EXCEPTIONS.md](core/GUEST_EXCEPTIONS.md) | Guest SEH / C++ exception dispatch: today's `RtlRaiseException`/`RtlUnwind` behaviour and the design for real dispatch (gap G13). Designed, not implemented. |
+| [core/GUEST_EXCEPTIONS.md](core/GUEST_EXCEPTIONS.md) | Guest SEH / C++ exception dispatch (gap G13): the MSVC C++ catch path is built (`.pdata` lookup, PPC virtual unwind, dispatch, unwind); SEH `__except` and cross-frame unwinds are not. |
 
 ### Kinect / NUI (`nui/`)
 
