@@ -61,7 +61,10 @@ GP2_MIN = 60
 
 
 
-def timeout_from_tail(log, tail_bytes=16384):
+# 1 MiB: on S1V with inline render the XMA threads keep logging after the
+# timeout, and the TIMEOUT line was measured ~1000 lines (~70 KB) before the
+# end of the log (2026-10-03), split by a whole XmaContext line.
+def timeout_from_tail(log, tail_bytes=1 << 20):
     """`TIMEOUT: <ms>ms reached` is printed by the headless main thread while
     other threads are still logging, so it can be split across lines
     ('i> F8000004 XE_SWAPTIMEOUT: \\n230000ms reached', measured). Search the
