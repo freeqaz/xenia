@@ -114,11 +114,27 @@ def build_premake():
           'windows',
           ], shell=False)
     else:
+      # The pinned premake-core's bundled libzip calls close() and getpid()
+      # without including <unistd.h> on non-Windows hosts (zip_close.c guards
+      # the include behind HAVE_UNISTD_H, which nothing defines; mkstemp.c has
+      # no include at all). GCC 14+ and Clang 16+ make implicit function
+      # declarations a hard error in C99 and later, so the bootstrap fails on
+      # current toolchains. Define the autoconf macro that any POSIX host
+      # would have, and keep the remaining implicit getpid() a warning (its
+      # implicit `int` return is pid_t on Linux). Passed through CFLAGS, which
+      # the generated bootstrap makefiles append, so the submodule stays
+      # unmodified.
+      env = os.environ.copy()
+      env['CFLAGS'] = ' '.join(filter(None, [
+          env.get('CFLAGS', ''),
+          '-DHAVE_UNISTD_H',
+          '-Wno-error=implicit-function-declaration',
+          ]))
       subprocess.call([
           'make',
           '-f', 'Bootstrap.mak',
           'linux',
-          ], shell=False)
+          ], shell=False, env=env)
   finally:
     os.chdir(cwd)
   pass

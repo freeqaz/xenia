@@ -127,6 +127,21 @@ filter({"platforms:Linux", "toolset:gcc"})
     })
   end
 
+-- Vendored headers are included by Xenia's own sources as
+-- "third_party/<lib>/...", resolved through the "." and "third_party" include
+-- roots, so an -isystem directory can't single them out without also covering
+-- src/. Mark them as system headers by include spelling instead: newer Clang
+-- diagnoses pinned upstream headers (fmt and date's `operator"" _x`
+-- -Wdeprecated-literal-operator, imgui's memset(this) -Wnontrivial-memcall,
+-- cxxopts' -(min)() -Winteger-overflow) and FatalWarnings would otherwise turn
+-- that into a build failure in every Xenia project that includes them. Xenia's
+-- own headers and sources keep full warnings-as-errors; third-party projects
+-- already build without FatalWarnings (see the loop in the workspace below).
+filter({"platforms:Linux", "toolset:clang"})
+  buildoptions({
+    "--system-header-prefix=third_party/",
+  })
+
 filter({"platforms:Linux", "language:C++", "toolset:clang"})
   disablewarnings({
     "deprecated-register"
