@@ -213,7 +213,7 @@ echo "[manifest]"
   cd "$C"
   # Real files: sha256. Symlinked disc data (~6 GB): size + mtime + target,
   # which is what changes if the torrent dir is re-downloaded.
-  find . -type f ! -name MANIFEST.sha256 -printf '%P\n' | sort | while read -r f; do
+  find . -type f ! -name MANIFEST.sha256 ! -path './s1v-pcache/*' -printf '%P\n' | sort | while read -r f; do
     printf '%s  %s\n' "$(sha "$f")" "$f"
   done
   find . -type l -printf '%P\n' | sort | while read -r f; do
@@ -222,3 +222,12 @@ echo "[manifest]"
   done
 ) > "$C/MANIFEST.sha256"
 echo "  $(grep -vc '^symlink' "$C/MANIFEST.sha256") files, $(grep -c '^symlink' "$C/MANIFEST.sha256") symlinks -> $C/MANIFEST.sha256"
+
+# S1V's warm pipeline cache is NOT made here: it is a run output (the first S1V
+# PASS writes it; README "S1V pipeline cache") and it is mutable, so it stays
+# out of the manifest above.
+if [ -s "$C/s1v-pcache/xenia_vulkan_pipeline_cache.bin" ]; then
+  echo "[s1v] warm pipeline cache: $(stat -c %s "$C/s1v-pcache/xenia_vulkan_pipeline_cache.bin") B (not in the manifest)"
+else
+  echo "[s1v] no warm pipeline cache yet: the first S1V PASS writes $C/s1v-pcache/ (README \"S1V pipeline cache\")"
+fi

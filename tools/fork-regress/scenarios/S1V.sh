@@ -18,12 +18,38 @@ if command -v nvidia-smi >/dev/null; then
     exit 0
   fi
 fi
+# Inline render (draws + resolves every frame, so the capture reads the
+# frontbuffer the title resolved) starts from a persistent warm pipeline cache
+# kept with the pinned content. It is copied INTO the run's private cache dir
+# here and copied back by S1V.post.sh only after a PASS, so concurrent runs never
+# write the shared copy in place. With no seed the run starts cold and its PASS
+# writes the seed: a fully cold start (no xenia cache, empty driver cache) does
+# NOT deadlock on this capture flow, with or without async pipelines (measured
+# 2026-10-03; README "S1V pipeline cache"). FR_S1V_COLD_CACHE=1 ignores the
+# seed, to measure a cold start on purpose.
+PCACHE_SEED="$(s1v_pcache_seed)"
+PCACHE_FROM=seed
+if [ "${FR_S1V_COLD_CACHE:-0}" = 1 ]; then PCACHE_FROM=cold
+elif [ ! -s "$PCACHE_SEED" ]; then PCACHE_FROM=cold-no-seed; fi
 xr_begin
 dc3_original_args vulkan $(( (TIMEOUT_S - 10) * 1000 ))
 mkdir -p "$RD/frames" "$RD/pcache"
+SEED_SHA=""
+if [ "$PCACHE_FROM" = seed ]; then
+  cp "$PCACHE_SEED" "$RD/pcache/$(basename "$PCACHE_SEED")"
+  # Hashed now: the run rewrites its copy at exit.
+  SEED_SHA="$(sha256sum "$RD/pcache/$(basename "$PCACHE_SEED")" | awk '{print $1}')"
+fi
+export XR_META_EXTRA="{\"s1v_pcache\": \"$PCACHE_FROM\", \"s1v_pcache_seed_sha256\": \"$SEED_SHA\"}"
 xr_arg "--vulkan_device=$DEV" "--dump_frames_path=$RD/frames" --headless_capture_interval=300
-# A private pipeline cache: the default is a shared /tmp path.
+# The run's PRIVATE pipeline cache (seeded above): the default is a shared path.
 xr_opt vulkan_pipeline_cache_path "$RD/pcache"
+# Inline render: the deferred replay drops 299 of every 300 frames' draws and
+# replays the 300th against guest memory the title has since rewritten; its
+# gameplay captures are mostly black|blue clears (README, S1V). Older binaries
+# spell it dc3_inline_render; one predating both is recorded as dropped.
+if has_cvar headless_inline_render; then xr_arg --headless_inline_render=true
+else xr_opt dc3_inline_render true; fi
 # The capture-path cvars default to upstream behaviour (false) since Lane E;
 # this scenario's measurement is the fork's capture flow, so opt in. xr_opt
 # drops them on a binary that predates them (where they were already true).

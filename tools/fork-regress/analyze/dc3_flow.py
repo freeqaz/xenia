@@ -39,7 +39,16 @@ MILESTONES = [
 ]
 TS_RE = re.compile(r"Thread Status Report \((\d+)ms\).*SIGSEGV=(\d+)")
 FAULTS_RE = re.compile(r"DC3 FAULTS \((\d+)ms\): SIGSEGV=(\d+) XMA=(\d+) NON_XMA=(\d+)")
-TIMEOUT_RE = re.compile(r"TIMEOUT: (\d+)ms reached")
+# Another thread's log prefix can land between "TIMEOUT: " and the number
+# ('TIMEOUT: i> 001445C9 230000ms reachedTimeout of 230000ms reached, ...',
+# measured 2026-10-03 on an S1V run, ~1000 lines before the end of the log, so
+# outside timeout_from_tail's window).
+# The same branch of emulator_headless.cc first logs a whole XELOGI line,
+# 'Timeout of <ms>ms reached, terminating...', which cannot be split; it is
+# accepted too (S1V x2 run-02, 2026-10-03: the cout line was split by ten
+# XMA lines).
+TIMEOUT_RE = re.compile(r"TIMEOUT: (?:[a-zA-Z!]> [0-9A-Fa-f]{8} )?(\d+)ms reached"
+                        r"|Timeout of (\d+)ms reached, terminating")
 FAILMSG_RE = re.compile(r"mFailThreadMsg=([0-9A-Fa-f]+) '([^']*)'")
 TAINT_RE = re.compile(r"TAINTED")
 SONG_RE = re.compile(r"DC3 Script: song '([^']*)'")
@@ -57,7 +66,10 @@ GP2_MIN = 60
 
 
 
-def timeout_from_tail(log, tail_bytes=16384):
+# 1 MiB: on S1V with inline render the XMA threads keep logging after the
+# timeout, and the TIMEOUT line was measured ~1000 lines (~70 KB) before the
+# end of the log (2026-10-03), split by a whole XmaContext line.
+def timeout_from_tail(log, tail_bytes=1 << 20):
     """`TIMEOUT: <ms>ms reached` is printed by the headless main thread while
     other threads are still logging, so it can be split across lines
     ('i> F8000004 XE_SWAPTIMEOUT: \\n230000ms reached', measured). Search the
@@ -100,7 +112,7 @@ def parse(log: Path) -> dict:
                     seen[name] = now
             t = TIMEOUT_RE.search(line)
             if t:
-                timeout_line = int(t.group(1))
+                timeout_line = int(t.group(1) or t.group(2))
             fm = FAILMSG_RE.search(line)
             if fm and fm.group(2) not in fail_msgs:
                 fail_msgs.append(fm.group(2))
