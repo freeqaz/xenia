@@ -207,6 +207,18 @@ To re-seed, delete `s1v-pcache/` and run S1V once. The cache depends on the
 binary's shader translation and the driver, so a mismatched file costs compile
 time and is not a correctness problem.
 
+**S1V x2 with this scenario** (main `b7569fe3b`'s Checked binary, seeded,
+2026-10-03): both runs PASS.
+
+| run | load mean | game_screen / gpState=3 | frames | blank game_screen captures | kept-frame quadrants |
+|---|---|---|---|---|---|
+| run-01 | 49 | 36 s / 192 s | 26 | 0 of 17 | 39.7 and above |
+| run-02 | 38 | 33 s / 189 s | 34 | 0 of 23 | 40.8 and above |
+
+An earlier pair from the same binary hit two different splits of the stdout
+TIMEOUT line, which the dc3_flow fixes on this branch now handle. Re-judged,
+that pair also PASSes.
+
 ## Pinned inputs
 
 Content: `build_content.sh` → `$FORK_REGRESS_CONTENT` (default
