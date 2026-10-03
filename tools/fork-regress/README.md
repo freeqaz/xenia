@@ -11,6 +11,13 @@ tools/fork-regress/compare.py baselines/<ref>.json <out-dir>   # exit 0 ok / 1 r
 tools/fork-regress/load_evidence.py <out-dir>...         # outcome vs host load table
 ```
 
+**Sharing the host.** Several lanes run the harness at once. Wrap each
+`run.sh` call in `tools/fork-regress/slot.sh` (or pass `ab.sh --slot`): three
+slots, at most one per owner (`$FR_SLOT_OWNER`, else the lane path in the
+arguments, else the working directory's name), and slots 2-3 only while the
+1-minute load is below 40. Hold a slot for one run, never for a whole sequence.
+`/home/free/tmp/fr-slot.sh` is a symlink to this script on the dev host.
+
 Runs need the sandbox off (`dangerouslyDisableSandbox: true`): they exec the
 emulator, open unix sockets, and S1V uses GPU 1.
 
