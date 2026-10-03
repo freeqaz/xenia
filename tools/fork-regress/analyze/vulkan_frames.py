@@ -26,7 +26,11 @@ dc3_flow = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(dc3_flow)
 
 CAPTURE_RE = re.compile(r"VdSwap #(\d+):.*\[CAPTURE\]")
-SAT_RE = re.compile(r"wait_screen '(\w+)' SATISFIED")
+# A flow's wait_screen, or the adapter's screen-change line. The second is the
+# only record of game_screen: the shared ymca flow never waits on it, so
+# without it every gameplay capture stayed tagged multiuser_screen and the
+# kept frame fell back to the last swap (post-song).
+SAT_RE = re.compile(r"wait_screen '(\w+)' SATISFIED|DC3 Script: screen -> '(\w+)'")
 MIN_FRAMES = 10
 # Swaps after game_screen SATISFIED before the kept frame: past the transition.
 KEEP_AFTER_CAPTURES = 2
@@ -82,7 +86,7 @@ def analyze(run_dir: Path, meta: dict):
         for line in f:
             s = SAT_RE.search(line)
             if s:
-                current = s.group(1)
+                current = s.group(1) or s.group(2)
                 continue
             c = CAPTURE_RE.search(line)
             if c:
