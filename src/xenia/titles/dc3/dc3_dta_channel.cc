@@ -204,7 +204,12 @@ bool Plausible(uint32_t addr) {
   if (addr < 0x00010000u || addr >= 0xA0000000u) return false;
   return g_channel->memory->LookupHeap(addr) != nullptr;
 }
-std::string ReadCString(uint32_t addr, size_t max = 4096) {
+// `max` bounds the read. Result strings pass kMaxResultBytes: a value longer
+// than that cannot fit the reply anyway, and Evaluate's output cap then clips
+// the reply and appends kTruncationNotice, the contract's explicit sentinel.
+// (This used to default to 4096 for every caller, which cut kDataString and
+// kDataSymbol results at 4 KB with no marker while the contract promised 32 KB.)
+std::string ReadCString(uint32_t addr, size_t max) {
   std::string s;
   if (!Plausible(addr)) return "<bad-string>";
   for (size_t i = 0; i < max; ++i) {
@@ -341,6 +346,10 @@ void PrintArray(std::string& out, uint32_t array, char open, char close,
 }
 
 void PrintNode(std::string& out, uint32_t node, int depth) {
+  // Past the reply cap nothing more can be shown; Evaluate clips and appends
+  // the truncation notice. Stops a 256-element array of long strings from
+  // reading megabytes of guest memory first.
+  if (out.size() >= kMaxResultBytes) return;
   if (!Plausible(node)) {
     out += "<bad-node>";
     return;
@@ -365,12 +374,13 @@ void PrintNode(std::string& out, uint32_t node, int depth) {
       break;
     }
     case kDataSymbol:
-      out += Plausible(value) ? ReadCString(value) : "<bad-symbol>";
+      out += Plausible(value) ? ReadCString(value, kMaxResultBytes)
+                              : "<bad-symbol>";
       break;
     case kDataString:
       // value is a DataArray whose mNodes word is the char buffer.
       out.push_back('"');
-      if (Plausible(value)) out += ReadCString(Load32(value));
+      if (Plausible(value)) out += ReadCString(Load32(value), kMaxResultBytes);
       out.push_back('"');
       break;
     case kDataObject:
