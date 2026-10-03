@@ -131,8 +131,14 @@ fi
 # `git worktree add` does NOT populate submodules — they come up empty. The
 # build needs their .cc sources (e.g. third_party/fmt/src/format.cc). Reflink
 # the main repo's checked-out submodule working trees in; this gives the EXACT
-# sources the reflinked object cache was built against (including any locally
-# patched submodule content), for free on CoW.
+# sources the reflinked object cache was built against, for free on CoW.
+# The main repo's submodules are expected to be pristine: the build no longer
+# needs local submodule edits (premake5.lua, tools/build/premake).
+# Each copy's `.git` gitfile is dropped: it says `gitdir: ../../.git/modules/..`,
+# which from a worktree (whose .git is a file) points nowhere, and made every
+# plain `git status` in the worktree die with "gitfile does not point to a
+# valid repository". Without it the copies are plain read-only source trees and
+# git reports the submodules as unpopulated, which is what they are here.
 echo "==> third_party submodules  (reflink copy — pinned sources)"
 while read -r _ SUBPATH; do
     [ -n "$SUBPATH" ] || continue
@@ -143,6 +149,7 @@ while read -r _ SUBPATH; do
     rm -rf "$DST"
     mkdir -p "$(dirname "$DST")"
     cp -a --reflink=auto "$SRC" "$DST"
+    [ -f "$DST/.git" ] && rm -f "$DST/.git"
 done < <(git -C "$MAIN_REPO" config --file .gitmodules --get-regexp path | awk '{print $1, $2}')
 
 # ---- warm the object cache : stamp it newer than the source tree ------------
