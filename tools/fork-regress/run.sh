@@ -154,6 +154,11 @@ for S in "${LIST[@]}"; do
       "$HARNESS/scenarios/$S.sh" "$rd" "$i"
       "$PY" "$HARNESS/lib/fr.py" finalize "$S" "$rd" | sed 's/^/   /'
       v="$("$PY" "$HARNESS/lib/fr.py" verdict-of "$rd")"
+      # Optional per-scenario step that needs the verdict (S1V: write back
+      # its warm pipeline cache only after a PASS).
+      if [ -x "$HARNESS/scenarios/$S.post.sh" ]; then
+        "$HARNESS/scenarios/$S.post.sh" "$rd" "$v" | sed 's/^/   /'
+      fi
       [ "$v" = INCONCLUSIVE ] || break
     done
   done

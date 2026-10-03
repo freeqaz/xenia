@@ -151,6 +151,10 @@ PY
   return 0
 }
 
+# S1V's persistent warm pipeline cache (mutable state, NOT pinned content:
+# excluded from MANIFEST.sha256; each run records the sha256 it started from).
+s1v_pcache_seed() { echo "$CONTENT/s1v-pcache/xenia_vulkan_pipeline_cache.bin"; }
+
 # Common DC3-original-layout cvars (the oracle command, docs/dc3-oracle).
 # The resolver inputs are passed EXPLICITLY so no host path is auto-probed.
 dc3_original_args() {

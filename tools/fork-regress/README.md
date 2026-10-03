@@ -27,7 +27,7 @@ emulator, open unix sockets, and S1V uses GPU 1.
 |---|---|---|---|---|
 | S0 | nothing (static) | the binary's compiled-in cvar defaults (full map); source ratchets on this tree: title-ID literals outside `src/xenia/titles/`, `/home/free` in `src/`, `XELOGI(` in `src/xenia/gpu/`; the title-ID **allow-list** | measurements taken, and no title-ID line (`373307D9`/`45410914`, any case, `0x` optional, or `kTitleDc3`/`kTitleRb3`) outside `src/xenia/titles/` beyond `scenarios/S0.title-id-allowlist` (path, max lines, reason; a file below its allowance is reported as a stale entry); the comparator lists every changed default and fails a ratchet increase | 1 (1) |
 | S1 | DC3 original `debug.xex`, null GPU, the shared flow `flows/dc3-ymca.txt` (native-port semantics, frame clock), 230 s (the dc3-oracle command) | milestone times title/main/choose_mode/song_select/game_screen, first `gpState=2 paused=0`, first `gpState=3`, gpState=2 sample count, max SIGSEGV, `mFailThreadMsg`/TAINTED lines | title ≤ 30 s, game_screen ≤ 60 s, ≥ 60 gpState=2 samples, gpState=3 seen, rc 0 + `TIMEOUT` line, NON_XMA 0 (SIGSEGV 0 on a binary without `DC3 FAULTS`), song (`DC3 Script: song`) == `ymca` on a binary whose adapter logs `screen ->` lines | 5 (2): the reference chan5 passes only 5 of 8 flows on a quiet host, so "2 of 3" would fail a good binary 32% of the time |
-| S1V | S1 on Vulkan, `--vulkan_device=1`, capture every 300 swaps, private pipeline cache | frame count, capture swap indices, flow milestones, Milo fail-screen frames (first swap, screen, PNG); keeps one PNG from game_screen (else the furthest screen) | rc 0 + TIMEOUT, title reached, ≥ 10 frames, kept frame not a uniform fill. game_screen and the fail screen are recorded, not required: on chan5 and both BASELINE.md runs the Vulkan run hits a MILO_FAIL at song_select (`Could not find preview.tmov in dir song_info`) from swap 1200 | 1 (1) |
+| S1V | S1 on Vulkan, `--vulkan_device=1`, capture every 300 swaps, `--headless_inline_render=true`, private pipeline cache seeded from the persistent warm cache (see "S1V pipeline cache") | frame count, capture swap indices, flow milestones, Milo fail-screen frames (first swap, screen, PNG); keeps one PNG from game_screen (else the furthest screen); per-quadrant stddev of the kept frame; `game_screen_blank_swaps` (captures failing the quadrant test, while the PPMs exist); `s1v_pcache` = seed / cold / cold-no-seed in run_meta | rc 0 + TIMEOUT, title reached, ≥ 10 frames, kept frame not a uniform fill, and **every quadrant of the kept frame has max-channel stddev ≥ 10** (a black\|blue half-and-half clear, the deferred-replay capture's usual output, has overall stddev ~74 but four flat quadrants). game_screen and the fail screen are recorded, not required | 1 (1) |
 | S2 | S1 + `--dc3_dta_channel=<run>/dta.sock`; `lib/dta_driver.py` drives `dc3-decomp/tools/console/dc3_eval.py -T xenia --socket` | channel installed, first poll thread, answers + latency, `object_list main` count, plus the S1 flow on the same run | thread `00000006`; `{+ 1 2}`→`=> 3`; `{no_such_func 1}`→`=> !! refused: script error…`; `{+ 5 5}`→`=> 10`; `{size {object_list main Object FALSE}}`→`=> <int>`; `{gamedata get song}` (sent once the song plays) == `ymca` (`FR_DTA_EXPECT_SONG`); S1 criteria | 2 (1) |
 | S3 | DC3 decomp-layout `default.xex` (2026-08-24 build), 120 s, pinned 2026-08-29 shared toml | count of `tw/td forced trap hit!` and the per-LR histogram (a fingerprint of how far the decomp image boots and through which assert sites) | count == 627 and histogram == `reference/trap627_s66.json`; `layout=decomp`; manifest-fingerprint-mismatch line; TIMEOUT; rc 0. LR sequence equality recorded, not required | 2 (2) |
 | S4 | RB3 clean retail TU5 (`clean_tu5_nodd.xex`), autopilot, mogg key table | screen timeline, tv3 screens, game_screen entry, song-stream census after game_screen | `app-run-direct installed`; main_hub, song_select, part_difficulty, tv3_* reached; with key: game_screen transState=0 and a stream at mState=3 with 11 receivers/11 channels; no `FAULT_LIVELOCK_ABORT`; rc 0. Without key: menu-only (transition to game_screen begins) | 2 (1) |
@@ -155,6 +155,58 @@ channels), so the song is a watched measurement, not a criterion. Three of
 assert `cs->owning_thread == 0` in RtlEnterCriticalSection
 (`xboxkrnl_rtl.cc:638`), the fork's CS fast path.
 
+## S1V pipeline cache
+
+Why inline render: measured 2026-10-03 on main `b7569fe3b`'s Checked binary,
+every game_screen capture of five S1V runs. The deferred replay (S1V before
+this change) kept 2 correct frames of 59; 51 were black|blue clears, bare or
+with a stray polygon, and 6 partial (dark fragments, a scene under a black
+blob). `--headless_inline_render=true`
+kept 47 of 47 correct (venue and dancers, intro shot, the tunnel transition,
+the Kinect camera panel). `--headless_capture_only_draws=false` on the deferred
+path gave 16 of 19 correct plus 3 with thin stray lines, so most of the damage
+is that the deferred path drops every non-capture frame's draws and resolves.
+
+The kept-frame quadrant criterion was checked against these runs with the new
+analyzer, re-run over their kept frames. The deferred baselines FAIL: main-keepfix
+2400 has quadrants `[29.2, 1.0, 29.0, 0.0]` and the second baseline's 2400 has
+`[18.5, 19.5, 0.0, 0.0]`. Inline render (two runs) and capture_only_draws=false
+PASS, with every quadrant at 40.9 or above. The previous analyzer PASSed all
+five.
+
+Inline render compiles pipelines on the CP thread, so with async pipelines a
+cold start skips draws until they compile. S1V therefore copies a persistent
+warm cache, `$FORK_REGRESS_CONTENT/s1v-pcache/xenia_vulkan_pipeline_cache.bin`,
+into the run's private `--vulkan_pipeline_cache_path` before the run.
+`scenarios/S1V.post.sh` (run.sh calls `<scenario>.post.sh <run-dir> <verdict>`
+after finalize when one exists) copies the run's cache back only after a
+**PASS**, only when it is at least as large as the seed (the cache is
+load + append), through a temp file and a rename. Concurrent runs read the old
+file or the new one and never write the shared copy in place.
+
+**Cold start, measured.** Both runs used inline render, no xenia cache, and
+a fresh empty NVIDIA driver cache (`__GL_SHADER_DISK_CACHE_PATH`; it filled to
+5.8 MB, so the driver did use it). Neither deadlocked:
+
+| run | async pipelines | load mean | verdict | game_screen / gpState=3 | frames | blank game_screen captures |
+|---|---|---|---|---|---|---|
+| cold3 | on (as S1V passes it) | 19 | PASS | 36 s / 192 s | 37 | 0 of 26 |
+| cold4 | off (`--extra-arg --headless_async_pipelines=false`) | 124 | PASS (loaded) | 39 s / 195 s | 30 | 0 of 20 |
+
+The 2026-06 doc's cold-compile deadlock does not reproduce here. Both runs
+kept `--headless_skip_submission_wait=true`, whose own description names the
+same frame-12 deadlock. cold3's PASS wrote a 4,780,175 B seed. cold4's
+lower frame count is not attributable to the cold cache, because that run was
+loaded.
+
+So the seed needs no separate step. With no seed, S1V starts cold
+(`s1v_pcache: cold-no-seed`), and its first PASS writes the seed.
+`FR_S1V_COLD_CACHE=1` ignores an existing seed to measure a cold start on
+purpose.
+To re-seed, delete `s1v-pcache/` and run S1V once. The cache depends on the
+binary's shader translation and the driver, so a mismatched file costs compile
+time and is not a correctness problem.
+
 ## Pinned inputs
 
 Content: `build_content.sh` → `$FORK_REGRESS_CONTENT` (default
@@ -172,6 +224,7 @@ never overwritten with different bytes.
 | `rb3/rb3dx/` | RB3DX `default.xex` (`6639ce25…`) + the same links, patch ark included | S5 S6.3 |
 | `rb3/mogg_key_table.hex` | 64 bytes at VA `0x82C76258` of `rb3-xenon/orig/45410914/band.exe` (the deobscured RB3DX-lineage image; `dx_vs_retail_diff.txt`). Mode 0400, refused unless its sha256 is `4321690f…` | S4 |
 | `rb3/seed-post-s66-2026-08-29/` | the RB3 profile content s66 ran on (`globaloptions`, `songcache`, `rbdxcache`, `band3/save.dat`), copied into the private content root before S4. Fresh: the boot reaches splash but the A-press join never fires; globaloptions without band3: parks in the startup autosave | S4 |
+| `s1v-pcache/` | `xenia_vulkan_pipeline_cache.bin`, S1V's warm Vulkan pipeline cache. NOT pinned: written by S1V itself after a PASS, excluded from `MANIFEST.sha256`; each run records the sha256 it started from (`s1v_pcache_seed_sha256`) | S1V |
 | `dc1/` | DC1 TU0 `default.xex` alone (no disc data: it only has to boot far enough for title hooks to fire or not) | S6.1 |
 
 Configs (in git, small text): `config/dc3-oracle.defaults.toml` (the
