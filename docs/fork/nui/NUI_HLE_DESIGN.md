@@ -1,6 +1,8 @@
 # A title-agnostic Kinect (NUI) HLE device for Xenia: design
 
-Status: design only. Nothing here has been built or run.
+Status: phases 0-1 built by lane nui-hle (2026-10-02/03); phase 2 (retiring the calib.*,
+pause and controller-mode hacks) is under measurement, not landed. §8 "As built" lists what
+differs from this design and why. Phases 3+ are still design.
 Written 2026-10-02 against:
 - xenia `main` at `1f309687c`, read with `git show main:` and `git grep main`;
 - dc3-decomp `main` at `a7cf32774`, including its split listings in `build/373307D9/asm/`.
@@ -918,3 +920,48 @@ Native port:
 
 - `rb3-xenon/config/45410914/symbols.txt` (no NUI)
 - `rb3/config/SZBE69_B8/symbols.txt` (no NUI)
+
+---
+
+## 8. As built (phases 0-1, lane nui-hle)
+
+Code: `src/xenia/kernel/nui/` (device, facade, frame, pose sources, signatures),
+`tools/nui/gen_signatures.py`, wired in `Emulator::CompleteLaunch` before the title hooks.
+Spec read from the SDK: `NUI_DEVICE_SPEC.md`. Measurements: `docs/fork/dc3/BASELINE.md`,
+"Lane NUI-HLE".
+
+What differs from the design above, each with its evidence:
+
+| design said | as built | why |
+|---|---|---|
+| `NuiInitialize` with the sensor absent: S_OK, `connected=false` (§3.3.3) | returns `0x8301000D` | measured: the real SDK on Xenia with `XamNuiGetDeviceStatus` "not connected" returns it, and DC3 MILO_FAILs on it (phase-0 probe) |
+| faithful policy: "before any selection, the first two persons are TRACKED" (§3.3.4) | with the title-sets-tracked flag nobody is TRACKED until `NuiSkeletonSetTrackedSkeletons`; without it, the two nearest (0.3 m hysteresis) | `NuiSkeletonTrackingEnable` clears the ids; `NuipPostProcessSkeletonFrame` skips the policy when `R+0x1F10` is set (`NUI_DEVICE_SPEC.md`) |
+| per-version table hand-written from the resolver's 10+ signatures (§3.3.1) | generated from a split listing: every word of the first 24, relocated fields masked; thunks (body < 8 words, or not unique) carry an XREF anchor on their tail branch's target | 56/56 unique on DC3; `--nui_symbol_map` agrees 56/56 |
+| tripwire overrides on known-but-unimplemented entries | none in phase 1: all 56 are installed (6 device-backed, `NuiIdentityGetEnrollmentInformation` faithful, 49 legacy return values) and the facade is all-or-nothing | a partial resolve installs nothing; SDK internals are only reachable through those 56 |
+| ConstantPoseSource id 1 | id 5 | `synthetic_kinect.py` gives its first person id 5; the same pose and id on both sides |
+| phase-2 "correct frames" as a separate step | the frames were correct from phase 1 (0xAB0, stride 0x1C0, joint states, `w=1`, ms stamps, hip `Position`, stable ids) | one encoder, unit-tested |
+
+Phase 2 status. Code reading (NOT yet measured: the first exploration run, e2, died at boot of
+finding 1 before reaching the title) points at controller mode, not calibration, as what made the title ignore confirms when `calib.*` was off:
+`ShellInput::OnMsg(ButtonDownMsg)` swallows the first press made out of controller mode
+(`EnterControllerMode`, `return 0`); `ShellInput::Poll` exits controller mode 5 s after the last
+press (helpbar `controller_mode_timeout 5000`); `HamNavList` acts on pad input only in
+controller mode. `seq.controller_mode` forces the flag on and `calib.exit_controller_mode`
+stubs the exit; with only the second removed, the forced flag and the per-frame exit fight.
+The experiments that decide it were queued at hand-off (outputs under
+`/home/free/tmp/nui-hle-runs/exp/`): e2b (calib.* + pause off), e3 (also seq.controller_mode
+off), e4 (the five non-controller calib ids + pause off), e6 (all off, with an `l3` press
+before each screen's first action to enter controller mode the way a 360 player must).
+
+Findings the design did not anticipate:
+
+1. **`NuiIdentityGetEnrollmentInformation` must write its output.** The legacy S_OK stub left
+   `NUI_ENROLLMENT_INFORMATION` unwritten; `SkeletonIdentifier::UpdateEnrolledPlayers` read
+   uninitialised stack (a random path). Fixed in phase 1: `{0xFE, 0}` per `identityapi.s`.
+2. **DC3's KinectGuideThread makes the SkeletonUpdate worker spin at boot, faithfully.** It
+   calls `NuiSkeletonTrackingDisable` (which sets and drops the title event, `sk:120-167`) and
+   `Enable(0, 0)`; the manual-reset `sNewSkeletonEvent` stays signaled with nobody to reset it,
+   so the worker loops `GetNextFrame(0)` -> E_PENDING until `Enable(event, 2)` at the end of
+   boot. The SDK does exactly this; the old stubs never set the event (`skel.wait_33ms` polled
+   at 33 ms), so it never showed. On Xenia the loop costs ~360k calls and ~6-9 s of boot
+   (title_screen 24 s vs 15 s). See BASELINE.
