@@ -963,5 +963,8 @@ Findings the design did not anticipate:
    `Enable(0, 0)`; the manual-reset `sNewSkeletonEvent` stays signaled with nobody to reset it,
    so the worker loops `GetNextFrame(0)` -> E_PENDING until `Enable(event, 2)` at the end of
    boot. The SDK does exactly this; the old stubs never set the event (`skel.wait_33ms` polled
-   at 33 ms), so it never showed. On Xenia the loop costs ~360k calls and ~6-9 s of boot
-   (title_screen 24 s vs 15 s). See BASELINE.
+   at 33 ms), so it never showed. On Xenia it is ~400k E_PENDING calls, but it is **not** what
+   made the tip's title_screen 24-27 s against main's 15-18 s. That delta was the facade's
+   symbol-map cross-check: `std::regex` over 211,849 lines of symbols.txt, 10.8 s in a Checked
+   build, before any guest thread starts (fixed in `584a10ab2`). After the fix, S1 x3 interleaved
+   with main gives title_screen 18/18/21 s against 18/15/18 s.
