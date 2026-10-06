@@ -1,0 +1,374 @@
+/**
+ ******************************************************************************
+ * Xenia : Xbox 360 Emulator Research Project                                 *
+ ******************************************************************************
+ * Kinect (NUI) HLE: the SDK facade.
+ ******************************************************************************
+ */
+
+#include "xenia/kernel/nui/nui_sdk_facade.h"
+
+#include <array>
+#include <atomic>
+#include <chrono>
+#include <cstring>
+#include <fstream>
+#include <string>
+#include <string_view>
+#include <unordered_map>
+#include <utility>
+#include <vector>
+
+#include "xenia/base/cvar.h"
+#include "xenia/base/logging.h"
+#include "xenia/base/memory.h"
+#include "xenia/cpu/ppc/ppc_context.h"
+#include "xenia/cpu/processor.h"
+#include "xenia/cpu/xex_module.h"
+#include "xenia/kernel/kernel_state.h"
+#include "xenia/kernel/nui/nui_device.h"
+#include "xenia/kernel/user_module.h"
+#include "xenia/kernel/util/xex2_info.h"
+#include "xenia/memory.h"
+
+DEFINE_bool(nui_hle, true,
+            "Kinect (NUI) HLE: emulate the statically linked NUI SDK of a "
+            "title whose XEX static-library header names a supported NUI "
+            "version (2.0.21173). Titles without NUI are untouched.",
+            "Kernel");
+DEFINE_string(nui_symbol_map, "",
+              "Kinect (NUI) HLE debug cross-check: a symbols.txt-style map "
+              "('Name = .text:0xADDR; ...'). Every resolved SDK entry is "
+              "compared with the map's address; a mismatch is logged as "
+              "TAINTED.",
+              "Kernel");
+
+namespace xe {
+namespace kernel {
+namespace nui {
+
+#include "xenia/kernel/nui/nui_sdk_sigs_2_0_21173.inc"
+
+namespace {
+
+struct SdkVersionTable {
+  uint16_t major, minor, build;
+  const NuiSdkSignature* sigs;
+  size_t count;
+};
+const SdkVersionTable kTables[] = {
+    {2, 0, 21173, kNuiSdk_2_0_21173, std::size(kNuiSdk_2_0_21173)},
+};
+
+constexpr size_t kMaxEntries = 64;
+struct EntryState {
+  const char* name = nullptr;
+  uint32_t address = 0;
+  std::atomic<uint64_t> hits{0};
+};
+std::array<EntryState, kMaxEntries> g_entries;
+
+void NoteHit(size_t index) {
+  if (g_entries[index].hits.fetch_add(1, std::memory_order_relaxed) == 0) {
+    XELOGI("NUI HLE: first call {} ({:08X})", g_entries[index].name,
+           g_entries[index].address);
+  }
+}
+
+uint32_t Arg(cpu::ppc::PPCContext* ctx, int n) {
+  return static_cast<uint32_t>(ctx->r[3 + n]);
+}
+void Return(cpu::ppc::PPCContext* ctx, uint32_t hr) {
+  ctx->r[3] = static_cast<uint64_t>(static_cast<int64_t>(
+      static_cast<int32_t>(hr)));
+}
+
+// --- Device-backed entries -------------------------------------------------
+
+using Handler = uint32_t (*)(NuiDevice* device, cpu::ppc::PPCContext* ctx);
+
+uint32_t DoInitialize(NuiDevice* d, cpu::ppc::PPCContext* ctx) {
+  return d->Initialize(Arg(ctx, 0));
+}
+uint32_t DoShutdown(NuiDevice* d, cpu::ppc::PPCContext*) {
+  return d->Shutdown();
+}
+uint32_t DoTrackingEnable(NuiDevice* d, cpu::ppc::PPCContext* ctx) {
+  return d->SkeletonTrackingEnable(Arg(ctx, 0), Arg(ctx, 1));
+}
+uint32_t DoTrackingDisable(NuiDevice* d, cpu::ppc::PPCContext*) {
+  return d->SkeletonTrackingDisable();
+}
+uint32_t DoSetTracked(NuiDevice* d, cpu::ppc::PPCContext* ctx) {
+  return d->SkeletonSetTrackedSkeletons(Arg(ctx, 0));
+}
+uint32_t DoGetNextFrame(NuiDevice* d, cpu::ppc::PPCContext* ctx) {
+  return d->SkeletonGetNextFrame(Arg(ctx, 0), Arg(ctx, 1));
+}
+
+// NuiIdentityGetEnrollmentInformation(index, NUI_ENROLLMENT_INFORMATION*):
+// identityapi.s -- index >= 8 is E_INVALIDARG; an index nobody is enrolled
+// in writes { dwUserIndex = 0xFE, dwEnrollmentFlags = 0 } and returns S_OK.
+// The sensor knows no faces, so every index is "not enrolled". (The legacy
+// stub returned S_OK WITHOUT writing it: DC3's SkeletonIdentifier then read
+// an uninitialised stack struct, a run-to-run random path.)
+uint32_t DoGetEnrollmentInformation(NuiDevice* d, cpu::ppc::PPCContext* ctx) {
+  const uint32_t index = Arg(ctx, 0);
+  const uint32_t info_ptr = Arg(ctx, 1);
+  if (index >= 8 || !info_ptr) {
+    return kE_INVALIDARG;
+  }
+  auto* info = d->memory()->TranslateVirtual<xe::be<uint32_t>*>(info_ptr);
+  info[0] = 0xFE;  // dwUserIndex
+  info[1] = 0;     // dwEnrollmentFlags
+  return kS_OK;
+}
+
+// --- Phase 1 "legacy-equivalent" entries -----------------------------------
+// The value the DC3 title table returned for each (li r3,0|-1; blr), now
+// resolved by SDK version instead of by title address, so a title behaves as
+// before while phase 3 gives each its SDK semantics
+// (docs/fork/nui/NUI_HLE_DESIGN.md sections 2.4, 3.3.3).
+struct Behaviour {
+  const char* name;
+  Handler handler;    // device-backed, or null
+  uint32_t legacy;    // returned when handler is null
+};
+const Behaviour kBehaviours[] = {
+    {"NuiInitialize", DoInitialize, 0},
+    {"NuiShutdown", DoShutdown, 0},
+    {"NuiSkeletonTrackingEnable", DoTrackingEnable, 0},
+    {"NuiSkeletonTrackingDisable", DoTrackingDisable, 0},
+    {"NuiSkeletonSetTrackedSkeletons", DoSetTracked, 0},
+    {"NuiSkeletonGetNextFrame", DoGetNextFrame, 0},
+    {"NuiIdentityGetEnrollmentInformation", DoGetEnrollmentInformation, 0},
+    {"NuiImageStreamGetNextFrame", nullptr, 0xFFFFFFFF},
+    {"NuiAudioCreate", nullptr, 0xFFFFFFFF},
+    {"NuiAudioCreatePrivate", nullptr, 0xFFFFFFFF},
+    {"NuiFitnessStartTracking", nullptr, 0xFFFFFFFF},
+    {"NuiFitnessPauseTracking", nullptr, 0xFFFFFFFF},
+    {"NuiFitnessResumeTracking", nullptr, 0xFFFFFFFF},
+    {"NuiFitnessStopTracking", nullptr, 0xFFFFFFFF},
+    {"NuiFitnessGetCurrentFitnessData", nullptr, 0xFFFFFFFF},
+    {"NuiWaveSetEnabled", nullptr, 0xFFFFFFFF},
+    {"NuiWaveGetGestureOwnerProgress", nullptr, 0xFFFFFFFF},
+    {"NuiSpeechGetEvents", nullptr, 0xFFFFFFFF},
+};
+
+const Behaviour* FindBehaviour(std::string_view name) {
+  for (const auto& b : kBehaviours) {
+    if (name == b.name) {
+      return &b;
+    }
+  }
+  return nullptr;
+}
+
+std::array<const Behaviour*, kMaxEntries> g_behaviour;
+
+template <size_t I>
+void Thunk(cpu::ppc::PPCContext* ctx, KernelState*) {
+  NoteHit(I);
+  const Behaviour* b = g_behaviour[I];
+  if (b && b->handler) {
+    auto device = NuiDevice::Get();
+    Return(ctx, device ? b->handler(device.get(), ctx) : b->legacy);
+  } else {
+    Return(ctx, b ? b->legacy : 0);
+  }
+}
+
+template <size_t... I>
+constexpr std::array<cpu::GuestFunction::ExternHandler, sizeof...(I)>
+MakeThunks(std::index_sequence<I...>) {
+  return {&Thunk<I>...};
+}
+const auto kThunks = MakeThunks(std::make_index_sequence<kMaxEntries>());
+
+// symbols.txt: `Name = .text:0x829C2790; // type:function ...`, i.e.
+// ^\s*(\S+)\s*=\s*\.text:0x([0-9A-Fa-f]+); -- parsed by hand: std::regex over
+// the whole file cost ~10.8 s of boot in a Checked build (measured), for a
+// diagnostic that needs only `wanted`'s names.
+bool ParseSymbolLine(std::string_view line, std::string_view* name,
+                     uint32_t* address) {
+  auto is_space = [](char c) { return c == ' ' || c == '\t' || c == '\r'; };
+  size_t i = 0;
+  while (i < line.size() && is_space(line[i])) ++i;
+  const size_t name_begin = i;
+  while (i < line.size() && !is_space(line[i])) ++i;
+  if (i == name_begin) return false;
+  std::string_view n = line.substr(name_begin, i - name_begin);
+  // (\S+) is greedy, so a name ending in '=' backtracks to the '='.
+  size_t eq = n.find('=');
+  if (eq != std::string_view::npos) {
+    if (eq == 0) return false;
+    i = name_begin + eq;
+    n = n.substr(0, eq);
+  }
+  while (i < line.size() && is_space(line[i])) ++i;
+  if (i >= line.size() || line[i] != '=') return false;
+  ++i;
+  while (i < line.size() && is_space(line[i])) ++i;
+  constexpr std::string_view kText = ".text:0x";
+  if (line.substr(i, kText.size()) != kText) return false;
+  i += kText.size();
+  uint32_t value = 0;
+  const size_t digits_begin = i;
+  for (; i < line.size(); ++i) {
+    const char c = line[i];
+    uint32_t d;
+    if (c >= '0' && c <= '9') d = c - '0';
+    else if (c >= 'a' && c <= 'f') d = c - 'a' + 10;
+    else if (c >= 'A' && c <= 'F') d = c - 'A' + 10;
+    else break;
+    value = (value << 4) | d;
+  }
+  if (i == digits_begin || i >= line.size() || line[i] != ';') return false;
+  *name = n;
+  *address = value;
+  return true;
+}
+
+std::unordered_map<std::string, uint32_t> LoadSymbolMap(
+    const std::string& path, const std::vector<std::string_view>& wanted) {
+  std::unordered_map<std::string, uint32_t> map;
+  std::unordered_map<std::string_view, bool> want;
+  for (auto w : wanted) want.emplace(w, true);
+  std::ifstream in(path);
+  std::string line;
+  while (std::getline(in, line)) {
+    std::string_view name;
+    uint32_t address;
+    if (ParseSymbolLine(line, &name, &address) && want.count(name)) {
+      map.emplace(std::string(name), address);  // first definition wins
+    }
+  }
+  return map;
+}
+
+}  // namespace
+
+void InstallNuiHle(KernelState* kernel_state, cpu::Processor* processor,
+                   UserModule* module) {
+  for (auto& e : g_entries) {
+    e.name = nullptr;
+    e.address = 0;
+    e.hits = 0;
+  }
+  g_behaviour.fill(nullptr);
+  auto* xex = module ? module->xex_module() : nullptr;
+  if (!xex) {
+    return;
+  }
+  xex2_opt_static_libraries* libs = nullptr;
+  if (!xex->GetOptHeader(XEX_HEADER_STATIC_LIBRARIES, &libs) || !libs) {
+    XELOGI("NUI HLE: no static-library header; device inert");
+    return;
+  }
+  const xex2_opt_static_library* nui = nullptr;
+  const uint32_t lib_count = (libs->size - 4) / 0x10;
+  for (uint32_t i = 0; i < lib_count; ++i) {
+    if (std::strncmp(libs->libraries[i].name, "NUI", 8) == 0) {
+      nui = &libs->libraries[i];
+    }
+  }
+  if (!nui) {
+    XELOGI("NUI HLE: the image links no NUI SDK; device inert");
+    return;
+  }
+  const uint16_t major = nui->version_major, minor = nui->version_minor,
+                 build = nui->version_build;
+  if (!cvars::nui_hle) {
+    XELOGI("NUI HLE: NUI {}.{}.{} linked; facade disabled (--nui_hle=false)",
+           major, minor, build);
+    return;
+  }
+  const SdkVersionTable* table = nullptr;
+  for (const auto& t : kTables) {
+    if (t.major == major && t.minor == minor && t.build == build) {
+      table = &t;
+    }
+  }
+  if (!table) {
+    XELOGW("NUI HLE: unsupported NUI {}.{}.{}; no SDK facade (the sensor is "
+           "the kernel/XAM surface only)",
+           major, minor, build);
+    return;
+  }
+  auto* text = xex->GetPESection(".text");
+  auto* memory = kernel_state->memory();
+  if (!text || !text->size) {
+    XELOGE("NUI HLE: NUI {}.{}.{} linked but the image has no .text", major,
+           minor, build);
+    return;
+  }
+  const uint8_t* text_mem = memory->TranslateVirtual<const uint8_t*>(
+      text->address);
+  const auto t_scan = std::chrono::steady_clock::now();
+  std::vector<uint32_t> resolved(table->count, 0);
+  size_t ok = 0;
+  for (size_t i = 0; i < table->count; ++i) {
+    const auto& sig = table->sigs[i];
+    uint32_t addr = 0;
+    uint32_t n = FindSignature(text_mem, text->address, text->size, sig, &addr);
+    if (n == 1) {
+      resolved[i] = addr;
+      ++ok;
+    } else {
+      XELOGW("NUI HLE: {} {} ({} matches)", sig.name,
+             n ? "AMBIGUOUS" : "unresolved", n);
+    }
+  }
+  const auto t_scanned = std::chrono::steady_clock::now();
+  if (ok != table->count || table->count > kMaxEntries) {
+    XELOGE("NUI HLE: NUI {}.{}.{} resolved {}/{}; refusing the facade (a "
+           "partial SDK HLE would run SDK internals against a runtime "
+           "NuiInitialize never set up)",
+           major, minor, build, ok, table->count);
+    return;
+  }
+  if (!cvars::nui_symbol_map.empty()) {
+    std::vector<std::string_view> wanted;
+    for (size_t i = 0; i < table->count; ++i) {
+      wanted.push_back(table->sigs[i].name);
+    }
+    auto map = LoadSymbolMap(cvars::nui_symbol_map, wanted);
+    size_t agree = 0;
+    for (size_t i = 0; i < table->count; ++i) {
+      auto it = map.find(table->sigs[i].name);
+      if (it == map.end()) {
+        XELOGW("NUI HLE: symbol map has no {}", table->sigs[i].name);
+      } else if (it->second != resolved[i]) {
+        XELOGE("NUI HLE: {} resolved {:08X} but the symbol map says {:08X} "
+               "(TAINTED)",
+               table->sigs[i].name, resolved[i], it->second);
+      } else {
+        ++agree;
+      }
+    }
+    XELOGI("NUI HLE: symbol map cross-check: {}/{} agree", agree,
+           table->count);
+  }
+  const auto t_mapped = std::chrono::steady_clock::now();
+  for (size_t i = 0; i < table->count; ++i) {
+    g_entries[i].name = table->sigs[i].name;
+    g_entries[i].address = resolved[i];
+    g_behaviour[i] = FindBehaviour(table->sigs[i].name);
+    processor->RegisterGuestFunctionOverride(
+        resolved[i], kThunks[i], std::string(table->sigs[i].name));
+  }
+  NuiDevice::Create(kernel_state);
+  using ms = std::chrono::duration<double, std::milli>;
+  XELOGI("NUI HLE: NUI {}.{}.{} resolved {}/{} (.text {:08X}+{:X}); SDK "
+         "facade installed (scan {:.1f} ms, symbol map {:.1f} ms)",
+         major, minor, build, ok, table->count, text->address, text->size,
+         ms(t_scanned - t_scan).count(), ms(t_mapped - t_scanned).count());
+}
+
+void ShutdownNuiHle() {
+  NuiDevice::Destroy();
+}
+
+}  // namespace nui
+}  // namespace kernel
+}  // namespace xe

@@ -21,3 +21,5 @@ project("xenia-kernel")
   files({
     "debug_visualizers.natvis",
   })
+
+include("nui/testing")

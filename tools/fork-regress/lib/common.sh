@@ -181,6 +181,9 @@ dc3_original_args() {
   # cvar and always run their automation (on the NUI worker).
   xr_opt dc3_headless_autonav true
   xr_opt dc3_nui_symbol_map_path "$I/symbols.dc3-decomp-c362ede1c.txt"
+  # Kinect HLE (kernel/nui): cross-check every SDK entry the facade resolves
+  # by signature against the map; a mismatch logs a TAINTED line.
+  xr_opt nui_symbol_map "$I/symbols.dc3-decomp-c362ede1c.txt"
   xr_opt dc3_nui_layout_fingerprint_cache_path "$I/dc3_nui_fingerprints.xenia-a5fc2f1b6.txt"
   # Without this the early manifest load auto-probes
   # dc3-decomp/build/373307D9/xenia_dc3_patch_manifest.json (measured: it did,

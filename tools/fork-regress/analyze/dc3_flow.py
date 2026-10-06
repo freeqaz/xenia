@@ -52,6 +52,10 @@ TIMEOUT_RE = re.compile(r"TIMEOUT: (?:[a-zA-Z!]> [0-9A-Fa-f]{8} )?(\d+)ms reache
 FAILMSG_RE = re.compile(r"mFailThreadMsg=([0-9A-Fa-f]+) '([^']*)'")
 TAINT_RE = re.compile(r"TAINTED")
 SONG_RE = re.compile(r"DC3 Script: song '([^']*)'")
+# Kinect HLE (kernel/nui): resolution and the frame clock's counters.
+NUI_RESOLVED_RE = re.compile(r"NUI HLE: NUI (\S+) resolved (\d+)/(\d+)")
+NUI_CLOCK_RE = re.compile(r"NUI HLE: frame clock ([0-9.]+)/s produced=(\d+) "
+                          r"events=(\d+) get_next=(\d+) served=(\d+)")
 
 # The song S1's flow selects. Enforced when the binary logs the song (an
 # adapter with the `screen ->` line); xenia-ymca.txt played `thehustle` for
@@ -89,6 +93,7 @@ def parse(log: Path) -> dict:
     xma, non_xma, fault_lines = 0, 0, 0
     timeout_line, fail_msgs, tainted = None, [], 0
     song, screen_lines = None, 0
+    nui_resolved, nui_clock = None, None
     last_line = ""
     with open(log, errors="replace") as f:
         for line in f:
@@ -124,6 +129,17 @@ def parse(log: Path) -> dict:
                     song = sm.group(1)
             if "DC3 Script: screen -> '" in line:
                 screen_lines += 1
+            if "NUI HLE:" in line:
+                nr = NUI_RESOLVED_RE.search(line)
+                if nr:
+                    nui_resolved = f"{nr.group(1)} {nr.group(2)}/{nr.group(3)}"
+                nc = NUI_CLOCK_RE.search(line)
+                if nc:
+                    nui_clock = {"rate": float(nc.group(1)),
+                                 "produced": int(nc.group(2)),
+                                 "events": int(nc.group(3)),
+                                 "get_next": int(nc.group(4)),
+                                 "served": int(nc.group(5))}
     if timeout_line is None:
         timeout_line = timeout_from_tail(log)
     return {
@@ -139,6 +155,10 @@ def parse(log: Path) -> dict:
         "timeout_reached_ms": timeout_line,
         "mfailthreadmsg_seen": fail_msgs,
         "tainted_lines": tainted,
+        # Kinect HLE: "<NUI version> <resolved>/<entries>" and the last
+        # frame-clock counters; None on a binary without kernel/nui.
+        "nui_resolved": nui_resolved,
+        "nui_frame_clock": nui_clock,
         # The song the game is playing (`DC3 Script: song`); None on a binary
         # whose adapter predates the line (no `screen ->` lines either).
         "song": song,
