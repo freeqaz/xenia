@@ -13,7 +13,6 @@
 #include <chrono>
 #include <cstring>
 #include <fstream>
-#include <regex>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -186,18 +185,62 @@ MakeThunks(std::index_sequence<I...>) {
 }
 const auto kThunks = MakeThunks(std::make_index_sequence<kMaxEntries>());
 
+// symbols.txt: `Name = .text:0x829C2790; // type:function ...`, i.e.
+// ^\s*(\S+)\s*=\s*\.text:0x([0-9A-Fa-f]+); -- parsed by hand: std::regex over
+// the whole file cost ~10.8 s of boot in a Checked build (measured), for a
+// diagnostic that needs only `wanted`'s names.
+bool ParseSymbolLine(std::string_view line, std::string_view* name,
+                     uint32_t* address) {
+  auto is_space = [](char c) { return c == ' ' || c == '\t' || c == '\r'; };
+  size_t i = 0;
+  while (i < line.size() && is_space(line[i])) ++i;
+  const size_t name_begin = i;
+  while (i < line.size() && !is_space(line[i])) ++i;
+  if (i == name_begin) return false;
+  std::string_view n = line.substr(name_begin, i - name_begin);
+  // (\S+) is greedy, so a name ending in '=' backtracks to the '='.
+  size_t eq = n.find('=');
+  if (eq != std::string_view::npos) {
+    if (eq == 0) return false;
+    i = name_begin + eq;
+    n = n.substr(0, eq);
+  }
+  while (i < line.size() && is_space(line[i])) ++i;
+  if (i >= line.size() || line[i] != '=') return false;
+  ++i;
+  while (i < line.size() && is_space(line[i])) ++i;
+  constexpr std::string_view kText = ".text:0x";
+  if (line.substr(i, kText.size()) != kText) return false;
+  i += kText.size();
+  uint32_t value = 0;
+  const size_t digits_begin = i;
+  for (; i < line.size(); ++i) {
+    const char c = line[i];
+    uint32_t d;
+    if (c >= '0' && c <= '9') d = c - '0';
+    else if (c >= 'a' && c <= 'f') d = c - 'a' + 10;
+    else if (c >= 'A' && c <= 'F') d = c - 'A' + 10;
+    else break;
+    value = (value << 4) | d;
+  }
+  if (i == digits_begin || i >= line.size() || line[i] != ';') return false;
+  *name = n;
+  *address = value;
+  return true;
+}
+
 std::unordered_map<std::string, uint32_t> LoadSymbolMap(
-    const std::string& path) {
+    const std::string& path, const std::vector<std::string_view>& wanted) {
   std::unordered_map<std::string, uint32_t> map;
+  std::unordered_map<std::string_view, bool> want;
+  for (auto w : wanted) want.emplace(w, true);
   std::ifstream in(path);
   std::string line;
-  // symbols.txt: `Name = .text:0x829C2790; // type:function ...`
-  static const std::regex re(R"(^\s*(\S+)\s*=\s*\.text:0x([0-9A-Fa-f]+);)");
   while (std::getline(in, line)) {
-    std::smatch m;
-    if (std::regex_search(line, m, re)) {
-      map.emplace(m[1].str(), static_cast<uint32_t>(
-                                  std::stoul(m[2].str(), nullptr, 16)));
+    std::string_view name;
+    uint32_t address;
+    if (ParseSymbolLine(line, &name, &address) && want.count(name)) {
+      map.emplace(std::string(name), address);  // first definition wins
     }
   }
   return map;
@@ -285,7 +328,11 @@ void InstallNuiHle(KernelState* kernel_state, cpu::Processor* processor,
     return;
   }
   if (!cvars::nui_symbol_map.empty()) {
-    auto map = LoadSymbolMap(cvars::nui_symbol_map);
+    std::vector<std::string_view> wanted;
+    for (size_t i = 0; i < table->count; ++i) {
+      wanted.push_back(table->sigs[i].name);
+    }
+    auto map = LoadSymbolMap(cvars::nui_symbol_map, wanted);
     size_t agree = 0;
     for (size_t i = 0; i < table->count; ++i) {
       auto it = map.find(table->sigs[i].name);
