@@ -10,6 +10,7 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstring>
 #include <fstream>
 #include <regex>
@@ -260,6 +261,7 @@ void InstallNuiHle(KernelState* kernel_state, cpu::Processor* processor,
   }
   const uint8_t* text_mem = memory->TranslateVirtual<const uint8_t*>(
       text->address);
+  const auto t_scan = std::chrono::steady_clock::now();
   std::vector<uint32_t> resolved(table->count, 0);
   size_t ok = 0;
   for (size_t i = 0; i < table->count; ++i) {
@@ -274,6 +276,7 @@ void InstallNuiHle(KernelState* kernel_state, cpu::Processor* processor,
              n ? "AMBIGUOUS" : "unresolved", n);
     }
   }
+  const auto t_scanned = std::chrono::steady_clock::now();
   if (ok != table->count || table->count > kMaxEntries) {
     XELOGE("NUI HLE: NUI {}.{}.{} resolved {}/{}; refusing the facade (a "
            "partial SDK HLE would run SDK internals against a runtime "
@@ -299,6 +302,7 @@ void InstallNuiHle(KernelState* kernel_state, cpu::Processor* processor,
     XELOGI("NUI HLE: symbol map cross-check: {}/{} agree", agree,
            table->count);
   }
+  const auto t_mapped = std::chrono::steady_clock::now();
   for (size_t i = 0; i < table->count; ++i) {
     g_entries[i].name = table->sigs[i].name;
     g_entries[i].address = resolved[i];
@@ -307,9 +311,11 @@ void InstallNuiHle(KernelState* kernel_state, cpu::Processor* processor,
         resolved[i], kThunks[i], std::string(table->sigs[i].name));
   }
   NuiDevice::Create(kernel_state);
+  using ms = std::chrono::duration<double, std::milli>;
   XELOGI("NUI HLE: NUI {}.{}.{} resolved {}/{} (.text {:08X}+{:X}); SDK "
-         "facade installed",
-         major, minor, build, ok, table->count, text->address, text->size);
+         "facade installed (scan {:.1f} ms, symbol map {:.1f} ms)",
+         major, minor, build, ok, table->count, text->address, text->size,
+         ms(t_scanned - t_scan).count(), ms(t_mapped - t_scanned).count());
 }
 
 void ShutdownNuiHle() {
