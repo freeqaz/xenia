@@ -45,7 +45,6 @@ tools/fork-regress/compare.py --paired out/cand out/ctrl
 | `content.wipe` | host FS | `remove_all(<content>/373307D9)` | O47 | **default off** (`--dc3_clean_content_cache=false`) |
 | `saveload.activate` | `SaveLoadManager::Activate` 0x82894A10 | `blr` | O37 | kept (L6, content/XAM) |
 | `speech.grammar_unload` | `SpeechMgr::Grammar::Unload` 0x82439F38 | `blr` | O7: the NUI S_OK stubs | kept (NUI) |
-| `calib.exit_controller_mode` | `ShellInput::ExitControllerMode` 0x82902748 | `blr` | O13: pairs with `seq.controller_mode`; the stock flow's pad presses need controller mode held | kept (NUI, phase 2: the controller-mode pair) |
 
 ## `dc3_hack_pack_skeleton.cc` (with `--fake_kinect_data`)
 
@@ -66,7 +65,6 @@ These were removed earlier:
 
 | id | where | what | masks | status |
 |---|---|---|---|---|
-| `seq.controller_mode` | probe thread, every 100 ms (was the NUI sequencer callback) | `TheGestureMgr`+0x426D := 1 | O6 | kept (NUI, phase 2) |
 | `input.attract_press` | pad poll | press A every 3 s while attract blocks `wait_screen title_screen` | O45: the attract movie plays for real (Bink is real since lane B), and the shared flow has no attract step because the native port's movie fails to open | `--dc3_headless_autonav` only; the one host input left. It takes attract -> autosave_warning -> title through the game's own handlers |
 
 These were removed:
@@ -157,11 +155,48 @@ end of song); `compare.py --paired` clean. The DTA probe in the phase-2 experime
 | `calib.wait_recovery` | `ShouldWaitForRecovery` 0x82904CD0 -> `return 0` | O12: same | same |
 | `game.pause_for_skeleton_loss` | `Game::PauseForSkeletonLoss` 0x82866D50 -> `blr` | O14: no player bound, so `CheckForSkeletonLoss` counted 0 playing and paused the song | player 0 is bound; no skeleton-loss pause in 5/5 runs (paused samples identical to the control) |
 
-Still kept: `calib.exit_controller_mode` and `seq.controller_mode`, a pair. Retiring
+Kept at the time: `calib.exit_controller_mode` and `seq.controller_mode`, a pair. Retiring
 `calib.exit_controller_mode` alone flaps controller mode and stalls at title (e2b);
 retiring both stalls at title with the stock flow, because `ShellInput` swallows the first
 pad press outside controller mode and controller mode times out 5 s later (e3); both off
 with an L3 wake press before each screen's first action plays the whole song (e6, one run).
+Retired together in lane flow-wake, below.
+
+## Retired in lane flow-wake (2026-10-07)
+
+The pair is retired because the flow now does what a player does. The player
+(`hid/nop/nop_input_driver.cc`, `a09bf52b0`) understands the native port's `N wake` /
+`+N wake`: a one-frame L3 press, or a no-op when `TheGestureMgr->mInControllerMode` is
+already set, as `JoypadScriptWakeNeededFn` answers on native. `flows/dc3-ymca.txt` puts a
+`wake` two frames before each screen's first press (title, main, choose_mode,
+song_select, multiuser). Every other press follows within ~2 s, inside the 5 s timeout.
+
+- **Faithful:** the 360 boots outside controller mode (`GestureMgr`'s ctor sets
+  `mInControllerMode = 0`; only the native port's `NativeBootControllerModeOnce` enters it at
+  boot). An L3 press inside controller mode is not inert: `HamUI::OnMsg(ButtonDownMsg)`
+  restarts the timeout for every button. So a wake is skipped there.
+- **Title +180 frames is faithful:** with the pair off, title_screen lands ~180 frames (3 s)
+  later in every run, in either run order. The harness's attract A press
+  (`input.attract_press`, every 3 s) arrives outside controller mode and is swallowed, so
+  attract leaves on the second press, as with a 360 player who presses A twice.
+  Hacks-on runs: 1 attract press. Hacks-off runs: 2.
+- **Wakes per hacks-off pass:** 1 pressed (title, since controller mode lapsed after the
+  attract press) and 4 no-ops.
+
+Evidence, Checked builds, both ids passed to `--dc3_disable_hacks`:
+
+| run set | binary | hacks off | control (hacks on) |
+|---|---|---|---|
+| `ab.sh --slot` S1 x5, same binary | 596a0224f + the wake flow | **5/5 PASS**; title 18-21 s, game_screen 36-39 s, gpState=3 192-195 s | 5/5 PASS; title 15-18 s, game_screen 33 s, gpState=3 189 s |
+| S1 x2, order swapped | same | 1/2 (run-02: a boot `Debug::Fail` before any input, text not captured then; led to `a234046f7`) | 2/2 |
+| S1 x10 | 29dbc4380 + the wake flow | **9/10 PASS**; the miss is the pre-existing Splash/`Rnd::DoWorldEnd` boot race (also seen hacks-on: dc3-b2-runs r1-cand S2) | - |
+
+Every pass: 76 unpaused gameplay samples, gpState=3, song ymca, 0 taint, 0 NON_XMA faults.
+
+| id | site | why it existed | evidence it is gone for good |
+|---|---|---|---|
+| `seq.controller_mode` | probe thread, every 100 ms: `TheGestureMgr`+0x426D := 1 | O6: DC3 is Kinect-driven; outside controller mode `ShellInput::OnMsg(ButtonDownMsg)` swallows a pad press and only enters controller mode, so the stock flow's presses did nothing | the flow's `wake` steps enter controller mode the way a player does. A/B above |
+| `calib.exit_controller_mode` | `ShellInput::ExitControllerMode` 0x82902748 -> `blr` | O13: the other half; nothing cleared the forced flag | the game's own 5 s timeout and exit now run; the wakes cover each screen. A/B above |
 
 ## Status legend
 
