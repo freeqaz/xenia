@@ -306,8 +306,10 @@ void EmulatorHeadless::ReportThreadStatus(int64_t elapsed) {
   // 0x7FEB0000): trapped-and-emulated device register writes, recovered by
   // construction. NON_XMA = SIGSEGV - XMA is the number that means "a guest
   // access faulted".
-  uint64_t segv = ExceptionHandler::GetSigsegvCount();
+  // XMA first, SIGSEGV second: the handler bumps SIGSEGV then XMA,
+  // so SIGSEGV >= XMA here (exception_handler.h).
   uint64_t xma = ExceptionHandler::GetXmaSoftFaultCount();
+  uint64_t segv = ExceptionHandler::GetSigsegvCount();
   fprintf(stderr,
           "=== Thread Status Report (%ldms) === %zu threads, SIGSEGV=%lu "
           "XMA=%lu NON_XMA=%lu last_fault=0x%lX last_rip=0x%lX%s\n",

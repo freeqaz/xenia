@@ -325,8 +325,10 @@ void TripwireThread(Memory* memory, cpu::Processor* processor,
     // faulted". Logged when it changes, at most every 3 s.
     if (now - last_faults >= std::chrono::seconds(3)) {
       last_faults = now;
-      uint64_t segv = ExceptionHandler::GetSigsegvCount();
+      // XMA first, SIGSEGV second: the handler bumps SIGSEGV then XMA,
+      // so SIGSEGV >= XMA here (exception_handler.h).
       uint64_t xma = ExceptionHandler::GetXmaSoftFaultCount();
+      uint64_t segv = ExceptionHandler::GetSigsegvCount();
       if (segv != last_segv || xma != last_xma) {
         last_segv = segv;
         last_xma = xma;

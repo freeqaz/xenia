@@ -238,6 +238,12 @@ class ExceptionHandler {
   // trackers exclude the XMA aperture so diagnostics can show the genuine
   // last fault (and count the benign XMA soft-faults separately). See the
   // main_hub teardown investigation (HUBCRASH-ROOTCAUSE-82BCEFE4.md).
+  // The handler counts every fault in GetSigsegvCount() and then, for an XMA
+  // aperture fault, here (release). To compute SIGSEGV - XMA, read THIS count
+  // first and GetSigsegvCount() second: every XMA increment seen then has its
+  // SIGSEGV increment visible too, so SIGSEGV >= XMA exactly. Reading SIGSEGV
+  // first lets a fault between the two reads count in XMA only, and
+  // SIGSEGV - XMA wraps to 2^64 - 1.
   static uint64_t GetXmaSoftFaultCount();
   static uint64_t GetLastRealFaultAddress();
   static uint64_t GetLastRealFaultRip();
