@@ -875,16 +875,6 @@ void ApplyDc3LaunchHooks(const titles::TitleLaunchContext& ctx) {
     if (cvars::fake_kinect_data) {
       XELOGI("DC3: Entering original-XEX fake Kinect patch block");
 
-      constexpr uint32_t kShouldWaitForRecovery = 0x82904CD0;
-      with_patch_target("calib.wait_recovery", "ShouldWaitForRecovery", kShouldWaitForRecovery, 8,
-                        [&](uint8_t* swr_ptr) {
-                          xe::store_and_swap<uint32_t>(swr_ptr + 0, 0x38600000);
-                          xe::store_and_swap<uint32_t>(swr_ptr + 4, 0x4E800020);
-                          XELOGI("DC3: Calibration bypass: stubbed "
-                                 "ShouldWaitForRecovery at {:08X} to return false",
-                                 kShouldWaitForRecovery);
-                        });
-
       constexpr uint32_t kExitControllerMode = 0x82902748;
       with_patch_target("calib.exit_controller_mode", "ExitControllerMode", kExitControllerMode, 4,
                         [&](uint8_t* ecm_ptr) {

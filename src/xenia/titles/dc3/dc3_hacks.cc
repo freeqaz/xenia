@@ -40,7 +40,6 @@ constexpr const char* kKnownIds[] = {
     "content.wipe",
     "saveload.activate",
     "speech.grammar_unload",
-    "calib.wait_recovery",
     "calib.exit_controller_mode",
     "game.pause_for_skeleton_loss",
     // Runtime, the probe thread (dc3_fail_tripwire.cc).
