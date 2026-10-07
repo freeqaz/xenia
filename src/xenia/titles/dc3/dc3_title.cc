@@ -875,33 +875,6 @@ void ApplyDc3LaunchHooks(const titles::TitleLaunchContext& ctx) {
     if (cvars::fake_kinect_data) {
       XELOGI("DC3: Entering original-XEX fake Kinect patch block");
 
-      constexpr uint32_t kSetPlayerPresentGuard = 0x8290834C;
-      constexpr uint32_t kExpectedInsn = 0x4800001D;
-      auto* guard_ptr =
-          dc3::HackGate("calib.player_present_guard",
-                        "NOP IsTrackingAllSkeletons guard in "
-                        "SkeletonChooser::SetPlayerPresent")
-              ? memory->TranslateVirtual<uint8_t*>(kSetPlayerPresentGuard)
-              : nullptr;
-      if (guard_ptr) {
-        uint32_t actual = xe::load_and_swap<uint32_t>(guard_ptr);
-        if (actual == kExpectedInsn) {
-          auto* heap = memory->LookupHeap(kSetPlayerPresentGuard);
-          if (heap) {
-            heap->Protect(kSetPlayerPresentGuard, 4,
-                          kMemoryProtectRead | kMemoryProtectWrite);
-            xe::store_and_swap<uint32_t>(guard_ptr, 0x60000000);
-            XELOGI("DC3: Calibration bypass: NOP'd IsTrackingAllSkeletons "
-                   "guard in SetPlayerPresent at {:08X}",
-                   kSetPlayerPresentGuard);
-          }
-        } else {
-          XELOGW("DC3: Calibration bypass: unexpected insn at {:08X}: "
-                 "{:08X} (expected {:08X})",
-                 kSetPlayerPresentGuard, actual, kExpectedInsn);
-        }
-      }
-
       constexpr uint32_t kChoosePlayerSides = 0x82909968;
       with_patch_target("calib.choose_player_sides", "ChoosePlayerSides", kChoosePlayerSides, 4,
                         [&](uint8_t* cps_ptr) {
