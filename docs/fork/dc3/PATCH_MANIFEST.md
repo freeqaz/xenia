@@ -45,8 +45,7 @@ tools/fork-regress/compare.py --paired out/cand out/ctrl
 | `content.wipe` | host FS | `remove_all(<content>/373307D9)` | O47 | **default off** (`--dc3_clean_content_cache=false`) |
 | `saveload.activate` | `SaveLoadManager::Activate` 0x82894A10 | `blr` | O37 | kept (L6, content/XAM) |
 | `speech.grammar_unload` | `SpeechMgr::Grammar::Unload` 0x82439F38 | `blr` | O7: the NUI S_OK stubs | kept (NUI) |
-| `calib.player_present_guard`, `calib.choose_player_sides`, `calib.warning_data`, `calib.nav_data`, `calib.wait_recovery`, `calib.exit_controller_mode` | SkeletonChooser / ShellInput (0x8290834C, 0x82909968, 0x82907880, 0x82909340, 0x82904CD0, 0x82902748) | `nop` / `blr` / rewrite | O8-O13: a constant skeleton is not a calibrated player | kept (NUI) |
-| `game.pause_for_skeleton_loss` | `Game::PauseForSkeletonLoss` 0x82866D50 | `blr` | O14 | kept (NUI) |
+| `calib.exit_controller_mode` | `ShellInput::ExitControllerMode` 0x82902748 | `blr` | O13: pairs with `seq.controller_mode`; the stock flow's pad presses need controller mode held | kept (NUI, phase 2: the controller-mode pair) |
 
 ## `dc3_hack_pack_skeleton.cc` (with `--fake_kinect_data`)
 
@@ -138,6 +137,31 @@ known-id table.
 | `skel.wait_33ms` | `SkeletonUpdateThread`+0xA4 0x8242E74C, INFINITE -> 33 ms | O4: the stubbed `NuiSkeletonTrackingEnable` never stored the title's event | the HLE stores the event and sets it per depth frame; the frame clock log shows events ~= frames served. Same S1 x5 |
 | `skel.is_override_nop` | `SkeletonUpdate::Update`+0x40 0x8242E1B0, `bne` on `mIsCameraOverride` -> `nop` | O5 | inert by construction: `mIsCameraOverride = mCameraInput->IsOverride()` and `LiveCameraInput::IsOverride()` is `return false`. S1 x5 against main with the code deleted (BASELINE.md) |
 | `content.refresh_done` | `ContentMgr::RefreshDone` 0x825FEB48 -> `li r3,1; blr` | O36: "content discovery never completes" (XAM cross-title enumeration) | core-d2 `d056ec7c8`: S1 PASS with `--dc3_disable_hacks=content.refresh_done` on main `1f309687c` and on core-d2 (whole song, gpState=3 at 198-204 s). The chain is implemented: `XContentCreateCrossTitleEnumerator` -> `XamGetPrivateEnumStructureFromHandle` -> `XamTaskSchedule` -> `XMsgInProcessCall(0xFE, 0x2000E)` -> `XMsgCompleteIORequest`. This lane: S1 x5 with the code deleted, interleaved with main `3cf2e27c3` (BASELINE.md) |
+
+## Retired in lane NUI-P2A (2026-10-07)
+
+Same-binary S1 x5 A/B on xenia main `0658fad65` (`ab.sh --slot`, `--extra-a
+--dc3_disable_hacks=` all six ids below), then the code deleted. Disabled side 5/5 PASS,
+control 5/5; title_screen 15-18 s vs 15-21 s, game_screen 33.0-33.1 s vs 33.0-42.1 s,
+76/76 unpaused gameplay samples every run, gpState=3 189.1-192.2 s vs 189.1-198.3 s,
+0 NON_XMA faults, 0 taint, song ymca, the same paused samples as the control (intro and
+end of song); `compare.py --paired` clean. The DTA probe in the phase-2 experiments
+(e4, e6) shows one tracked skeleton, player 0 bound to its id 5, and player 0 playing.
+
+| id | site | why it existed | evidence it is gone for good |
+|---|---|---|---|
+| `calib.player_present_guard` | `SkeletonChooser::SetPlayerPresent` 0x8290834C, `IsTrackingAllSkeletons` guard -> `nop` | O8: a constant skeleton is not a calibrated player (every joint NOT_TRACKED) | the NUI HLE serves TRACKED joints under the SDK's tracking policy; the real chooser binds player 0. A/B above |
+| `calib.choose_player_sides` | `ChoosePlayerSides` 0x82909968 -> `blr` | O9: same | same |
+| `calib.warning_data` | `SetPlayerSkeletonWarningData` 0x82907880 -> `blr` | O10: same | same |
+| `calib.nav_data` | `SetPlayerSkeletonNavData` 0x82909340 -> 2x `SetPlayerPresent` | O11: same | same |
+| `calib.wait_recovery` | `ShouldWaitForRecovery` 0x82904CD0 -> `return 0` | O12: same | same |
+| `game.pause_for_skeleton_loss` | `Game::PauseForSkeletonLoss` 0x82866D50 -> `blr` | O14: no player bound, so `CheckForSkeletonLoss` counted 0 playing and paused the song | player 0 is bound; no skeleton-loss pause in 5/5 runs (paused samples identical to the control) |
+
+Still kept: `calib.exit_controller_mode` and `seq.controller_mode`, a pair. Retiring
+`calib.exit_controller_mode` alone flaps controller mode and stalls at title (e2b);
+retiring both stalls at title with the stock flow, because `ShellInput` swallows the first
+pad press outside controller mode and controller mode times out 5 s later (e3); both off
+with an L3 wake press before each screen's first action plays the whole song (e6, one run).
 
 ## Status legend
 
