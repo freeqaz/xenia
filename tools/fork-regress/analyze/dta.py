@@ -94,4 +94,6 @@ def analyze(run_dir: Path, meta: dict):
     crit = {"installed": True, "first_poll_thread": "00000006",
             "answers": {q: (k, w) for q, (k, w) in EXPECT.items()},
             "flow": flow_crit, "song": EXPECT_SONG}
-    return ("PASS" if not reasons else "FAIL"), reasons, m, crit
+    verdict, reasons = dc3_flow.apply_known_race("PASS" if not reasons else "FAIL",
+                                                 reasons, flow)
+    return verdict, reasons, m, crit

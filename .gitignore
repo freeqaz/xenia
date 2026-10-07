@@ -71,6 +71,8 @@ private/
 *.trace
 imgui.ini
 *.log
+# fork-regress test fixtures: recorded logs trimmed to the analyzer lines
+!tools/fork-regress/tests/fixtures/*/run.log
 
 # ==============================================================================
 # Build system output

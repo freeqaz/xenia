@@ -374,6 +374,14 @@ stays in history for the NUI HLE lane.
   runs (r1-cand S2 r1, load 14). `mPostProcessors` is walked while the main
   thread is still building it. The splash thread is real since lane B
   retired the `Splash::*` stubs. Recorded, not fixed.
+  - 2026-10-07: confirmed as an ORIGINAL-GAME race (a use-after-free of the
+    default SpotlightDrawer's list node, freed by `NgSpotlightDrawer::Init`'s
+    `RELEASE(sDefault)` while the splash thread is inside `EndWorld` on it;
+    every function involved is 100% in dc3-decomp; caught in the act under
+    the GDB stub). fork-regress now judges a run that fails only on it
+    INCONCLUSIVE (`known_game_race:splash_postprocessor_uaf`, retried and
+    counted in `summary.json`): `tools/fork-regress/README.md`, "Known
+    original-game races".
 - The harness provenance said `headless=false` for every run; `fr.py` now
   records `true` for `xenia-headless`, which forces it (`701de7e39`).
 

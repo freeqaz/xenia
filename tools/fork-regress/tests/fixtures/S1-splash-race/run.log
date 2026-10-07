@@ -1,0 +1,103 @@
+i> 00272DF4 NUI HLE: NUI 2.0.21173 resolved 56/56 (.text 82330000+BB6B14); SDK facade installed (scan 442.2 ms, symbol map 75.0 ms)
+=== Thread Status Report (3001ms) === 21 threads, SIGSEGV=0 XMA=0 NON_XMA=0 last_fault=0x0 last_rip=0x0
+w> F800010C MMIO soft-fault read from unmapped guest 00000008 (host 0000000100000008, host RIP 00000000A03DCE4B, len 6, guest lr 82662B24 r1 7330FA80): not handled (--soft_fault_unmapped_reads=false)
+=== Thread Status Report (6004ms) === 24 threads, SIGSEGV=1 XMA=0 NON_XMA=1 last_fault=0x100000008 last_rip=0xA03DCE4B crash_guest=0x82662B18 []
+i> 00272DF8 DC3 FAULTS (6003ms): SIGSEGV=1 XMA=0 NON_XMA=1 last_non_xma=0x100000008 rip=0xA03DCE4B
+=== Thread Status Report (9006ms) === 24 threads, SIGSEGV=1 XMA=0 NON_XMA=1 last_fault=0x100000008 last_rip=0xA03DCE4B crash_guest=0x82662B18 []
+=== Thread Status Report (12008ms) === 24 threads, SIGSEGV=1 XMA=0 NON_XMA=1 last_fault=0x100000008 last_rip=0xA03DCE4B crash_guest=0x82662B18 []
+i> 00272E3A NUI HLE: frame clock 30.0/s produced=300 events=3 get_next=147515 served=80 no_frame=1 pending=147434
+=== Thread Status Report (15011ms) === 24 threads, SIGSEGV=1 XMA=0 NON_XMA=1 last_fault=0x100000008 last_rip=0xA03DCE4B crash_guest=0x82662B18 []
+=== Thread Status Report (18013ms) === 24 threads, SIGSEGV=1 XMA=0 NON_XMA=1 last_fault=0x100000008 last_rip=0xA03DCE4B crash_guest=0x82662B18 []
+=== Thread Status Report (21015ms) === 24 threads, SIGSEGV=1 XMA=0 NON_XMA=1 last_fault=0x100000008 last_rip=0xA03DCE4B crash_guest=0x82662B18 []
+i> 00272E3A NUI HLE: frame clock 30.0/s produced=601 events=3 get_next=147515 served=80 no_frame=1 pending=147434
+=== Thread Status Report (24018ms) === 24 threads, SIGSEGV=1 XMA=0 NON_XMA=1 last_fault=0x100000008 last_rip=0xA03DCE4B crash_guest=0x82662B18 []
+=== Thread Status Report (27020ms) === 24 threads, SIGSEGV=1 XMA=0 NON_XMA=1 last_fault=0x100000008 last_rip=0xA03DCE4B crash_guest=0x82662B18 []
+=== Thread Status Report (30022ms) === 24 threads, SIGSEGV=1 XMA=0 NON_XMA=1 last_fault=0x100000008 last_rip=0xA03DCE4B crash_guest=0x82662B18 []
+i> 00272E3A NUI HLE: frame clock 30.0/s produced=902 events=3 get_next=147515 served=80 no_frame=1 pending=147434
+=== Thread Status Report (33024ms) === 24 threads, SIGSEGV=1 XMA=0 NON_XMA=1 last_fault=0x100000008 last_rip=0xA03DCE4B crash_guest=0x82662B18 []
+=== Thread Status Report (36026ms) === 24 threads, SIGSEGV=1 XMA=0 NON_XMA=1 last_fault=0x100000008 last_rip=0xA03DCE4B crash_guest=0x82662B18 []
+=== Thread Status Report (39029ms) === 24 threads, SIGSEGV=1 XMA=0 NON_XMA=1 last_fault=0x100000008 last_rip=0xA03DCE4B crash_guest=0x82662B18 []
+=== Thread Status Report (42031ms) === 24 threads, SIGSEGV=1 XMA=0 NON_XMA=1 last_fault=0x100000008 last_rip=0xA03DCE4B crash_guest=0x82662B18 []
+i> 00272E3A NUI HLE: frame clock 30.0/s produced=1203 events=3 get_next=147515 served=80 no_frame=1 pending=147434
+=== Thread Status Report (45033ms) === 24 threads, SIGSEGV=1 XMA=0 NON_XMA=1 last_fault=0x100000008 last_rip=0xA03DCE4B crash_guest=0x82662B18 []
+=== Thread Status Report (48036ms) === 24 threads, SIGSEGV=1 XMA=0 NON_XMA=1 last_fault=0x100000008 last_rip=0xA03DCE4B crash_guest=0x82662B18 []
+=== Thread Status Report (51038ms) === 24 threads, SIGSEGV=1 XMA=0 NON_XMA=1 last_fault=0x100000008 last_rip=0xA03DCE4B crash_guest=0x82662B18 []
+i> 00272E3A NUI HLE: frame clock 30.0/s produced=1504 events=3 get_next=147515 served=80 no_frame=1 pending=147434
+=== Thread Status Report (54040ms) === 24 threads, SIGSEGV=1 XMA=0 NON_XMA=1 last_fault=0x100000008 last_rip=0xA03DCE4B crash_guest=0x82662B18 []
+=== Thread Status Report (57042ms) === 24 threads, SIGSEGV=1 XMA=0 NON_XMA=1 last_fault=0x100000008 last_rip=0xA03DCE4B crash_guest=0x82662B18 []
+=== Thread Status Report (60045ms) === 24 threads, SIGSEGV=1 XMA=0 NON_XMA=1 last_fault=0x100000008 last_rip=0xA03DCE4B crash_guest=0x82662B18 []
+i> 00272E3A NUI HLE: frame clock 30.0/s produced=1805 events=3 get_next=147515 served=80 no_frame=1 pending=147434
+=== Thread Status Report (63047ms) === 24 threads, SIGSEGV=1 XMA=0 NON_XMA=1 last_fault=0x100000008 last_rip=0xA03DCE4B crash_guest=0x82662B18 []
+=== Thread Status Report (66049ms) === 24 threads, SIGSEGV=1 XMA=0 NON_XMA=1 last_fault=0x100000008 last_rip=0xA03DCE4B crash_guest=0x82662B18 []
+=== Thread Status Report (69051ms) === 24 threads, SIGSEGV=1 XMA=0 NON_XMA=1 last_fault=0x100000008 last_rip=0xA03DCE4B crash_guest=0x82662B18 []
+=== Thread Status Report (72054ms) === 24 threads, SIGSEGV=1 XMA=0 NON_XMA=1 last_fault=0x100000008 last_rip=0xA03DCE4B crash_guest=0x82662B18 []
+i> 00272E3A NUI HLE: frame clock 30.0/s produced=2106 events=3 get_next=147515 served=80 no_frame=1 pending=147434
+=== Thread Status Report (75056ms) === 24 threads, SIGSEGV=1 XMA=0 NON_XMA=1 last_fault=0x100000008 last_rip=0xA03DCE4B crash_guest=0x82662B18 []
+=== Thread Status Report (78059ms) === 24 threads, SIGSEGV=1 XMA=0 NON_XMA=1 last_fault=0x100000008 last_rip=0xA03DCE4B crash_guest=0x82662B18 []
+=== Thread Status Report (81061ms) === 24 threads, SIGSEGV=1 XMA=0 NON_XMA=1 last_fault=0x100000008 last_rip=0xA03DCE4B crash_guest=0x82662B18 []
+i> 00272E3A NUI HLE: frame clock 30.0/s produced=2407 events=3 get_next=147515 served=80 no_frame=1 pending=147434
+=== Thread Status Report (84063ms) === 24 threads, SIGSEGV=1 XMA=0 NON_XMA=1 last_fault=0x100000008 last_rip=0xA03DCE4B crash_guest=0x82662B18 []
+=== Thread Status Report (87065ms) === 24 threads, SIGSEGV=1 XMA=0 NON_XMA=1 last_fault=0x100000008 last_rip=0xA03DCE4B crash_guest=0x82662B18 []
+=== Thread Status Report (90068ms) === 24 threads, SIGSEGV=1 XMA=0 NON_XMA=1 last_fault=0x100000008 last_rip=0xA03DCE4B crash_guest=0x82662B18 []
+i> 00272E3A NUI HLE: frame clock 30.0/s produced=2708 events=3 get_next=147515 served=80 no_frame=1 pending=147434
+=== Thread Status Report (93072ms) === 24 threads, SIGSEGV=1 XMA=0 NON_XMA=1 last_fault=0x100000008 last_rip=0xA03DCE4B crash_guest=0x82662B18 []
+=== Thread Status Report (96075ms) === 24 threads, SIGSEGV=1 XMA=0 NON_XMA=1 last_fault=0x100000008 last_rip=0xA03DCE4B crash_guest=0x82662B18 []
+=== Thread Status Report (99077ms) === 24 threads, SIGSEGV=1 XMA=0 NON_XMA=1 last_fault=0x100000008 last_rip=0xA03DCE4B crash_guest=0x82662B18 []
+=== Thread Status Report (102079ms) === 24 threads, SIGSEGV=1 XMA=0 NON_XMA=1 last_fault=0x100000008 last_rip=0xA03DCE4B crash_guest=0x82662B18 []
+i> 00272E3A NUI HLE: frame clock 30.0/s produced=3009 events=3 get_next=147515 served=80 no_frame=1 pending=147434
+=== Thread Status Report (105081ms) === 24 threads, SIGSEGV=1 XMA=0 NON_XMA=1 last_fault=0x100000008 last_rip=0xA03DCE4B crash_guest=0x82662B18 []
+=== Thread Status Report (108084ms) === 24 threads, SIGSEGV=1 XMA=0 NON_XMA=1 last_fault=0x100000008 last_rip=0xA03DCE4B crash_guest=0x82662B18 []
+=== Thread Status Report (111086ms) === 24 threads, SIGSEGV=1 XMA=0 NON_XMA=1 last_fault=0x100000008 last_rip=0xA03DCE4B crash_guest=0x82662B18 []
+i> 00272E3A NUI HLE: frame clock 30.0/s produced=3310 events=3 get_next=147515 served=80 no_frame=1 pending=147434
+=== Thread Status Report (114088ms) === 24 threads, SIGSEGV=1 XMA=0 NON_XMA=1 last_fault=0x100000008 last_rip=0xA03DCE4B crash_guest=0x82662B18 []
+=== Thread Status Report (117090ms) === 24 threads, SIGSEGV=1 XMA=0 NON_XMA=1 last_fault=0x100000008 last_rip=0xA03DCE4B crash_guest=0x82662B18 []
+=== Thread Status Report (120093ms) === 24 threads, SIGSEGV=1 XMA=0 NON_XMA=1 last_fault=0x100000008 last_rip=0xA03DCE4B crash_guest=0x82662B18 []
+i> 00272E3A NUI HLE: frame clock 30.0/s produced=3611 events=3 get_next=147515 served=80 no_frame=1 pending=147434
+=== Thread Status Report (123095ms) === 24 threads, SIGSEGV=1 XMA=0 NON_XMA=1 last_fault=0x100000008 last_rip=0xA03DCE4B crash_guest=0x82662B18 []
+=== Thread Status Report (126097ms) === 24 threads, SIGSEGV=1 XMA=0 NON_XMA=1 last_fault=0x100000008 last_rip=0xA03DCE4B crash_guest=0x82662B18 []
+=== Thread Status Report (129100ms) === 24 threads, SIGSEGV=1 XMA=0 NON_XMA=1 last_fault=0x100000008 last_rip=0xA03DCE4B crash_guest=0x82662B18 []
+=== Thread Status Report (132102ms) === 24 threads, SIGSEGV=1 XMA=0 NON_XMA=1 last_fault=0x100000008 last_rip=0xA03DCE4B crash_guest=0x82662B18 []
+i> 00272E3A NUI HLE: frame clock 30.0/s produced=3911 events=3 get_next=147515 served=80 no_frame=1 pending=147434
+=== Thread Status Report (135104ms) === 24 threads, SIGSEGV=1 XMA=0 NON_XMA=1 last_fault=0x100000008 last_rip=0xA03DCE4B crash_guest=0x82662B18 []
+=== Thread Status Report (138107ms) === 24 threads, SIGSEGV=1 XMA=0 NON_XMA=1 last_fault=0x100000008 last_rip=0xA03DCE4B crash_guest=0x82662B18 []
+=== Thread Status Report (141109ms) === 24 threads, SIGSEGV=1 XMA=0 NON_XMA=1 last_fault=0x100000008 last_rip=0xA03DCE4B crash_guest=0x82662B18 []
+i> 00272E3A NUI HLE: frame clock 30.0/s produced=4212 events=3 get_next=147515 served=80 no_frame=1 pending=147434
+=== Thread Status Report (144114ms) === 24 threads, SIGSEGV=1 XMA=0 NON_XMA=1 last_fault=0x100000008 last_rip=0xA03DCE4B crash_guest=0x82662B18 []
+=== Thread Status Report (147116ms) === 24 threads, SIGSEGV=1 XMA=0 NON_XMA=1 last_fault=0x100000008 last_rip=0xA03DCE4B crash_guest=0x82662B18 []
+=== Thread Status Report (150120ms) === 24 threads, SIGSEGV=1 XMA=0 NON_XMA=1 last_fault=0x100000008 last_rip=0xA03DCE4B crash_guest=0x82662B18 []
+i> 00272E3A NUI HLE: frame clock 30.0/s produced=4512 events=3 get_next=147515 served=80 no_frame=1 pending=147434
+=== Thread Status Report (153124ms) === 24 threads, SIGSEGV=1 XMA=0 NON_XMA=1 last_fault=0x100000008 last_rip=0xA03DCE4B crash_guest=0x82662B18 []
+=== Thread Status Report (156128ms) === 24 threads, SIGSEGV=1 XMA=0 NON_XMA=1 last_fault=0x100000008 last_rip=0xA03DCE4B crash_guest=0x82662B18 []
+=== Thread Status Report (159130ms) === 24 threads, SIGSEGV=1 XMA=0 NON_XMA=1 last_fault=0x100000008 last_rip=0xA03DCE4B crash_guest=0x82662B18 []
+=== Thread Status Report (162133ms) === 24 threads, SIGSEGV=1 XMA=0 NON_XMA=1 last_fault=0x100000008 last_rip=0xA03DCE4B crash_guest=0x82662B18 []
+i> 00272E3A NUI HLE: frame clock 30.0/s produced=4813 events=3 get_next=147515 served=80 no_frame=1 pending=147434
+=== Thread Status Report (165135ms) === 24 threads, SIGSEGV=1 XMA=0 NON_XMA=1 last_fault=0x100000008 last_rip=0xA03DCE4B crash_guest=0x82662B18 []
+=== Thread Status Report (168138ms) === 24 threads, SIGSEGV=1 XMA=0 NON_XMA=1 last_fault=0x100000008 last_rip=0xA03DCE4B crash_guest=0x82662B18 []
+=== Thread Status Report (171140ms) === 24 threads, SIGSEGV=1 XMA=0 NON_XMA=1 last_fault=0x100000008 last_rip=0xA03DCE4B crash_guest=0x82662B18 []
+i> 00272E3A NUI HLE: frame clock 30.0/s produced=5114 events=3 get_next=147515 served=80 no_frame=1 pending=147434
+=== Thread Status Report (174143ms) === 24 threads, SIGSEGV=1 XMA=0 NON_XMA=1 last_fault=0x100000008 last_rip=0xA03DCE4B crash_guest=0x82662B18 []
+=== Thread Status Report (177145ms) === 24 threads, SIGSEGV=1 XMA=0 NON_XMA=1 last_fault=0x100000008 last_rip=0xA03DCE4B crash_guest=0x82662B18 []
+=== Thread Status Report (180147ms) === 24 threads, SIGSEGV=1 XMA=0 NON_XMA=1 last_fault=0x100000008 last_rip=0xA03DCE4B crash_guest=0x82662B18 []
+i> 00272E3A NUI HLE: frame clock 30.0/s produced=5414 events=3 get_next=147515 served=80 no_frame=1 pending=147434
+=== Thread Status Report (183150ms) === 24 threads, SIGSEGV=1 XMA=0 NON_XMA=1 last_fault=0x100000008 last_rip=0xA03DCE4B crash_guest=0x82662B18 []
+=== Thread Status Report (186152ms) === 24 threads, SIGSEGV=1 XMA=0 NON_XMA=1 last_fault=0x100000008 last_rip=0xA03DCE4B crash_guest=0x82662B18 []
+=== Thread Status Report (189155ms) === 24 threads, SIGSEGV=1 XMA=0 NON_XMA=1 last_fault=0x100000008 last_rip=0xA03DCE4B crash_guest=0x82662B18 []
+=== Thread Status Report (192159ms) === 24 threads, SIGSEGV=1 XMA=0 NON_XMA=1 last_fault=0x100000008 last_rip=0xA03DCE4B crash_guest=0x82662B18 []
+i> 00272E3A NUI HLE: frame clock 30.0/s produced=5715 events=3 get_next=147515 served=80 no_frame=1 pending=147434
+=== Thread Status Report (195161ms) === 24 threads, SIGSEGV=1 XMA=0 NON_XMA=1 last_fault=0x100000008 last_rip=0xA03DCE4B crash_guest=0x82662B18 []
+=== Thread Status Report (198163ms) === 24 threads, SIGSEGV=1 XMA=0 NON_XMA=1 last_fault=0x100000008 last_rip=0xA03DCE4B crash_guest=0x82662B18 []
+=== Thread Status Report (201167ms) === 24 threads, SIGSEGV=1 XMA=0 NON_XMA=1 last_fault=0x100000008 last_rip=0xA03DCE4B crash_guest=0x82662B18 []
+i> 00272E3A NUI HLE: frame clock 30.0/s produced=6016 events=3 get_next=147515 served=80 no_frame=1 pending=147434
+=== Thread Status Report (204170ms) === 24 threads, SIGSEGV=1 XMA=0 NON_XMA=1 last_fault=0x100000008 last_rip=0xA03DCE4B crash_guest=0x82662B18 []
+=== Thread Status Report (207172ms) === 24 threads, SIGSEGV=1 XMA=0 NON_XMA=1 last_fault=0x100000008 last_rip=0xA03DCE4B crash_guest=0x82662B18 []
+=== Thread Status Report (210175ms) === 24 threads, SIGSEGV=1 XMA=0 NON_XMA=1 last_fault=0x100000008 last_rip=0xA03DCE4B crash_guest=0x82662B18 []
+i> 00272E3A NUI HLE: frame clock 30.0/s produced=6316 events=3 get_next=147515 served=80 no_frame=1 pending=147434
+=== Thread Status Report (213177ms) === 24 threads, SIGSEGV=1 XMA=0 NON_XMA=1 last_fault=0x100000008 last_rip=0xA03DCE4B crash_guest=0x82662B18 []
+=== Thread Status Report (216179ms) === 24 threads, SIGSEGV=1 XMA=0 NON_XMA=1 last_fault=0x100000008 last_rip=0xA03DCE4B crash_guest=0x82662B18 []
+=== Thread Status Report (219182ms) === 24 threads, SIGSEGV=1 XMA=0 NON_XMA=1 last_fault=0x100000008 last_rip=0xA03DCE4B crash_guest=0x82662B18 []
+=== Thread Status Report (222184ms) === 24 threads, SIGSEGV=1 XMA=0 NON_XMA=1 last_fault=0x100000008 last_rip=0xA03DCE4B crash_guest=0x82662B18 []
+i> 00272E3A NUI HLE: frame clock 30.0/s produced=6617 events=3 get_next=147515 served=80 no_frame=1 pending=147434
+=== Thread Status Report (225186ms) === 24 threads, SIGSEGV=1 XMA=0 NON_XMA=1 last_fault=0x100000008 last_rip=0xA03DCE4B crash_guest=0x82662B18 []
+=== Thread Status Report (228188ms) === 24 threads, SIGSEGV=1 XMA=0 NON_XMA=1 last_fault=0x100000008 last_rip=0xA03DCE4B crash_guest=0x82662B18 []
+TIMEOUT: 230000ms reached
+i> 00272DEB Timeout of 230000ms reached, terminating...

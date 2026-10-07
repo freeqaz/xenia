@@ -1,0 +1,166 @@
+w> F80000B4 MMIO soft-fault read from unmapped guest 00000000 (host 0000000100000000, host RIP 00000000A02957C1, len 6): zeroing destination register and resuming
+w> F80000B4 MMIO soft-fault read from unmapped guest 0000000C (host 000000010000000C, host RIP 00000000A02957D1, len 6): zeroing destination register and resuming
+=== Thread Status Report (3004ms) === 17 threads, SIGSEGV=2 last_fault=0x10000000C last_rip=0xA02957D1 crash_guest=0x82E999CC []
+=== Thread Status Report (6023ms) === 22 threads, SIGSEGV=2 last_fault=0x10000000C last_rip=0xA02957D1 crash_guest=0x82E999CC []
+=== Thread Status Report (9048ms) === 24 threads, SIGSEGV=2 last_fault=0x10000000C last_rip=0xA02957D1 crash_guest=0x82E999CC []
+=== Thread Status Report (12072ms) === 24 threads, SIGSEGV=2 last_fault=0x10000000C last_rip=0xA02957D1 crash_guest=0x82E999CC []
+=== Thread Status Report (15093ms) === 24 threads, SIGSEGV=2 last_fault=0x10000000C last_rip=0xA02957D1 crash_guest=0x82E999CC []
+i> F8000088 DC3 Script: wait_screen 'title_screen' SATISFIED (current: 'title_screen')
+=== Thread Status Report (18114ms) === 22 threads, SIGSEGV=2 last_fault=0x10000000C last_rip=0xA02957D1 crash_guest=0x82E999CC []
+i> F8000088 DC3 Script: wait_screen 'main_screen' SATISFIED (current: 'main_screen')
+=== Thread Status Report (21142ms) === 25 threads, SIGSEGV=2 last_fault=0x10000000C last_rip=0xA02957D1 crash_guest=0x82E999CC []
+i> F8000088 DC3 Script: wait_screen 'choose_mode_screen' SATISFIED (current: 'choose_mode_screen')
+=== Thread Status Report (24152ms) === 25 threads, SIGSEGV=2 last_fault=0x10000000C last_rip=0xA02957D1 crash_guest=0x82E999CC []
+i> F8000088 DC3 Script: wait_screen 'song_select_screen' SATISFIED (current: 'song_select_screen')
+=== Thread Status Report (27160ms) === 25 threads, SIGSEGV=2 last_fault=0x10000000C last_rip=0xA02957D1 crash_guest=0x82E999CC []
+=== Thread Status Report (30180ms) === 26 threads, SIGSEGV=2 last_fault=0x10000000C last_rip=0xA02957D1 crash_guest=0x82E999CC []
+=== Thread Status Report (33192ms) === 25 threads, SIGSEGV=2 last_fault=0x10000000C last_rip=0xA02957D1 crash_guest=0x82E999CC []
+=== Thread Status Report (36205ms) === 25 threads, SIGSEGV=2 last_fault=0x10000000C last_rip=0xA02957D1 crash_guest=0x82E999CC []
+=== Thread Status Report (39218ms) === 25 threads, SIGSEGV=2 last_fault=0x10000000C last_rip=0xA02957D1 crash_guest=0x82E999CC []
+=== Thread Status Report (42223ms) === 25 threads, SIGSEGV=2 last_fault=0x10000000C last_rip=0xA02957D1 crash_guest=0x82E999CC []
+i> F8000088 DC3 Script: wait_screen 'game_screen' SATISFIED (current: 'game_screen')
+=== Thread Status Report (45229ms) === 25 threads, SIGSEGV=2 last_fault=0x10000000C last_rip=0xA02957D1 crash_guest=0x82E999CC []
+i> F8000088 DC3 Script: gameplay gp=40C64678 gpState=2 game=40822470 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (48233ms) === 25 threads, SIGSEGV=2 last_fault=0x10000000C last_rip=0xA02957D1 crash_guest=0x82E999CC []
+i> F8000088 DC3 Script: gameplay gp=40C64678 gpState=2 game=40822470 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (51238ms) === 25 threads, SIGSEGV=2 last_fault=0x10000000C last_rip=0xA02957D1 crash_guest=0x82E999CC []
+i> F8000088 DC3 Script: gameplay gp=40C64678 gpState=2 game=40822470 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+i> F8000088 DC3 Script: gameplay gp=40C64678 gpState=2 game=40822470 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (54242ms) === 25 threads, SIGSEGV=2 last_fault=0x10000000C last_rip=0xA02957D1 crash_guest=0x82E999CC []
+i> F8000088 DC3 Script: gameplay gp=40C64678 gpState=2 game=40822470 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (57246ms) === 25 threads, SIGSEGV=2 last_fault=0x10000000C last_rip=0xA02957D1 crash_guest=0x82E999CC []
+i> F8000088 DC3 Script: gameplay gp=40C64678 gpState=2 game=40822470 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+i> F8000088 DC3 Script: gameplay gp=40C64678 gpState=2 game=40822470 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (60252ms) === 25 threads, SIGSEGV=2 last_fault=0x10000000C last_rip=0xA02957D1 crash_guest=0x82E999CC []
+i> F8000088 DC3 Script: gameplay gp=40C64678 gpState=2 game=40822470 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (63258ms) === 25 threads, SIGSEGV=2 last_fault=0x10000000C last_rip=0xA02957D1 crash_guest=0x82E999CC []
+i> F8000088 DC3 Script: gameplay gp=40C64678 gpState=2 game=40822470 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+i> F8000088 DC3 Script: gameplay gp=40C64678 gpState=2 game=40822470 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (66261ms) === 25 threads, SIGSEGV=2 last_fault=0x10000000C last_rip=0xA02957D1 crash_guest=0x82E999CC []
+i> F8000088 DC3 Script: gameplay gp=40C64678 gpState=2 game=40822470 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (69264ms) === 25 threads, SIGSEGV=2 last_fault=0x10000000C last_rip=0xA02957D1 crash_guest=0x82E999CC []
+i> F8000088 DC3 Script: gameplay gp=40C64678 gpState=2 game=40822470 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+i> F8000088 DC3 Script: gameplay gp=40C64678 gpState=2 game=40822470 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (72267ms) === 25 threads, SIGSEGV=2 last_fault=0x10000000C last_rip=0xA02957D1 crash_guest=0x82E999CC []
+i> F8000088 DC3 Script: gameplay gp=40C64678 gpState=2 game=40822470 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (75270ms) === 25 threads, SIGSEGV=2 last_fault=0x10000000C last_rip=0xA02957D1 crash_guest=0x82E999CC []
+i> F8000088 DC3 Script: gameplay gp=40C64678 gpState=2 game=40822470 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+i> F8000088 DC3 Script: gameplay gp=40C64678 gpState=2 game=40822470 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (78273ms) === 25 threads, SIGSEGV=2 last_fault=0x10000000C last_rip=0xA02957D1 crash_guest=0x82E999CC []
+i> F8000088 DC3 Script: gameplay gp=40C64678 gpState=2 game=40822470 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (81276ms) === 25 threads, SIGSEGV=2 last_fault=0x10000000C last_rip=0xA02957D1 crash_guest=0x82E999CC []
+i> F8000088 DC3 Script: gameplay gp=40C64678 gpState=2 game=40822470 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+i> F8000088 DC3 Script: gameplay gp=40C64678 gpState=2 game=40822470 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (84279ms) === 25 threads, SIGSEGV=2 last_fault=0x10000000C last_rip=0xA02957D1 crash_guest=0x82E999CC []
+i> F8000088 DC3 Script: gameplay gp=40C64678 gpState=2 game=40822470 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (87282ms) === 25 threads, SIGSEGV=2 last_fault=0x10000000C last_rip=0xA02957D1 crash_guest=0x82E999CC []
+i> F8000088 DC3 Script: gameplay gp=40C64678 gpState=2 game=40822470 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+i> F8000088 DC3 Script: gameplay gp=40C64678 gpState=2 game=40822470 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (90285ms) === 25 threads, SIGSEGV=2 last_fault=0x10000000C last_rip=0xA02957D1 crash_guest=0x82E999CC []
+i> F8000088 DC3 Script: gameplay gp=40C64678 gpState=2 game=40822470 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (93288ms) === 25 threads, SIGSEGV=2 last_fault=0x10000000C last_rip=0xA02957D1 crash_guest=0x82E999CC []
+i> F8000088 DC3 Script: gameplay gp=40C64678 gpState=2 game=40822470 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+i> F8000088 DC3 Script: gameplay gp=40C64678 gpState=2 game=40822470 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (96291ms) === 25 threads, SIGSEGV=2 last_fault=0x10000000C last_rip=0xA02957D1 crash_guest=0x82E999CC []
+i> F8000088 DC3 Script: gameplay gp=40C64678 gpState=2 game=40822470 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (99295ms) === 25 threads, SIGSEGV=2 last_fault=0x10000000C last_rip=0xA02957D1 crash_guest=0x82E999CC []
+i> F8000088 DC3 Script: gameplay gp=40C64678 gpState=2 game=40822470 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+i> F8000088 DC3 Script: gameplay gp=40C64678 gpState=2 game=40822470 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (102298ms) === 25 threads, SIGSEGV=2 last_fault=0x10000000C last_rip=0xA02957D1 crash_guest=0x82E999CC []
+i> F8000088 DC3 Script: gameplay gp=40C64678 gpState=2 game=40822470 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (105301ms) === 25 threads, SIGSEGV=2 last_fault=0x10000000C last_rip=0xA02957D1 crash_guest=0x82E999CC []
+i> F8000088 DC3 Script: gameplay gp=40C64678 gpState=2 game=40822470 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+i> F8000088 DC3 Script: gameplay gp=40C64678 gpState=2 game=40822470 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (108304ms) === 25 threads, SIGSEGV=2 last_fault=0x10000000C last_rip=0xA02957D1 crash_guest=0x82E999CC []
+i> F8000088 DC3 Script: gameplay gp=40C64678 gpState=2 game=40822470 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (111310ms) === 25 threads, SIGSEGV=2 last_fault=0x10000000C last_rip=0xA02957D1 crash_guest=0x82E999CC []
+i> F8000088 DC3 Script: gameplay gp=40C64678 gpState=2 game=40822470 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+i> F8000088 DC3 Script: gameplay gp=40C64678 gpState=2 game=40822470 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (114313ms) === 25 threads, SIGSEGV=2 last_fault=0x10000000C last_rip=0xA02957D1 crash_guest=0x82E999CC []
+i> F8000088 DC3 Script: gameplay gp=40C64678 gpState=2 game=40822470 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (117316ms) === 25 threads, SIGSEGV=2 last_fault=0x10000000C last_rip=0xA02957D1 crash_guest=0x82E999CC []
+i> F8000088 DC3 Script: gameplay gp=40C64678 gpState=2 game=40822470 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+i> F8000088 DC3 Script: gameplay gp=40C64678 gpState=2 game=40822470 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (120319ms) === 25 threads, SIGSEGV=2 last_fault=0x10000000C last_rip=0xA02957D1 crash_guest=0x82E999CC []
+i> F8000088 DC3 Script: gameplay gp=40C64678 gpState=2 game=40822470 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (123322ms) === 25 threads, SIGSEGV=2 last_fault=0x10000000C last_rip=0xA02957D1 crash_guest=0x82E999CC []
+i> F8000088 DC3 Script: gameplay gp=40C64678 gpState=2 game=40822470 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+i> F8000088 DC3 Script: gameplay gp=40C64678 gpState=2 game=40822470 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (126325ms) === 25 threads, SIGSEGV=2 last_fault=0x10000000C last_rip=0xA02957D1 crash_guest=0x82E999CC []
+i> F8000088 DC3 Script: gameplay gp=40C64678 gpState=2 game=40822470 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (129328ms) === 25 threads, SIGSEGV=2 last_fault=0x10000000C last_rip=0xA02957D1i> F8000004 NullGPU: LoadShader #7200000 type=0 addr=0x1E4932C0 dwords=45
+i> F8000088 DC3 Script: gameplay gp=40C64678 gpState=2 game=40822470 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+i> F8000088 DC3 Script: gameplay gp=40C64678 gpState=2 game=40822470 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (132331ms) === 25 threads, SIGSEGV=2 last_fault=0x10000000C last_rip=0xA02957D1 crash_guest=0x82E999CC []
+i> F8000088 DC3 Script: gameplay gp=40C64678 gpState=2 game=40822470 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (135334ms) === 25 threads, SIGSEGV=2 last_fault=0x10000000C last_rip=0xA02957D1 crash_guest=0x82E999CC []
+i> F8000088 DC3 Script: gameplay gp=40C64678 gpState=2 game=40822470 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+i> F8000088 DC3 Script: gameplay gp=40C64678 gpState=2 game=40822470 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (138337ms) === 25 threads, SIGSEGV=2 last_fault=0x10000000C last_rip=0xA02957D1 crash_guest=0x82E999CC []
+i> F8000088 DC3 Script: gameplay gp=40C64678 gpState=2 game=40822470 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (141340ms) === 25 threads, SIGSEGV=2 last_fault=0x10000000C last_rip=0xA02957D1 crash_guest=0x82E999CC []
+i> F8000088 DC3 Script: gameplay gp=40C64678 gpState=2 game=40822470 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+i> F8000088 DC3 Script: gameplay gp=40C64678 gpState=2 game=40822470 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (144344ms) === 25 threads, SIGSEGV=2 last_fault=0x10000000C last_rip=0xA02957D1 crash_guest=0x82E999CC []
+i> F8000088 DC3 Script: gameplay gp=40C64678 gpState=2 game=40822470 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (147347ms) === 25 threads, SIGSEGV=2 last_fault=0x10000000C last_rip=0xA02957D1 crash_guest=0x82E999CC []
+i> F8000088 DC3 Script: gameplay gp=40C64678 gpState=2 game=40822470 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+i> F8000088 DC3 Script: gameplay gp=40C64678 gpState=2 game=40822470 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (150350ms) === 25 threads, SIGSEGV=2 last_fault=0x10000000C last_rip=0xA02957D1 crash_guest=0x82E999CC []
+i> F8000088 DC3 Script: gameplay gp=40C64678 gpState=2 game=40822470 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (153353ms) === 25 threads, SIGSEGV=2 last_fault=0x10000000C last_rip=0xA02957D1 crash_guest=0x82E999CC []
+i> F8000088 DC3 Script: gameplay gp=40C64678 gpState=2 game=40822470 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+i> F8000088 DC3 Script: gameplay gp=40C64678 gpState=2 game=40822470 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (156356ms) === 25 threads, SIGSEGV=2 last_fault=0x10000000C last_rip=0xA02957D1 crash_guest=0x82E999CC []
+i> F8000088 DC3 Script: gameplay gp=40C64678 gpState=2 game=40822470 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (159359ms) === 25 threads, SIGSEGV=2 last_fault=0x10000000C last_rip=0xA02957D1 crash_guest=0x82E999CC []
+i> F8000088 DC3 Script: gameplay gp=40C64678 gpState=2 game=40822470 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+i> F8000088 DC3 Script: gameplay gp=40C64678 gpState=2 game=40822470 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (162370ms) === 25 threads, SIGSEGV=2 last_fault=0x10000000C last_rip=0xA02957D1 crash_guest=0x82E999CC []
+i> F8000088 DC3 Script: gameplay gp=40C64678 gpState=2 game=40822470 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (165405ms) === 25 threads, SIGSEGV=2 last_fault=0x10000000C last_rip=0xA02957D1 crash_guest=0x82E999CC []
+i> F8000088 DC3 Script: gameplay gp=40C64678 gpState=2 game=40822470 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+i> F8000088 DC3 Script: gameplay gp=40C64678 gpState=2 game=40822470 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (168424ms) === 25 threads, SIGSEGV=2 last_fault=0x10000000C last_rip=0xA02957D1 crash_guest=0x82E999CC []
+i> F8000088 DC3 Script: gameplay gp=40C64678 gpState=2 game=40822470 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (171434ms) === 25 threads, SIGSEGV=2 last_fault=0x10000000C last_rip=0xA02957D1 crash_guest=0x82E999CC []
+i> F8000088 DC3 Script: gameplay gp=40C64678 gpState=2 game=40822470 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+i> F8000088 DC3 Script: gameplay gp=40C64678 gpState=2 game=40822470 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (174441ms) === 25 threads, SIGSEGV=2 last_fault=0x10000000C last_rip=0xA02957D1 crash_guest=0x82E999CC []
+i> F8000088 DC3 Script: gameplay gp=40C64678 gpState=2 game=40822470 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (177445ms) === 25 threads, SIGSEGV=2 last_fault=0x10000000C last_rip=0xA02957D1 crash_guest=0x82E999CC []
+i> F8000088 DC3 Script: gameplay gp=40C64678 gpState=2 game=40822470 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+i> F8000088 DC3 Script: gameplay gp=40C64678 gpState=2 game=40822470 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (180449ms) === 25 threads, SIGSEGV=2 last_fault=0x10000000C last_rip=0xA02957D1 crash_guest=0x82E999CC []
+i> F8000088 DC3 Script: gameplay gp=40C64678 gpState=2 game=40822470 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (183457ms) === 25 threads, SIGSEGV=2 last_fault=0x10000000C last_rip=0xA02957D1 crash_guest=0x82E999CC []
+i> F8000088 DC3 Script: gameplay gp=40C64678 gpState=2 game=40822470 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+i> F8000088 DC3 Script: gameplay gp=40C64678 gpState=2 game=40822470 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (186460ms) === 25 threads, SIGSEGV=2 last_fault=0x10000000C last_rip=0xA02957D1 crash_guest=0x82E999CC []
+i> F8000088 DC3 Script: gameplay gp=40C64678 gpState=2 game=40822470 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (189464ms) === 25 threads, SIGSEGV=2 last_fault=0x10000000C last_rip=0xA02957D1 crash_guest=0x82E999CC []
+i> F8000088 DC3 Script: gameplay gp=40C64678 gpState=2 game=40822470 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+i> F8000088 DC3 Script: gameplay gp=40C64678 gpState=2 game=40822470 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (192473ms) === 25 threads, SIGSEGV=2 last_fault=0x10000000C last_rip=0xA02957D1 crash_guest=0x82E999CC []
+i> F8000088 DC3 Script: gameplay gp=40C64678 gpState=2 game=40822470 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (195482ms) === 25 threads, SIGSEGV=2 last_fault=0x10000000C last_rip=0xA02957D1 crash_guest=0x82E999CC []
+i> F8000088 DC3 Script: gameplay gp=40C64678 gpState=2 game=40822470 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+i> F8000088 DC3 Script: gameplay gp=40C64678 gpState=2 game=40822470 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (198487ms) === 25 threads, SIGSEGV=2 last_fault=0x10000000C last_rip=0xA02957D1 crash_guest=0x82E999CC []
+i> F8000088 DC3 Script: gameplay gp=40C64678 gpState=2 game=40822470 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (201494ms) === 25 threads, SIGSEGV=2 last_fault=0x10000000C last_rip=0xA02957D1 crash_guest=0x82E999CC []
+i> F8000088 DC3 Script: gameplay gp=40C64678 gpState=2 game=40822470 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+i> F8000088 DC3 Script: gameplay gp=40C64678 gpState=3 game=40822470 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+i> F8000088 DC3 Script: gameplay gp=40C64678 gpState=3 game=40822470 load=3 wait=0 paused=1 timePaused=0 realTime=1 hasIntro=0
+=== Thread Status Report (204500ms) === 25 threads, SIGSEGV=2 last_fault=0x10000000C last_rip=0xA02957D1 crash_guest=0x82E999CC []
+i> F8000088 DC3 Script: gameplay gp=40C64678 gpState=3 game=40822470 load=3 wait=0 paused=1 timePaused=0 realTime=1 hasIntro=0
+i> F8000088 DC3 Script: gameplay gp=40C64678 gpState=3 game=40822470 load=3 wait=0 paused=1 timePaused=0 realTime=1 hasIntro=0
+=== Thread Status Report (207504ms) === 25 threads, SIGSEGV=2 last_fault=0x10000000C last_rip=0xA02957D1 crash_guest=0x82E999CC []
+=== Thread Status Report (210509ms) === 25 threads, SIGSEGV=2 last_fault=0x10000000C last_rip=0xA02957D1 crash_guest=0x82E999CC []
+=== Thread Status Report (213517ms) === 25 threads, SIGSEGV=2 last_fault=0x10000000C last_rip=0xA02957D1 crash_guest=0x82E999CC []
+=== Thread Status Report (216521ms) === 25 threads, SIGSEGV=2 last_fault=0x10000000C last_rip=0xA02957D1 crash_guest=0x82E999CC []
+=== Thread Status Report (219525ms) === 25 threads, SIGSEGV=2 last_fault=0x10000000C last_rip=0xA02957D1 crash_guest=0x82E999CC []
+=== Thread Status Report (222528ms) === 25 threads, SIGSEGV=2 last_fault=0x10000000C last_rip=0xA02957D1 crash_guest=0x82E999CC []
+=== Thread Status Report (225531ms) === 25 threads, SIGSEGV=2 last_fault=0x10000000C last_rip=0xA02957D1 crash_guest=0x82E999CC []
+=== Thread Status Report (228534ms) === 25 threads, SIGSEGV=2 last_fault=0x10000000C last_rip=0xA02957D1 crash_guest=0x82E999CC []
+TIMEOUT: 230000ms reached

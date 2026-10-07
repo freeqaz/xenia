@@ -390,6 +390,19 @@ def run_dirs(scenario_dir: Path):
     return {k: sorted(v, key=lambda p: (len(p.name), p.name)) for k, v in by_idx.items()}
 
 
+# Reason prefix an analyzer gives a run that failed only on a known
+# ORIGINAL-GAME race (analyze/dc3_flow.py KNOWN_RACES; README.md "Known
+# original-game races"). Such a run is INCONCLUSIVE, so --retry re-runs it;
+# every attempt that hit one is counted, so the race rate stays visible even
+# when a retry passes.
+KNOWN_RACE_PREFIX = "known_game_race:"
+
+
+def known_races(reasons) -> list[str]:
+    return [r[len(KNOWN_RACE_PREFIX):] for r in reasons or []
+            if r.startswith(KNOWN_RACE_PREFIX)]
+
+
 def aggregate(scenario: str, scenario_dir: Path) -> dict:
     spec = SCENARIOS[scenario]
     runs, attempts = [], []
@@ -406,6 +419,15 @@ def aggregate(scenario: str, scenario_dir: Path) -> dict:
                      "measurements": final["measurements"]})
     counts = {k: sum(1 for r in runs if r["verdict"] == k)
               for k in ("PASS", "FAIL", "INCONCLUSIVE", "SKIPPED")}
+    # Every ATTEMPT (retries included) that hit a known game race, by race;
+    # `final` = run indices whose last attempt is still one (no retry left).
+    races = {"attempts": len(attempts), "final": 0, "by_race": {}}
+    for a in attempts:
+        for name in known_races(a["reasons"]):
+            races["by_race"][name] = races["by_race"].get(name, 0) + 1
+    for idx, ds in run_dirs(scenario_dir).items():
+        if known_races(read_json(ds[-1] / "verdict.json").get("reasons")):
+            races["final"] += 1
     n = len(runs) - counts["SKIPPED"]
     need = min(spec["need"], max(n, 1))
     if n == 0:
@@ -418,6 +440,7 @@ def aggregate(scenario: str, scenario_dir: Path) -> dict:
         verdict = "INCONCLUSIVE"
     out = {"schema": SCHEMA, "scenario": scenario, "name": spec["name"],
            "verdict": verdict, "need_pass": need, "counts": counts,
+           "known_game_races": races,
            "runs": runs, "attempts": attempts}
     write_json(scenario_dir / "scenario.json", out)
     return out
@@ -442,12 +465,35 @@ def summary(out_dir: Path) -> dict:
                 r = inert.scan(log, forbid)
                 passive[f"{s}/{d.name}"] = {"forbid": forbid, "total": r["total"],
                                             "counts": {k: n for k, n in r["counts"].items() if n}}
+    # Known original-game races, counted per scenario over every attempt
+    # (they are INCONCLUSIVE, never PASS; a retry that passes does not erase
+    # the count). Recomputed from the attempts, so an out-dir aggregated by
+    # an older fr.py is counted too.
+    races = {"total": 0, "by_race": {}, "scenarios": {}}
+    for s, v in scen.items():
+        by = {}
+        for a in v.get("attempts", []):
+            for name in known_races(a.get("reasons")):
+                by[name] = by.get(name, 0) + 1
+        races["scenarios"][s] = {"attempts": len(v.get("attempts", [])), "by_race": by}
+        for name, n in by.items():
+            races["by_race"][name] = races["by_race"].get(name, 0) + n
+            races["total"] += n
     out = {"schema": SCHEMA, "invocation": meta,
            "verdicts": {s: v["verdict"] for s, v in scen.items()},
+           "known_game_races": races,
            "passive_inertness": passive,
            "scenarios": scen}
     write_json(out_dir / "summary.json", out)
     return out
+
+
+def print_known_races(v):
+    kr = v.get("known_game_races") or {}
+    for s, r in (kr.get("scenarios") or {}).items():
+        for name, n in r["by_race"].items():
+            print(f"  {s:4s} known_game_race:{name} x{n} of {r['attempts']} attempts "
+                  f"(INCONCLUSIVE, re-run by --retry; never counted as PASS)")
 
 
 def main(argv):
@@ -479,6 +525,7 @@ def main(argv):
         v = summary(Path(argv[2]))
         for s, verdict in v["verdicts"].items():
             print(f"  {s:4s} {verdict}")
+        print_known_races(v)
         return 0
     if cmd == "refinalize":
         # Re-judge every run in an out-dir from its kept artefacts (run.log,
@@ -496,6 +543,7 @@ def main(argv):
         v = summary(out)
         for s, verdict in v["verdicts"].items():
             print(f"  {s:4s} {verdict}")
+        print_known_races(v)
         return 0
     if cmd == "verdict-of":
         v = read_json(Path(argv[2]) / "verdict.json", {})
