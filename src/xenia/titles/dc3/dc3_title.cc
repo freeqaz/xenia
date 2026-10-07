@@ -875,15 +875,6 @@ void ApplyDc3LaunchHooks(const titles::TitleLaunchContext& ctx) {
     if (cvars::fake_kinect_data) {
       XELOGI("DC3: Entering original-XEX fake Kinect patch block");
 
-      constexpr uint32_t kChoosePlayerSides = 0x82909968;
-      with_patch_target("calib.choose_player_sides", "ChoosePlayerSides", kChoosePlayerSides, 4,
-                        [&](uint8_t* cps_ptr) {
-                          xe::store_and_swap<uint32_t>(cps_ptr, 0x4E800020);
-                          XELOGI("DC3: Calibration bypass: stubbed "
-                                 "ChoosePlayerSides at {:08X} to blr",
-                                 kChoosePlayerSides);
-                        });
-
       constexpr uint32_t kSetPlayerSkeletonWarningData = 0x82907880;
       with_patch_target("calib.warning_data", "SetPlayerSkeletonWarningData",
                         kSetPlayerSkeletonWarningData, 4,
