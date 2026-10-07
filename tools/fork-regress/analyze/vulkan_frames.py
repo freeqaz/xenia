@@ -193,4 +193,6 @@ def analyze(run_dir: Path, meta: dict):
             "kept_frame_quadrant_stddev_ge": QUADRANT_MIN_STDDEV,
             "informational": ["game_screen_reached", "capture_swaps",
                               "fail_screen_first_swap", "game_screen_blank_swaps"]}
-    return ("PASS" if not reasons else "FAIL"), reasons, m, crit
+    verdict, reasons = dc3_flow.apply_known_race("PASS" if not reasons else "FAIL",
+                                                 reasons, flow)
+    return verdict, reasons, m, crit

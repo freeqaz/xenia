@@ -56,7 +56,9 @@ the non-default subset with each value's source. Each scenario aggregates to
   exit 0, which would read as a silent pass.
 - INCONCLUSIVE: a flow scenario that FAILED while the 1-min load exceeded the
   gate; a process killed by an external signal; an interrupted harness; GPU 1
-  busy. Never counted as PASS or FAIL. `--retry K` re-runs it (default 1).
+  busy; a run whose only failure is a **known original-game race** (reason
+  `known_game_race:<name>`, see "Known original-game races"). Never counted
+  as PASS or FAIL. `--retry K` re-runs it (default 1).
 - A PASS under load stays a PASS (marked `loaded: true`): it is a stronger
   result, but the comparator leaves loaded runs out of timing medians.
 
@@ -112,6 +114,106 @@ Because one run cannot separate load from a real failure, use `ab.sh` and
 and a FAIL next to a PASS at comparable load is a PAIRED-FAIL.
 `load_evidence.py <out-dir>...` reprints this table from any set of runs; set
 `FR_LOAD_MAX` and `fr.py refinalize <out-dir>` to re-judge kept runs.
+
+## Known original-game races
+
+A crash that is a race in the game's own code (present in the original
+`debug.xex`, not introduced by the emulator) says nothing about the binary
+under test. A run whose faults match one **exactly** is INCONCLUSIVE with
+reason `known_game_race:<name>` (first in `reasons`; the original FAIL
+reasons follow), so `--retry` re-runs it. It is never a PASS: `scenario.json`
+and `summary.json` carry `known_game_races` (every attempt, retries included,
+by race; `final` = run indices still ending on one), `fr.py summary` prints a
+line per race, and `compare.py` prints a `KNOWN-RACE` line with the
+candidate's and the baseline's counts (not judged, exit code unchanged). A
+scenario left INCONCLUSIVE by a race exits 3 like any other. The match lives
+in `analyze/dc3_flow.py` (`KNOWN_RACES`) and is applied by S1, S1V and S2.
+Tests: `tests/test_known_game_race.py` (recorded logs trimmed to the lines
+the analyzer reads, plus one-line mutations that each must stay FAIL).
+
+### `splash_postprocessor_uaf`: Rnd::DoWorldEnd on the splash thread
+
+**Signature** (all required): exactly one `MMIO soft-fault read from
+unmapped guest 00000008 (... guest lr 82662B24 ...)` line in the log, logged
+before title_screen; every `crash_guest=` on the status reports is
+`0x82662B18`; exactly one non-XMA fault (one SIGSEGV on a binary without
+`DC3 FAULTS`). Anything else (a second fault, another PC/lr/address, the same
+read after title_screen, XMA faults that move `crash_guest`) stays a FAIL: a
+miss errs toward FAIL.
+
+**Mechanism** (dc3-decomp `066d55163`):
+
+- `Splash::BeginSplasher` starts a real render thread on the Xbox path
+  (`src/system/movie/Splash.cpp:226-232`: `CreateThread` suspended,
+  `XSetThreadProcessor(thread, 5)`, `SetThreadPriority(thread, 1)`); the main
+  thread goes on booting (`src/App.cpp:634` BeginSplasher ... `:703`
+  `WorldInit()`).
+- Each splash frame ends the world: `Rnd::DoWorldEnd`
+  (`src/system/rndobj/Rnd.cpp:737-756`) walks `TheRnd.mPostProcessors`
+  (`std::list<PostProcessor *>`, `src/system/rndobj/Rnd.h:314`, at
+  TheDxRnd+0x15C) **without a lock**, calling `EndWorld` on each.
+- On the main thread, `WorldInit` (`src/system/world/World.cpp:37`) calls
+  `NgSpotlightDrawer::Init` (`src/system/world/SpotlightDrawer_NG.cpp:89-96`),
+  whose `RELEASE(sDefault)` (`:92`) destroys the default `SpotlightDrawer`:
+  `~SpotlightDrawer` (`src/system/world/SpotlightDrawer.cpp:34-41`) ->
+  `DeSelect` (`:420-430`) -> `Rnd::UnregisterPostProcessor`
+  (`src/system/rndobj/Rnd.cpp:885`, `list::remove`), which unlinks the node
+  and frees it at once; `FixedSizeAlloc::Free`
+  (`src/system/utl/PoolAlloc.cpp:99-101`) writes the pool's free-list link
+  into the node's first word, which is the list node's `_M_next`.
+- If the splash thread is between `EndWorld` and `++it` on that node
+  (`0x82662B24`, `lwz r30,0(r30)`), it follows the free-list link into pool
+  memory, loads a data word that is not a `PostProcessor`, and faults on the
+  vtable+8 load at `0x82662B18` (`lwz r11,8(r11)` with r11 = 0: a read of
+  guest `0x00000008`; lr is still `0x82662B24`).
+
+**Our source matches the image**: `Rnd::DoWorldEnd`,
+`Rnd::RegisterPostProcessor`, `Rnd::UnregisterPostProcessor`,
+`NgSpotlightDrawer::Init`, `SpotlightDrawer::~SpotlightDrawer` (and its
+deleting dtor), `SpotlightDrawer::Select`, `SpotlightDrawer::DeSelect`,
+`FixedSizeAlloc::Free`, `Splash::BeginSplasher` and `Splash::ThreadStart` are
+all 100.0% (normalized and fuzzy, `name_check` ruler) in dc3-decomp's
+`report.json`. The race is in the game.
+
+**Evidence**:
+
+- The production signature, identical in every instance (read of guest 8,
+  crash_guest `0x82662B18`, guest lr `82662B24`, r1 `7330FA80`, splash thread,
+  3-9 s, before title): flow-wake `rate` S1 run-04 (1 of 10), lane B2
+  `r1-cand` S2 run-01 (1 of 43 lane-B2 S1/S2 runs, `docs/fork/dc3/BASELINE.md`
+  "Other findings"), core-d2 `gdb-cand3` S1 run-01.
+- Caught in the act under the GDB-RSP stub (2026-10-07, main `29dbc4380`,
+  scripts in `/home/free/tmp/splash-race/`, run-06): main stopped at
+  `NgSpotlightDrawer::Init` with the default drawer's node `0x4029FCE0`
+  first in the list; the splash thread (guest tid 0x12) then stopped at
+  `0x82662B24` with r30 = `0x4029FCE0`, r31 = the list sentinel
+  `0x830A13CC`, while main was already inside `~SpotlightDrawer` past
+  `DeSelect` (lr `0x82827290`). Released, the splash thread faulted with the
+  production signature. The stub is all-stop (no per-thread hold), so a
+  deterministic forced interleaving was not possible; this was one natural
+  catch.
+- Specificity (2026-10-07): the matcher over every recorded S1/S1V/S2 run
+  under `/home/free/tmp` (342 runs: 251 PASS, 77 FAIL, 14 INCONCLUSIVE by the
+  verdicts on disk) matches exactly the three runs above and nothing else; no
+  other run carries even part of the signature (crash_guest `0x82662B18` or
+  an unmapped read with lr `82662B24`).
+
+**Why the native port is immune**: it has no splash thread.
+`src/system/movie/Splash.cpp:29-34` sets `mThreaded = false` under
+`HX_NATIVE`, and the `CreateThread` path (`:226`) is `#ifndef HX_NATIVE`; the
+splash is drawn from `TheSplasher->Poll()` on the main thread (`src/App.cpp`
+native path, Poll around `WorldInit()` at `:414`), so the walk and the free
+never overlap.
+
+**Why Xenia likely amplifies it** (not measured on hardware): on a console the
+splash thread runs on hardware thread 5 at raised priority, and the window
+(from loading the node to `++it`, i.e. one `EndWorld` call on the default
+drawer) has to overlap a short RELEASE on the main thread.
+Xenia ignores both (`ignore_thread_affinities` / `ignore_thread_priorities`
+are true in the pinned config), so every guest thread is an ordinary host
+thread scheduled by Linux next to the JIT, the XMA workers and whatever else
+the host runs; one preemption of the splash thread inside the window is
+enough. Measured rate here: 1 of 10 (`rate`) and 1 of 43 (lane B2).
 
 ## Baselines (`baselines/`)
 
@@ -271,4 +373,7 @@ commit: `Thread Status Report (<ms>ms)… SIGSEGV=<n>`, `TIMEOUT: <ms>ms reached
 `DC3 DTA channel: installed on`, `DTA channel: first poll on guest thread <tid>`,
 `RB3DX UI PROBE[n]: transState=… curScreen=…'<x>' transScreen=…'<x>'`,
 `STREAM-CENSUS 0x… mState=… (n=…) … (n=…)`, `RB3: app-run-direct installed`,
-`RB3: mogg-key-table installed`, `FAULT_LIVELOCK_ABORT`, `VdSwap #<n>: … [CAPTURE]`.
+`RB3: mogg-key-table installed`, `FAULT_LIVELOCK_ABORT`, `VdSwap #<n>: … [CAPTURE]`,
+`MMIO soft-fault read from unmapped guest <addr> (… guest lr <lr> …)`
+(cpu/mmio_handler.cc) and `crash_guest=0x<pc>` on the status report (both
+read only to match a known original-game race).

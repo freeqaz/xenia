@@ -20,6 +20,11 @@ comparison is per scenario:
                baseline PASS -> candidate INCONCLUSIVE INCONCLUSIVE (re-run on a quiet host)
                candidate SKIPPED where baseline ran    REGRESSION (capability lost)
                baseline FAIL -> candidate PASS          IMPROVED
+  known races  every attempt that hit a known original-game race
+               (`known_game_race:<name>`, README.md) is INCONCLUSIVE, never a
+               PASS; the count is printed as KNOWN-RACE on every comparison
+               and does not change the exit code (a scenario left
+               INCONCLUSIVE by it still exits 3)
   S0           every changed/added/removed cvar default is LISTED (a cleanup
                lane must name each one in its commit message); a source
                ratchet that increases is a REGRESSION
@@ -67,7 +72,8 @@ def condense(summary, note=""):
            "passive_inertness": summary.get("passive_inertness"),
            "scenarios": {}}
     for s, sc in summary.get("scenarios", {}).items():
-        out["scenarios"][s] = strip({k: sc[k] for k in ("verdict", "counts", "need_pass", "runs",
+        out["scenarios"][s] = strip({k: sc[k] for k in ("verdict", "counts", "need_pass",
+                                                       "known_game_races", "runs",
                                                        "attempts") if k in sc})
     return out
 
@@ -101,6 +107,21 @@ def median_milestones(sc, key_path):
     return {k: statistics.median(v) for k, v in vals.items()}
 
 
+KNOWN_RACE_PREFIX = "known_game_race:"  # lib/fr.py
+
+
+def race_counts(sc):
+    """Known-race attempts in a scenario, by race, from its attempts (a
+    baseline condensed before the field existed is counted the same way)."""
+    out = {}
+    for a in sc.get("attempts", []):
+        for r in a.get("reasons", []):
+            if r.startswith(KNOWN_RACE_PREFIX):
+                name = r[len(KNOWN_RACE_PREFIX):]
+                out[name] = out.get(name, 0) + 1
+    return out
+
+
 def compare(base, cand):
     findings = []  # (severity, scenario, text)
     bs, cs = base.get("scenarios", {}), cand.get("scenarios", {})
@@ -125,6 +146,16 @@ def compare(base, cand):
             findings.append(("SAME", s, f"{cv} {c.get('counts')}"))
         else:
             findings.append(("CHANGED", s, f"{bv} -> {cv}"))
+
+        # Known original-game races (README.md): INCONCLUSIVE attempts, never
+        # a PASS. Reported on every comparison so the rate stays visible; not
+        # judged (the race is in the game, so a rate change is not evidence
+        # about the binary on its own).
+        for name, n in sorted(race_counts(c).items()):
+            bn = race_counts(b).get(name, 0)
+            findings.append(("KNOWN-RACE", s, f"known_game_race:{name} x{n} of "
+                             f"{len(c.get('attempts', []))} attempts (baseline x{bn} of "
+                             f"{len(b.get('attempts', []))})"))
 
         if s == "S0":
             bm = (b.get("runs") or [{}])[0].get("measurements", {})
@@ -217,6 +248,12 @@ def paired(out_a, out_b):
         lb = vb["provenance"]["load"].get("load1_mean")
         ra, rb = raw_verdict(va), raw_verdict(vb)
         tag = ""
+        # A known original-game race stays INCONCLUSIVE on its side: not a
+        # PAIRED-FAIL against that binary, and not a PASS.
+        for side, v in (("A", va), ("B", vb)):
+            for r in v.get("reasons", []):
+                if r.startswith(KNOWN_RACE_PREFIX):
+                    tag += f"{side}:{r} "
         # A failing side counts against its binary when it was not loaded
         # itself (below the gate), or no more loaded than the passing side.
         gate = float(os.environ.get("FR_LOAD_MAX", 80))
@@ -251,7 +288,8 @@ def main(argv):
     base = json.loads(Path(argv[1]).read_text())
     cand = load_summary(argv[2])
     findings = compare(base, cand)
-    order = ["REGRESSION", "INCONCLUSIVE", "LIST", "CHANGED", "IMPROVED", "TIMING", "SAME", "INFO"]
+    order = ["REGRESSION", "INCONCLUSIVE", "KNOWN-RACE", "LIST", "CHANGED", "IMPROVED", "TIMING",
+             "SAME", "INFO"]
     for sev in order:
         for f in findings:
             if f[0] == sev:

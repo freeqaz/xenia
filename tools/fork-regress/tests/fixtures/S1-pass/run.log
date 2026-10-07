@@ -1,0 +1,273 @@
+i> 002579A3 NUI HLE: NUI 2.0.21173 resolved 56/56 (.text 82330000+BB6B14); SDK facade installed (scan 440.7 ms, symbol map 69.6 ms)
+=== Thread Status Report (3001ms) === 21 threads, SIGSEGV=0 XMA=0 NON_XMA=0 last_fault=0x0 last_rip=0x0
+=== Thread Status Report (6004ms) === 24 threads, SIGSEGV=0 XMA=0 NON_XMA=0 last_fault=0x0 last_rip=0x0
+=== Thread Status Report (9008ms) === 24 threads, SIGSEGV=0 XMA=0 NON_XMA=0 last_fault=0x0 last_rip=0x0
+i> F8000088 DC3 Script: screen -> 'attract_screen' (frame 1)
+=== Thread Status Report (12010ms) === 24 threads, SIGSEGV=890 XMA=890 NON_XMA=0 last_fault=0x17FEA1940 last_rip=0xA09A1CBF crash_guest=0x82E77CBC []
+i> 002579C4 NUI HLE: frame clock 29.9/s produced=299 events=32 get_next=442798 served=297 no_frame=2 pending=442498
+i> 002579B3 DC3 FAULTS (12006ms): SIGSEGV=2374 XMA=2374 NON_XMA=0 last_non_xma=0x0 rip=0x0
+=== Thread Status Report (15013ms) === 24 threads, SIGSEGV=4511 XMA=4511 NON_XMA=0 last_fault=0x17FEA1940 last_rip=0xA09A1CBF crash_guest=0x82E77CBC []
+i> 002579B3 DC3 FAULTS (15008ms): SIGSEGV=4815 XMA=4815 NON_XMA=0 last_non_xma=0x0 rip=0x0
+i> F8000088 DC3 Script: screen -> 'autosave_warning_screen' (frame 294)
+=== Thread Status Report (18015ms) === 22 threads, SIGSEGV=6215 XMA=6215 NON_XMA=0 last_fault=0x17FEA1940 last_rip=0xA09A1CBF crash_guest=0x82E77CBC []
+i> 002579B3 DC3 FAULTS (18010ms): SIGSEGV=6509 XMA=6509 NON_XMA=0 last_non_xma=0x0 rip=0x0
+i> F8000088 DC3 Script: wait_screen 'title_screen' SATISFIED (current: 'title_screen', frame 555)
+i> F8000088 DC3 Script: screen -> 'title_screen' (frame 555)
+=== Thread Status Report (21017ms) === 22 threads, SIGSEGV=7449 XMA=7449 NON_XMA=0 last_fault=0x17FEA1940 last_rip=0xA09A1CBF crash_guest=0x82E77CBC []
+i> 002579B3 DC3 FAULTS (21012ms): SIGSEGV=8338 XMA=8338 NON_XMA=0 last_non_xma=0x0 rip=0x0
+i> 002579C4 NUI HLE: frame clock 30.0/s produced=599 events=332 get_next=443098 served=597 no_frame=2 pending=442498
+i> F8000088 DC3 Script: screen -> 'wait_main_after_saveload_screen' (frame 641)
+i> F8000088 DC3 Script: screen -> 'main_screen' (frame 651)
+i> F8000088 DC3 Script: wait_screen 'main_screen' SATISFIED (current: 'main_screen', frame 652)
+=== Thread Status Report (24019ms) === 25 threads, SIGSEGV=11216 XMA=11216 NON_XMA=0 last_fault=0x17FEA1940 last_rip=0xA09A1CBF crash_guest=0x82E77CBC []
+i> F8000088 DC3 Script: screen -> 'choose_mode_screen' (frame 738)
+i> F8000088 DC3 Script: wait_screen 'choose_mode_screen' SATISFIED (current: 'choose_mode_screen', frame 739)
+i> 002579B3 DC3 FAULTS (24013ms): SIGSEGV=12317 XMA=12317 NON_XMA=0 last_non_xma=0x0 rip=0x0
+i> F8000088 DC3 Script: screen -> 'song_select_screen' (frame 825)
+i> F8000088 DC3 Script: wait_screen 'song_select_screen' SATISFIED (current: 'song_select_screen', frame 826)
+=== Thread Status Report (27021ms) === 26 threads, SIGSEGV=16182 XMA=16182 NON_XMA=0 last_fault=0x17FEA1940 last_rip=0xA09A1CBF crash_guest=0x82E77CBC []
+i> 002579B3 DC3 FAULTS (27015ms): SIGSEGV=17228 XMA=17228 NON_XMA=0 last_non_xma=0x0 rip=0x0
+i> F8000088 DC3 Script: screen -> 'multiuser_screen' (frame 972)
+=== Thread Status Report (30024ms) === 25 threads, SIGSEGV=23145 XMA=23145 NON_XMA=0 last_fault=0x17FEA1940 last_rip=0xA09A1CBF crash_guest=0x82E77CBC []
+i> 002579B3 DC3 FAULTS (30017ms): SIGSEGV=25089 XMA=25089 NON_XMA=0 last_non_xma=0x0 rip=0x0
+i> 002579C4 NUI HLE: frame clock 30.0/s produced=899 events=632 get_next=443398 served=897 no_frame=2 pending=442498
+=== Thread Status Report (33026ms) === 25 threads, SIGSEGV=30444 XMA=30444 NON_XMA=0 last_fault=0x17FEA1940 last_rip=0xA09A1CBF crash_guest=0x82E77CBC []
+i> 002579B3 DC3 FAULTS (33018ms): SIGSEGV=31620 XMA=31620 NON_XMA=0 last_non_xma=0x0 rip=0x0
+i> F8000088 DC3 Script: screen -> 'loading_screen' (frame 1366)
+i> F8000088 DC3 Script: screen -> 'real_loading_screen' (frame 1372)
+=== Thread Status Report (36028ms) === 25 threads, SIGSEGV=34118 XMA=34118 NON_XMA=0 last_fault=0x17FEA1940 last_rip=0xA09A1CBF crash_guest=0x82E77CBC []
+i> F8000088 DC3 Script: screen -> 'game_screen' (frame 1485)
+i> F8000088 DC3 Script: song 'ymca' (TheGameData 404E0180)
+i> 002579B3 DC3 FAULTS (36020ms): SIGSEGV=34676 XMA=34676 NON_XMA=0 last_non_xma=0x0 rip=0x0
+=== Thread Status Report (39030ms) === 25 threads, SIGSEGV=35990 XMA=35990 NON_XMA=0 last_fault=0x17FEA1940 last_rip=0xA09A1CBF crash_guest=0x82E77CBC []
+i> 002579B3 DC3 FAULTS (39022ms): SIGSEGV=36293 XMA=36293 NON_XMA=0 last_non_xma=0x0 rip=0x0
+i> F8000088 DC3 Script: gameplay gp=40C5CD38 gpState=2 game=40430C50 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (42033ms) === 25 threads, SIGSEGV=37215 XMA=37215 NON_XMA=0 last_fault=0x17FEA1940 last_rip=0xA09A1CBF crash_guest=0x82E77CBC []
+i> 002579C4 NUI HLE: frame clock 29.9/s produced=1199 events=932 get_next=443698 served=1197 no_frame=2 pending=442498
+i> 002579B3 DC3 FAULTS (42024ms): SIGSEGV=38091 XMA=38091 NON_XMA=0 last_non_xma=0x0 rip=0x0
+i> F8000088 DC3 Script: gameplay gp=40C5CD38 gpState=2 game=40430C50 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (45035ms) === 25 threads, SIGSEGV=40420 XMA=40420 NON_XMA=0 last_fault=0x17FEA1940 last_rip=0xA09A1CBF crash_guest=0x82E77CBC []
+i> 002579B3 DC3 FAULTS (45025ms): SIGSEGV=41004 XMA=41004 NON_XMA=0 last_non_xma=0x0 rip=0x0
+i> F8000088 DC3 Script: gameplay gp=40C5CD38 gpState=2 game=40430C50 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+i> F8000088 DC3 Script: gameplay gp=40C5CD38 gpState=2 game=40430C50 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (48037ms) === 25 threads, SIGSEGV=42672 XMA=42672 NON_XMA=0 last_fault=0x17FEA1940 last_rip=0xA09A1CBF crash_guest=0x82E77CBC []
+i> 002579B3 DC3 FAULTS (48027ms): SIGSEGV=43256 XMA=43256 NON_XMA=0 last_non_xma=0x0 rip=0x0
+i> F8000088 DC3 Script: gameplay gp=40C5CD38 gpState=2 game=40430C50 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (51039ms) === 25 threads, SIGSEGV=46820 XMA=46820 NON_XMA=0 last_fault=0x17FEA1940 last_rip=0xA09A1CBF crash_guest=0x82E77CBC []
+i> 002579B3 DC3 FAULTS (51029ms): SIGSEGV=47988 XMA=47988 NON_XMA=0 last_non_xma=0x0 rip=0x0
+i> F8000088 DC3 Script: gameplay gp=40C5CD38 gpState=2 game=40430C50 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+i> 002579C4 NUI HLE: frame clock 30.0/s produced=1499 events=1232 get_next=443998 served=1497 no_frame=2 pending=442498
+i> F8000088 DC3 Script: gameplay gp=40C5CD38 gpState=2 game=40430C50 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (54041ms) === 25 threads, SIGSEGV=52406 XMA=52406 NON_XMA=0 last_fault=0x17FEA1940 last_rip=0xA09A1CBF crash_guest=0x82E77CBC []
+i> 002579B3 DC3 FAULTS (54031ms): SIGSEGV=53804 XMA=53804 NON_XMA=0 last_non_xma=0x0 rip=0x0
+i> F8000088 DC3 Script: gameplay gp=40C5CD38 gpState=2 game=40430C50 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (57044ms) === 25 threads, SIGSEGV=58350 XMA=58350 NON_XMA=0 last_fault=0x17FEA1940 last_rip=0xA09A1CBF crash_guest=0x82E77CBC []
+i> 002579B3 DC3 FAULTS (57032ms): SIGSEGV=59220 XMA=59220 NON_XMA=0 last_non_xma=0x0 rip=0x0
+i> F8000088 DC3 Script: gameplay gp=40C5CD38 gpState=2 game=40430C50 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+i> F8000088 DC3 Script: gameplay gp=40C5CD38 gpState=2 game=40430C50 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (60046ms) === 25 threads, SIGSEGV=64768 XMA=64768 NON_XMA=0 last_fault=0x17FEA1940 last_rip=0xA09A1CBF crash_guest=0x82E77CBC []
+i> 002579B3 DC3 FAULTS (60034ms): SIGSEGV=67051 XMA=67051 NON_XMA=0 last_non_xma=0x0 rip=0x0
+i> F8000088 DC3 Script: gameplay gp=40C5CD38 gpState=2 game=40430C50 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+i> 002579C4 NUI HLE: frame clock 30.0/s produced=1799 events=1532 get_next=444298 served=1797 no_frame=2 pending=442498
+=== Thread Status Report (63048ms) === 25 threads, SIGSEGV=74651 XMA=74651 NON_XMA=0 last_fault=0x17FEA1940 last_rip=0xA09A1CBF crash_guest=0x82E77CBC []
+i> 002579B3 DC3 FAULTS (63036ms): SIGSEGV=77120 XMA=77120 NON_XMA=0 last_non_xma=0x0 rip=0x0
+i> F8000088 DC3 Script: gameplay gp=40C5CD38 gpState=2 game=40430C50 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+i> F8000088 DC3 Script: gameplay gp=40C5CD38 gpState=2 game=40430C50 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (66050ms) === 25 threads, SIGSEGV=82851 XMA=82851 NON_XMA=0 last_fault=0x17FEA1940 last_rip=0xA09A1CBF crash_guest=0x82E77CBC []
+i> 002579B3 DC3 FAULTS (66037ms): SIGSEGV=85079 XMA=85079 NON_XMA=0 last_non_xma=0x0 rip=0x0
+i> F8000088 DC3 Script: gameplay gp=40C5CD38 gpState=2 game=40430C50 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (69053ms) === 25 threads, SIGSEGV=91903 XMA=91903 NON_XMA=0 last_fault=0x17FEA1940 last_rip=0xA09A1CBF crash_guest=0x82E77CBC []
+i> 002579B3 DC3 FAULTS (69039ms): SIGSEGV=94452 XMA=94452 NON_XMA=0 last_non_xma=0x0 rip=0x0
+i> F8000088 DC3 Script: gameplay gp=40C5CD38 gpState=2 game=40430C50 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+i> F8000088 DC3 Script: gameplay gp=40C5CD38 gpState=2 game=40430C50 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (72055ms) === 25 threads, SIGSEGV=102710 XMA=102710 NON_XMA=0 last_fault=0x17FEA1940 last_rip=0xA09A1CBF crash_guest=0x82E77CBC []
+i> 002579C4 NUI HLE: frame clock 30.0/s produced=2099 events=1832 get_next=444598 served=2097 no_frame=2 pending=442498
+i> 002579B3 DC3 FAULTS (72041ms): SIGSEGV=106401 XMA=106401 NON_XMA=0 last_non_xma=0x0 rip=0x0
+i> F8000088 DC3 Script: gameplay gp=40C5CD38 gpState=2 game=40430C50 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (75057ms) === 25 threads, SIGSEGV=115079 XMA=115079 NON_XMA=0 last_fault=0x17FEA1940 last_rip=0xA09A1CBF crash_guest=0x82E77CBC []
+i> 002579B3 DC3 FAULTS (75043ms): SIGSEGV=117361 XMA=117361 NON_XMA=0 last_non_xma=0x0 rip=0x0
+i> F8000088 DC3 Script: gameplay gp=40C5CD38 gpState=2 game=40430C50 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+i> F8000088 DC3 Script: gameplay gp=40C5CD38 gpState=2 game=40430C50 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (78059ms) === 25 threads, SIGSEGV=122312 XMA=122312 NON_XMA=0 last_fault=0x17FEA1940 last_rip=0xA09A1CBF crash_guest=0x82E77CBC []
+i> 002579B3 DC3 FAULTS (78044ms): SIGSEGV=125246 XMA=125246 NON_XMA=0 last_non_xma=0x0 rip=0x0
+i> F8000088 DC3 Script: gameplay gp=40C5CD38 gpState=2 game=40430C50 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (81061ms) === 25 threads, SIGSEGV=133710 XMA=133710 NON_XMA=0 last_fault=0x17FEA1940 last_rip=0xA09A1CBF crash_guest=0x82E77CBC []
+i> 002579B3 DC3 FAULTS (81046ms): SIGSEGV=136066 XMA=136066 NON_XMA=0 last_non_xma=0x0 rip=0x0
+i> F8000088 DC3 Script: gameplay gp=40C5CD38 gpState=2 game=40430C50 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+i> 002579C4 NUI HLE: frame clock 30.0/s produced=2399 events=2132 get_next=444898 served=2397 no_frame=2 pending=442498
+i> F8000088 DC3 Script: gameplay gp=40C5CD38 gpState=2 game=40430C50 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (84064ms) === 25 threads, SIGSEGV=143109 XMA=143109 NON_XMA=0 last_fault=0x17FEA1940 last_rip=0xA09A1CBF crash_guest=0x82E77CBC []
+i> 002579B3 DC3 FAULTS (84048ms): SIGSEGV=145973 XMA=145973 NON_XMA=0 last_non_xma=0x0 rip=0x0
+i> F8000088 DC3 Script: gameplay gp=40C5CD38 gpState=2 game=40430C50 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (87066ms) === 25 threads, SIGSEGV=155957 XMA=155957 NON_XMA=0 last_fault=0x17FEA1940 last_rip=0xA09A1CBF crash_guest=0x82E77CBC []
+i> 002579B3 DC3 FAULTS (87049ms): SIGSEGV=158963 XMA=158963 NON_XMA=0 last_non_xma=0x0 rip=0x0
+i> F8000088 DC3 Script: gameplay gp=40C5CD38 gpState=2 game=40430C50 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+i> F8000088 DC3 Script: gameplay gp=40C5CD38 gpState=2 game=40430C50 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (90068ms) === 25 threads, SIGSEGV=167033 XMA=167033 NON_XMA=0 last_fault=0x17FEA1940 last_rip=0xA09A1CBF crash_guest=0x82E77CBC []
+i> 002579B3 DC3 FAULTS (90051ms): SIGSEGV=170517 XMA=170517 NON_XMA=0 last_non_xma=0x0 rip=0x0
+i> F8000088 DC3 Script: gameplay gp=40C5CD38 gpState=2 game=40430C50 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+i> 002579C4 NUI HLE: frame clock 30.0/s produced=2699 events=2432 get_next=445198 served=2697 no_frame=2 pending=442498
+=== Thread Status Report (93070ms) === 25 threads, SIGSEGV=178659 XMA=178659 NON_XMA=0 last_fault=0x17FEA1940 last_rip=0xA09A1CBF crash_guest=0x82E77CBC []
+i> 002579B3 DC3 FAULTS (93053ms): SIGSEGV=181247 XMA=181247 NON_XMA=0 last_non_xma=0x0 rip=0x0
+i> F8000088 DC3 Script: gameplay gp=40C5CD38 gpState=2 game=40430C50 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+i> F8000088 DC3 Script: gameplay gp=40C5CD38 gpState=2 game=40430C50 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (96072ms) === 25 threads, SIGSEGV=190097 XMA=190097 NON_XMA=0 last_fault=0x17FEA1940 last_rip=0xA09A1CBF crash_guest=0x82E77CBC []
+i> 002579B3 DC3 FAULTS (96055ms): SIGSEGV=192707 XMA=192707 NON_XMA=0 last_non_xma=0x0 rip=0x0
+i> F8000088 DC3 Script: gameplay gp=40C5CD38 gpState=2 game=40430C50 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (99074ms) === 25 threads, SIGSEGV=199387 XMA=199387 NON_XMA=0 last_fault=0x17FEA1940 last_rip=0xA09A1CBF crash_guest=0x82E77CBC []
+i> 002579B3 DC3 FAULTS (99056ms): SIGSEGV=201907 XMA=201907 NON_XMA=0 last_non_xma=0x0 rip=0x0
+i> F8000088 DC3 Script: gameplay gp=40C5CD38 gpState=2 game=40430C50 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+i> F8000088 DC3 Script: gameplay gp=40C5CD38 gpState=2 game=40430C50 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (102076ms) === 25 threads, SIGSEGV=210573 XMA=210573 NON_XMA=0 last_fault=0x17FEA1940 last_rip=0xA09A1CBF crash_guest=0x82E77CBC []
+i> 002579C4 NUI HLE: frame clock 30.0/s produced=2999 events=2732 get_next=445498 served=2997 no_frame=2 pending=442498
+i> 002579B3 DC3 FAULTS (102058ms): SIGSEGV=213321 XMA=213321 NON_XMA=0 last_non_xma=0x0 rip=0x0
+i> F8000088 DC3 Script: gameplay gp=40C5CD38 gpState=2 game=40430C50 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (105079ms) === 25 threads, SIGSEGV=219821 XMA=219821 NON_XMA=0 last_fault=0x17FEA1940 last_rip=0xA09A1CBF crash_guest=0x82E77CBC []
+i> 002579B3 DC3 FAULTS (105060ms): SIGSEGV=222125 XMA=222125 NON_XMA=0 last_non_xma=0x0 rip=0x0
+i> F8000088 DC3 Script: gameplay gp=40C5CD38 gpState=2 game=40430C50 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+i> F8000088 DC3 Script: gameplay gp=40C5CD38 gpState=2 game=40430C50 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (108081ms) === 25 threads, SIGSEGV=231189 XMA=231189 NON_XMA=0 last_fault=0x17FEA1940 last_rip=0xA09A1CBF crash_guest=0x82E77CBC []
+i> 002579B3 DC3 FAULTS (108061ms): SIGSEGV=233781 XMA=233781 NON_XMA=0 last_non_xma=0x0 rip=0x0
+i> F8000088 DC3 Script: gameplay gp=40C5CD38 gpState=2 game=40430C50 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (111083ms) === 25 threads, SIGSEGV=240051 XMA=240051 NON_XMA=0 last_fault=0x17FEA1940 last_rip=0xA09A1CBF crash_guest=0x82E77CBC []
+i> 002579B3 DC3 FAULTS (111063ms): SIGSEGV=241972 XMA=241972 NON_XMA=0 last_non_xma=0x0 rip=0x0
+i> F8000088 DC3 Script: gameplay gp=40C5CD38 gpState=2 game=40430C50 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+i> 002579C4 NUI HLE: frame clock 30.0/s produced=3299 events=3032 get_next=445798 served=3297 no_frame=2 pending=442498
+i> F8000088 DC3 Script: gameplay gp=40C5CD38 gpState=2 game=40430C50 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (114085ms) === 25 threads, SIGSEGV=249076 XMA=249076 NON_XMA=0 last_fault=0x17FEA1940 last_rip=0xA09A1CA> F80000B0 XmaContext: disabling context 0
+i> 002579B3 DC3 FAULTS (114065ms): SIGSEGV=252380 XMA=252380 NON_XMA=0 last_non_xma=0x0 rip=0x0
+i> F8000088 DC3 Script: gameplay gp=40C5CD38 gpState=2 game=40430C50 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (117087ms) === 25 threads, SIGSEGV=262647 XMA=262647 NON_XMA=0 last_fault=0x17FEA1940 last_rip=0xA09A1CBF crash_guest=0x82E77CBC []
+i> 002579B3 DC3 FAULTS (117067ms): SIGSEGV=265547 XMA=265547 NON_XMA=0 last_non_xma=0x0 rip=0x0
+i> F8000088 DC3 Script: gameplay gp=40C5CD38 gpState=2 game=40430C50 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+i> F8000088 DC3 Script: gameplay gp=40C5CD38 gpState=2 game=40430C50 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (120090ms) === 25 threads, SIGSEGV=272776 XMA=272776 NON_XMA=0 last_fault=0x17FEA1940 last_rip=0xA09A1CBF crash_guest=0x82E77CBC []
+i> 002579B3 DC3 FAULTS (120068ms): SIGSEGV=276240 XMA=276240 NON_XMA=0 last_non_xma=0x0 rip=0x0
+i> F8000088 DC3 Script: gameplay gp=40C5CD38 gpState=2 game=40430C50 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+i> 002579C4 NUI HLE: frame clock 30.0/s produced=3599 events=3332 get_next=446098 served=3597 no_frame=2 pending=442498
+=== Thread Status Report (123092ms) === 25 threads, SIGSEGV=286537 XMA=286537 NON_XMA=0 last_fault=0x17FEA1940 last_rip=0xA09A1CBF crash_guest=0x82E77CBC []
+i> 002579B3 DC3 FAULTS (123070ms): SIGSEGV=290381 XMA=290381 NON_XMA=0 last_non_xma=0x0 rip=0x0
+i> F8000088 DC3 Script: gameplay gp=40C5CD38 gpState=2 game=40430C50 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+i> F8000088 DC3 Script: gameplay gp=40C5CD38 gpState=2 game=40430C50 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (126094ms) === 25 threads, SIGSEGV=300980 XMA=300980 NON_XMA=0 last_fault=0x17FEA1940 last_rip=0xA09A1CBF crash_guest=0x82E77CBC []
+i> 002579B3 DC3 FAULTS (126072ms): SIGSEGV=304348 XMA=304348 NON_XMA=0 last_non_xma=0x0 rip=0x0
+i> F8000088 DC3 Script: gameplay gp=40C5CD38 gpState=2 game=40430C50 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (129096ms) === 25 threads, SIGSEGV=313743 XMA=313743 NON_XMA=0 last_fault=0x17FEA1940 last_rip=0xA09A1CBF crash_guest=0x82E77CBC []
+i> 002579B3 DC3 FAULTS (129074ms): SIGSEGV=317245 XMA=317245 NON_XMA=0 last_non_xma=0x0 rip=0x0
+i> F8000088 DC3 Script: gameplay gp=40C5CD38 gpState=2 game=40430C50 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+i> F8000088 DC3 Script: gameplay gp=40C5CD38 gpState=2 game=40430C50 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (132099ms) === 25 threads, SIGSEGV=327319 XMA=327319 NON_XMA=0 last_fault=0x17FEA1940 last_rip=0xA09A1CBF crash_guest=0x82E77CBC []
+i> 002579C4 NUI HLE: frame clock 30.0/s produced=3899 events=3632 get_next=446398 served=3897 no_frame=2 pending=442498
+i> 002579B3 DC3 FAULTS (132075ms): SIGSEGV=331351 XMA=331351 NON_XMA=0 last_non_xma=0x0 rip=0x0
+i> F8000088 DC3 Script: gameplay gp=40C5CD38 gpState=2 game=40430C50 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (135101ms) === 25 threads, SIGSEGV=341788 XMA=341788 NON_XMA=0 last_fault=0x17FEA1940 last_rip=0xA09A1CBF crash_guest=0x82E77CBC []
+i> 002579B3 DC3 FAULTS (135077ms): SIGSEGV=344956 XMA=344956 NON_XMA=0 last_non_xma=0x0 rip=0x0
+i> F8000088 DC3 Script: gameplay gp=40C5CD38 gpState=2 game=40430C50 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+i> F8000088 DC3 Script: gameplay gp=40C5CD38 gpState=2 game=40430C50 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (138103ms) === 25 threads, SIGSEGV=354768 XMA=354768 NON_XMA=0 last_fault=0x17FEA1940 last_rip=0xA09A1CBF crash_guest=0x82E77CBC []
+i> 002579B3 DC3 FAULTS (138079ms): SIGSEGV=357678 XMA=357678 NON_XMA=0 last_non_xma=0x0 rip=0x0
+i> F8000088 DC3 Script: gameplay gp=40C5CD38 gpState=2 game=40430C50 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (141105ms) === 25 threads, SIGSEGV=367718 XMA=367718 NON_XMA=0 last_fault=0x17FEA1940 last_rip=0xA09A1CBF crash_guest=0x82E77CBC []
+i> 002579B3 DC3 FAULTS (141080ms): SIGSEGV=370798 XMA=370798 NON_XMA=0 last_non_xma=0x0 rip=0x0
+i> F8000088 DC3 Script: gameplay gp=40C5CD38 gpState=2 game=40430C50 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+i> 002579C4 NUI HLE: frame clock 30.0/s produced=4199 events=3932 get_next=446698 served=4197 no_frame=2 pending=442498
+i> F8000088 DC3 Script: gameplay gp=40C5CD38 gpState=2 game=40430C50 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (144107ms) === 25 threads, SIGSEGV=378707 XMA=378707 NON_XMA=0 last_fault=0x17FEA1940 last_rip=0xA09A1CBF crash_guest=0x82E77CBC []
+i> 002579B3 DC3 FAULTS (144082ms): SIGSEGV=381281 XMA=381281 NON_XMA=0 last_non_xma=0x0 rip=0x0
+i> F8000088 DC3 Script: gameplay gp=40C5CD38 gpState=2 game=40430C50 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (147109ms) === 25 threads, SIGSEGV=389379 XMA=389379 NON_XMA=0 last_fault=0x17FEA1940 last_rip=0xA09A1CBF crash_guest=0x82E77CBC []
+i> 002579B3 DC3 FAULTS (147084ms): SIGSEGV=392715 XMA=392715 NON_XMA=0 last_non_xma=0x0 rip=0x0
+i> F8000088 DC3 Script: gameplay gp=40C5CD38 gpState=2 game=40430C50 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+i> F8000088 DC3 Script: gameplay gp=40C5CD38 gpState=2 game=40430C50 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (150111ms) === 25 threads, SIGSEGV=403892 XMA=403892 NON_XMA=0 last_fault=0x17FEA1940 last_rip=0xA09A1CBF crash_guest=0x82E77CBC []
+i> 002579B3 DC3 FAULTS (150086ms): SIGSEGV=407224 XMA=407224 NON_XMA=0 last_non_xma=0x0 rip=0x0
+i> F8000088 DC3 Script: gameplay gp=40C5CD38 gpState=2 game=40430C50 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+i> 002579C4 NUI HLE: frame clock 30.0/s produced=4499 events=4232 get_next=446998 served=4497 no_frame=2 pending=442498
+=== Thread Status Report (153114ms) === 25 threads, SIGSEGV=416446 XMA=416446 NON_XMA=0 last_fault=0x17FEA1940 last_rip=0xA09A1CBF crash_guest=0x82E77CBC []
+i> 002579B3 DC3 FAULTS (153087ms): SIGSEGV=419878 XMA=419878 NON_XMA=0 last_non_xma=0x0 rip=0x0
+i> F8000088 DC3 Script: gameplay gp=40C5CD38 gpState=2 game=40430C50 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+i> F8000088 DC3 Script: gameplay gp=40C5CD38 gpState=2 game=40430C50 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (156116ms) === 25 threads, SIGSEGV=429848 XMA=429848 NON_XMA=0 last_fault=0x17FEA1940 last_rip=0xA09A1CBF crash_guest=0x82E77CBC []
+i> 002579B3 DC3 FAULTS (156089ms): SIGSEGV=433852 XMA=433852 NON_XMA=0 last_non_xma=0x0 rip=0x0
+i> F8000088 DC3 Script: gameplay gp=40C5CD38 gpState=2 game=40430C50 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (159118ms) === 25 threads, SIGSEGV=444524 XMA=444524 NON_XMA=0 last_fault=0x17FEA1940 last_rip=0xA09A1CBF crash_guest=0x82E77CBC []
+i> 002579B3 DC3 FAULTS (159091ms): SIGSEGV=449002 XMA=449002 NON_XMA=0 last_non_xma=0x0 rip=0x0
+i> F8000088 DC3 Script: gameplay gp=40C5CD38 gpState=2 game=40430C50 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+i> F8000088 DC3 Script: gameplay gp=40C5CD38 gpState=2 game=40430C50 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (162120ms) === 25 threads, SIGSEGV=460324 XMA=460324 NON_XMA=0 last_fault=0x17FEA1940 last_rip=0xA09A1CBF crash_guest=0x82E77CBC []
+i> 002579C4 NUI HLE: frame clock 30.0/s produced=4799 events=4532 get_next=447298 served=4797 no_frame=2 pending=442498
+i> 002579B3 DC3 FAULTS (162093ms): SIGSEGV=463184 XMA=463184 NON_XMA=0 last_non_xma=0x0 rip=0x0
+i> F8000088 DC3 Script: gameplay gp=40C5CD38 gpState=2 game=40430C50 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (165122ms) === 25 threads, SIGSEGV=473560 XMA=473560 NON_XMA=0 last_fault=0x17FEA1940 last_rip=0xA09A1CBF crash_guest=0x82E77CBC []
+i> 002579B3 DC3 FAULTS (165094ms): SIGSEGV=477547 XMA=477547 NON_XMA=0 last_non_xma=0x0 rip=0x0
+i> F8000088 DC3 Script: gameplay gp=40C5CD38 gpState=2 game=40430C50 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+i> F8000088 DC3 Script: gameplay gp=40C5CD38 gpState=2 game=40430C50 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (168124ms) === 25 threads, SIGSEGV=488307 XMA=488307 NON_XMA=0 last_fault=0x17FEA1940 last_rip=0xA09A1CBF crash_guest=0x82E77CBC []
+i> 002579B3 DC3 FAULTS (168096ms): SIGSEGV=491147 XMA=491147 NON_XMA=0 last_non_xma=0x0 rip=0x0
+i> F8000088 DC3 Script: gameplay gp=40C5CD38 gpState=2 game=40430C50 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (171127ms) === 25 threads, SIGSEGV=502599 XMA=502599 NON_XMA=0 last_fault=0x17FEA1940 last_rip=0xA09A1CA> F800000C Processing context 12 (offset 118909, buffer 0, ptr 0x216dbf000)
+i> 002579B3 DC3 FAULTS (171098ms): SIGSEGV=506753 XMA=506753 NON_XMA=0 last_non_xma=0x0 rip=0x0
+i> F8000088 DC3 Script: gameplay gp=40C5CD38 gpState=2 game=40430C50 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+i> 002579C4 NUI HLE: frame clock 30.0/s produced=5099 events=4832 get_next=447598 served=5097 no_frame=2 pending=442498
+i> F8000088 DC3 Script: gameplay gp=40C5CD38 gpState=2 game=40430C50 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (174129ms) === 25 threads, SIGSEGV=516697 XMA=516697 NON_XMA=0 last_fault=0x17FEA1940 last_rip=0xA09A1CBF crash_guest=0x82E77CBC []
+i> 002579B3 DC3 FAULTS (174099ms): SIGSEGV=519593 XMA=519593 NON_XMA=0 last_non_xma=0x0 rip=0x0
+i> F8000088 DC3 Script: gameplay gp=40C5CD38 gpState=2 game=40430C50 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (177131ms) === 25 threads, SIGSEGV=529906 XMA=529906 NON_XMA=0 last_fault=0x17FEA1940 last_rip=0xA09A1CBF crash_guest=0x82E77CBC []
+i> 002579B3 DC3 FAULTS (177101ms): SIGSEGV=533574 XMA=533574 NON_XMA=0 last_non_xma=0x0 rip=0x0
+i> F8000088 DC3 Script: gameplay gp=40C5CD38 gpState=2 game=40430C50 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+i> F8000088 DC3 Script: gameplay gp=40C5CD38 gpState=2 game=40430C50 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (180134ms) === 25 threads, SIGSEGV=543049 XMA=543049 NON_XMA=0 last_fault=0x17FEA1940 last_rip=0xA09A1CBF crash_guest=0x82E77CBC []
+i> 002579B3 DC3 FAULTS (180103ms): SIGSEGV=545887 XMA=545887 NON_XMA=0 last_non_xma=0x0 rip=0x0
+i> F8000088 DC3 Script: gameplay gp=40C5CD38 gpState=2 game=40430C50 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+i> 002579C4 NUI HLE: frame clock 30.0/s produced=5399 events=5132 get_next=447898 served=5397 no_frame=2 pending=442498
+=== Thread Status Report (183136ms) === 25 threads, SIGSEGV=555730 XMA=555730 NON_XMA=0 last_fault=0x17FEA1940 last_rip=0xA09A1CBF crash_guest=0x82E77CBC []
+i> 002579B3 DC3 FAULTS (183105ms): SIGSEGV=559960 XMA=559960 NON_XMA=0 last_non_xma=0x0 rip=0x0
+i> F8000088 DC3 Script: gameplay gp=40C5CD38 gpState=2 game=40430C50 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+i> F8000088 DC3 Script: gameplay gp=40C5CD38 gpState=2 game=40430C50 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (186138ms) === 25 threads, SIGSEGV=568992 XMA=568992 NON_XMA=0 last_fault=0x17FEA1940 last_rip=0xA09A1CBF crash_guest=0x82E77CBC []
+i> 002579B3 DC3 FAULTS (186106ms): SIGSEGV=572068 XMA=572068 NON_XMA=0 last_non_xma=0x0 rip=0x0
+i> F8000088 DC3 Script: gameplay gp=40C5CD38 gpState=2 game=40430C50 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (189140ms) === 25 threads, SIGSEGV=581330 XMA=581330 NON_XMA=0 last_fault=0x17FEA1940 last_rip=0xA09A1CBF crash_guest=0x82E77CBC []
+i> 002579B3 DC3 FAULTS (189108ms): SIGSEGV=584454 XMA=584454 NON_XMA=0 last_non_xma=0x0 rip=0x0
+i> F8000088 DC3 Script: gameplay gp=40C5CD38 gpState=2 game=40430C50 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+i> F8000088 DC3 Script: gameplay gp=40C5CD38 gpState=2 game=40430C50 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+=== Thread Status Report (192143ms) === 25 threads, SIGSEGV=596486 XMA=596486 NON_XMA=0 last_fault=0x17FEA1940 last_rip=0xA09A1CBF crash_guest=0x82E77CBC []
+i> 002579C4 NUI HLE: frame clock 30.0/s produced=5699 events=5432 get_next=448198 served=5697 no_frame=2 pending=442498
+i> 002579B3 DC3 FAULTS (192110ms): SIGSEGV=600746 XMA=600746 NON_XMA=0 last_non_xma=0x0 rip=0x0
+i> F8000088 DC3 Script: gameplay gp=40C5CD38 gpState=3 game=40430C50 load=3 wait=0 paused=0 timePaused=0 realTime=0 hasIntro=0
+i> F8000088 DC3 Script: gameplay gp=40C5CD38 gpState=3 game=40430C50 load=3 wait=0 paused=1 timePaused=0 realTime=1 hasIntro=0
+=== Thread Status Report (195145ms) === 25 threads, SIGSEGV=614177 XMA=614177 NON_XMA=0 last_fault=0x17FEA1940 last_rip=0xA09A1CBF crash_guest=0x82E77CBC []
+i> F8000088 DC3 Script: gameplay gp=40C5CD38 gpState=3 game=40430C50 load=3 wait=0 paused=1 timePaused=0 realTime=1 hasIntro=0
+i> 002579B3 DC3 FAULTS (195112ms): SIGSEGV=617760 XMA=617760 NON_XMA=0 last_non_xma=0x0 rip=0x0
+i> F8000088 DC3 Script: gameplay gp=40C5CD38 gpState=3 game=40430C50 load=3 wait=0 paused=1 timePaused=0 realTime=1 hasIntro=0
+=== Thread Status Report (198147ms) === 25 threads, SIGSEGV=628544 XMA=628544 NON_XMA=0 last_fault=0x17FEA1940 last_rip=0xA09A1CBF crash_guest=0x82E77CBC []
+i> 002579B3 DC3 FAULTS (198113ms): SIGSEGV=631476 XMA=631476 NON_XMA=0 last_non_xma=0x0 rip=0x0
+i> F8000088 DC3 Script: screen -> 'perform_endgame_screen' (frame 11077)
+=== Thread Status Report (201149ms) === 25 threads, SIGSEGV=640750 XMA=640750 NON_XMA=0 last_fault=0x17FEA1940 last_rip=0xA09A1CBF crash_guest=0x82E77CBC []
+i> 002579B3 DC3 FAULTS (201115ms): SIGSEGV=643882 XMA=643882 NON_XMA=0 last_non_xma=0x0 rip=0x0
+i> 002579C4 NUI HLE: frame clock 30.0/s produced=5999 events=5732 get_next=448498 served=5997 no_frame=2 pending=442498
+=== Thread Status Report (204151ms) === 25 threads, SIGSEGV=653665 XMA=653665 NON_XMA=0 last_fault=0x17FEA1940 last_rip=0xA09A1CBF crash_guest=0x82E77CBC []
+i> F8000088 DC3 Script: screen -> 'xp_reward_screen_for_perform_endgame_screen' (frame 11378)
+i> 002579B3 DC3 FAULTS (204117ms): SIGSEGV=657093 XMA=657093 NON_XMA=0 last_non_xma=0x0 rip=0x0
+=== Thread Status Report (207154ms) === 25 threads, SIGSEGV=665719 XMA=665719 NON_XMA=0 last_fault=0x17FEA1940 last_rip=0xA09A1CBF crash_guest=0x82E77CBC []
+i> 002579B3 DC3 FAULTS (207118ms): SIGSEGV=668379 XMA=668379 NON_XMA=0 last_non_xma=0x0 rip=0x0
+i> F8000088 DC3 Script: screen -> 'perform_endgame_screen' (frame 11626)
+=== Thread Status Report (210156ms) === 25 threads, SIGSEGV=675375 XMA=675375 NON_XMA=0 last_fault=0x17FEA1940 last_rip=0xA09A1CBF crash_guest=0x82E77CBC []
+i> 002579B3 DC3 FAULTS (210120ms): SIGSEGV=677741 XMA=677741 NON_XMA=0 last_non_xma=0x0 rip=0x0
+i> 002579C4 NUI HLE: frame clock 30.0/s produced=6299 events=6032 get_next=448798 served=6297 no_frame=2 pending=442498
+=== Thread Status Report (213158ms) === 25 threads, SIGSEGV=685182 XMA=685182 NON_XMA=0 last_fault=0x17FEA1940 last_rip=0xA09A1CBF crash_guest=0x82E77CBC []
+i> 002579B3 DC3 FAULTS (213122ms): SIGSEGV=687438 XMA=687438 NON_XMA=0 last_non_xma=0x0 rip=0x0
+i> F8000088 DC3 Script: screen -> 'perform_final_results_screen' (frame 11994)
+=== Thread Status Report (216160ms) === 25 threads, SIGSEGV=694980 XMA=694980 NON_XMA=0 last_fault=0x17FEA1940 last_rip=0xA09A1CBF crash_guest=0x82E77CBC []
+i> 002579B3 DC3 FAULTS (216124ms): SIGSEGV=697518 XMA=697518 NON_XMA=0 last_non_xma=0x0 rip=0x0
+=== Thread Status Report (219163ms) === 25 threads, SIGSEGV=705114 XMA=705114 NON_XMA=0 last_fault=0x17FEA1940 last_rip=0xA09A1CBF crash_guest=0x82E77CBC []
+i> 002579B3 DC3 FAULTS (219128ms): SIGSEGV=707652 XMA=707652 NON_XMA=0 last_non_xma=0x0 rip=0x0
+=== Thread Status Report (222166ms) === 25 threads, SIGSEGV=715248 XMA=715248 NON_XMA=0 last_fault=0x17FEA1940 last_rip=0xA09A1CBF crash_guest=0x82E77CBC []
+i> 002579C4 NUI HLE: frame clock 30.0/s produced=6599 events=6332 get_next=449098 served=6597 no_frame=2 pending=442498
+i> 002579B3 DC3 FAULTS (222129ms): SIGSEGV=717786 XMA=717786 NON_XMA=0 last_non_xma=0x0 rip=0x0
+=== Thread Status Report (225168ms) === 25 threads, SIGSEGV=725382 XMA=725382 NON_XMA=0 last_fault=0x17FEA1940 last_rip=0xA09A1CBF crash_guest=0x82E77CBC []
+i> 002579B3 DC3 FAULTS (225131ms): SIGSEGV=727920 XMA=727920 NON_XMA=0 last_non_xma=0x0 rip=0x0
+=== Thread Status Report (228170ms) === 25 threads, SIGSEGV=735516 XMA=735516 NON_XMA=0 last_fault=0x17FEA1940 last_rip=0xA09A1CBF crash_guest=0x82E77CBC []
+i> 002579B3 DC3 FAULTS (228133ms): SIGSEGV=738054 XMA=738054 NON_XMA=0 last_non_xma=0x0 rip=0x0
+TIMEOUT: i> 00257980 Timeout of 230000ms reached, terminating...
