@@ -187,7 +187,11 @@ Module* Processor::GetModule(const std::string_view name) {
 
 std::vector<Module*> Processor::GetModules() {
   auto global_lock = global_critical_region_.Acquire();
-  std::vector<Module*> clone(modules_.size());
+  // reserve(), not resize(): resize() default-constructs modules_.size() null
+  // entries and the push_back()s below then append the real modules after
+  // them, so callers got twice the expected length with a null first half.
+  std::vector<Module*> clone;
+  clone.reserve(modules_.size());
   for (const auto& module : modules_) {
     clone.push_back(module.get());
   }
