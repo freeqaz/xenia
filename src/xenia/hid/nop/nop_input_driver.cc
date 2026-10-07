@@ -32,6 +32,12 @@ DEFINE_string(
     "band if they present as different instrument subtypes.",
     "HID");
 
+DEFINE_string(
+    scripted_input_wake_button, "l3",
+    "The button a scripted-input `wake` directive presses (a script button "
+    "name: l3, r3, start, ...). The native port's MILO_INPUT_WAKE_BUTTON.",
+    "HID");
+
 namespace xe {
 namespace hid {
 namespace nop {
@@ -271,6 +277,19 @@ void NopInputDriver::LoadScriptFile(const std::string& path) {
         std::string upper_button_name = button_name;
         for (auto& c : upper_button_name) c = static_cast<char>(toupper(c));
 
+        // `wake` = "the player presses the wake button" (the native port's
+        // kDirectiveWake): the button is resolved here, as native does, and
+        // the press is gated on the adapter's WakeNeeded() when it fires.
+        bool is_wake = upper_button_name == "WAKE";
+        if (is_wake) {
+          button_name = cvars::scripted_input_wake_button;
+          if (!ParseButtonName(button_name) && !ParseTriggerName(button_name)) {
+            XELOGW("Script: --scripted_input_wake_button: unknown button "
+                   "'{}', using l3",
+                   button_name);
+            button_name = "l3";
+          }
+        }
         uint16_t buttons = ParseButtonName(button_name);
         uint8_t triggers = ParseTriggerName(button_name);
         bool is_idle_hold = upper_button_name == "NONE" ||
@@ -285,10 +304,11 @@ void NopInputDriver::LoadScriptFile(const std::string& path) {
           dir.frame = value;
           dir.relative = relative;
           dir.triggers = triggers;
+          dir.wake = is_wake;
           script_directives_.push_back(dir);
-          XELOGI("Script[{}]: {}{} {} (0x{:04X}{})", line_num,
-                 relative ? "+" : "@", value, button_name, buttons,
-                 is_idle_hold ? ", no press" : "");
+          XELOGI("Script[{}]: {}{} {}{} (0x{:04X}{})", line_num,
+                 relative ? "+" : "@", value, is_wake ? "wake = " : "",
+                 button_name, buttons, is_idle_hold ? ", no press" : "");
         } else {
           XELOGW("Script[{}]: unknown button '{}'", line_num, button_name);
         }
@@ -574,6 +594,18 @@ uint16_t NopInputDriver::StepFrameScript(ScriptedInputTitleAdapter* adapter,
                                        : d.frame)
                                 : d.frame;
     if (frame == target) {
+      if (d.wake && !adapter->WakeNeeded(memory_)) {
+        XELOGI("DC3 Script: wake at frame {}: no-op (already awake, screen "
+               "'{}', directive {})",
+               frame, last_screen_name_, script_index_);
+        ++script_index_;
+        continue;
+      }
+      if (d.wake) {
+        XELOGI("DC3 Script: wake at frame {}: pressed 0x{:04X} (screen '{}', "
+               "directive {})",
+               frame, d.buttons, last_screen_name_, script_index_);
+      }
       buttons |= d.buttons;
       *triggers |= d.triggers;
       if (d.buttons || d.triggers) {

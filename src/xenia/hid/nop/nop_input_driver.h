@@ -62,6 +62,13 @@ class ScriptedInputTitleAdapter {
   // (`+N` = N x 50 ms, 350 ms hold).
   virtual bool HasFrameClock() { return false; }
   virtual int64_t FrameNumber() { return -1; }
+  // The `wake` directive's question (the native port's
+  // JoypadScriptWakeNeededFn, milo-native-engine
+  // src/platform/JoypadScriptHook.h): true when a press of the wake button
+  // would change anything, i.e. the title is NOT in its pad-driven mode;
+  // false makes the directive a no-op. A title with no such mode keeps the
+  // default, so the press always happens.
+  virtual bool WakeNeeded(Memory* memory) { return true; }
 };
 
 // True once LoadScriptFile() loaded a screen-aware script (set before the
@@ -97,6 +104,13 @@ class NopInputDriver final : public InputDriver {
   //   +<frames> <button>           — press <button> N frames after the last
   //                                  satisfied wait_screen
   //   <frames> <button>            — press <button> at absolute frame N
+  //   [+]<frames> wake             — "the player presses the wake button"
+  //                                  (--scripted_input_wake_button, L3): a
+  //                                  no-op when the adapter's WakeNeeded()
+  //                                  says the title is already in its
+  //                                  pad-driven mode, else a one-frame press
+  //                                  (the legacy wall-clock timing presses
+  //                                  it unconditionally)
   //   # comment                    — ignored
   // The format and the semantics are the native port's
   // (dc3-decomp native/src/platform/Joypad_Native.cpp), so one flow file
@@ -136,6 +150,7 @@ class NopInputDriver final : public InputDriver {
     int frame = 0;            // For kDelayedPress (frame clock): N
     bool relative = true;     // `+N` (after the last wait) or absolute `N`
     uint8_t triggers = 0;     // bit 0 = left trigger, bit 1 = right trigger
+    bool wake = false;        // A `wake` directive: asks WakeNeeded() first
   };
 
   // Dynamic injection event
