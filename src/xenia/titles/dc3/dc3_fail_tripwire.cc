@@ -186,26 +186,11 @@ bool CurrentScreenNameIs(Memory* memory, const char* name) {
   return false;
 }
 
-// seq.controller_mode (gap O6): TheGestureMgr->mInControllerMode := 1, so
-// pad presses navigate the shell (DC3 is Kinect-driven; ShellInput swallows
-// the first press out of controller mode to enter it). Was written by the
-// NuiSkeletonGetNextFrame sequencer on every NUI frame; the Kinect HLE
-// writes no title globals, so it lives here, every 100 ms, until phase 2
-// of docs/fork/nui/NUI_HLE_DESIGN.md decides it. Once set, nothing clears
-// it while calib.exit_controller_mode stubs ExitControllerMode.
-void ForceControllerMode(Memory* memory) {
-  constexpr uint32_t kTheGestureMgr = 0x82F5F7B4;
-  constexpr uint32_t kInControllerModeOff = 0x426D;
-  if (!Readable(memory, kTheGestureMgr, 4)) return;
-  uint32_t gm = xe::load_and_swap<uint32_t>(
-      memory->TranslateVirtual<uint8_t*>(kTheGestureMgr));
-  if (!Readable(memory, gm + kInControllerModeOff, 1)) return;
-  auto* flag = memory->TranslateVirtual<uint8_t*>(gm + kInControllerModeOff);
-  if (!*flag) {
-    *flag = 1;
-    HackFired("seq.controller_mode");
-  }
-}
+// (RETIRED 2026-10-07, lane flow-wake) seq.controller_mode: TheGestureMgr->
+// mInControllerMode := 1 every 100 ms (gap O6). The 360 boots outside
+// controller mode (GestureMgr's ctor), and ShellInput swallows the first pad
+// press there; the shared flow now says so itself with a `wake` (L3) before
+// each screen's first press, as a player does (docs/fork/dc3/PATCH_MANIFEST.md).
 
 void TripwireThread(Memory* memory, cpu::Processor* processor,
                     kernel::KernelState* kernel_state) {
@@ -228,16 +213,9 @@ void TripwireThread(Memory* memory, cpu::Processor* processor,
   XELOGI("DC3 TRIPWIRE: watching TheDebug {:08X} (mFailing +0x5, "
          "mFailThreadMsg +0x104)",
          kTheDebug);
-  const bool force_controller_mode =
-      cvars::fake_kinect_data &&
-      HackGate("seq.controller_mode",
-               "GestureMgr mInControllerMode := 1 (probe thread, 100 ms)");
   uint32_t ticks = 0;
   while (titles::ProbeSleep(100)) {
     ++ticks;
-    if (force_controller_mode) {
-      ForceControllerMode(memory);
-    }
     // IK telemetry (--dc3_ik_telemetry): ~1/s on game_screen. Read-only;
     // ReadDc3IKTelemetry guards every guest read. Was driven by the NUI
     // sequencer callback.
