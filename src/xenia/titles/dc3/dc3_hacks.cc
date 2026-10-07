@@ -40,7 +40,6 @@ constexpr const char* kKnownIds[] = {
     "content.wipe",
     "saveload.activate",
     "speech.grammar_unload",
-    "calib.nav_data",
     "calib.wait_recovery",
     "calib.exit_controller_mode",
     "game.pause_for_skeleton_loss",

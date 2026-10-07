@@ -875,41 +875,6 @@ void ApplyDc3LaunchHooks(const titles::TitleLaunchContext& ctx) {
     if (cvars::fake_kinect_data) {
       XELOGI("DC3: Entering original-XEX fake Kinect patch block");
 
-      constexpr uint32_t kSetPlayerSkeletonNavData = 0x82909340;
-      constexpr uint32_t kSetPlayerPresent = 0x82908320;
-      auto* nav_ptr =
-          dc3::HackGate("calib.nav_data",
-                        "SetPlayerSkeletonNavData -> 2x SetPlayerPresent")
-              ? memory->TranslateVirtual<uint8_t*>(kSetPlayerSkeletonNavData)
-              : nullptr;
-      if (nav_ptr) {
-        auto* heap = memory->LookupHeap(kSetPlayerSkeletonNavData);
-        if (heap) {
-          heap->Protect(kSetPlayerSkeletonNavData, 64,
-                        kMemoryProtectRead | kMemoryProtectWrite);
-          auto w = [nav_ptr](int idx, uint32_t insn) {
-            xe::store_and_swap<uint32_t>(nav_ptr + idx * 4, insn);
-          };
-          int i = 0;
-          w(i++, 0x7C0802A6);
-          w(i++, 0x90010004);
-          w(i++, 0x9421FFC0);
-          w(i++, 0x38600000);
-          w(i++, 0x38800001);
-          w(i++, 0x48000001 | (kSetPlayerPresent - 0x82909350));
-          w(i++, 0x38600001);
-          w(i++, 0x38800001);
-          w(i++, 0x48000001 | (kSetPlayerPresent - 0x82909358));
-          w(i++, 0x38210040);
-          w(i++, 0x80010004);
-          w(i++, 0x7C0803A6);
-          w(i++, 0x4E800020);
-          XELOGI("DC3: Calibration bypass: replaced SetPlayerSkeletonNavData "
-                 "at {:08X} with SetPlayerPresent stub ({} instructions)",
-                 kSetPlayerSkeletonNavData, i);
-        }
-      }
-
       constexpr uint32_t kShouldWaitForRecovery = 0x82904CD0;
       with_patch_target("calib.wait_recovery", "ShouldWaitForRecovery", kShouldWaitForRecovery, 8,
                         [&](uint8_t* swr_ptr) {
