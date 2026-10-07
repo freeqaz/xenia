@@ -110,6 +110,7 @@ class Dc3ScriptedInputAdapter final
   void LogWaitStatus(Memory* memory, const std::string& wanted,
                      const std::string& screen) override;
   bool InTransition(Memory* memory) override;
+  bool WakeNeeded(Memory* memory) override;
   bool HasFrameClock() override { return frame_clock_; }
   int64_t FrameNumber() override {
     return static_cast<int64_t>(MainThreadFrame());
@@ -172,6 +173,31 @@ bool Dc3ScriptedInputAdapter::InTransition(Memory* memory) {
   if (!IsGuestReadable(memory, ui_addr, 0x50)) return false;
   return xe::load_and_swap<uint32_t>(
              memory->TranslateVirtual<uint8_t*>(ui_addr) + 0x2C) != 0;
+}
+
+// The `wake` directive's gate, as the native port answers it: a wake press
+// is needed only outside controller mode (!TheGestureMgr->InControllerMode()).
+// Outside it, ShellInput::OnMsg(ButtonDownMsg) swallows the press and only
+// enters controller mode. Inside it, an L3 press is NOT inert, so it cannot
+// simply be pressed every time: L3 maps to kAction_None (joypad.dta
+// button_meanings), ShellInput passes it on unhandled (it acts only on Start,
+// the right stick and the triggers) and no extracted DTA names kPad_L3 /
+// kPad_Xbox_LS outside system config (quick cheats need the shift held), but
+// HamUI::OnMsg(ButtonDownMsg) exports ResetControllerModeTimeoutMsg for every
+// button, which restarts ShellInput's ~5 s controller-mode timeout. Pressing
+// would keep controller mode alive where the native port lets it lapse, so
+// this skips the press like native does. Unreadable state answers true (the
+// press happens).
+bool Dc3ScriptedInputAdapter::WakeNeeded(Memory* memory) {
+  constexpr uint32_t kTheGestureMgr = 0x82F5F7B4;  // GestureMgr*
+  constexpr uint32_t kInControllerModeOff = 0x426D;  // bool mInControllerMode
+  if (!IsGuestReadable(memory, kTheGestureMgr, 4)) return true;
+  uint32_t gm = xe::load_and_swap<uint32_t>(
+      memory->TranslateVirtual<uint8_t*>(kTheGestureMgr));
+  if (!gm || !IsGuestReadable(memory, gm + kInControllerModeOff, 1)) {
+    return true;
+  }
+  return *memory->TranslateVirtual<uint8_t*>(gm + kInControllerModeOff) == 0;
 }
 
 void Dc3ScriptedInputAdapter::OnPrimaryPadPoll(Memory* memory,
