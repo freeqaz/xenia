@@ -1271,7 +1271,8 @@ bool CommandProcessor::ExecutePacketType3_EVENT_WRITE_ZPD(RingBuffer* reader,
     // Older versions of D3D also checks for ZFail (4D5307D5).
     bool is_end_via_z_fail = pSampleCounts->ZFail_A == kQueryFinished &&
                              pSampleCounts->ZFail_B == kQueryFinished;
-    std::memset(pSampleCounts, 0, sizeof(xe_gpu_depth_sample_counts));
+    std::memset(reinterpret_cast<void*>(pSampleCounts), 0,
+                sizeof(xe_gpu_depth_sample_counts));
     if (is_end_via_z_pass || is_end_via_z_fail) {
       pSampleCounts->ZPass_A = fake_sample_count;
       pSampleCounts->Total_A = fake_sample_count;

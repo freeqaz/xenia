@@ -88,7 +88,7 @@ X_HRESULT_result_t XamUserGetSigninInfo_entry(
     return X_E_INVALIDARG;
   }
 
-  std::memset(info, 0, sizeof(X_USER_SIGNIN_INFO));
+  std::memset(reinterpret_cast<void*>(&*info), 0, sizeof(X_USER_SIGNIN_INFO));
   if (user_index) {
     return X_E_NO_SUCH_USER;
   }
@@ -273,7 +273,8 @@ uint32_t XamUserReadProfileSettingsEx(uint32_t title_id, uint32_t user_index,
     uint32_t setting_id = setting_ids[n];
     auto setting = user_profile->GetSetting(setting_id);
 
-    std::memset(out_setting, 0, sizeof(X_USER_PROFILE_SETTING));
+    std::memset(reinterpret_cast<void*>(&*out_setting), 0,
+                sizeof(X_USER_PROFILE_SETTING));
     out_setting->from = !setting || !setting->is_set   ? 0
                         : setting->is_title_specific() ? 2
                                                        : 1;
