@@ -8,6 +8,8 @@
  */
 
 #include <cstring>
+#include <mutex>
+#include <random>
 
 #include "xenia/base/clock.h"
 #include "xenia/base/logging.h"
@@ -224,9 +226,29 @@ DECLARE_XAM_EXPORT1(NetDll_XNetGetOpt, kNetworking, kSketchy);
 
 dword_result_t NetDll_XNetRandom_entry(dword_t caller, lpvoid_t buffer_ptr,
                                        dword_t length) {
-  // For now, constant values.
-  // This makes replicating things easier.
-  std::memset(buffer_ptr, 0xBB, length);
+  // Real entropy. A constant fill makes every value a title derives from
+  // XNetRandom identical: Rock Band 3 builds each local player's UserGuid
+  // from it and resolves slot -> user by guid equality, so with a constant
+  // fill every player gets the same guid and the second player can never own
+  // a part. Any title deriving an identity, nonce or key from it is affected.
+  static std::mutex s_rng_mutex;
+  static std::mt19937_64 s_rng = []() {
+    std::random_device rd;
+    std::seed_seq seq{rd(), rd(), rd(), rd()};
+    return std::mt19937_64(seq);
+  }();
+  {
+    std::lock_guard<std::mutex> lock(s_rng_mutex);
+    uint8_t* out = buffer_ptr.as<uint8_t*>();
+    uint32_t remaining = length;
+    while (remaining) {
+      uint64_t word = s_rng();
+      uint32_t chunk = remaining < 8 ? remaining : 8;
+      std::memcpy(out, &word, chunk);
+      out += chunk;
+      remaining -= chunk;
+    }
+  }
 
   return 0;
 }
