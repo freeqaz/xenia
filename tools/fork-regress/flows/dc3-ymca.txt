@@ -1,7 +1,7 @@
 # YMCA — Full DTA flow from boot to gameplay
 #
 # Navigates through the complete screen chain:
-#   attract -> (auto) autosave_warning -> (auto) title
+#   attract -> autosave_warning -> (auto) title   (attract: see below)
 #   -> (auto) wait_main_after_saveload -> main -> choose_mode
 #   -> song_select -> multiuser (difficulty, play, skip_waiting) -> loading
 #   -> preloading -> real_loading -> game_screen
@@ -25,23 +25,43 @@
 #     MILO_INPUT_SCRIPT=scripts/dc3-input-flows/ymca.txt \
 #     native/build/dc3-native
 
-# attract_screen needs no input: its movie (no .bik ships in the extracted
-# tree) fails to open, so MoviePanel::Poll sends movie_done on the first poll
-# and attract_movie_panel's handler goes to next_screen -- what the image does
-# with a movie that did not open (BinkMovieImpl::Poll returns false).
+# WAKE: DC3 is Kinect-driven. A pad press outside "controller mode" does not
+# act; ShellInput::OnMsg(ButtonDownMsg) swallows it and only enters
+# controller mode, which lapses after 5 s with no pad input
+# (ShellInput::PostUpdate, ResetControllerModeTimeoutMsg from
+# HamUI::OnMsg(ButtonDownMsg)). `wake` = "the player presses the wake button"
+# (L3): a no-op when the game is already in controller mode, else a one-frame
+# press. A no-op wake does not restart the 5 s timer, so each screen's first
+# real press gets a wake 2 frames ahead of it, never earlier. No gap between
+# presses below reaches 5 s (the longest is ~120 frames, ~2 s at ~59 fps),
+# so no other press needs one.
+
+# attract_screen: on the NATIVE port it needs no input: its movie (no .bik
+# ships in the extracted tree) fails to open, so MoviePanel::Poll sends
+# movie_done on the first poll and attract_movie_panel's handler goes to
+# next_screen -- what the image does with a movie that did not open
+# (BinkMovieImpl::Poll returns false).  On XENIA the movie plays (real Bink)
+# and attract waits for a press; this flow has no attract step, so the harness
+# presses A every 3 s (input.attract_press, --dc3_headless_autonav).  The
+# first press arrives outside controller mode and is swallowed (see WAKE), so
+# attract leaves on the second, ~180 frames later -- what a 360 does with a
+# player who presses A twice.
 
 # autosave_warning_screen auto-transitions to title_screen.
 # Title screen -- press confirm to proceed.
 wait_screen title_screen
++43 wake
 +45 confirm
 
 # wait_main_after_saveload_screen auto-transitions to main_screen.
 # Main screen -- select "gameplay" (first item).
 wait_screen main_screen
++43 wake
 +45 confirm
 
 # Choose mode -- select "perform" (first item).
 wait_screen choose_mode_screen
++43 wake
 +45 confirm
 
 # Song select -- ONE down, derived from the list, not tuned until green.
@@ -58,6 +78,7 @@ wait_screen choose_mode_screen
 # carried an invented `- 1` that fired one row early and jumped the cursor
 # over index 6 to starships (so this flow was playing starships, not ymca).
 wait_screen song_select_screen
++43 wake
 +45 down
 +105 confirm
 
@@ -67,6 +88,7 @@ wait_screen song_select_screen
 # `skip_waiting` -> start_game -> enter_gameplay.  Each pane change replays the
 # list's enter animation (presses dropped meanwhile), hence the spacing.
 wait_screen multiuser_screen
++38 wake
 +40 confirm
 +150 confirm
 +270 confirm
