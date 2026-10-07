@@ -884,31 +884,6 @@ void ApplyDc3LaunchHooks(const titles::TitleLaunchContext& ctx) {
                                  kExitControllerMode);
                         });
 
-      // Blocker A (early auto-pause during gameplay): with --fake_kinect_data,
-      // the synthetic skeleton is never registered as a "playing" player, so
-      // Game::CheckForSkeletonLoss() sees numPlaying(0) < threshold(1) every
-      // SkeletonUpdate and calls Game::PauseForSkeletonLoss() ~2s into the song
-      // -> Handle(pause_game) -> perform_pause_screen, killing playback.
-      // Confirmed root cause: PAUSE-ONSET DIAG showed the UIEventMgr dialog
-      // queue EMPTY at the pause onset (qsize=0), ruling out GamePanel::Poll's
-      // HasActiveDialogEvent() branch and pinning it on the skeleton-loss path.
-      // Real Kinect would mark the player present and this never fires; under
-      // fake input it's a false positive. Stub the void Game::PauseForSkeletonLoss
-      // (private, non-virtual; 0x82866D50) to a bare blr so the song keeps
-      // playing. Scoped to the fake-Kinect block since that's the only case that
-      // produces the false skeleton loss. The player-count computation in
-      // CheckForSkeletonLoss is left intact; only the pause action is removed.
-      constexpr uint32_t kPauseForSkeletonLoss = 0x82866D50;
-      with_patch_target("game.pause_for_skeleton_loss", "Game::PauseForSkeletonLoss", kPauseForSkeletonLoss, 4,
-                        [&](uint8_t* pfsl_ptr) {
-                          xe::store_and_swap<uint32_t>(pfsl_ptr, 0x4E800020);
-                          XELOGI("DC3: Gameplay fix: stubbed "
-                                 "Game::PauseForSkeletonLoss at {:08X} to blr "
-                                 "(suppress fake-Kinect false skeleton-loss "
-                                 "auto-pause)",
-                                 kPauseForSkeletonLoss);
-                        });
-
       // (RETIRED 2026-10-02) XMAHALAllocateContexts -> 0 and the
       // --nop_audio_driver auto -> dummy override. The stub was what made the
       // paced nop driver's render callback fault; once the MMIO handler
