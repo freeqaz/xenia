@@ -271,7 +271,10 @@ static void ExceptionHandlerCallback(int signal_number, siginfo_t* signal_info,
       const bool fault_is_xma_aperture =
           fault_guest_ea >= 0x7FEA0000u && fault_guest_ea < 0x7FEB0000u;
       if (fault_is_xma_aperture) {
-        xma_soft_fault_count_.fetch_add(1, std::memory_order_relaxed);
+        // Release, after sigsegv_count_'s increment above: a reader that
+        // acquire-loads this count first then sees SIGSEGV >= XMA (see
+        // exception_handler.h, GetXmaSoftFaultCount).
+        xma_soft_fault_count_.fetch_add(1, std::memory_order_release);
       } else {
         last_real_fault_address_.store(
             reinterpret_cast<uint64_t>(signal_info->si_addr),
@@ -443,7 +446,7 @@ void ExceptionHandler::Uninstall(Handler fn, void* data) {
 }
 
 uint64_t ExceptionHandler::GetSigsegvCount() {
-  return sigsegv_count_.load(std::memory_order_relaxed);
+  return sigsegv_count_.load(std::memory_order_acquire);
 }
 
 uint64_t ExceptionHandler::GetLastFaultAddress() {
@@ -455,7 +458,7 @@ uint64_t ExceptionHandler::GetLastFaultRip() {
 }
 
 uint64_t ExceptionHandler::GetXmaSoftFaultCount() {
-  return xma_soft_fault_count_.load(std::memory_order_relaxed);
+  return xma_soft_fault_count_.load(std::memory_order_acquire);
 }
 
 uint64_t ExceptionHandler::GetLastRealFaultAddress() {
