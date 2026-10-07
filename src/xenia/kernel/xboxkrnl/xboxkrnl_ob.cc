@@ -7,8 +7,12 @@
  ******************************************************************************
  */
 
+#include <atomic>
+#include <unordered_map>
+
 #include "xenia/base/assert.h"
 #include "xenia/base/logging.h"
+#include "xenia/cpu/processor.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/util/shim_utils.h"
 #include "xenia/kernel/xboxkrnl/xboxkrnl_private.h"
@@ -84,24 +88,76 @@ DECLARE_XBOXKRNL_EXPORT1(ObLookupThreadByThreadId, kNone, kImplemented);
 dword_result_t ObReferenceObjectByHandle_entry(dword_t handle,
                                                dword_t object_type_ptr,
                                                lpdword_t out_object_ptr) {
-  // These values come from how Xenia handles uninitialized kernel data exports.
-  // D###BEEF where ### is the ordinal.
-  const static std::unordered_map<XObject::Type, uint32_t> object_types = {
-      {XObject::Type::Event, 0xD00EBEEF},
-      {XObject::Type::Semaphore, 0xD017BEEF},
-      {XObject::Type::Thread, 0xD01BBEEF}};
+  // A title identifies the expected object type in one of two ways; accept
+  // both:
+  //  (a) the legacy Xenia sentinel D###BEEF, where ### is the ordinal of the
+  //      Ex*ObjectType data export: what a title sees if it dereferences the
+  //      export when it is not mapped;
+  //  (b) the guest ADDRESS of the Ex*ObjectType export variable itself, which
+  //      is what a title passing `&ExEventObjectType` actually supplies.
+  // Log (once per type per form) which one a title used.
+  auto* resolver = kernel_state()->processor()->export_resolver();
+  struct ObjectTypeInfo {
+    const char* module;
+    uint16_t ordinal;
+    uint32_t legacy_sentinel;
+  };
+  const static std::unordered_map<XObject::Type, ObjectTypeInfo>
+      object_type_ordinals = {
+          // ExEventObjectType
+          {XObject::Type::Event, {"xboxkrnl.exe", 0x0E, 0xD00EBEEF}},
+          // ExSemaphoreObjectType
+          {XObject::Type::Semaphore, {"xboxkrnl.exe", 0x17, 0xD017BEEF}},
+          // ExThreadObjectType
+          {XObject::Type::Thread, {"xboxkrnl.exe", 0x1B, 0xD01BBEEF}},
+      };
   auto object = kernel_state()->object_table()->LookupObject<XObject>(handle);
   if (!object) {
     return X_STATUS_INVALID_HANDLE;
   }
 
   uint32_t native_ptr = object->guest_object();
-  auto object_type = object_types.find(object->type());
-  if (object_type != object_types.end()) {
-    if (object_type_ptr && object_type_ptr != object_type->second) {
-      return X_STATUS_OBJECT_TYPE_MISMATCH;
+  if (object_type_ptr) {
+    // Check type: look up the expected variable address for this object type.
+    auto ordinal_it = object_type_ordinals.find(object->type());
+    if (ordinal_it != object_type_ordinals.end()) {
+      auto export_entry = resolver->GetExportByOrdinal(
+          ordinal_it->second.module, ordinal_it->second.ordinal);
+      uint32_t expected_var_addr =
+          export_entry ? export_entry->variable_ptr : 0;
+      uint32_t legacy_sentinel = ordinal_it->second.legacy_sentinel;
+      bool matched_var_addr =
+          expected_var_addr && object_type_ptr == expected_var_addr;
+      bool matched_sentinel = object_type_ptr == legacy_sentinel;
+      // Fail closed: if the export variable could not be resolved, only the
+      // legacy sentinel matches (this used to accept ANY type pointer).
+      if (!matched_var_addr && !matched_sentinel) {
+        return X_STATUS_OBJECT_TYPE_MISMATCH;
+      }
+      // One line per (type, form) pair, not per call.
+      static std::atomic<uint32_t> s_form_logged{0};
+      uint32_t form_bit =
+          1u << ((static_cast<uint32_t>(object->type()) & 0xF) * 2 +
+                 (matched_sentinel ? 1u : 0u));
+      if ((matched_var_addr || matched_sentinel) &&
+          !(s_form_logged.fetch_or(form_bit, std::memory_order_relaxed) &
+            form_bit)) {
+        XELOGD(
+            "ObReferenceObjectByHandle: object_type_ptr=0x{:08X} matched the "
+            "{} form for type {} (var_addr=0x{:08X} sentinel=0x{:08X})",
+            (uint32_t)object_type_ptr,
+            matched_sentinel ? "legacy D###BEEF sentinel"
+                             : "Ex*ObjectType variable address",
+            static_cast<uint32_t>(object->type()), expected_var_addr,
+            legacy_sentinel);
+      }
+    } else {
+      // Unknown object type — don't fail, just warn
+      assert_unhandled_case(object->type());
+      native_ptr = 0xDEADF00D;
     }
-  } else {
+  } else if (object_type_ordinals.find(object->type()) ==
+             object_type_ordinals.end()) {
     assert_unhandled_case(object->type());
     native_ptr = 0xDEADF00D;
   }
