@@ -340,6 +340,11 @@ pointer_result_t RtlImageXexHeaderField_entry(pointer_t<xex2_header> xex_header,
   uint32_t field_value = 0;
   uint32_t field = field_dword;  // VS acts weird going from dword_t -> enum
 
+  if (!xex_header) {
+    XELOGW("RtlImageXexHeaderField: null xex_header for field {:08X}", field);
+    return field_value;
+  }
+
   UserModule::GetOptHeader(kernel_memory(), xex_header, xex2_header_keys(field),
                            &field_value);
 
@@ -380,6 +385,14 @@ void xeRtlInitializeCriticalSection(X_RTL_CRITICAL_SECTION* cs,
   cs->header.type = 1;      // EventSynchronizationObject (auto reset)
   cs->header.absolute = 0;  // spin count div 256
   cs->header.signal_state = 0;
+  // Initialize the wait list as an empty circular list (self-referential),
+  // as the kernel does (&header->WaitListHead). Left zeroed, code that walks
+  // or links into the list -- the CRT's XapiThreadNotifyHead shares these
+  // fields -- reads garbage.
+  uint32_t wait_list_ptr =
+      cs_ptr + offsetof(X_DISPATCH_HEADER, wait_list_flink);
+  cs->header.wait_list_flink = wait_list_ptr;
+  cs->header.wait_list_blink = wait_list_ptr;
   cs->lock_count = -1;
   cs->recursion_count = 0;
   cs->owning_thread = 0;
@@ -403,6 +416,11 @@ X_STATUS xeRtlInitializeCriticalSectionAndSpinCount(X_RTL_CRITICAL_SECTION* cs,
   cs->header.type = 1;  // EventSynchronizationObject (auto reset)
   cs->header.absolute = spin_count_div_256;
   cs->header.signal_state = 0;
+  // Initialize the wait list as an empty circular list (self-referential).
+  uint32_t wait_list_ptr =
+      cs_ptr + offsetof(X_DISPATCH_HEADER, wait_list_flink);
+  cs->header.wait_list_flink = wait_list_ptr;
+  cs->header.wait_list_blink = wait_list_ptr;
   cs->lock_count = -1;
   cs->recursion_count = 0;
   cs->owning_thread = 0;
