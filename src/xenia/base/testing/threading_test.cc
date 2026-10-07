@@ -8,6 +8,8 @@
 */
 
 #include <array>
+#include <filesystem>
+#include <functional>
 
 #include "xenia/base/threading.h"
 
@@ -1138,9 +1140,215 @@ TEST_CASE("Test Thread QueueUserCallback", "[thread]") {
   REQUIRE(is_modified == 0);
   REQUIRE(order == 2);
 
-  // TODO(bwrsandman): Test alertable wait returning kUserCallback by using IO
-  // callbacks.
 }
+
+TEST_CASE("Test Alertable Wait Returns kUserCallback", "[thread]") {
+  // Proves the threading_posix fix: an alertable Wait() breaks out of its
+  // condvar park when a user-mode callback (APC) is queued to the waiting
+  // thread, returning WaitResult::kUserCallback WITHOUT consuming the object.
+  // The Event used here is a never-signaled manual-reset event, so the ONLY
+  // way the worker's Wait can return is via the APC.
+  Thread::CreationParameters params = {};
+
+  SECTION("Infinite alertable wait breaks on APC") {
+    // A never-signaled manual-reset event: an infinite Wait on it can only
+    // ever return because of the alertable APC, never because of a signal.
+    auto never_signaled = Event::CreateManualResetEvent(false);
+    REQUIRE(never_signaled);
+
+    std::atomic<bool> entered_wait(false);
+    std::atomic<bool> callback_ran(false);
+    std::atomic<WaitResult> wait_result(WaitResult::kFailed);
+
+    auto thread = Thread::Create(params, [&] {
+      entered_wait = true;
+      // INFINITE alertable wait. Without the fix this parks forever.
+      wait_result = Wait(never_signaled.get(), true,
+                         std::chrono::milliseconds::max());
+    });
+    REQUIRE(thread);
+
+    // Make sure the worker is actually parked inside the alertable Wait
+    // before we deliver the APC, so the signal lands while it is waiting.
+    REQUIRE(spin_wait_for(1s, [&] { return entered_wait.load(); }));
+    Sleep(20ms);
+
+    thread->QueueUserCallback([&] { callback_ran = true; });
+
+    // The worker's infinite Wait must now return kUserCallback.
+    REQUIRE(spin_wait_for(
+        1s, [&] { return wait_result.load() != WaitResult::kFailed; }));
+    REQUIRE(wait_result.load() == WaitResult::kUserCallback);
+    REQUIRE(callback_ran.load());
+
+    // Worker has exited its wait; join it.
+    REQUIRE(Wait(thread.get(), false, 1s) == WaitResult::kSuccess);
+  }
+
+  SECTION("Finite alertable wait returns kUserCallback before timeout") {
+    auto never_signaled = Event::CreateManualResetEvent(false);
+    REQUIRE(never_signaled);
+
+    std::atomic<bool> entered_wait(false);
+    std::atomic<bool> callback_ran(false);
+    std::atomic<WaitResult> wait_result(WaitResult::kFailed);
+    // Generous timeout: the APC must short-circuit the wait well before this
+    // would elapse, so the elapsed wall time proves the early return.
+    constexpr auto kTimeout = 10s;
+
+    auto thread = Thread::Create(params, [&] {
+      entered_wait = true;
+      wait_result = Wait(never_signaled.get(), true, kTimeout);
+    });
+    REQUIRE(thread);
+
+    REQUIRE(spin_wait_for(1s, [&] { return entered_wait.load(); }));
+    Sleep(20ms);
+
+    auto queued_at = std::chrono::steady_clock::now();
+    thread->QueueUserCallback([&] { callback_ran = true; });
+
+    REQUIRE(spin_wait_for(
+        1s, [&] { return wait_result.load() != WaitResult::kFailed; }));
+    auto elapsed = std::chrono::steady_clock::now() - queued_at;
+
+    REQUIRE(wait_result.load() == WaitResult::kUserCallback);
+    REQUIRE(callback_ran.load());
+    // Returned because of the APC, NOT because the timeout elapsed.
+    REQUIRE(elapsed < kTimeout);
+
+    REQUIRE(Wait(thread.get(), false, 1s) == WaitResult::kSuccess);
+  }
+
+  SECTION("APC queued before alertable wait entry still fires (durability)") {
+    auto never_signaled = Event::CreateManualResetEvent(false);
+    REQUIRE(never_signaled);
+    // Auto-reset gate the main thread sets only AFTER it has queued the APC,
+    // forcing the worker to receive the callback BEFORE it ever enters the
+    // alertable Wait. The durable apc_pending_ flag must still deliver it at
+    // wait entry (NT durability).
+    auto gate = Event::CreateAutoResetEvent(false);
+    REQUIRE(gate);
+
+    std::atomic<bool> started(false);
+    std::atomic<bool> callback_ran(false);
+    std::atomic<WaitResult> wait_result(WaitResult::kFailed);
+
+    auto thread = Thread::Create(params, [&] {
+      started = true;
+      // Park (non-alertably) until the main thread has queued the APC.
+      Wait(gate.get(), false, std::chrono::milliseconds::max());
+      // Only now enter the alertable wait; the already-pending APC must fire
+      // at entry and return kUserCallback without consuming never_signaled.
+      wait_result = Wait(never_signaled.get(), true,
+                         std::chrono::milliseconds::max());
+    });
+    REQUIRE(thread);
+
+    // Ensure the worker exists/started, then queue the APC while it is still
+    // parked on the gate (i.e. before the alertable Wait).
+    REQUIRE(spin_wait_for(1s, [&] { return started.load(); }));
+    Sleep(20ms);
+    thread->QueueUserCallback([&] { callback_ran = true; });
+    Sleep(20ms);
+    REQUIRE_FALSE(wait_result.load() != WaitResult::kFailed);
+
+    // Release the worker into the alertable wait; the pending APC fires now.
+    gate->Set();
+
+    REQUIRE(spin_wait_for(
+        1s, [&] { return wait_result.load() != WaitResult::kFailed; }));
+    REQUIRE(wait_result.load() == WaitResult::kUserCallback);
+    REQUIRE(callback_ran.load());
+
+    REQUIRE(Wait(thread.get(), false, 1s) == WaitResult::kSuccess);
+  }
+}
+
+TEST_CASE("Alertable SignalAndWait, WaitAny and AlertableSleep take APCs",
+          "[thread]") {
+  // The other three alertable entry points: each must return its 'user
+  // callback' result when an APC is queued while it is parked, and run it.
+  Thread::CreationParameters params = {};
+
+  auto run_case = [&](std::function<bool()> park_alertably) {
+    std::atomic<bool> parked(false);
+    std::atomic<bool> callback_ran(false);
+    std::atomic<int> outcome(-1);  // 1 = returned the APC result
+    auto thread = Thread::Create(params, [&] {
+      parked = true;
+      outcome = park_alertably() ? 1 : 0;
+    });
+    REQUIRE(thread);
+    REQUIRE(spin_wait_for(1s, [&] { return parked.load(); }));
+    Sleep(20ms);
+    thread->QueueUserCallback([&] { callback_ran = true; });
+    REQUIRE(spin_wait_for(2s, [&] { return outcome.load() != -1; }));
+    REQUIRE(outcome.load() == 1);
+    REQUIRE(callback_ran.load());
+    REQUIRE(Wait(thread.get(), false, 1s) == WaitResult::kSuccess);
+  };
+
+  SECTION("SignalAndWait") {
+    auto to_signal = Event::CreateAutoResetEvent(false);
+    auto never_signaled = Event::CreateManualResetEvent(false);
+    run_case([&] {
+      return SignalAndWait(to_signal.get(), never_signaled.get(), true,
+                           std::chrono::milliseconds::max()) ==
+             WaitResult::kUserCallback;
+    });
+    // The signal half still happened.
+    REQUIRE(Wait(to_signal.get(), false, 0ms) == WaitResult::kSuccess);
+  }
+
+  SECTION("WaitAny") {
+    auto a = Event::CreateManualResetEvent(false);
+    auto b = Event::CreateManualResetEvent(false);
+    run_case([&] {
+      std::vector<WaitHandle*> handles = {a.get(), b.get()};
+      return WaitAny(handles, true, std::chrono::milliseconds::max()).first ==
+             WaitResult::kUserCallback;
+    });
+  }
+
+  SECTION("AlertableSleep") {
+    run_case([&] { return AlertableSleep(10s) == SleepResult::kAlerted; });
+  }
+
+  SECTION("AlertableSleep without an APC sleeps the full duration") {
+    auto start = std::chrono::steady_clock::now();
+    REQUIRE(AlertableSleep(50ms) == SleepResult::kSuccess);
+    REQUIRE(std::chrono::steady_clock::now() - start >= 50ms);
+  }
+}
+
+#if XE_PLATFORM_LINUX
+static size_t CountOpenFds() {
+  size_t n = 0;
+  for (const auto& entry :
+       std::filesystem::directory_iterator("/proc/self/fd")) {
+    (void)entry;
+    ++n;
+  }
+  return n;
+}
+
+TEST_CASE("Alertable eventfd is closed when its thread exits", "[thread]") {
+  // Each thread that enters an alertable sleep/wait lazily creates an eventfd
+  // for APC wakeups. It used to be leaked at thread exit: one fd per thread.
+  Thread::CreationParameters params = {};
+  constexpr int kThreads = 32;
+  const size_t before = CountOpenFds();
+  for (int i = 0; i < kThreads; ++i) {
+    auto thread = Thread::Create(params, [] { AlertableSleep(1ms); });
+    REQUIRE(thread);
+    REQUIRE(Wait(thread.get(), false, 5s) == WaitResult::kSuccess);
+  }
+  const size_t after = CountOpenFds();
+  // A leak would add one fd per thread; allow a little unrelated slack.
+  REQUIRE(after < before + kThreads / 2);
+}
+#endif  // XE_PLATFORM_LINUX
 
 }  // namespace test
 }  // namespace base
