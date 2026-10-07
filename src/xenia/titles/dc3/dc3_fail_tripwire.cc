@@ -10,12 +10,15 @@
 
 #include <chrono>
 #include <cstring>
+#include <mutex>
 #include <string>
+#include <string_view>
 
 #include "xenia/base/byte_order.h"
 #include "xenia/base/exception_handler.h"
 #include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
+#include "xenia/cpu/debug_print_observer.h"
 #include "xenia/cpu/processor.h"
 #include "xenia/cpu/thread_state.h"
 #include "xenia/kernel/kernel_state.h"
@@ -74,6 +77,44 @@ std::string ReadCString(Memory* memory, uint32_t addr, size_t max) {
     s.push_back(c == '\n' || c == '\r' ? ' ' : (c == '\'' ? '"' : c));
   }
   return s;
+}
+
+// The failure text, from the game's own log. Debug::Modal(kModalFail) prints
+// "FAIL-MSG: <msg>\n" (MILO_LOG -> Debug::Print -> OutputDebugStringA ->
+// RtlDebugPrintHelper's debug-print trap) before it shows the modal, and a
+// worker-thread Debug::Fail prints "THREAD-FAIL: <msg>\n". The trap's host
+// handler only logs at debug level, so the text never reached a default-level
+// log; this observer (cpu/debug_print_observer.h) reads it there. Read-only:
+// the guest's print is unchanged.
+std::mutex g_fail_text_mutex;
+std::string g_fail_text;  // the last FAIL-MSG text, one line
+
+std::string OneLine(std::string_view text, size_t max) {
+  std::string s;
+  for (char c : text.substr(0, max)) {
+    // One line, and no quote that would end the harness's '...' capture.
+    s.push_back(c == '\n' || c == '\r' ? ' ' : (c == '\'' ? '"' : c));
+  }
+  while (!s.empty() && s.back() == ' ') s.pop_back();
+  return s;
+}
+
+void OnDebugPrint(uint32_t thread_id, std::string_view text) {
+  constexpr std::string_view kFailMsg = "FAIL-MSG: ";
+  constexpr std::string_view kThreadFail = "THREAD-FAIL: ";
+  bool main_fail = text.substr(0, kFailMsg.size()) == kFailMsg;
+  bool thread_fail = text.substr(0, kThreadFail.size()) == kThreadFail;
+  if (!main_fail && !thread_fail) {
+    return;
+  }
+  std::string msg = OneLine(
+      text.substr(main_fail ? kFailMsg.size() : kThreadFail.size()), 1000);
+  XELOGE("DC3 TRIPWIRE: guest {} (thread {:08X}): '{}'",
+         main_fail ? "FAIL-MSG" : "THREAD-FAIL", thread_id, msg);
+  if (main_fail) {
+    std::lock_guard<std::mutex> lock(g_fail_text_mutex);
+    g_fail_text = msg;
+  }
 }
 
 // A main-thread Fail keeps its message in stack locals (Debug::Fail's
@@ -243,6 +284,9 @@ void TripwireThread(Memory* memory, cpu::Processor* processor,
         main_scan_pending = true;
       } else {
         XELOGI("DC3 TRIPWIRE: Debug::mFailing 1->0 at {}ms", ms);
+        // That Fail is over; a later one must not inherit its text.
+        std::lock_guard<std::mutex> lock(g_fail_text_mutex);
+        g_fail_text.clear();
       }
       last_failing = failing;
     }
@@ -253,10 +297,18 @@ void TripwireThread(Memory* memory, cpu::Processor* processor,
       latched_reported = true;
       if (main_scan_pending && !msg) {
         // No mFailThreadMsg: a MAIN-thread Fail, stuck in Debug::Modal
-        // (kModalFail ends in Exit()). The first string is the message;
+        // (kModalFail ends in Exit()). The message is the game's own
+        // FAIL-MSG print when it got that far, else the first stack string;
         // logged in the harness's mFailThreadMsg='...' shape so
         // fork-regress records it with the worker fails.
-        std::string text = LogMainThreadStackStrings(memory, kernel_state);
+        std::string text;
+        {
+          std::lock_guard<std::mutex> lock(g_fail_text_mutex);
+          text = g_fail_text;
+        }
+        if (text.empty()) {
+          text = LogMainThreadStackStrings(memory, kernel_state);
+        }
         XELOGE("DC3 TRIPWIRE: TAINTED: main-thread Debug::Fail "
                "mFailThreadMsg={:08X} '{}'",
                0, text);
@@ -299,6 +351,7 @@ void StartFailTripwire(Memory* memory, cpu::Processor* processor,
   if (!cvars::dc3_fail_tripwire) {
     return;
   }
+  cpu::SetDebugPrintObserver(&OnDebugPrint);
   titles::SpawnProbeThread([memory, processor, kernel_state] {
     TripwireThread(memory, processor, kernel_state);
   });
