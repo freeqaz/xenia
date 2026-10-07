@@ -1,7 +1,7 @@
 # YMCA — Full DTA flow from boot to gameplay
 #
 # Navigates through the complete screen chain:
-#   attract -> (auto) autosave_warning -> (auto) title
+#   attract -> autosave_warning -> (auto) title   (attract: see below)
 #   -> (auto) wait_main_after_saveload -> main -> choose_mode
 #   -> song_select -> multiuser (difficulty, play, skip_waiting) -> loading
 #   -> preloading -> real_loading -> game_screen
@@ -36,10 +36,16 @@
 # presses below reaches 5 s (the longest is ~120 frames, ~2 s at ~59 fps),
 # so no other press needs one.
 
-# attract_screen needs no input: its movie (no .bik ships in the extracted
-# tree) fails to open, so MoviePanel::Poll sends movie_done on the first poll
-# and attract_movie_panel's handler goes to next_screen -- what the image does
-# with a movie that did not open (BinkMovieImpl::Poll returns false).
+# attract_screen: on the NATIVE port it needs no input: its movie (no .bik
+# ships in the extracted tree) fails to open, so MoviePanel::Poll sends
+# movie_done on the first poll and attract_movie_panel's handler goes to
+# next_screen -- what the image does with a movie that did not open
+# (BinkMovieImpl::Poll returns false).  On XENIA the movie plays (real Bink)
+# and attract waits for a press; this flow has no attract step, so the harness
+# presses A every 3 s (input.attract_press, --dc3_headless_autonav).  The
+# first press arrives outside controller mode and is swallowed (see WAKE), so
+# attract leaves on the second, ~180 frames later -- what a 360 does with a
+# player who presses A twice.
 
 # autosave_warning_screen auto-transitions to title_screen.
 # Title screen -- press confirm to proceed.
