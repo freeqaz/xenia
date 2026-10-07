@@ -470,9 +470,16 @@ void X64Emitter::CallIndirect(const hir::Instr* instr,
   } else {
     // Old-style resolve.
     // Not too important because indirection table is almost always available.
-    mov(edx, reg.cvt32());
     mov(rax, reinterpret_cast<uint64_t>(ResolveFunction));
+#if XE_PLATFORM_LINUX
+    // System V: rdi = context, rsi = target. Read rsi (the context register)
+    // before overwriting it with the target address.
+    mov(rdi, GetContextReg());
+    mov(esi, reg.cvt32());
+#else
     mov(rcx, GetContextReg());
+    mov(edx, reg.cvt32());
+#endif
     call(rax);
   }
 
