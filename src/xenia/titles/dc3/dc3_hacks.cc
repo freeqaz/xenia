@@ -40,13 +40,7 @@ constexpr const char* kKnownIds[] = {
     "content.wipe",
     "saveload.activate",
     "speech.grammar_unload",
-    "calib.player_present_guard",
-    "calib.choose_player_sides",
-    "calib.warning_data",
-    "calib.nav_data",
-    "calib.wait_recovery",
     "calib.exit_controller_mode",
-    "game.pause_for_skeleton_loss",
     // Runtime, the probe thread (dc3_fail_tripwire.cc).
     "seq.controller_mode",
     // Runtime, scripted-input adapter (dc3_scripted_input.cc); only with

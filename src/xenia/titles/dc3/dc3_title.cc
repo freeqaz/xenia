@@ -875,97 +875,6 @@ void ApplyDc3LaunchHooks(const titles::TitleLaunchContext& ctx) {
     if (cvars::fake_kinect_data) {
       XELOGI("DC3: Entering original-XEX fake Kinect patch block");
 
-      constexpr uint32_t kSetPlayerPresentGuard = 0x8290834C;
-      constexpr uint32_t kExpectedInsn = 0x4800001D;
-      auto* guard_ptr =
-          dc3::HackGate("calib.player_present_guard",
-                        "NOP IsTrackingAllSkeletons guard in "
-                        "SkeletonChooser::SetPlayerPresent")
-              ? memory->TranslateVirtual<uint8_t*>(kSetPlayerPresentGuard)
-              : nullptr;
-      if (guard_ptr) {
-        uint32_t actual = xe::load_and_swap<uint32_t>(guard_ptr);
-        if (actual == kExpectedInsn) {
-          auto* heap = memory->LookupHeap(kSetPlayerPresentGuard);
-          if (heap) {
-            heap->Protect(kSetPlayerPresentGuard, 4,
-                          kMemoryProtectRead | kMemoryProtectWrite);
-            xe::store_and_swap<uint32_t>(guard_ptr, 0x60000000);
-            XELOGI("DC3: Calibration bypass: NOP'd IsTrackingAllSkeletons "
-                   "guard in SetPlayerPresent at {:08X}",
-                   kSetPlayerPresentGuard);
-          }
-        } else {
-          XELOGW("DC3: Calibration bypass: unexpected insn at {:08X}: "
-                 "{:08X} (expected {:08X})",
-                 kSetPlayerPresentGuard, actual, kExpectedInsn);
-        }
-      }
-
-      constexpr uint32_t kChoosePlayerSides = 0x82909968;
-      with_patch_target("calib.choose_player_sides", "ChoosePlayerSides", kChoosePlayerSides, 4,
-                        [&](uint8_t* cps_ptr) {
-                          xe::store_and_swap<uint32_t>(cps_ptr, 0x4E800020);
-                          XELOGI("DC3: Calibration bypass: stubbed "
-                                 "ChoosePlayerSides at {:08X} to blr",
-                                 kChoosePlayerSides);
-                        });
-
-      constexpr uint32_t kSetPlayerSkeletonWarningData = 0x82907880;
-      with_patch_target("calib.warning_data", "SetPlayerSkeletonWarningData",
-                        kSetPlayerSkeletonWarningData, 4,
-                        [&](uint8_t* spw_ptr) {
-                          xe::store_and_swap<uint32_t>(spw_ptr, 0x4E800020);
-                          XELOGI("DC3: Calibration bypass: stubbed "
-                                 "SetPlayerSkeletonWarningData at {:08X} to blr",
-                                 kSetPlayerSkeletonWarningData);
-                        });
-
-      constexpr uint32_t kSetPlayerSkeletonNavData = 0x82909340;
-      constexpr uint32_t kSetPlayerPresent = 0x82908320;
-      auto* nav_ptr =
-          dc3::HackGate("calib.nav_data",
-                        "SetPlayerSkeletonNavData -> 2x SetPlayerPresent")
-              ? memory->TranslateVirtual<uint8_t*>(kSetPlayerSkeletonNavData)
-              : nullptr;
-      if (nav_ptr) {
-        auto* heap = memory->LookupHeap(kSetPlayerSkeletonNavData);
-        if (heap) {
-          heap->Protect(kSetPlayerSkeletonNavData, 64,
-                        kMemoryProtectRead | kMemoryProtectWrite);
-          auto w = [nav_ptr](int idx, uint32_t insn) {
-            xe::store_and_swap<uint32_t>(nav_ptr + idx * 4, insn);
-          };
-          int i = 0;
-          w(i++, 0x7C0802A6);
-          w(i++, 0x90010004);
-          w(i++, 0x9421FFC0);
-          w(i++, 0x38600000);
-          w(i++, 0x38800001);
-          w(i++, 0x48000001 | (kSetPlayerPresent - 0x82909350));
-          w(i++, 0x38600001);
-          w(i++, 0x38800001);
-          w(i++, 0x48000001 | (kSetPlayerPresent - 0x82909358));
-          w(i++, 0x38210040);
-          w(i++, 0x80010004);
-          w(i++, 0x7C0803A6);
-          w(i++, 0x4E800020);
-          XELOGI("DC3: Calibration bypass: replaced SetPlayerSkeletonNavData "
-                 "at {:08X} with SetPlayerPresent stub ({} instructions)",
-                 kSetPlayerSkeletonNavData, i);
-        }
-      }
-
-      constexpr uint32_t kShouldWaitForRecovery = 0x82904CD0;
-      with_patch_target("calib.wait_recovery", "ShouldWaitForRecovery", kShouldWaitForRecovery, 8,
-                        [&](uint8_t* swr_ptr) {
-                          xe::store_and_swap<uint32_t>(swr_ptr + 0, 0x38600000);
-                          xe::store_and_swap<uint32_t>(swr_ptr + 4, 0x4E800020);
-                          XELOGI("DC3: Calibration bypass: stubbed "
-                                 "ShouldWaitForRecovery at {:08X} to return false",
-                                 kShouldWaitForRecovery);
-                        });
-
       constexpr uint32_t kExitControllerMode = 0x82902748;
       with_patch_target("calib.exit_controller_mode", "ExitControllerMode", kExitControllerMode, 4,
                         [&](uint8_t* ecm_ptr) {
@@ -973,31 +882,6 @@ void ApplyDc3LaunchHooks(const titles::TitleLaunchContext& ctx) {
                           XELOGI("DC3: Controller bypass: stubbed "
                                  "ExitControllerMode at {:08X} to blr",
                                  kExitControllerMode);
-                        });
-
-      // Blocker A (early auto-pause during gameplay): with --fake_kinect_data,
-      // the synthetic skeleton is never registered as a "playing" player, so
-      // Game::CheckForSkeletonLoss() sees numPlaying(0) < threshold(1) every
-      // SkeletonUpdate and calls Game::PauseForSkeletonLoss() ~2s into the song
-      // -> Handle(pause_game) -> perform_pause_screen, killing playback.
-      // Confirmed root cause: PAUSE-ONSET DIAG showed the UIEventMgr dialog
-      // queue EMPTY at the pause onset (qsize=0), ruling out GamePanel::Poll's
-      // HasActiveDialogEvent() branch and pinning it on the skeleton-loss path.
-      // Real Kinect would mark the player present and this never fires; under
-      // fake input it's a false positive. Stub the void Game::PauseForSkeletonLoss
-      // (private, non-virtual; 0x82866D50) to a bare blr so the song keeps
-      // playing. Scoped to the fake-Kinect block since that's the only case that
-      // produces the false skeleton loss. The player-count computation in
-      // CheckForSkeletonLoss is left intact; only the pause action is removed.
-      constexpr uint32_t kPauseForSkeletonLoss = 0x82866D50;
-      with_patch_target("game.pause_for_skeleton_loss", "Game::PauseForSkeletonLoss", kPauseForSkeletonLoss, 4,
-                        [&](uint8_t* pfsl_ptr) {
-                          xe::store_and_swap<uint32_t>(pfsl_ptr, 0x4E800020);
-                          XELOGI("DC3: Gameplay fix: stubbed "
-                                 "Game::PauseForSkeletonLoss at {:08X} to blr "
-                                 "(suppress fake-Kinect false skeleton-loss "
-                                 "auto-pause)",
-                                 kPauseForSkeletonLoss);
                         });
 
       // (RETIRED 2026-10-02) XMAHALAllocateContexts -> 0 and the
