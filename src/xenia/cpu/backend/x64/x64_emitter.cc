@@ -33,6 +33,7 @@
 #include "xenia/cpu/backend/x64/x64_sequences.h"
 #include "xenia/cpu/backend/x64/x64_stack_layout.h"
 #include "xenia/cpu/cpu_flags.h"
+#include "xenia/cpu/debug_print_observer.h"
 #include "xenia/cpu/function.h"
 #include "xenia/cpu/function_debug_info.h"
 #include "xenia/cpu/milo_trace.h"
@@ -541,6 +542,14 @@ uint64_t TrapDebugPrint(void* raw_context, uint64_t address) {
 
   if (cvars::debugprint_trap_log) {
     debugging::DebugPrint("(DebugPrint) {}", str);
+  }
+
+  // Fork: a title observer (debug_print_observer.h). Read-only; bounded by
+  // the trap's length (r4) and the first NUL.
+  if (str_ptr) {
+    size_t len = uint16_t(thread_state->context()->r[4]);
+    len = strnlen(str, len);
+    NotifyDebugPrint(thread_state->thread_id(), std::string_view(str, len));
   }
 
   return 0;
