@@ -466,7 +466,26 @@ void X64Emitter::CallIndirect(const hir::Instr* instr,
     if (reg.cvt32() != ebx) {
       mov(ebx, reg.cvt32());
     }
+    // The indirection table only covers guest addresses
+    // [kIndirectionTableBase, kIndirectionTableBase + kIndirectionTableSize).
+    // A target outside it (e.g. code in a module loaded below 0x80000000)
+    // must not be looked up there -- dword[ebx] would read unmapped host
+    // memory -- so send it to the resolve thunk, which saves and restores
+    // the volatile host registers the JIT keeps guest state in.
+    mov(eax, ebx);
+    sub(eax, static_cast<uint32_t>(X64CodeCache::kIndirectionTableBase));
+    cmp(eax, static_cast<uint32_t>(X64CodeCache::kIndirectionTableSize));
+    Xbyak::Label in_range;
+    Xbyak::Label resolved;
+    jb(in_range);
+    assert_zero(reinterpret_cast<uint64_t>(backend_->resolve_function_thunk()) &
+                0xFFFFFFFF00000000ull);
+    mov(eax, static_cast<uint32_t>(reinterpret_cast<uint64_t>(
+                 backend_->resolve_function_thunk())));
+    jmp(resolved, CodeGenerator::T_NEAR);
+    L(in_range);
     mov(eax, dword[ebx]);
+    L(resolved);
   } else {
     // Old-style resolve.
     // Not too important because indirection table is almost always available.

@@ -136,6 +136,12 @@ void X64CodeCache::AddIndirection(uint32_t guest_address,
     return;
   }
 
+  // Bounds check: only update slots within the indirection table range.
+  if (guest_address < kIndirectionTableBase ||
+      guest_address >= kIndirectionTableBase + kIndirectionTableSize) {
+    return;
+  }
+
   uint32_t* indirection_slot = reinterpret_cast<uint32_t*>(
       indirection_table_base_ + (guest_address - kIndirectionTableBase));
   *indirection_slot = host_address;
@@ -281,8 +287,11 @@ void X64CodeCache::PlaceGuestCode(uint32_t guest_address, void* machine_code,
 
   // Now that everything is ready, fix up the indirection table.
   // Note that we do support code that doesn't have an indirection fixup, so
-  // ignore those when we see them.
-  if (guest_address && indirection_table_base_) {
+  // ignore those when we see them.  Also skip addresses outside the
+  // indirection table range (e.g. KernelModule trampolines below 0x80000000).
+  if (guest_address && indirection_table_base_ &&
+      guest_address >= kIndirectionTableBase &&
+      guest_address < kIndirectionTableBase + kIndirectionTableSize) {
     uint32_t* indirection_slot = reinterpret_cast<uint32_t*>(
         indirection_table_base_ + (guest_address - kIndirectionTableBase));
     *indirection_slot =
