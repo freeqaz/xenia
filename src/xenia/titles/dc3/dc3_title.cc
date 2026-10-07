@@ -875,14 +875,10 @@ void ApplyDc3LaunchHooks(const titles::TitleLaunchContext& ctx) {
     if (cvars::fake_kinect_data) {
       XELOGI("DC3: Entering original-XEX fake Kinect patch block");
 
-      constexpr uint32_t kExitControllerMode = 0x82902748;
-      with_patch_target("calib.exit_controller_mode", "ExitControllerMode", kExitControllerMode, 4,
-                        [&](uint8_t* ecm_ptr) {
-                          xe::store_and_swap<uint32_t>(ecm_ptr, 0x4E800020);
-                          XELOGI("DC3: Controller bypass: stubbed "
-                                 "ExitControllerMode at {:08X} to blr",
-                                 kExitControllerMode);
-                        });
+      // (RETIRED 2026-10-07, lane flow-wake) calib.exit_controller_mode:
+      // ShellInput::ExitControllerMode (0x82902748) -> blr (O13), the other
+      // half of seq.controller_mode. With the game entering controller mode
+      // itself (the flow's `wake` steps), its own 5 s timeout and exit run.
 
       // (RETIRED 2026-10-02) XMAHALAllocateContexts -> 0 and the
       // --nop_audio_driver auto -> dummy override. The stub was what made the

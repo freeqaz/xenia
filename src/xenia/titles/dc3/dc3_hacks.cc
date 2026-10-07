@@ -40,7 +40,6 @@ constexpr const char* kKnownIds[] = {
     "content.wipe",
     "saveload.activate",
     "speech.grammar_unload",
-    "calib.exit_controller_mode",
     // Runtime, scripted-input adapter (dc3_scripted_input.cc); only with
     // --dc3_headless_autonav.
     "input.attract_press",
