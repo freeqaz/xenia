@@ -875,16 +875,6 @@ void ApplyDc3LaunchHooks(const titles::TitleLaunchContext& ctx) {
     if (cvars::fake_kinect_data) {
       XELOGI("DC3: Entering original-XEX fake Kinect patch block");
 
-      constexpr uint32_t kSetPlayerSkeletonWarningData = 0x82907880;
-      with_patch_target("calib.warning_data", "SetPlayerSkeletonWarningData",
-                        kSetPlayerSkeletonWarningData, 4,
-                        [&](uint8_t* spw_ptr) {
-                          xe::store_and_swap<uint32_t>(spw_ptr, 0x4E800020);
-                          XELOGI("DC3: Calibration bypass: stubbed "
-                                 "SetPlayerSkeletonWarningData at {:08X} to blr",
-                                 kSetPlayerSkeletonWarningData);
-                        });
-
       constexpr uint32_t kSetPlayerSkeletonNavData = 0x82909340;
       constexpr uint32_t kSetPlayerPresent = 0x82908320;
       auto* nav_ptr =
