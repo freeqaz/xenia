@@ -71,6 +71,13 @@ DEFINE_path(devkit_root, "",
             "Optional host path to mount as devkit:. Useful for debug XEX "
             "overlay files such as locale_keep.dta.",
             "Storage");
+DEFINE_path(update_root, "",
+            "Optional host path to mount as update:, the title-update content "
+            "device. Point it at a directory holding a title update's files "
+            "(for Rock Band 3 TU5: gen/patch_xbox.hdr and gen/patch_xbox_0.ark "
+            "extracted from the TU package). Empty (the default) leaves "
+            "update: unmounted, as before.",
+            "Storage");
 DEFINE_string(gpu, "null",
               "Graphics system. Use: [null, vulkan]", "GPU");
 DEFINE_bool(headless_report_boot, true,
@@ -261,6 +268,28 @@ static int HeadlessMain(const std::vector<std::string>& args) {
       } else {
         emulator->file_system()->RegisterSymbolicLink("devkit:", "\\DEVKIT");
         XELOGI("Mounted devkit: -> {}", xe::path_to_utf8(devkit_root));
+      }
+    }
+  }
+
+  if (!cvars::update_root.empty()) {
+    std::filesystem::path update_root = cvars::update_root;
+    if (!update_root.is_absolute()) {
+      update_root = std::filesystem::absolute(update_root);
+    }
+
+    auto update_device = std::make_unique<xe::vfs::HostPathDevice>(
+        "\\UPDATE", xe::path_to_utf8(update_root), true);
+    if (!update_device->Initialize()) {
+      XELOGE("Unable to scan update path: {}", xe::path_to_utf8(update_root));
+    } else {
+      if (!emulator->file_system()->RegisterDevice(std::move(update_device))) {
+        XELOGE("Unable to register update path: {}",
+               xe::path_to_utf8(update_root));
+      } else {
+        emulator->file_system()->RegisterSymbolicLink("update:", "\\UPDATE");
+        XELOGI("Mounted update: -> {} (read-only)",
+               xe::path_to_utf8(update_root));
       }
     }
   }
